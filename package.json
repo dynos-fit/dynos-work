@@ -1,0 +1,6 @@
+{
+  "name": "dynos-audit",
+  "version": "1.0.0",
+  "description": "Spec-driven audit enforcement for Claude Code. Requires Superpowers.",
+  "license": "MIT"
+}
