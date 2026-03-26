@@ -11,6 +11,16 @@
           }
         ]
       }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "A task was just completed. Check if it was an implementation task (code was written/modified). If yes, output: {\"hookSpecificOutput\":{\"hookEventName\":\"TaskCompleted\",\"additionalContext\":\"MANDATORY: Run dynos-audit:audit-router now before proceeding to the next task or declaring work complete. Do NOT skip this.\"}}. If it was a non-code task (planning, research, questions), output nothing."
+          }
+        ]
+      }
     ]
   }
 }
