@@ -1,16 +1,15 @@
 {
   "name": "dynos-audit",
-  "displayName": "Dynos Audit",
-  "description": "Spec-driven audit enforcement for Claude Code. Requires Superpowers.",
+  "description": "Spec-driven audit enforcement that forces AI agents to prove completion before advancing phases.",
   "version": "1.0.0",
   "author": {
-    "name": "Hassam",
-    "email": ""
+    "name": "Hassam Sheikh",
+    "url": "https://dynos.fit"
   },
-  "homepage": "https://github.com/hassam/dynos-audit",
-  "repository": "https://github.com/hassam/dynos-audit",
+  "homepage": "https://github.com/HassamSheikh/dynos-audit",
   "license": "MIT",
-  "keywords": ["audit", "spec", "completion", "enforcement"],
+  "keywords": ["audit", "spec", "enforcement", "quality", "testing", "superpowers", "tdd"],
+  "category": "code-quality",
   "skills": "./skills/",
   "hooks": "./hooks.json"
 }
