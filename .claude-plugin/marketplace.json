@@ -1,0 +1,19 @@
+{
+  "name": "dynos-audit",
+  "owner": {
+    "name": "Hassam Sheikh",
+    "url": "https://dynos.fit"
+  },
+  "plugins": [
+    {
+      "name": "dynos-audit",
+      "description": "Spec-driven audit enforcement that forces AI agents to prove completion before advancing phases.",
+      "version": "1.0.0",
+      "source": "./",
+      "author": {
+        "name": "Hassam Sheikh",
+        "url": "https://dynos.fit"
+      }
+    }
+  ]
+}
