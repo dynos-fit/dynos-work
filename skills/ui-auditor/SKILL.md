@@ -1,6 +1,6 @@
 ---
 name: ui-auditor
-description: Use when UI files have been written or modified (.tsx, .jsx, .css, .html, .vue, .svelte, .scss, .less) and the agent is about to declare the work complete, or when the user asks to audit UI work. Symptoms/keywords: UI done, frontend complete, components ready, screens implemented, audit UI, check interface, verify states, review frontend. This skill performs a ruthless, evidence-based UI audit and delegates fixes to /superpowers instead of implementing them directly.
+description: "Use when UI files have been written or modified (.tsx, .jsx, .css, .html, .vue, .svelte, .scss, .less) and the agent is about to declare the work complete, or when the user asks to audit UI work. Symptoms/keywords: UI done, frontend complete, components ready, screens implemented, audit UI, check interface, verify states, review frontend. This skill performs a ruthless, evidence-based UI audit and delegates fixes to /superpowers instead of implementing them directly."
 ---
 
 # UI Auditor (v1)

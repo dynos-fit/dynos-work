@@ -1,6 +1,6 @@
 ---
 name: code-quality-auditor
-description: Use when backend or logic code has been written or modified (.ts, .js, .py, .go, .rs, .java, etc.) and the agent is about to declare the work complete, or when the user asks to audit code quality. Symptoms/keywords: code done, implementation complete, backend ready, logic done, audit code, check quality, verify implementation, validate code against spec, ensure correctness, review backend. This skill performs a ruthless, evidence-based code audit and delegates fixes to /superpowers instead of implementing them directly.
+description: "Use when backend or logic code has been written or modified (.ts, .js, .py, .go, .rs, .java, etc.) and the agent is about to declare the work complete, or when the user asks to audit code quality. Symptoms/keywords: code done, implementation complete, backend ready, logic done, audit code, check quality, verify implementation, validate code against spec, ensure correctness, review backend. This skill performs a ruthless, evidence-based code audit and delegates fixes to /superpowers instead of implementing them directly."
 ---
 
 # Code Quality Auditor (v1)
