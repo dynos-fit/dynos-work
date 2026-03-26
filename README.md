@@ -1,3 +1,7 @@
+<a href="https://dynos.fit"><img src="dynos-logo-dark.svg" alt="dynos.fit" width="200"/></a>
+
+Built by the team at [**dynos.fit**](https://dynos.fit)
+
 # dynos-audit
 
 Spec-driven audit enforcement for AI coding agents. Forces every phase of development to prove completion against your spec before moving on.
@@ -53,7 +57,7 @@ Requires [Superpowers](https://github.com/obra/superpowers) to be installed firs
 **Claude Code:**
 ```bash
 /plugin install superpowers
-/plugin install dynos-audit
+/plugin install dynos-audit@claude-plugins-official
 ```
 
 **Cursor:** Search for `dynos-audit` in the plugin marketplace.
