@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Escape string for JSON embedding
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+session_context="<EXTREMELY_IMPORTANT>\\ndynos-audit is installed and active. It works alongside Superpowers.\\n\\nMANDATORY AUDIT RULES:\\n\\n1. After brainstorming completes → invoke dynos-audit:spec-auditor\\n2. After writing-plans completes → invoke dynos-audit:spec-auditor\\n3. After each task in subagent-driven-development → invoke dynos-audit:audit-router\\n4. Before invoking finishing-a-development-branch → invoke dynos-audit:spec-auditor\\n\\ndynos-audit:audit-router inspects files touched (git diff --name-only) and dispatches:\\n- UI files only (.tsx .jsx .css .html .vue .svelte) → spec-auditor + ui-auditor\\n- Logic files only (.ts .js .py .go .rs .java) → spec-auditor + code-quality-auditor\\n- Mixed → all three auditors\\n- User says full audit → all three regardless\\n\\ndynos-audit:spec-auditor audits the current artifact against the user spec and loops until all requirements are provably complete with evidence.\\n\\nDO NOT claim any phase complete until the relevant auditors pass.\\nDO NOT skip audit because the work seems done.\\nDO NOT proceed to the next phase while any auditor has open gaps.\\n</EXTREMELY_IMPORTANT>"
+
+if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+  printf '{\n  "additional_context": "%s"\n}\n' "$session_context"
+elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$session_context"
+else
+  printf '{\n  "additional_context": "%s"\n}\n' "$session_context"
+fi
+
+exit 0
