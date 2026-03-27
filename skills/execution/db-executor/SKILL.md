@@ -1,5 +1,5 @@
 ---
-name: db-executor
+name: execution/db-executor
 description: "Internal: DB Executor. Implements schema changes, migrations, ORM models, queries. Read spec and segment. Write evidence on completion."
 ---
 

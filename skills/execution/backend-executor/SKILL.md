@@ -1,5 +1,5 @@
 ---
-name: backend-executor
+name: execution/backend-executor
 description: "Internal: Backend Executor. Implements API routes, services, business logic, auth. Read spec and segment. Write evidence on completion."
 ---
 

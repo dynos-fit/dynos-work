@@ -1,5 +1,5 @@
 ---
-name: integration-executor
+name: execution/integration-executor
 description: "Internal: Integration Executor. Wires components together, connects external APIs, handles plumbing. Write evidence on completion."
 ---
 

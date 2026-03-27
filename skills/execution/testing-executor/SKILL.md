@@ -1,5 +1,5 @@
 ---
-name: testing-executor
+name: execution/testing-executor
 description: "Internal: Testing Executor. Writes unit, integration, and e2e tests. Read spec and segment. Write evidence on completion."
 ---
 

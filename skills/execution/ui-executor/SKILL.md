@@ -1,5 +1,5 @@
 ---
-name: ui-executor
+name: execution/ui-executor
 description: "Internal: UI Executor. Implements UI components, pages, interactions, and styles. Read spec and segment. Write evidence on completion."
 ---
 

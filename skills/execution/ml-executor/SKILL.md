@@ -1,5 +1,5 @@
 ---
-name: ml-executor
+name: execution/ml-executor
 description: "Internal: ML Executor. Implements ML models, training pipelines, inference code, data processing. Read spec and segment. Write evidence on completion."
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: refactor-executor
+name: execution/refactor-executor
 description: "Internal: Refactor Executor. Restructures code without changing behavior. No new features. Write evidence on completion."
 ---
 
