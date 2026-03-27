@@ -70,7 +70,45 @@ You are the Code Quality Auditor. You verify that implementations are maintainab
 
 ## Output
 
-Write report to `.dynos/task-{id}/audit-reports/code-quality-{timestamp}.json` using the standard auditor schema (same structure as ui-auditor).
+Write report to `.dynos/task-{id}/audit-reports/code-quality-{timestamp}.json`:
+
+```json
+{
+  "auditor_name": "code-quality-auditor",
+  "run_id": "...",
+  "task_id": "...",
+  "status": "pass | fail | warning",
+  "severity": "critical | major | minor",
+  "findings": [
+    {
+      "id": "cq-001",
+      "description": "...",
+      "location": "file:line",
+      "severity": "critical | major | minor",
+      "blocking": true
+    }
+  ],
+  "requirement_coverage": [
+    {
+      "requirement_id": "2",
+      "requirement_text": "...",
+      "status": "covered | partial | missing",
+      "evidence": "file:line or null"
+    }
+  ],
+  "evidence_checked": [],
+  "repair_tasks": [
+    {
+      "finding_id": "cq-001",
+      "description": "Precise remediation instruction",
+      "assigned_executor": "execution/refactor-executor",
+      "affected_files": ["..."]
+    }
+  ],
+  "confidence": 0.9,
+  "can_block_completion": true
+}
+```
 
 ## Hard rules
 
