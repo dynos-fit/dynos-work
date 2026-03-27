@@ -91,24 +91,8 @@ All task state is stored in `.dynos/task-{id}/` (gitignored). Tasks survive sess
 
 ### Claude Code
 
-**Step 1** — Register the dynos-work marketplace in your `~/.claude/settings.json`:
-
-```json
-{
-  "extraKnownMarketplaces": {
-    "dynos-work": {
-      "source": {
-        "source": "github",
-        "repo": "HassamSheikh/dynos-work"
-      }
-    }
-  }
-}
 ```
-
-**Step 2** — Install the plugin:
-
-```
+/plugin marketplace add HassamSheikh/dynos-work
 /plugin install dynos-work
 ```
 
