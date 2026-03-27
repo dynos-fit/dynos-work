@@ -1,15 +1,12 @@
 {
   "name": "dynos-work",
-  "description": "Audit-governed autonomous engineering system. Full lifecycle from intake to evidence-backed completion.",
-  "version": "2.0.0",
+  "version": "1.0.0",
+  "description": "Audit-governed autonomous engineering system. Plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.",
   "author": {
-    "name": "Hassam Sheikh",
+    "name": "dynos.fit",
     "url": "https://dynos.fit"
   },
   "homepage": "https://github.com/HassamSheikh/dynos-work",
-  "license": "MIT",
-  "keywords": ["audit", "spec", "enforcement", "quality", "lifecycle", "autonomous", "orchestration"],
-  "category": "code-quality",
-  "skills": "./skills/",
-  "hooks": "./hooks.json"
+  "repository": "https://github.com/HassamSheikh/dynos-work",
+  "keywords": ["audit", "autonomous", "engineering", "agents"]
 }
