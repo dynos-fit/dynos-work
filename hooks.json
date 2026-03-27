@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "A task was just completed. Check if it was an implementation task (code was written/modified). If yes, output: {\"hookSpecificOutput\":{\"hookEventName\":\"TaskCompleted\",\"additionalContext\":\"MANDATORY: Run dynos-audit:audit-router now before proceeding to the next task or declaring work complete. Do NOT skip this.\"}}. If it was a non-code task (planning, research, questions), output nothing."
+            "prompt": "A task was just completed. Check if it was an implementation task (code was written or modified). If yes, output: {\"hookSpecificOutput\":{\"hookEventName\":\"TaskCompleted\",\"additionalContext\":\"MANDATORY: The dynos-work lifecycle is active. If a dynos-work:start task is in progress, the Lifecycle Controller will automatically handle audit routing. If work was done outside of dynos-work:start, invoke dynos-work:audit now to trigger standalone audit.\"}}. If it was a non-code task (planning, research, questions), output nothing."
           }
         ]
       }
