@@ -43,6 +43,8 @@ For every criterion, ask:
 
 ## Output
 
+> **Note:** This auditor uses binary `pass | fail` only — no `warning` state. A requirement is either covered with evidence or it is not. There is no middle ground for spec compliance.
+
 Write your report to `.dynos/task-{id}/audit-reports/spec-completion-{timestamp}.json`:
 
 ```json
