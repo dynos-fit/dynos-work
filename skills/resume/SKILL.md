@@ -13,7 +13,7 @@ Resume a dynos-work task that was interrupted.
 2. If one active task: resume it automatically
 3. If multiple active tasks: show list and ask which to resume
 4. Read `manifest.json` to determine current stage
-5. Spawn the Lifecycle Controller via the Agent tool with the existing task ID and state
+5. Spawn the `lifecycle` agent via the Agent tool with the existing task ID and state
 6. The Lifecycle Controller picks up from the current stage
 
 ## Output on resume

@@ -40,7 +40,7 @@ Starting lifecycle controller...
 ```
 
 6. **Spawn the Lifecycle Controller** via the Agent tool:
-   - Invoke `dynos-work:lifecycle`
+   - Use the `lifecycle` agent
    - Pass: task ID, task directory path, and full task description
    - The Lifecycle Controller now owns the task completely
 
