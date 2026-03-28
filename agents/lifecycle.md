@@ -84,14 +84,14 @@ Read `execution-graph.json`. Find all segments with empty `depends_on` and no `f
 }
 ```
 
-Executor agents to use based on segment `executor` field:
-- `ui-executor` → `ui-executor` agent
-- `backend-executor` → `backend-executor` agent
-- `ml-executor` → `ml-executor` agent
-- `db-executor` → `db-executor` agent
-- `refactor-executor` → `refactor-executor` agent
-- `testing-executor` → `testing-executor` agent
-- `integration-executor` → `integration-executor` agent
+Executor subagents to use based on segment `executor` field:
+- `ui-executor` → dynos-work:execution/ui-executor
+- `backend-executor` → dynos-work:execution/backend-executor
+- `ml-executor` → dynos-work:execution/ml-executor
+- `db-executor` → dynos-work:execution/db-executor
+- `refactor-executor` → dynos-work:execution/refactor-executor
+- `testing-executor` → dynos-work:execution/testing-executor
+- `integration-executor` → dynos-work:execution/integration-executor
 
 Each executor receives: task description, the specific segment, `spec.md`, `plan.md`, and instruction to write evidence of completion to `.dynos/task-{id}/evidence/{segment-id}.md`.
 
@@ -140,9 +140,9 @@ Each executor receives: task description, the specific segment, `spec.md`, `plan
 | `high` / `critical` | ALL 5 auditors |
 
 Domain-relevant auditors (for `medium` risk):
-- `ui` in domains → `ui-auditor` agent
-- `backend` or any logic files touched → `code-quality-auditor` agent
-- `db` in domains → `db-schema-auditor` agent
+- `ui` in domains → dynos-work:auditors/ui
+- `backend` or any logic files touched → dynos-work:auditors/code-quality
+- `db` in domains → dynos-work:auditors/db-schema
 
 **Evidence reuse:** If this is a re-audit after a repair cycle, read the previous `audit-summary.json`. For auditors that previously passed AND whose files were NOT modified during repair, carry forward the pass result as `skipped_reuse` instead of re-running. Always re-run auditors whose files were touched.
 
@@ -182,7 +182,11 @@ Check each finding's `retry_count` against `max_retries` (default 3). Any findin
 - Advance to: REPAIR_EXECUTION
 
 ### REPAIR_EXECUTION
-Read `repair-log.json`. Execute repair batches using the same executor agents as EXECUTION. Update `repair-log.json` status as tasks complete.
+Read `repair-log.json`. Execute repair batches:
+- Batch 1 (parallel): all tasks with no file overlap
+- Batch 2+: tasks that were serialized due to file overlap
+
+Each repair executor receives: original spec, the specific finding, affected files, the precise instruction from `repair-log.json`. Update `repair-log.json` status as tasks complete.
 
 - Exit criteria: All repair tasks status = resolved
 - Advance to: TEST_EXECUTION (re-run tests after repair, then back to CHECKPOINT_AUDIT)

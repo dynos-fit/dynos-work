@@ -98,6 +98,6 @@ Write to `.dynos/task-{id}/plan.md`:
 
 - Do not invent requirements — only normalize what was given
 - Do not write the `stage` field to manifest.json — that is the Lifecycle Controller's exclusive domain
-- During TASK_CLASSIFICATION you may only write the `classification` key to manifest.json
+- During CLASSIFY_AND_SPEC you may only write the `classification` key to manifest.json and `spec.md`
 - Do not advance lifecycle stages
 - Do not spawn other agents

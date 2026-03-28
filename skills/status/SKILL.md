@@ -48,9 +48,9 @@ Acceptance Criteria: [N]/[total] covered
 Latest Audit Results:
   spec-completion: PASS | FAIL | not yet run
   security: PASS | FAIL | not yet run
-  ui: PASS | FAIL | SKIPPED | REUSED | not yet run
-  code-quality: PASS | FAIL | SKIPPED | REUSED | not yet run
-  db-schema: PASS | FAIL | SKIPPED | REUSED | not yet run
+  ui: PASS | FAIL | SKIPPED | SKIPPED_REUSE | not yet run
+  code-quality: PASS | FAIL | SKIPPED | SKIPPED_REUSE | not yet run
+  db-schema: PASS | FAIL | SKIPPED | SKIPPED_REUSE | not yet run
 
 Open Blocking Findings:
   [finding-id] [auditor]: [description] ([file:line])
