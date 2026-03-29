@@ -92,14 +92,21 @@ INTAKE → DISCOVERY (up to 5 questions) → DESIGN_OPTIONS (critical/hard subta
 
 ### Key behaviors
 
-- **Human-guided discovery** — before writing a single line of spec, dynos-work asks targeted questions and surfaces design trade-offs for the decisions that actually matter
-- **Mandatory spec sign-off** — you always review and approve the normalized spec before execution begins, regardless of risk level
-- **Risk-based auditing** — domain-relevant auditors (ui, code-quality, db-schema) always run when those domains are touched, regardless of risk level. high/critical runs all 5.
-- **Diff-scoped** — auditors only inspect files changed by the task, preventing false positives from pre-existing issues
-- **Evidence reuse** — on repair re-audit, auditors whose files weren't touched carry forward their previous pass
-- **Test gate** — test suite runs before audit to catch real failures before spending tokens on auditors
-- **Rollback on failure** — if a task hits max retries, provides the snapshot branch and rollback commands
-- **Progress tracking** — manifest.json tracks segment completion during execution for live status
+**Human-guided discovery** — before writing a single line of spec, dynos-work asks targeted questions and surfaces design trade-offs for the decisions that actually matter
+
+**Mandatory spec sign-off** — you always review and approve the normalized spec before execution begins, regardless of risk level
+
+**Risk-based auditing** — domain-relevant auditors (ui, code-quality, db-schema) always run when those domains are touched, regardless of risk level. high/critical runs all 5.
+
+**Diff-scoped** — auditors only inspect files changed by the task, preventing false positives from pre-existing issues
+
+**Evidence reuse** — on repair re-audit, auditors whose files weren't touched carry forward their previous pass
+
+**Test gate** — test suite runs before audit to catch real failures before spending tokens on auditors
+
+**Rollback on failure** — if a task hits max retries, provides the snapshot branch and rollback commands
+
+**Execution log** — every stage transition, agent spawn, human gate, and decision is timestamped and written to `execution-log.md` for full traceability
 
 ---
 
@@ -123,26 +130,35 @@ Not every agent needs the most expensive model. Orchestration and checklist agen
 | UI auditor | Sonnet | Checklist verification |
 
 ### Executor specialists (run your code)
-- **UI executor** — components, pages, interactions, styling
-- **Backend executor** — APIs, services, auth, business logic
-- **ML executor** — models, pipelines, inference
-- **DB executor** — schema, migrations, indexes, queries
-- **Refactor executor** — structural cleanup (no behavior changes)
-- **Testing executor** — unit, integration, e2e tests
-- **Integration executor** — wiring, plumbing, external APIs
+
+| Executor | Responsibility |
+|---|---|
+| UI executor | Components, pages, interactions, styling |
+| Backend executor | APIs, services, auth, business logic |
+| ML executor | Models, pipelines, inference |
+| DB executor | Schema, migrations, indexes, queries |
+| Refactor executor | Structural cleanup, no behavior changes |
+| Testing executor | Unit, integration, e2e tests |
+| Integration executor | Wiring, plumbing, external APIs |
 
 ### Auditors (verify independently, read-only)
-- **Spec-completion** — did every acceptance criterion get implemented? (runs on every task)
-- **Security** — injection, auth gaps, secrets, data exposure (runs on every task)
-- **UI** — states, interactions, accessibility, responsive behavior
-- **Code quality** — structure, correctness, tests, maintainability
-- **DB schema** — design, migration safety, indexes, integrity
+
+| Auditor | What it checks | When it runs |
+|---|---|---|
+| Spec-completion | Did every acceptance criterion get implemented? | Every task |
+| Security | Injection, auth gaps, secrets, data exposure | Every task |
+| UI | States, interactions, accessibility, responsive behavior | UI domain touched |
+| Code quality | Structure, correctness, tests, maintainability | Backend domain touched |
+| DB schema | Design, migration safety, indexes, integrity | DB domain touched |
+| Dead code | Unused imports, dead functions, orphaned files, commented-out code | Final audit only |
 
 ---
 
 ## State persistence
 
 All task state is stored in `.dynos/task-{id}/` (gitignored). Tasks survive session restarts. Use `/dynos-work:resume` to continue interrupted work.
+
+The execution log at `.dynos/task-{id}/execution-log.md` records every stage transition, subagent spawn, human gate, and decision with timestamps.
 
 ---
 
@@ -175,10 +191,16 @@ See `.codex/INSTALL.md` for manual setup instructions.
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
+
+---
+
 ## Philosophy
 
 > Completion is determined only by independent audit backed by evidence.
 
-The Lifecycle Controller is the only entity that can write `DONE`. It only does so after every applicable auditor passes, every acceptance criterion has a file+line evidence reference, and the repair loop has converged to zero blocking findings.
+The Lifecycle Controller is the only entity that can write `DONE`. It only does so after every applicable auditor passes, every acceptance criterion has a file and line evidence reference, and the repair loop has converged to zero blocking findings.
 
 There is no shortcut.
