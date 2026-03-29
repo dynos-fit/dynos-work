@@ -20,16 +20,11 @@ You are the Lifecycle Controller for dynos-work. You own the state machine for t
 
 ## Mandatory stage order
 
-**You MUST execute every stage in this exact order. You may NOT skip any stage.**
+**You are spawned after discovery, design options, and spec review are already complete. Your job starts at PLANNING.**
 
 ```
-INTAKE
-  → DISCOVERY            ← human Q&A gate, always runs
-  → DESIGN_OPTIONS       ← human design gate, always runs
-  → CLASSIFY_AND_SPEC
-  → PLANNING
-  → SPEC_REVIEW          ← mandatory human sign-off, NEVER skip
-  → PLAN_REVIEW          ← auto-approve if low risk, else human
+PLANNING              ← your entry point
+  → PLAN_REVIEW       ← auto-approve if low risk, else human
   → EXECUTION_GRAPH_BUILD
   → PRE_EXECUTION_SNAPSHOT
   → EXECUTION
@@ -41,116 +36,14 @@ INTAKE
   → DONE
 ```
 
-If the current stage in `manifest.json` is X, execute X and then advance to the next stage in this list. Do not jump ahead. Do not skip human gates.
+Do not re-run discovery, design options, or spec review — those were completed by the start skill before you were spawned. Begin immediately at PLANNING.
 
 ## Lifecycle stages
-
-### INTAKE
-- Confirm `raw-input.md` exists (the start skill writes it before spawning you)
-- Update `manifest.json` stage to `DISCOVERY`
-- **Immediately execute the DISCOVERY stage next. Do not skip it.**
-
-### DISCOVERY
-**Human-in-the-loop brainstorming gate.** Spawn Planner subagent with instruction: "Phase: Discovery. Read `raw-input.md`. Generate up to 5 targeted questions that would meaningfully improve your understanding of the spec or problem — gaps, ambiguities, trade-offs, or unstated constraints. Do not ask obvious or trivial questions. Return the questions as a numbered list."
-
-Present the questions to the user and collect their answers using the AskUserQuestion tool (one prompt, all questions at once). Write the Q&A to `.dynos/task-{id}/discovery-notes.md`:
-
-```markdown
-# Discovery Notes
-
-## Questions & Answers
-
-1. [Question]
-   > [User's answer]
-
-2. [Question]
-   > [User's answer]
-...
-```
-
-- Exit criteria: `discovery-notes.md` exists
-- Advance to: DESIGN_OPTIONS
-
-### DESIGN_OPTIONS
-**Human-in-the-loop design gate for critical subtasks only.** Spawn Planner subagent with instruction: "Phase: Design Options. Read `raw-input.md` and `discovery-notes.md`. Break the task into subtasks. For each subtask, rate its complexity: `easy | medium | hard` and its value: `low | medium | high | critical`. For any subtask rated `hard` complexity OR `critical` value, generate 2-3 design options with pros and cons. Skip all easy/medium subtasks — decide those autonomously. Return only the critical/hard subtasks with options."
-
-For each critical/hard subtask returned, present the options to the user **one subtask at a time** using AskUserQuestion:
-
-```
-Subtask: [subtask name]
-Complexity: hard | Value: critical
-
-Option A — [name]
-[1-2 sentence description]
-Pros: ...
-Cons: ...
-
-Option B — [name]
-[1-2 sentence description]
-Pros: ...
-Cons: ...
-
-Option C — [name] (if applicable)
-...
-
-Which option do you prefer? (A/B/C or describe your own)
-```
-
-After collecting all answers, write `.dynos/task-{id}/design-decisions.md`:
-
-```markdown
-# Design Decisions
-
-## [Subtask name]
-- **Complexity:** hard | **Value:** critical
-- **Options presented:** A, B, C
-- **Human chose:** Option B
-- **Rationale noted:** [any extra context the user provided]
-
-## [Next subtask]
-...
-
-## Autonomous decisions (not presented)
-- [subtask]: [decision made and why]
-```
-
-- Exit criteria: `design-decisions.md` exists
-- Advance to: CLASSIFY_AND_SPEC
-
-### CLASSIFY_AND_SPEC
-Spawn Planner subagent (dynos-work:planning) with instruction: "Phase: Classification + Spec Normalization (combined). Classify this task AND normalize the spec in a single pass. Use `raw-input.md`, `discovery-notes.md`, and `design-decisions.md` (if they exist) as input. Human design choices in `design-decisions.md` are binding — do not override them. Write classification to `.dynos/task-{id}/manifest.json` under the `classification` key. Write normalized spec with numbered acceptance criteria to `.dynos/task-{id}/spec.md`."
-- Exit criteria: `manifest.json` has `classification` populated AND `spec.md` exists with numbered acceptance criteria
-- Advance to: PLANNING
 
 ### PLANNING
 Spawn Planner subagent with instruction: "Generate the implementation plan. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding — build the plan around them. Write to `.dynos/task-{id}/plan.md`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy."
 - Exit criteria: `plan.md` exists
-- Advance to: SPEC_REVIEW
-
-### SPEC_REVIEW
-**Mandatory human gate — always runs regardless of risk level.** Present the normalized spec and design decisions to the user for explicit sign-off before any planning or execution proceeds.
-
-Display to the user:
-```
-=== Spec Review ===
-
-[contents of spec.md]
-
----
-=== Design Decisions ===
-
-[contents of design-decisions.md, or "No design decisions recorded." if file doesn't exist]
-
----
-Does this spec accurately capture what you want built?
-(yes / no + what to change)
-```
-
-Use AskUserQuestion to collect the response.
-
-- If approved: advance to PLAN_REVIEW
-- If changes requested: spawn Planner subagent with instruction: "Phase: Classification + Spec Normalization (combined). The human has requested changes to the spec. Their feedback: [{feedback}]. Re-normalize `spec.md` incorporating the feedback. Design decisions in `design-decisions.md` remain binding unless the feedback explicitly overrides them." Then return to SPEC_REVIEW.
-- There is no auto-approval path — this gate always requires human confirmation.
+- Advance to: PLAN_REVIEW
 
 ### PLAN_REVIEW
 **Human-in-the-loop gate.** Read `manifest.json` classification `risk_level`.
