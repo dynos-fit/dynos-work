@@ -19,7 +19,7 @@ Resume a dynos-work task that was interrupted.
 |---|---|
 | PLANNING, PLAN_REVIEW, PLAN_AUDIT | `/dynos-work:plan` |
 | EXECUTION_GRAPH_BUILD, PRE_EXECUTION_SNAPSHOT, EXECUTION, TEST_EXECUTION | `/dynos-work:execute` |
-| CHECKPOINT_AUDIT, REPAIR_PLANNING, REPAIR_EXECUTION, FINAL_AUDIT, COMPLETION_REVIEW | `/dynos-work:audit` |
+| CHECKPOINT_AUDIT, REPAIR_PLANNING, REPAIR_EXECUTION, FINAL_AUDIT | `/dynos-work:audit` |
 
 ## Output on resume
 

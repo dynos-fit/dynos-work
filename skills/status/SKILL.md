@@ -26,20 +26,19 @@ Risk: medium
 Snapshot: dynos/task-20260327-001-snapshot
 
 Lifecycle Progress:
-  ✓ INTAKE
   ✓ DISCOVERY
   ✓ DESIGN_OPTIONS
   ✓ CLASSIFY_AND_SPEC
-  ✓ PLANNING
   ✓ SPEC_REVIEW (user-approved)
+  ✓ PLANNING
   ✓ PLAN_REVIEW (auto-approved | user-approved)
+  ✓ PLAN_AUDIT
   ✓ EXECUTION_GRAPH_BUILD
   ✓ PRE_EXECUTION_SNAPSHOT
   ✓ EXECUTION (3/3 segments complete)
   ✓ TEST_EXECUTION (all tests passed)
   → CHECKPOINT_AUDIT (in progress)
   ○ FINAL_AUDIT
-  ○ COMPLETION_REVIEW
 
 Execution Progress:
   Segments: [N]/[total] complete
@@ -85,6 +84,5 @@ Always end the status report with a "Next:" line based on current stage:
 | REPAIR_PLANNING | `/dynos-work:audit` (or `/dynos-work:repair` for a specific finding) |
 | REPAIR_EXECUTION | `/dynos-work:audit` (or `/dynos-work:repair` for a specific finding) |
 | FINAL_AUDIT | `/dynos-work:audit` |
-| COMPLETION_REVIEW | `/dynos-work:audit` |
 | DONE | Task complete |
 | FAILED | Review failure report, consider `/dynos-work:repair` or rollback |

@@ -31,4 +31,4 @@ agents/             ← executor and auditor agent definitions
 
 ## What not to change
 
-The Lifecycle Controller is the only entity that writes `stage` to `manifest.json` and the only entity that writes `DONE` or `FAILED`. Do not add stage-writing logic to executors or auditors.
+The skills (`start`, `execute`, `audit`) own all stage transitions — they are the only entities that write `stage` to `manifest.json` and the only entities that write `DONE` or `FAILED`. Do not add stage-writing logic to executors or auditors.

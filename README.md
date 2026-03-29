@@ -68,22 +68,25 @@ Agent self-reports are untrusted. Completion requires independent proof.
 ## Lifecycle
 
 ```
-INTAKE → DISCOVERY (up to 5 questions) → DESIGN_OPTIONS (critical/hard subtasks only)
-       → CLASSIFY_AND_SPEC → PLANNING → SPEC_REVIEW (always, no skip)
-                                            │
-                                   approved → PLAN_REVIEW
-                                   changes  → re-normalize → SPEC_REVIEW
+DISCOVERY (up to 5 questions) → DESIGN_OPTIONS (critical/hard subtasks only)
+       → CLASSIFY_AND_SPEC → SPEC_REVIEW (always, no skip)
+                                   │
+                          approved → PLANNING → PLAN_REVIEW
+                          changes  → re-normalize → SPEC_REVIEW
                                             │
                                    low risk: auto-approve
                                    med+ risk: user approval
                                             │
+                                   PLAN_AUDIT (spec-completion check)
+                                            │
          ┌──────────────────────────────────▼
+         │  EXECUTION_GRAPH_BUILD (coordinator builds parallel batches)
          │  PRE_EXECUTION_SNAPSHOT (git branch safety net)
          │  EXECUTION (parallel executor batches with progress tracking)
          │  TEST_EXECUTION (run test suite, gate on pass/fail)
          │  CHECKPOINT_AUDIT (risk-based auditor selection + diff-scoped)
          │      │
-         │      ├── all pass → FINAL_AUDIT → COMPLETION_REVIEW → DONE
+         │      ├── all pass → FINAL_AUDIT → DONE
          │      └── failures → REPAIR_PLANNING → REPAIR_EXECUTION ─┐
          │                                                          │
          └──────────────────────────────────────────────────────────┘
@@ -118,7 +121,6 @@ Not every agent needs the most expensive model. Orchestration and checklist agen
 
 | Role | Model | Why |
 |---|---|---|
-| Lifecycle controller | Sonnet | Orchestration logic, no code writing |
 | Planning | Opus | Deep reasoning for spec and plan |
 | Execution coordinator | Sonnet | Graph construction from spec |
 | Repair coordinator | Sonnet | Mapping findings to executors |
@@ -201,6 +203,6 @@ See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
 > Completion is determined only by independent audit backed by evidence.
 
-The Lifecycle Controller is the only entity that can write `DONE`. It only does so after every applicable auditor passes, every acceptance criterion has a file and line evidence reference, and the repair loop has converged to zero blocking findings.
+Completion requires every applicable auditor to pass with evidence, every acceptance criterion to have a file and line reference, and the repair loop to converge to zero blocking findings.
 
 There is no shortcut.

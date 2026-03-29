@@ -5,7 +5,7 @@
 ## Which part of the system
 
 - [ ] start skill
-- [ ] lifecycle controller
+- [ ] execute / audit / resume skills (stage sequencing, repair loop)
 - [ ] planning subagent
 - [ ] executor(s)
 - [ ] auditor(s)
