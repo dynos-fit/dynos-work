@@ -252,7 +252,8 @@ Read all audit reports. Produce `.dynos/task-{id}/audit-summary.json`:
     "security": "pass | fail | skipped | skipped_reuse",
     "ui": "pass | fail | skipped | skipped_reuse",
     "code-quality": "pass | fail | skipped | skipped_reuse",
-    "db-schema": "pass | fail | skipped | skipped_reuse"
+    "db-schema": "pass | fail | skipped | skipped_reuse",
+    "dead-code": "pass | fail | skipped | skipped_reuse"
   },
   "files_audited": ["list of files from git diff"],
   "blocking_failures": [],
@@ -284,9 +285,11 @@ Each repair executor receives: original spec, the specific finding, affected fil
 
 ### FINAL_AUDIT
 Same as CHECKPOINT_AUDIT but:
-- Always run ALL five auditors regardless of risk level or domains touched
+- Always run ALL six auditors regardless of risk level or domains touched: spec-completion, security, code-quality, ui, db-schema, and dead-code-auditor
 - No evidence reuse — fresh audit of everything
-- This is the final gate. All five must pass.
+- This is the final gate. All six must pass.
+
+The `dead-code-auditor` agent runs only here. It checks for: unused imports, unused exports, unused variables, unreferenced files, dead functions, and commented-out code (excluding blocks with TODO/FIXME/HACK/NOTE markers).
 
 - If all pass: advance to COMPLETION_REVIEW
 - If failures: advance to REPAIR_PLANNING (repair loop continues)
