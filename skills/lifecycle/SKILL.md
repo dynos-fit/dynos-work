@@ -405,10 +405,11 @@ Example:
 2026-03-28T22:16:55Z [ADVANCE] DESIGN_OPTIONS → CLASSIFY_AND_SPEC
 ```
 
-Create the file with a header on first write:
+Create the file with a header on first write. Read the plugin version from `.claude-plugin/plugin.json` (field `version`) if that file exists, otherwise use `unknown`:
 ```
 # Execution Log — task-{id}
 # Started: {ISO timestamp}
+# Plugin version: {version from .claude-plugin/plugin.json}
 
 ```
 
