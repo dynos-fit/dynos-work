@@ -39,13 +39,15 @@ Spawn the `planning` agent with instruction: "Generate the implementation plan. 
 ### PLAN_REVIEW
 **Human-in-the-loop gate.** Read `manifest.json` classification `risk_level`.
 
-- If `risk_level` is `low`: auto-approve — print a brief summary of spec.md and plan.md, then advance immediately to EXECUTION_GRAPH_BUILD
-- If `risk_level` is `medium`, `high`, or `critical`: pause and present spec.md + plan.md to the user for review. Ask: "Approve this plan? (yes/no/adjust)" using the AskUserQuestion tool.
+- If `risk_level` is `low`,`medium`, `high`, or `critical`: pause and present spec.md + plan.md to the user for review. Ask: "Approve this plan? (yes/no/adjust)" using the AskUserQuestion tool.
   - If approved: advance to EXECUTION_GRAPH_BUILD
   - If adjustments requested: spawn Planner agent again with user feedback, then re-present for review
   - If rejected: set stage to FAILED with reason "Plan rejected by user"
 
 Update `manifest.json` stage before advancing.
+
+### PLAN_AUDIT
+use `spec-completion-auditor` skill to audit `spec.md`, `plan.md`
 
 ### EXECUTION_GRAPH_BUILD
 Spawn the `execution-coordinator` agent with instruction: "Read `spec.md` and `plan.md`. Build the execution graph. Write to `.dynos/task-{id}/execution-graph.json`. Each segment must declare: id, executor, description, files_expected, depends_on, parallelizable."
@@ -131,18 +133,20 @@ Each executor receives: task description, the specific segment, `spec.md`, `plan
 
 **Diff-scoped auditing:** Before spawning auditors, run `git diff --name-only {snapshot_head_sha}` to get the list of files changed by this task. Pass this file list to each auditor so they focus only on task-related changes.
 
-**Auditor selection by risk level:**
+Always run: spec-completion + security
+
+Always add domain-relevant auditors based on `domains` in classification, regardless of risk level:
+- `ui` in domains → `ui-auditor` agent
+- `backend` in domains, or any `.ts .js .py .go .rs .java .rb .cpp .cs .dart` logic files changed → `code-quality-auditor` agent
+- `db` in domains → `db-schema-auditor` agent
+
+Additionally for `high` / `critical` risk: run ALL 5 auditors even if domains don't cover them all.
 
 | Risk Level | Auditors Spawned |
 |---|---|
-| `low` | spec-completion + security |
+| `low` | spec-completion + security + domain-relevant |
 | `medium` | spec-completion + security + domain-relevant |
 | `high` / `critical` | ALL 5 auditors |
-
-Domain-relevant auditors (for `medium` risk):
-- `ui` in domains → dynos-work:auditors/ui
-- `backend` or any logic files touched → dynos-work:auditors/code-quality
-- `db` in domains → dynos-work:auditors/db-schema
 
 **Evidence reuse:** If this is a re-audit after a repair cycle, read the previous `audit-summary.json`. For auditors that previously passed AND whose files were NOT modified during repair, carry forward the pass result as `skipped_reuse` instead of re-running. Always re-run auditors whose files were touched.
 
@@ -170,8 +174,8 @@ Read all audit reports. Produce `.dynos/task-{id}/audit-summary.json`:
 }
 ```
 
-- If `all_passed: true`: advance to FINAL_AUDIT
-- If `blocking_failures` exist: advance to REPAIR_PLANNING
+- If `all_passed: true`: **immediately advance to FINAL_AUDIT — do NOT stop or wait for user input**
+- If `blocking_failures` exist: **immediately advance to REPAIR_PLANNING — do NOT stop or wait for user input**
 
 ### REPAIR_PLANNING
 Spawn the `repair-coordinator` agent with all audit reports, `repair-log.json` (if exists), and `test-results.json` (if exists). It produces updated `repair-log.json` with precise remediation tasks, assigned executors, and batch groupings.
@@ -189,13 +193,15 @@ Read `repair-log.json`. Execute repair batches:
 Each repair executor receives: original spec, the specific finding, affected files, the precise instruction from `repair-log.json`. Update `repair-log.json` status as tasks complete.
 
 - Exit criteria: All repair tasks status = resolved
-- Advance to: TEST_EXECUTION (re-run tests after repair, then back to CHECKPOINT_AUDIT)
+- Advance to: TEST_EXECUTION
+
+**This is a mandatory loop-back. After repair you MUST re-run tests and re-audit. Do NOT stop, do NOT wait for user input. Immediately advance to TEST_EXECUTION.**
 
 ### FINAL_AUDIT
 Same as CHECKPOINT_AUDIT but:
-- Always run ALL five auditors regardless of risk level or domains
+- Always run ALL six auditors regardless of risk level or domains: spec-completion, security, code-quality, ui, db-schema, and dead-code-auditor
 - No evidence reuse — fresh audit of everything
-- All five must pass.
+- All six must pass.
 
 - If all pass: advance to COMPLETION_REVIEW
 - If failures: advance to REPAIR_PLANNING
@@ -220,6 +226,20 @@ Terminal failure state. Print full failure report.
 - To review changes: `git diff dynos/task-{id}-snapshot`
 - To rollback: `git checkout dynos/task-{id}-snapshot -- .`
 
+## Execution log
+
+Append a timestamped entry to `.dynos/task-{id}/execution-log.md` for every event: stage entered (`[STAGE]`), agent spawned (`[SPAWN]`), agent completed (`[DONE]`), human gate (`[GATE]`), human response (`[HUMAN]`), decision (`[DECISION]`), stage advanced (`[ADVANCE]`), test run (`[TEST]`), repair triggered (`[REPAIR]`), error (`[ERROR]`), task complete/failed.
+
+Format: `{ISO timestamp} {EVENT_TYPE} {message}`
+
+Create the file on first write with header:
+```
+# Execution Log — task-{id}
+# Started: {ISO timestamp}
+# Plugin version: {version from .claude-plugin/plugin.json or unknown}
+
+```
+
 ## Hard rules
 
 - You are the ONLY entity that writes `stage` to `manifest.json`
@@ -230,3 +250,4 @@ Terminal failure state. Print full failure report.
 - You wait for ALL parallel agents to complete before reading their results
 - You do not trust executor self-reports — you only trust audit reports
 - Every stage transition must be written to `manifest.json` before proceeding
+- Every event must be appended to `execution-log.md` — no exceptions
