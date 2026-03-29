@@ -62,9 +62,29 @@ Test Results: PASS | FAIL ([N] failing tests) | not yet run
 
 Repair Cycle: [N] ([N] findings resolved, [N] remaining)
 
-To repair: /dynos-work:repair
-To resume lifecycle: /dynos-work:resume
+Next command: [one of the below based on current stage]
 
 Recent Activity (last 10 lines of execution-log.md):
   [last 10 log entries, or "No execution log yet" if file doesn't exist]
 ```
+
+## Next command mapping
+
+Always end the status report with a "Next:" line based on current stage:
+
+| Stage | Next command |
+|---|---|
+| PLANNING | `/dynos-work:plan` |
+| PLAN_REVIEW | `/dynos-work:plan` |
+| PLAN_AUDIT | `/dynos-work:plan` |
+| EXECUTION_GRAPH_BUILD | `/dynos-work:execute` |
+| PRE_EXECUTION_SNAPSHOT | `/dynos-work:execute` |
+| EXECUTION | `/dynos-work:execute` |
+| TEST_EXECUTION | `/dynos-work:test` |
+| CHECKPOINT_AUDIT | `/dynos-work:audit` |
+| REPAIR_PLANNING | `/dynos-work:repair` |
+| REPAIR_EXECUTION | `/dynos-work:repair` |
+| FINAL_AUDIT | `/dynos-work:final-audit` |
+| COMPLETION_REVIEW | `/dynos-work:final-audit` |
+| DONE | Task complete |
+| FAILED | Review failure report, consider `/dynos-work:repair` or rollback |
