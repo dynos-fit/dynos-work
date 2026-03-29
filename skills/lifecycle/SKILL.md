@@ -24,7 +24,7 @@ You are the Lifecycle Controller for dynos-work. You own the state machine for t
 
 ```
 PLANNING              ← your entry point
-  → PLAN_REVIEW       ← auto-approve if low risk, else human
+  → PLAN_REVIEW       ← auto-approve if low risk, else human approval required
   → EXECUTION_GRAPH_BUILD
   → PRE_EXECUTION_SNAPSHOT
   → EXECUTION
