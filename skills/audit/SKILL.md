@@ -155,6 +155,22 @@ Append to log:
 {timestamp} [DONE] reflect — task-retrospective.json written
 ```
 
+**Learn (inline -- no subagent):**
+
+After writing the retrospective, automatically aggregate all retrospectives in the project into the memory file. Follow the steps in `skills/learn/SKILL.md`:
+
+1. Scan all `.dynos/task-*/task-retrospective.json` files in the current working directory.
+2. Aggregate: top 5 finding categories, executor reliability rankings, average repair cycles by task type.
+3. Determine project memory path (`~/.claude/projects/<project>/memory/` where `<project>` is derived from the cwd by replacing `/` with `-`).
+4. Write (or overwrite) `dynos_patterns.md` to the project memory directory using the format defined in `skills/learn/SKILL.md`.
+
+If no retrospective files are found (edge case), skip silently.
+
+Append to log:
+```
+{timestamp} [DONE] learn — dynos_patterns.md updated ({N} tasks aggregated)
+```
+
 Write `completion.json`. Update stage to `DONE`. Append to log:
 ```
 {timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE

@@ -162,7 +162,7 @@ dynos-work learns from its own performance. Each completed task generates struct
 
 1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts by auditor and category, executor repair frequency, spec review iterations, and repair cycle count.
 
-2. **Learn:** run `/dynos-work:learn` to aggregate all retrospectives in the current project. It writes `dynos_patterns.md` to Claude Code's project memory, which is auto-loaded into every future conversation.
+2. **Learn:** automatically aggregates all retrospectives in the current project after each completed task. Writes `dynos_patterns.md` to Claude Code's project memory, which is auto-loaded into every future conversation. Can also be run manually with `/dynos-work:learn`.
 
 3. **Inject:** the planner and executors receive a pointer directive to check `dynos_patterns.md` for relevant patterns. The planner uses it to proactively address recurring issues in the spec. Executors use it to avoid their most common repair triggers.
 
@@ -174,7 +174,7 @@ dynos-work learns from its own performance. Each completed task generates struct
 | Executor repair frequency | Repair logs | Executors (self-checking) |
 | Avg repair cycles by task type | Execution logs | Planner (risk assessment) |
 
-Patterns are per-project. Run `/dynos-work:learn` after completing a few tasks to build up the knowledge base.
+Patterns are per-project and update automatically after each completed task. Run `/dynos-work:learn` manually to force a refresh or after importing retrospective data.
 
 ---
 

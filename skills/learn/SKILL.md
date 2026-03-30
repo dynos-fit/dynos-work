@@ -1,6 +1,6 @@
 ---
 name: learn
-description: "Aggregate task retrospectives into project memory. Scans all task-retrospective.json files and writes dynos_patterns.md to Claude Code project memory. User-invoked only."
+description: "Aggregate task retrospectives into project memory. Scans all task-retrospective.json files and writes dynos_patterns.md to Claude Code project memory. Runs automatically at task completion and can also be invoked manually."
 ---
 
 # dynos-work: Learn
