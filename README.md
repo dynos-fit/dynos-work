@@ -38,6 +38,8 @@ dynos-work owns the full lifecycle:
 10. **Audit:** independent auditors run simultaneously, conditionally gated on task domains, scoped to only the files you changed
 11. **Repair:** converts findings to precise fixes, domain-aware re-audit loops back through only affected auditors
 12. **Gate:** only marks DONE when all auditors pass with evidence
+13. **Reflect:** generates a structured retrospective from the task's audit and repair data
+14. **Learn:** aggregates retrospectives across tasks into project memory, informing future planning and execution
 
 Agent self-reports are untrusted. Completion requires independent proof.
 
@@ -56,11 +58,12 @@ Agent self-reports are untrusted. Completion requires independent proof.
 ### When you need to intervene
 
 ```
-/dynos-work:status    show current stage, audit results, open findings
-/dynos-work:resume    resume an interrupted task
-/dynos-work:plan      replan after scope changes or manual spec edits
-/dynos-work:repair    fix a specific finding manually
+/dynos-work:status       show current stage, audit results, open findings
+/dynos-work:resume       resume an interrupted task
+/dynos-work:plan         replan after scope changes or manual spec edits
+/dynos-work:repair       fix a specific finding manually
 /dynos-work:investigate  deep root cause analysis for any bug or error
+/dynos-work:learn        aggregate past task data into project memory
 ```
 
 ---
@@ -82,7 +85,7 @@ DISCOVERY + DESIGN + CLASSIFICATION (single planner pass)
          │  TEST_EXECUTION (run test suite, gate on pass/fail)
          │  CHECKPOINT_AUDIT (conditional auditor selection + diff-scoped)
          │      │
-         │      ├── all pass → DONE
+         │      ├── all pass → REFLECT (retrospective) → DONE
          │      └── findings → REPAIR (domain-aware re-audit) ─┐
          │                                                      │
          └──────────────────────────────────────────────────────┘
@@ -148,6 +151,30 @@ Not every agent needs the most expensive model. Orchestration and checklist agen
 | Code quality | Structure, correctness, tests, maintainability | Backend domain touched |
 | DB schema | Design, migration safety, indexes, integrity | DB domain touched |
 | Dead code | Unused imports, dead functions, orphaned files, commented-out code | Every task |
+
+---
+
+## Self-improvement
+
+dynos-work learns from its own performance. Each completed task generates structured data that feeds back into future tasks.
+
+### How it works
+
+1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts by auditor and category, executor repair frequency, spec review iterations, and repair cycle count.
+
+2. **Learn:** run `/dynos-work:learn` to aggregate all retrospectives in the current project. It writes `dynos_patterns.md` to Claude Code's project memory, which is auto-loaded into every future conversation.
+
+3. **Inject:** the planner and executors receive a pointer directive to check `dynos_patterns.md` for relevant patterns. The planner uses it to proactively address recurring issues in the spec. Executors use it to avoid their most common repair triggers.
+
+### What it tracks
+
+| Metric | Source | Used by |
+|---|---|---|
+| Top finding categories | Audit reports | Planner (spec normalization) |
+| Executor repair frequency | Repair logs | Executors (self-checking) |
+| Avg repair cycles by task type | Execution logs | Planner (risk assessment) |
+
+Patterns are per-project. Run `/dynos-work:learn` after completing a few tasks to build up the knowledge base.
 
 ---
 
