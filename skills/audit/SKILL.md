@@ -102,6 +102,59 @@ Wait for results.
 
 Read all audit reports. Write `audit-summary.json`.
 
+**Reflect (inline -- no subagent):**
+
+Before writing `completion.json`, generate `task-retrospective.json` in the task directory. This runs inline as part of the DONE gate.
+
+1. Scan `.dynos/task-{id}/audit-reports/*.json`. For each file, attempt to parse it as JSON. If parsing fails or the file is unreadable, skip it silently.
+2. From successfully parsed audit reports, extract:
+   - **Finding counts by auditor:** For each report, count the number of entries in the `findings` array. Key by `auditor_name`.
+   - **Finding counts by category:** For each finding, use the finding ID prefix (the part before the hyphen-number, e.g. `sec` from `sec-001`) as the category. Count findings per category.
+3. If `.dynos/task-{id}/repair-log.json` exists and is valid JSON:
+   - **Executor repair frequency:** Iterate all tasks across all batches. Count how many repair tasks were assigned to each `assigned_executor` value.
+   - **Repair cycle count:** Read the `repair_cycle` field (integer).
+   - If the file is missing or malformed, set executor repair frequency to `{}` and repair cycle count to `0`.
+4. Scan `.dynos/task-{id}/execution-log.md`. Count lines matching the pattern `[HUMAN] SPEC_REVIEW`. This is the **spec review iteration count**. If the file is missing, set to `0`.
+5. Read `manifest.json`. Flatten the `classification` object into scalar fields: `task_type` (string), `task_domains` (comma-separated string, e.g. "ui,backend"), `task_risk_level` (string). Set **task outcome** to `DONE` (this gate only runs for successful completion).
+6. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
+
+```json
+{
+  "task_id": "task-{id}",
+  "task_outcome": "DONE",
+  "task_type": "feature",
+  "task_domains": "ui,backend",
+  "task_risk_level": "medium",
+  "findings_by_auditor": { "security-auditor": 2, "code-quality-auditor": 1 },
+  "findings_by_category": { "sec": 2, "cq": 1 },
+  "executor_repair_frequency": { "backend-executor": 2 },
+  "spec_review_iterations": 1,
+  "repair_cycle_count": 0
+}
+```
+
+If no audit reports or repair logs exist, write the file with zeroed-out counts:
+
+```json
+{
+  "task_id": "task-{id}",
+  "task_outcome": "DONE",
+  "task_type": "feature",
+  "task_domains": "backend",
+  "task_risk_level": "low",
+  "findings_by_auditor": {},
+  "findings_by_category": {},
+  "executor_repair_frequency": {},
+  "spec_review_iterations": 0,
+  "repair_cycle_count": 0
+}
+```
+
+Append to log:
+```
+{timestamp} [DONE] reflect — task-retrospective.json written
+```
+
 Write `completion.json`. Update stage to `DONE`. Append to log:
 ```
 {timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE

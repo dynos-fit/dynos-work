@@ -56,6 +56,7 @@ Each executor receives:
 2. The full text of each acceptance criterion referenced by the segment's `criteria_ids` field, extracted from `spec.md` (include the criterion number and full text, not just IDs)
 3. Evidence files from dependency segments: for each segment ID in the executor's `depends_on` list, read `.dynos/task-{id}/evidence/{dependency-segment-id}.md` and include its contents
 4. Instruction to write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
+5. If `dynos_patterns.md` exists in project memory, check it for patterns relevant to your executor type.
 
 Do NOT pass the full `spec.md` or `plan.md` to executors. The extracted criteria and segment contain all the context the executor needs.
 

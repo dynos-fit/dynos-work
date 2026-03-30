@@ -121,7 +121,7 @@ Append to log:
 
 **Spawn the Planner subagent** with instruction: "Generate the implementation plan AND execution graph. Read `spec.md` and `design-decisions.md`. Human design choices are binding.
 
-1. Write the implementation plan to `.dynos/task-{id}/plan.md`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy.
+1. Write the implementation plan to `.dynos/task-{id}/plan.md`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy. If dynos_patterns.md exists in project memory, review it for relevant patterns before generating the plan.
 2. Write the execution graph to `.dynos/task-{id}/execution-graph.json`. Each segment must declare: id, executor, description, files_expected, depends_on, parallelizable, criteria_ids (list of acceptance criterion numbers this segment satisfies). Executor types: ui-executor, backend-executor, ml-executor, db-executor, refactor-executor, testing-executor, integration-executor."
 
 Wait for completion. The Planner writes `plan.md` and `execution-graph.json` per its own format. Append to log:
