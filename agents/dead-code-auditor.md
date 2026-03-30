@@ -52,38 +52,9 @@ You are the Dead Code Auditor. Your job is to ensure no dead, orphaned, or comme
 
 ## Output
 
-Write report to `.dynos/task-{id}/audit-reports/dead-code-{timestamp}.json`:
+Write report to `.dynos/task-{id}/audit-reports/dead-code-{timestamp}.json`.
 
-```json
-{
-  "auditor_name": "dead-code-auditor",
-  "run_id": "...",
-  "task_id": "...",
-  "status": "pass | fail",
-  "severity": "critical | major | minor",
-  "findings": [
-    {
-      "id": "dc-001",
-      "description": "Function `buildPayload` defined at src/utils/payload.ts:34 is never called anywhere in the codebase",
-      "location": "src/utils/payload.ts:34",
-      "severity": "major",
-      "blocking": true
-    }
-  ],
-  "requirement_coverage": [],
-  "evidence_checked": ["src/utils/payload.ts", "src/api/checkout.ts"],
-  "repair_tasks": [
-    {
-      "finding_id": "dc-001",
-      "description": "Remove unused function `buildPayload` from src/utils/payload.ts:34, or wire it into the call site if it was intended to be used",
-      "assigned_executor": "refactor-executor",
-      "affected_files": ["src/utils/payload.ts"]
-    }
-  ],
-  "confidence": 0.9,
-  "can_block_completion": true
-}
-```
+Write your report following the canonical schema defined in `agents/_shared/audit-report.md`.
 
 ## Hard rules
 

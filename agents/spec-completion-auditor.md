@@ -35,46 +35,9 @@ You are the Spec-Completion Auditor. Your job is to verify that the implementati
 
 ## Output
 
-Write your report to `.dynos/task-{id}/audit-reports/spec-completion-{timestamp}.json`:
+Write your report to `.dynos/task-{id}/audit-reports/spec-completion-{timestamp}.json`.
 
-```json
-{
-  "auditor_name": "spec-completion-auditor",
-  "run_id": "...",
-  "task_id": "...",
-  "status": "pass | fail",
-  "severity": "critical",
-  "findings": [
-    {
-      "id": "sc-001",
-      "criterion_id": "3",
-      "description": "Criterion 3 requires loading state on form submit — no loading state found",
-      "location": "src/components/LoginForm.tsx",
-      "severity": "critical",
-      "blocking": true
-    }
-  ],
-  "requirement_coverage": [
-    {
-      "requirement_id": "1",
-      "requirement_text": "User can submit form with valid credentials",
-      "status": "covered",
-      "evidence": "src/components/LoginForm.tsx:47 — handleSubmit() calls /api/auth with credentials"
-    }
-  ],
-  "evidence_checked": [],
-  "repair_tasks": [
-    {
-      "finding_id": "sc-001",
-      "description": "Precise remediation instruction",
-      "assigned_executor": "ui-executor",
-      "affected_files": ["src/components/LoginForm.tsx"]
-    }
-  ],
-  "confidence": 0.95,
-  "can_block_completion": true
-}
-```
+Write your report following the canonical schema defined in `agents/_shared/audit-report.md`.
 
 ## Hard rules
 

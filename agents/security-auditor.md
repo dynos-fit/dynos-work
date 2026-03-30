@@ -32,38 +32,9 @@ You are the Security Auditor. You think adversarially. Your job is to find every
 
 ## Output
 
-Write report to `.dynos/task-{id}/audit-reports/security-{timestamp}.json`:
+Write report to `.dynos/task-{id}/audit-reports/security-{timestamp}.json`.
 
-```json
-{
-  "auditor_name": "security-auditor",
-  "run_id": "...",
-  "task_id": "...",
-  "status": "pass | fail | warning",
-  "severity": "critical | major | minor",
-  "findings": [
-    {
-      "id": "sec-001",
-      "description": "...",
-      "location": "file:line",
-      "severity": "critical | major | minor",
-      "blocking": true
-    }
-  ],
-  "requirement_coverage": [],
-  "evidence_checked": [],
-  "repair_tasks": [
-    {
-      "finding_id": "sec-001",
-      "description": "Precise remediation instruction",
-      "assigned_executor": "backend-executor",
-      "affected_files": ["..."]
-    }
-  ],
-  "confidence": 0.95,
-  "can_block_completion": true
-}
-```
+Write your report following the canonical schema defined in `agents/_shared/audit-report.md`.
 
 **Severity:** `critical` = direct exploitability. `major` = significant risk. `minor` = defense-in-depth.
 

@@ -30,38 +30,9 @@ You are the DB Schema and Optimization Auditor. You think like a paranoid, elite
 
 ## Output
 
-Write report to `.dynos/task-{id}/audit-reports/db-schema-{timestamp}.json`:
+Write report to `.dynos/task-{id}/audit-reports/db-schema-{timestamp}.json`.
 
-```json
-{
-  "auditor_name": "db-schema-auditor",
-  "run_id": "...",
-  "task_id": "...",
-  "status": "pass | fail | warning",
-  "severity": "critical | major | minor",
-  "findings": [
-    {
-      "id": "db-001",
-      "description": "...",
-      "location": "file:line",
-      "severity": "critical | major | minor",
-      "blocking": true
-    }
-  ],
-  "requirement_coverage": [],
-  "evidence_checked": [],
-  "repair_tasks": [
-    {
-      "finding_id": "db-001",
-      "description": "Precise remediation instruction",
-      "assigned_executor": "db-executor",
-      "affected_files": ["..."]
-    }
-  ],
-  "confidence": 0.9,
-  "can_block_completion": true
-}
-```
+Write your report following the canonical schema defined in `agents/_shared/audit-report.md`.
 
 **Severity:** `critical` = data loss risk, broken referential integrity. `major` = missing index, N+1. `minor` = naming, minor optimization.
 

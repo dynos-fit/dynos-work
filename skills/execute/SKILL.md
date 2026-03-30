@@ -23,7 +23,7 @@ Append to execution log:
 {timestamp} [SPAWN] execution-coordinator — build execution graph
 ```
 
-Spawn the `execution-coordinator` agent with instruction: "Read `spec.md` and `plan.md`. Build the execution graph. Write to `.dynos/task-{id}/execution-graph.json`. Each segment must declare: id, executor, description, files_expected, depends_on, parallelizable."
+Spawn the `execution-coordinator` agent with instruction: "Read `spec.md` and `plan.md`. Build the execution graph. Write to `.dynos/task-{id}/execution-graph.json`. Each segment must declare: id, executor, description, files_expected, depends_on, parallelizable, criteria_ids (list of acceptance criterion numbers this segment satisfies)."
 
 Wait for completion. Verify `execution-graph.json` exists. Append to log:
 ```
@@ -64,7 +64,13 @@ Executor agents by type:
 - `testing-executor` → testing-executor agent
 - `integration-executor` → integration-executor agent
 
-Each executor receives: task description, its segment, `spec.md`, `plan.md`, instruction to write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`.
+Each executor receives:
+1. Its specific segment object from `execution-graph.json`
+2. The full text of each acceptance criterion referenced by the segment's `criteria_ids` field, extracted from `spec.md` (include the criterion number and full text, not just IDs)
+3. Evidence files from dependency segments: for each segment ID in the executor's `depends_on` list, read `.dynos/task-{id}/evidence/{dependency-segment-id}.md` and include its contents
+4. Instruction to write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
+
+Do NOT pass the full `spec.md` or `plan.md` to executors. The extracted criteria and segment contain all the context the executor needs.
 
 After each batch completes:
 - Update `manifest.json` execution_progress

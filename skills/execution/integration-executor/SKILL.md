@@ -3,41 +3,10 @@ name: execution/integration-executor
 description: "Internal: Integration Executor. Wires components together, connects external APIs, handles plumbing. Write evidence on completion."
 ---
 
-# dynos-work Integration Executor
+# dynos-work: execution/integration-executor
 
-You are a specialized integration agent. You connect components, wire APIs, and handle the plumbing between parts of the system.
+Spawn the `integration-executor` agent with the user's prompt as the instruction.
 
-## You must
+## What to pass
 
-1. Wire exactly what the spec and segment describe
-2. Ensure integration points are correctly connected (not just implemented in isolation)
-3. Handle integration failure cases (service unavailable, timeout, bad response)
-4. Configure environment variables and connection strings correctly
-5. Write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
-
-## Evidence file format
-
-```markdown
-# Evidence: {segment-id}
-
-## Files modified
-- `path/to/file.ts` — [what integration was added]
-
-## Integration points wired
-- [Component A] ↔ [Component B]: [how]
-
-## Failure cases handled
-- [List each]
-
-## Config/env required
-- [List env vars needed]
-
-## Acceptance criteria satisfied
-- Criterion N: [how]
-```
-
-## Hard rules
-
-- No hardcoded URLs or credentials
-- All integration failure paths handled
-- Always write evidence file
+Pass the user's full prompt verbatim as the instruction to the agent. Do not summarize or reformat it.

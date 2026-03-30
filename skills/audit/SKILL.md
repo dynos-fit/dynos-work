@@ -1,11 +1,11 @@
 ---
 name: audit
-description: "Power user: Run checkpoint audit, repair any findings, then run final audit to reach DONE — all in one shot. Use after /dynos-work:execute."
+description: "Power user: Run checkpoint audit, repair any findings, then reach DONE — all in one shot. Use after /dynos-work:execute."
 ---
 
 # dynos-work: Audit
 
-Runs the full audit-to-done pipeline: checkpoint audit → repair loop → final audit → DONE.
+Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 
 ## What you do
 
@@ -21,40 +21,46 @@ Run `git diff --name-only {snapshot.head_sha}` to get all files changed by this 
 
 If no snapshot exists (standalone audit), use `git diff --name-only HEAD`.
 
-### Step 3 — Checkpoint audit (risk-based)
+### Step 3 — Audit (conditional auditor spawning)
 
-Update `manifest.json` stage to `CHECKPOINT_AUDIT`. Append to log:
+Update `manifest.json` stage to `CHECKPOINT_AUDIT`.
+
+**Determine which auditors to spawn:**
+
+Read `manifest.json` `classification` field and `execution-graph.json`.
+
+**Always spawn (universal auditors):**
+- `spec-completion-auditor`
+- `security-auditor`
+- `code-quality-auditor`
+- `dead-code-auditor`
+
+**Conditionally spawn:**
+- `ui-auditor` — spawn only if classification `domains` includes `"ui"` OR any segment in `execution-graph.json` has `executor` value `"ui-executor"`
+- `db-schema-auditor` — spawn only if classification `domains` includes `"db"` OR any segment in `execution-graph.json` has `executor` value `"db-executor"`
+
+**When classification is null or missing:** spawn only the 4 universal auditors. Skip `ui-auditor` and `db-schema-auditor`.
+
+Append to log:
 ```
 {timestamp} [STAGE] → CHECKPOINT_AUDIT
-{timestamp} [SPAWN] checkpoint auditors — risk-based selection
+{timestamp} [SPAWN] {N} auditors in parallel ({list of names})
 ```
 
-Select auditors based on `classification.risk_level`:
+Spawn the determined auditors simultaneously.
 
-| Risk Level | Auditors Spawned |
-|---|---|
-| `low` | spec-completion + security |
-| `medium` | spec-completion + security + domain-relevant (see below) |
-| `high` / `critical` | ALL 5 auditors |
-| no classification | ALL 5 auditors |
-
-Domain-relevant auditors (for `medium` risk, based on changed files):
-- Any `.tsx .jsx .css .html .vue .svelte .scss .less .dart` files → `ui-auditor`
-- Any `.ts .js .py .go .rs .java .rb .cpp .cs .dart` logic files → `code-quality-auditor`
-- Any schema/migration/ORM files → `db-schema-auditor`
-
-Spawn selected auditors in parallel. Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
+Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
 Wait for all to complete. Append to log:
 ```
-{timestamp} [DONE] checkpoint audit complete
+{timestamp} [DONE] audit complete
 ```
 
 ### Step 4 — Repair loop (if findings exist)
 
-Read all checkpoint audit reports. Collect all blocking findings.
+Read all audit reports. Collect all blocking findings.
 
-**If no blocking findings:** append `{timestamp} [ADVANCE] CHECKPOINT_AUDIT → FINAL_AUDIT` to log. Skip to Step 5.
+**If no blocking findings:** proceed to Step 5.
 
 **If blocking findings exist:**
 
@@ -74,7 +80,7 @@ Wait for completion. Update stage to `REPAIR_EXECUTION`. Append to log:
 Spawn executor agents (in parallel where file-safe) for each repair task as assigned in `repair-log.json`:
 - `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`
 
-Each executor receives: the specific finding, the file(s) to fix, `spec.md`, `plan.md`.
+Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
 
 After all repairs complete, append to log:
 ```
@@ -83,67 +89,29 @@ After all repairs complete, append to log:
 
 **Re-audit:** spawn only the auditors that reported the repaired findings (plus always spec-completion and security). Wait for results.
 
-- If all clear: append `{timestamp} [ADVANCE] REPAIR_EXECUTION → FINAL_AUDIT` to log. Proceed to Step 5.
+- If all clear: proceed to Step 5.
 - If new findings: increment `retry_counts` for each finding. If any finding has exceeded 3 retries, set stage to `FAILED`, append `[FAILED] max retries exceeded for: {finding-ids}`, and stop. Otherwise loop back to repair.
 
-### Step 5 — Final audit (all 6 auditors, no evidence reuse)
+### Step 5 — Gate to DONE
 
-Update `manifest.json` stage to `FINAL_AUDIT`. Append to log:
-```
-{timestamp} [STAGE] → FINAL_AUDIT
-{timestamp} [SPAWN] all 6 auditors in parallel — final gate
-```
+Read all audit reports. Write `audit-summary.json`.
 
-Spawn simultaneously (no evidence reuse — every auditor runs fresh):
-- `spec-completion-auditor`
-- `security-auditor`
-- `code-quality-auditor`
-- `ui-auditor`
-- `db-schema-auditor`
-- `dead-code-auditor`
-
-Each receives: `spec.md`, `plan.md`, all evidence files, the diff-scoped file list. Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-final-{timestamp}.json`.
-
-Wait for ALL 6 to complete. Append to log:
-```
-{timestamp} [DONE] final audit complete
-```
-
-### Step 6 — Gate to DONE
-
-Read all 6 final audit reports. Write `audit-summary.json`.
-
-**If all 6 pass:**
 Write `completion.json`. Update stage to `DONE`. Append to log:
 ```
-{timestamp} [ADVANCE] FINAL_AUDIT → DONE
+{timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE
 ```
-Print:
+Print (listing only auditors that were actually spawned):
 ```
 Audit complete — ALL PASSED
 
-Checkpoint:      PASS
-Final audit:
-  spec-completion:  PASS
-  security:         PASS
-  code-quality:     PASS
-  ui:               PASS
-  db-schema:        PASS
-  dead-code:        PASS
+  {auditor-name}:  PASS
+  ... (one line per spawned auditor)
 
 Task complete. Snapshot branch dynos/task-{id}-snapshot can be deleted if desired.
 ```
-
-**If any final audit findings:**
-Update stage to `REPAIR_PLANNING`. Append to log:
-```
-{timestamp} [REPAIR] final audit — {N} findings: {list of finding IDs}
-{timestamp} [ADVANCE] FINAL_AUDIT → REPAIR_PLANNING
-```
-Loop back to Step 4 to repair and re-run final audit. Apply the same 3-retry limit per finding.
 
 ---
 
 ## Standalone use (no active task)
 
-If no active task is found, run auditors on `git diff --name-only HEAD`. Use `high` risk level (all 5 auditors + dead-code). Skip Steps 5–6 (no DONE state to write). Print results and stop.
+If no active task is found, run the 4 universal auditors on `git diff --name-only HEAD`. Skip Step 5 (no DONE state to write). Print results and stop.

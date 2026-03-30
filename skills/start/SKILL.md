@@ -119,7 +119,7 @@ Update `manifest.json` stage to `CLASSIFY_AND_SPEC`.
 
 **Spawn the Planner subagent** with instruction: "Phase: Classification + Spec Normalization (combined). Read `raw-input.md`, `discovery-notes.md`, and `design-decisions.md`. Human design choices are binding. Write classification to manifest.json under the `classification` key. Write normalized spec with numbered acceptance criteria to `spec.md`."
 
-Wait for it to complete. Verify `spec.md` and `classification` exist.
+Wait for it to complete. The Planner writes `spec.md` per its own format. Verify `spec.md` and `classification` exist.
 
 Append to log:
 ```
@@ -165,7 +165,7 @@ Append to log:
 
 **Spawn the Planner subagent** with instruction: "Generate the implementation plan. Read `spec.md` and `design-decisions.md`. Human design choices are binding. Write to `.dynos/task-{id}/plan.md`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy."
 
-Wait for completion. Append to log:
+Wait for completion. The Planner writes `plan.md` per its own format. Append to log:
 ```
 {timestamp} [DONE] planning — plan.md written
 {timestamp} [STAGE] → PLAN_REVIEW

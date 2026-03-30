@@ -2,5 +2,7 @@
   "name": "dynos-work",
   "version": "2.8.0",
   "description": "Audit-governed autonomous engineering system. Standalone — no dependencies required.",
-  "license": "MIT"
+  "license": "MIT",
+  "skills": "./skills/",
+  "hooks": "./hooks.json"
 }
