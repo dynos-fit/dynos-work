@@ -1,36 +1,23 @@
 ---
 name: execute
-description: "Power user: Build execution graph, snapshot, run all executor segments, then run the test suite. Runs EXECUTION_GRAPH_BUILD → PRE_EXECUTION_SNAPSHOT → EXECUTION → TEST_EXECUTION. Use after /dynos-work:start."
+description: "Power user: Snapshot, run all executor segments, then run the test suite. Runs PRE_EXECUTION_SNAPSHOT → EXECUTION → TEST_EXECUTION. Use after /dynos-work:start."
 ---
 
 # dynos-work: Execute
 
-Builds the execution graph, creates a git snapshot, runs all executor segments in dependency order, then runs the test suite. When done, run `/dynos-work:audit` (pass) or `/dynos-work:repair` (fail).
+Creates a git snapshot, runs all executor segments in dependency order, then runs the test suite. The execution graph (`execution-graph.json`) is generated during `/dynos-work:start`. When done, run `/dynos-work:audit` (pass) or `/dynos-work:repair` (fail).
 
 ## What you do
 
 ### Step 1 — Find active task
 
-Find the most recent active task in `.dynos/`. Read `manifest.json`, `spec.md`, `plan.md`.
+Find the most recent active task in `.dynos/`. Read `manifest.json`, `spec.md`, `plan.md`, `execution-graph.json`.
 
-Verify stage is `EXECUTION_GRAPH_BUILD`. If not, print the current stage and what command to run instead.
+Verify stage is `PRE_EXECUTION_SNAPSHOT`. If not, print the current stage and what command to run instead.
 
-### Step 2 — Build execution graph
+Verify `execution-graph.json` exists (generated during `/dynos-work:start`). If missing, print error and stop.
 
-Append to execution log:
-```
-{timestamp} [STAGE] → EXECUTION_GRAPH_BUILD
-{timestamp} [SPAWN] execution-coordinator — build execution graph
-```
-
-Spawn the `execution-coordinator` agent with instruction: "Read `spec.md` and `plan.md`. Build the execution graph. Write to `.dynos/task-{id}/execution-graph.json`. Each segment must declare: id, executor, description, files_expected, depends_on, parallelizable, criteria_ids (list of acceptance criterion numbers this segment satisfies)."
-
-Wait for completion. Verify `execution-graph.json` exists. Append to log:
-```
-{timestamp} [DONE] execution-coordinator — {N} segments planned
-```
-
-### Step 3 — Git snapshot
+### Step 2 — Git snapshot
 
 Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. Append to log:
 ```
@@ -46,7 +33,7 @@ Append to log:
 {timestamp} [DECISION] snapshot created — branch dynos/task-{id}-snapshot at {head_sha}
 ```
 
-### Step 4 — Execute segments
+### Step 3 — Execute segments
 
 Update `manifest.json` stage to `EXECUTION`. Append to log:
 ```
@@ -84,7 +71,7 @@ Append to log:
 {timestamp} [ADVANCE] EXECUTION → TEST_EXECUTION
 ```
 
-### Step 5 — Run tests
+### Step 4 — Run tests
 
 Update `manifest.json` stage to `TEST_EXECUTION`. Append to log:
 ```
@@ -105,7 +92,7 @@ Run the test command via Bash. Capture output. Append to log:
 {timestamp} [TEST] {command} — running
 ```
 
-### Step 6 — Gate on result
+### Step 5 — Gate on result
 
 **If all tests pass:**
 ```

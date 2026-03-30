@@ -70,7 +70,7 @@ Update stage to `REPAIR_PLANNING`. Append to log:
 {timestamp} [STAGE] → REPAIR_PLANNING
 ```
 
-Spawn `repair-coordinator` agent with instruction: "Read all audit reports in `.dynos/task-{id}/audit-reports/`. Produce a repair plan. Assign each finding to an executor. Write to `.dynos/task-{id}/repair-log.json`."
+Spawn `repair-coordinator` agent with instruction: "Read all audit reports in `.dynos/task-{id}/audit-reports/`. Produce a repair plan. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
 
 Wait for completion. Update stage to `REPAIR_EXECUTION`. Append to log:
 ```
@@ -87,7 +87,13 @@ After all repairs complete, append to log:
 {timestamp} [DONE] repair-execution — all fixes applied
 ```
 
-**Re-audit:** spawn only the auditors that reported the repaired findings (plus always spec-completion and security). Wait for results.
+**Re-audit (domain-aware):** Determine which files were modified by the repair executors. Spawn only:
+- `spec-completion-auditor` (always)
+- `security-auditor` (always)
+- Any auditor that originally reported a repaired finding
+- Skip auditors whose domain was not touched by the repair (e.g., if only backend files were repaired, skip `ui-auditor` even if it ran in the initial audit)
+
+Wait for results.
 
 - If all clear: proceed to Step 5.
 - If new findings: increment `retry_counts` for each finding. If any finding has exceeded 3 retries, set stage to `FAILED`, append `[FAILED] max retries exceeded for: {finding-ids}`, and stop. Otherwise loop back to repair.
