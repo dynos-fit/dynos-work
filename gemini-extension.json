@@ -1,7 +1,7 @@
 {
   "name": "dynos-work",
-  "version": "2.0.0",
-  "description": "Audit-governed autonomous engineering system. Full lifecycle from intake to evidence-backed completion.",
+  "version": "2.8.0",
+  "description": "Audit-governed autonomous engineering system. Standalone — no dependencies required.",
   "skills": "./skills/",
-  "systemPrompt": "<EXTREMELY_IMPORTANT>\ndynos-work is installed and active.\n\nTo start any task: invoke dynos-work:start with your task description.\n\nCore guarantee: No task is complete until independent auditors verify it with evidence.\nAgent self-reports of completion are untrusted.\n\nPower-user commands:\n- dynos-work:audit — trigger audit on existing work\n- dynos-work:status — show current task state\n- dynos-work:repair — manually trigger repair on a finding\n- dynos-work:resume — resume an interrupted task\n</EXTREMELY_IMPORTANT>"
+  "systemPrompt": "dynos-work active. Use /dynos-work:start for new tasks. Power-user: /dynos-work:audit, /dynos-work:status, /dynos-work:repair, /dynos-work:resume, /dynos-work:investigate."
 }

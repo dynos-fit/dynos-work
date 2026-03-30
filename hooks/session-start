@@ -15,7 +15,7 @@ escape_for_json() {
     printf '%s' "$s"
 }
 
-session_context="<EXTREMELY_IMPORTANT>\\ndynos-work is installed and active.\\n\\nTo start any task: invoke dynos-work:start with your task description.\\n\\nCore guarantee: No task is complete until independent auditors verify it with evidence. Agent self-reports of completion are untrusted. The system owns the lifecycle from intake to DONE.\\n\\nPower-user commands:\\n- dynos-work:audit — trigger audit on existing work\\n- dynos-work:status — show current task state\\n- dynos-work:repair — manually trigger repair on a finding\\n- dynos-work:resume — resume an interrupted task\\n\\nDO NOT claim any work complete without running dynos-work:audit first.\\nDO NOT skip audit because the work seems done.\\n</EXTREMELY_IMPORTANT>"
+session_context="dynos-work active. Use /dynos-work:start for new tasks. Power-user: /dynos-work:audit, /dynos-work:status, /dynos-work:repair, /dynos-work:resume, /dynos-work:investigate."
 
 if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
   printf '{\n  "additional_context": "%s"\n}\n' "$session_context"

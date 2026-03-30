@@ -26,19 +26,18 @@ They write code that mostly works, skip edge cases, leave stubs, miss requiremen
 
 dynos-work owns the full lifecycle:
 
-1. **Discover:** asks up to 5 targeted questions to surface gaps, trade-offs, and unstated constraints before any spec is written
-2. **Design:** identifies critical and high-complexity subtasks, proposes 2-3 options each with pros and cons, and asks for your choice. Easy and medium subtasks are decided autonomously.
-3. **Classify & Spec:** understands your task, classifies risk, extracts acceptance criteria using all context from discovery and design
-4. **Spec Review:** always pauses for your explicit sign-off on the normalized spec before any code is written. No auto-approval path.
-5. **Plan:** generates implementation plan with dependency graph, bound by your design choices
-6. **Plan Review:** pauses for your approval of the implementation plan
-7. **Plan Audit:** spec-completion auditor verifies every acceptance criterion is addressed in the plan before any code is written
-8. **Snapshot:** creates a git branch safety net before writing any code
-9. **Execute:** dispatches specialized executor subagents in parallel, with live progress tracking
-10. **Test:** runs the project's test suite and gates on pass/fail before auditing
-11. **Audit:** independent auditors run simultaneously, scoped to only the files you changed
-12. **Repair:** converts findings to precise fixes, loops back through tests and audit
-13. **Gate:** only marks DONE when all auditors pass with evidence
+1. **Discover + Design + Classify:** asks up to 5 targeted questions, identifies critical subtasks with design options, and classifies risk — all in a single planner pass
+2. **Spec:** normalizes acceptance criteria using all context from discovery and design
+3. **Spec Review:** always pauses for your explicit sign-off on the normalized spec. No auto-approval path.
+4. **Plan + Execution Graph:** generates implementation plan with dependency graph and parallel execution segments, bound by your design choices
+5. **Plan Review:** pauses for your approval of the implementation plan
+6. **Plan Audit:** spec-completion auditor verifies every acceptance criterion is addressed before any code is written
+7. **Snapshot:** creates a git branch safety net before writing any code
+8. **Execute:** dispatches specialized executor subagents in parallel, each receiving only its relevant segment and criteria
+9. **Test:** runs the project's test suite and gates on pass/fail before auditing
+10. **Audit:** independent auditors run simultaneously, conditionally gated on task domains, scoped to only the files you changed
+11. **Repair:** converts findings to precise fixes, domain-aware re-audit loops back through only affected auditors
+12. **Gate:** only marks DONE when all auditors pass with evidence
 
 Agent self-reports are untrusted. Completion requires independent proof.
 
@@ -61,7 +60,7 @@ Agent self-reports are untrusted. Completion requires independent proof.
 /dynos-work:resume    resume an interrupted task
 /dynos-work:plan      replan after scope changes or manual spec edits
 /dynos-work:repair    fix a specific finding manually
-/dynos-work:debug     deep root cause analysis for any bug or error
+/dynos-work:investigate  deep root cause analysis for any bug or error
 ```
 
 ---
@@ -69,28 +68,24 @@ Agent self-reports are untrusted. Completion requires independent proof.
 ## Lifecycle
 
 ```
-DISCOVERY (up to 5 questions) → DESIGN_OPTIONS (critical/hard subtasks only)
-       → CLASSIFY_AND_SPEC → SPEC_REVIEW (always, no skip)
+DISCOVERY + DESIGN + CLASSIFICATION (single planner pass)
+       → SPEC_NORMALIZATION → SPEC_REVIEW (always, no skip)
                                    │
-                          approved → PLANNING → PLAN_REVIEW
+                          approved → PLANNING + EXECUTION_GRAPH → PLAN_REVIEW
                           changes  → re-normalize → SPEC_REVIEW
-                                            │
-                                   low risk: auto-approve
-                                   med+ risk: user approval
                                             │
                                    PLAN_AUDIT (spec-completion check)
                                             │
          ┌──────────────────────────────────▼
-         │  EXECUTION_GRAPH_BUILD (coordinator builds parallel batches)
          │  PRE_EXECUTION_SNAPSHOT (git branch safety net)
          │  EXECUTION (parallel executor batches with progress tracking)
          │  TEST_EXECUTION (run test suite, gate on pass/fail)
-         │  CHECKPOINT_AUDIT (risk-based auditor selection + diff-scoped)
+         │  CHECKPOINT_AUDIT (conditional auditor selection + diff-scoped)
          │      │
-         │      ├── all pass → FINAL_AUDIT → DONE
-         │      └── failures → REPAIR_PLANNING → REPAIR_EXECUTION ─┐
-         │                                                          │
-         └──────────────────────────────────────────────────────────┘
+         │      ├── all pass → DONE
+         │      └── findings → REPAIR (domain-aware re-audit) ─┐
+         │                                                      │
+         └──────────────────────────────────────────────────────┘
                               (repair loop, max 3 retries per finding)
 ```
 
@@ -100,11 +95,11 @@ DISCOVERY (up to 5 questions) → DESIGN_OPTIONS (critical/hard subtasks only)
 
 **Mandatory spec sign-off:** you always review and approve the normalized spec before execution begins, regardless of risk level
 
-**Risk-based auditing:** domain-relevant auditors (ui, code-quality, db-schema) always run when those domains are touched, regardless of risk level. high/critical runs all 6.
+**Conditional auditing:** 4 universal auditors (spec-completion, security, code-quality, dead-code) always run. Domain-specific auditors (ui, db-schema) only spawn when their domain is relevant, based on task classification and execution graph.
 
 **Diff-scoped:** auditors only inspect files changed by the task, preventing false positives from pre-existing issues
 
-**Evidence reuse:** on repair re-audit, auditors whose files weren't touched carry forward their previous pass
+**Domain-aware repair:** on repair re-audit, only auditors whose domain was touched by the repair re-run, plus spec-completion and security always
 
 **Test gate:** test suite runs before audit to catch real failures before spending tokens on auditors
 
@@ -122,8 +117,7 @@ Not every agent needs the most expensive model. Orchestration and checklist agen
 
 | Role | Model | Why |
 |---|---|---|
-| Planning | Opus | Deep reasoning for spec and plan |
-| Execution coordinator | Sonnet | Graph construction from spec |
+| Planning | Opus | Deep reasoning for spec, plan, and execution graph |
 | Repair coordinator | Sonnet | Mapping findings to executors |
 | All 7 executors | Opus | Writing production code |
 | Security auditor | Opus | Adversarial thinking |
@@ -153,7 +147,7 @@ Not every agent needs the most expensive model. Orchestration and checklist agen
 | UI | States, interactions, accessibility, responsive behavior | UI domain touched |
 | Code quality | Structure, correctness, tests, maintainability | Backend domain touched |
 | DB schema | Design, migration safety, indexes, integrity | DB domain touched |
-| Dead code | Unused imports, dead functions, orphaned files, commented-out code | Final audit only |
+| Dead code | Unused imports, dead functions, orphaned files, commented-out code | Every task |
 
 ---
 
