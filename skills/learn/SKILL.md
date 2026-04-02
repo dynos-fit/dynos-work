@@ -114,9 +114,15 @@ After writing the core sections (Steps 1-4), compute effectiveness scores and de
 
 From all collected retrospectives, select those that contain a `quality_score` field. These retrospectives also contain `cost_score`, `efficiency_score`, `model_used_by_agent` (object mapping agent name to model string), and `task_type`. Retrospectives without `quality_score` are excluded from EMA computation but remain included in Steps 1-4 aggregations.
 
-Sort selected retrospectives by task ID ascending (chronological replay) to ensure deterministic EMA results.
+**Input validation:** For each selected retrospective, validate reward fields before use:
+- `quality_score`, `cost_score`, `efficiency_score` must each be a number in `[0.0, 1.0]`. If a field is not a number, is `null`, or is outside `[0.0, 1.0]`, skip that entire retrospective and log: `{timestamp} [WARN] invalid reward field in {task_id} -- skipping retrospective`
+- `model_used_by_agent` must be an object (not null, not a string, not an array). If invalid, skip the retrospective.
+- Each value in `model_used_by_agent` must be one of `haiku`, `sonnet`, `opus`, or `null`. Agents with `null` are skipped. Agents with any other value are skipped (do not propagate unknown model names into EMA).
+- `task_type` must be a non-empty string. If missing or not a string, skip the retrospective.
 
-For each selected retrospective, derive per-agent triples: for each agent in `model_used_by_agent`, the triple key is `(role=agent_name, model=model_used_by_agent[agent_name], task_type=task_type)`. The scores applied to each triple are the task-level scores: `quality_score`, `cost_score`, `efficiency_score`. Agents whose model value is `null` are skipped.
+Sort validated retrospectives by task ID ascending (chronological replay) to ensure deterministic EMA results.
+
+For each validated retrospective, derive per-agent triples: for each agent in `model_used_by_agent`, the triple key is `(role=agent_name, model=model_used_by_agent[agent_name], task_type=task_type)`. The scores applied to each triple are the task-level scores: `quality_score`, `cost_score`, `efficiency_score`. Agents whose model value is `null` or invalid are skipped.
 
 #### 5b -- Compute Effectiveness Scores via EMA
 
