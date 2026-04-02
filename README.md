@@ -99,7 +99,7 @@ DISCOVERY + DESIGN + CLASSIFICATION (single planner pass)
 
 **Mandatory spec sign-off:** you always review and approve the normalized spec before execution begins, regardless of risk level
 
-**Conditional auditing:** 3 skip-exempt auditors (spec-completion, security, code-quality) always run. Skip-eligible auditors (dead-code, ui, db-schema) are skipped when they have a zero-finding streak of 3+ consecutive tasks, saving tokens without sacrificing safety.
+**Adaptive auditing:** 3 skip-exempt auditors (spec-completion, security, code-quality) always run. Skip-eligible auditors (dead-code, ui, db-schema) are skipped based on learned skip thresholds from the policy table. Model selection for all agents is adaptive, driven by effectiveness scores tracked per (role, model, task_type) triple.
 
 **Diff-scoped:** auditors only inspect files changed by the task, preventing false positives from pre-existing issues
 
@@ -125,20 +125,22 @@ DISCOVERY + DESIGN + CLASSIFICATION (single planner pass)
 
 ## What runs under the hood
 
-### Model tiering
+### Adaptive model selection
 
-Not every agent needs the most expensive model. Orchestration and checklist agents use Sonnet; code-writing and adversarial agents use Opus.
+Model assignments are learned from task outcomes, not hardcoded. The policy table tracks effectiveness scores per (role, model, task_type) triple using exponential moving averages, and recommends the optimal model for each agent at spawn time.
 
-| Role | Model | Why |
-|---|---|---|
-| Planning | Opus | Deep reasoning for spec, plan, and execution graph |
-| Repair coordinator | Sonnet | Mapping findings to executors |
-| All 7 executors | Opus | Writing production code |
-| Security auditor | Opus | Adversarial thinking |
-| DB schema auditor | Opus | Architectural judgment |
-| Spec-completion auditor | Sonnet | Checklist verification |
-| Code quality auditor | Sonnet | Pattern matching |
-| UI auditor | Sonnet | Checklist verification |
+| Role | Default Model | Adaptive | Safety Floor |
+|---|---|---|---|
+| Planning | Opus | Yes | None |
+| Repair coordinator | Sonnet | Yes | None |
+| All 7 executors | Opus | Yes | None |
+| Security auditor | Opus | Yes | Always Opus (monotonicity) |
+| DB schema auditor | Opus | Yes | None |
+| Spec-completion auditor | Sonnet | Yes | None |
+| Code quality auditor | Sonnet | Yes | None |
+| UI auditor | Sonnet | Yes | None |
+
+Defaults are used during cold-start (first 5 tasks) or when the policy table is unavailable. After 5 tasks with reward data, the system recommends models based on observed quality, cost, and efficiency scores.
 
 ### Executor specialists (run your code)
 
@@ -171,11 +173,13 @@ dynos-work learns from its own performance. Each completed task generates struct
 
 ### How it works
 
-1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts by auditor and category, executor repair frequency, spec review iterations, repair cycle count, subagent spawn count, wasted spawns, and per-auditor zero-finding streaks.
+1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts, executor repair frequency, per-auditor zero-finding streaks, token usage per agent, model used per agent, and a reward vector (quality, cost, efficiency scores).
 
-2. **Learn:** automatically aggregates all retrospectives in the current project after each completed task. Writes `dynos_patterns.md` to Claude Code's project memory, which is auto-loaded into every future conversation. Synthesizes actionable prevention rules from recurring finding descriptions. Can also be run manually with `/dynos-work:learn`.
+2. **Learn:** automatically aggregates all retrospectives and updates `dynos_patterns.md` in Claude Code's project memory. Computes EMA effectiveness scores per (role, model, task_type) triple, derives a Model Policy (which model to use for each agent), a Skip Policy (adaptive skip thresholds per auditor), and validates everything through a meta-validator (bounds checking, monotonicity constraints, regression detection with rolling baseline revert). Can also be run manually with `/dynos-work:learn`.
 
-3. **Prevent:** the execute skill reads prevention rules from `dynos_patterns.md`, filters by executor type, and injects matching rules into each executor's spawn instructions. Executors treat injected rules as mandatory pre-evidence checks alongside their static baseline checklist. This closes the loop: findings become rules, rules prevent findings.
+3. **Prevent:** the execute skill reads prevention rules from `dynos_patterns.md`, filters by executor type, and injects matching rules into each executor's spawn instructions. This closes the loop: findings become rules, rules prevent findings.
+
+4. **Adapt:** all agent spawners (audit, execute, repair-coordinator) read the Model Policy and Skip Policy tables before spawning. The system progressively right-sizes models: Haiku for trivial work, Sonnet for medium, Opus for hard. A meta-validator prevents regressions: if quality drops for 2+ consecutive tasks, the policy blends back toward a known-good baseline.
 
 ### What it tracks
 
@@ -187,8 +191,13 @@ dynos-work learns from its own performance. Each completed task generates struct
 | Prevention rules | Finding descriptions | Executors (pre-flight validation) |
 | Spawn efficiency | Execution logs | Learn loop (waste tracking) |
 | Per-auditor zero-finding streaks | Audit reports | Audit skill (auditor skip decisions) |
+| Effectiveness scores (EMA) | Reward vectors | Learn step (model selection) |
+| Model Policy | Effectiveness scores | All spawners (adaptive model routing) |
+| Skip Policy | Quality EMA | Audit skill (adaptive skip thresholds) |
+| Baseline Policy | Policy snapshots | Meta-validator (regression revert) |
+| Token usage per agent | Spawn metadata | Reward vector (cost signal) |
 
-Patterns are per-project and update automatically after each completed task. The prevention rules compound over time: fewer findings lead to fewer repair cycles, fewer wasted spawns, and lower token costs. Auditor skip streaks compound similarly: auditors that consistently find nothing are automatically skipped, reducing spawn count and cost. Run `/dynos-work:learn` manually to force a refresh or after importing retrospective data.
+Patterns are per-project and update automatically after each completed task. The system compounds improvements across three dimensions: prevention rules reduce findings, adaptive model selection reduces token cost, and skip policies reduce unnecessary spawns. A meta-validator with rolling baseline revert prevents regressions. Run `/dynos-work:learn` manually to force a refresh or after importing retrospective data.
 
 ---
 

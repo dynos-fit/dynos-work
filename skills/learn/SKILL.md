@@ -1,6 +1,6 @@
 ---
 name: learn
-description: "Aggregate task retrospectives into project memory. Scans all task-retrospective.json files and writes dynos_patterns.md to Claude Code project memory. Runs automatically at task completion and can also be invoked manually."
+description: "Aggregate task retrospectives into project memory. Scans all task-retrospective.json files and writes dynos_patterns.md to Claude Code project memory. Computes effectiveness scores via EMA over (role, model, task_type) triples, derives Model Policy and Skip Policy, and manages baseline policies. Runs automatically at task completion and can also be invoked manually."
 ---
 
 # dynos-work: Learn
@@ -105,3 +105,124 @@ Print:
 dynos-work: Patterns written to {path}/dynos_patterns.md
 Analyzed {N} task retrospective(s).
 ```
+
+### Step 5 -- Policy Update
+
+After writing the core sections (Steps 1-4), compute effectiveness scores and derive policies from retrospectives that contain reward data (`quality_score`, `cost_score`, `efficiency_score`, `model_used_by_agent`). Append four new sections to `dynos_patterns.md` after the existing Spawn Efficiency section. All existing sections remain unchanged.
+
+#### 5a -- Extract reward data
+
+From all collected retrospectives, select those that contain a `quality_score` field. These retrospectives also contain `cost_score`, `efficiency_score`, `model_used_by_agent` (object mapping agent name to model string), and `task_type`. Retrospectives without `quality_score` are excluded from EMA computation but remain included in Steps 1-4 aggregations.
+
+Sort selected retrospectives by task ID ascending (chronological replay) to ensure deterministic EMA results.
+
+For each selected retrospective, derive per-agent triples: for each agent in `model_used_by_agent`, the triple key is `(role=agent_name, model=model_used_by_agent[agent_name], task_type=task_type)`. The scores applied to each triple are the task-level scores: `quality_score`, `cost_score`, `efficiency_score`. Agents whose model value is `null` are skipped.
+
+#### 5b -- Compute Effectiveness Scores via EMA
+
+For each unique `(role, model, task_type)` triple derived in Step 5a (processed in chronological task order):
+
+1. **Initialize:** On the first observation for a triple (cold-start), use `alpha = 1.0`:
+   - `quality_ema = quality_score`
+   - `cost_ema = cost_score`
+   - `efficiency_ema = efficiency_score`
+   - `sample_count = 1`
+
+2. **Update:** On subsequent observations, use `alpha = 0.3`:
+   - `quality_ema = 0.3 * quality_score + 0.7 * old_quality_ema`
+   - `cost_ema = 0.3 * cost_score + 0.7 * old_cost_ema`
+   - `efficiency_ema = 0.3 * efficiency_score + 0.7 * old_efficiency_ema`
+   - Increment `sample_count`.
+
+3. **Regression detection:** Track per-triple whether `quality_score` dropped compared to the previous observation for 2+ consecutive tasks. If so, blend toward baseline:
+   - `quality_ema = 0.3 * baseline_quality + 0.7 * quality_ema`
+   - `cost_ema = 0.3 * baseline_cost + 0.7 * cost_ema`
+   - `efficiency_ema = 0.3 * baseline_efficiency + 0.7 * efficiency_ema`
+   - Print warning: `{timestamp} [WARN] regression detected -- blending toward baseline: ({role}, {model}, {task_type})`
+
+4. **Meta-validator bounds:** Clamp all EMA values to `[0, 1]`. If any value was out of bounds, print warning: `{timestamp} [WARN] meta-validator clamped EMA from {raw} to {clamped} for ({role}, {model}, {task_type})`
+
+5. **Row cap:** Keep at most 50 rows in the Effectiveness Scores table. If exceeded, evict rows with the oldest `Updated` timestamp until at 50.
+
+#### 5c -- Derive Model Policy
+
+For each unique `(role, task_type)` pair present in the Effectiveness Scores:
+
+1. Compute a composite score per model: `composite = 0.5 * quality_ema + 0.3 * cost_ema + 0.2 * efficiency_ema`.
+2. Pick the model with the highest composite. Confidence = `quality_ema` of the winner.
+3. **Meta-validator:** Model must be one of `{haiku, sonnet, opus}`. If not, clamp to nearest valid model and print warning: `{timestamp} [WARN] meta-validator clamped model from {raw} to {clamped} for ({role}, {task_type})`
+4. **Monotonicity:** `security-auditor` must never be assigned a model below `opus`. If the derived model is not `opus`, override to `opus` and print warning: `{timestamp} [WARN] monotonicity override: security-auditor forced to opus for task_type={task_type}`
+5. Confidence must be in `[0, 1]`. Clamp and warn if out of bounds: `{timestamp} [WARN] meta-validator clamped confidence from {raw} to {clamped} for ({role}, {task_type})`
+
+#### 5d -- Derive Skip Policy
+
+For each unique auditor present in the Effectiveness Scores:
+
+1. **Skip-exempt auditors:** `security-auditor`, `spec-completion-auditor`, and `code-quality-auditor` must never appear in the Skip Policy. If found, remove and print warning: `{timestamp} [WARN] skip-exempt auditor {auditor} removed from Skip Policy`
+2. For eligible auditors, compute skip threshold: `round(3 + 2 * (1 - quality_ema))` where `quality_ema` is the auditor's average quality EMA across all its triples. Set `confidence` to the `quality_ema` value used in this computation.
+3. **Cold-start default:** If no quality data, threshold = 3 and confidence = 0.
+4. **Meta-validator bounds:** Threshold must be an integer in `[1, 10]`. Clamp and warn if out of bounds: `{timestamp} [WARN] meta-validator clamped skip threshold from {raw} to {clamped} for {auditor}`
+
+#### 5e -- Baseline Policy management
+
+1. **Read existing baseline:** Before overwriting `dynos_patterns.md`, read the current file and parse the existing `## Baseline Policy` section if present. Preserve it across rebuilds.
+2. **Initialize baseline:** If no baseline exists and this is the first complete policy computation (5+ retrospectives with reward data), set the baseline to match the current Effectiveness Scores.
+3. **Evolve baseline upward:** If no regression was detected and the average quality EMA over the last 3 retrospectives exceeds the baseline average quality, update the baseline to match the current Effectiveness Scores.
+4. **Baseline survives cache rebuilds:** Deleting `dynos_patterns.md` and re-running learn must regenerate the policy tables from scratch (they are a recomputable cache), but if a baseline was read from the file before deletion, it is preserved and written back.
+
+#### 5f -- Cold-start gate
+
+Count the number of retrospectives that contain `quality_score`. If fewer than 5:
+
+- Do **not** write the `## Model Policy` or `## Skip Policy` sections.
+- Instead, write a single line after `## Effectiveness Scores`: `Insufficient data -- using hardcoded defaults ({N}/5 tasks completed).`
+- The `## Effectiveness Scores` section is always written (even with partial data).
+- The `## Baseline Policy` section is written only if a baseline already exists from a previous run with sufficient data.
+
+#### 5g -- Write policy sections
+
+Append the following four sections to `dynos_patterns.md` after the `## Spawn Efficiency` section. Use a single atomic write operation for the complete file (do not write sections incrementally).
+
+```markdown
+## Effectiveness Scores
+
+| Role | Model | Task Type | Quality EMA | Cost EMA | Efficiency EMA | Sample Count | Updated |
+|------|-------|-----------|-------------|----------|----------------|--------------|---------|
+| {role} | {model} | {task_type} | {quality_ema} | {cost_ema} | {efficiency_ema} | {sample_count} | {ISO timestamp} |
+| ... | ... | ... | ... | ... | ... | ... | ... |
+
+## Model Policy
+
+| Role | Task Type | Recommended Model | Confidence | Updated |
+|------|-----------|-------------------|------------|---------|
+| {role} | {task_type} | {model} | {confidence} | {ISO timestamp} |
+| ... | ... | ... | ... | ... |
+
+## Skip Policy
+
+| Auditor | Skip Threshold | Confidence | Updated |
+|---------|----------------|------------|---------|
+| {auditor} | {threshold} | {confidence} | {ISO timestamp} |
+| ... | ... | ... | ... |
+
+## Baseline Policy
+
+| Role | Model | Task Type | Quality EMA | Cost EMA | Efficiency EMA | Sample Count | Updated |
+|------|-------|-----------|-------------|----------|----------------|--------------|---------|
+| {role} | {model} | {task_type} | {quality_ema} | {cost_ema} | {efficiency_ema} | {sample_count} | {ISO timestamp} |
+| ... | ... | ... | ... | ... | ... | ... | ... |
+```
+
+If the cold-start gate (5f) is active, omit `## Model Policy` and `## Skip Policy` sections and replace with the insufficient-data message as described. The `## Baseline Policy` section is omitted if no baseline exists yet.
+
+If no retrospectives contain `quality_score` at all, write only:
+
+```markdown
+## Effectiveness Scores
+
+No effectiveness data yet -- no retrospectives contain reward data.
+```
+
+And omit `## Model Policy`, `## Skip Policy`, and `## Baseline Policy`.
+
+Also update the `dynos_patterns.md` frontmatter description to: `"Auto-generated learned patterns from dynos-work task retrospectives. Top finding categories, executor reliability, repair cycle averages, prevention rules, spawn efficiency, effectiveness scores, model policy, skip policy."`

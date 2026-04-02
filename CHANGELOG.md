@@ -2,6 +2,29 @@
 
 All notable changes to dynos-work are documented here.
 
+## [2.11.0] - 2026-04-02
+
+### Added
+- Actor-critic inspired adaptive model selection: EMA effectiveness scores tracked per (role, model, task_type) triple
+- Model Policy table in `dynos_patterns.md`: recommends optimal model for each agent based on observed quality, cost, and efficiency
+- Skip Policy table: learned skip thresholds per auditor replace hardcoded value of 3
+- Effectiveness Scores table: raw EMA data driving policy derivation
+- Baseline Policy: rolling snapshot for regression detection and revert
+- Reward vector computation in reflect step: quality_score, cost_score, efficiency_score
+- Real token tracking: `token_usage_by_agent`, `total_token_usage`, `model_used_by_agent` in retrospective
+- Meta-validator: bounds checking, monotonicity constraints (security-auditor always Opus), regression detection with rolling baseline blend-back
+- Cold-start gate: hardcoded defaults for first 5 tasks, then adaptive
+- Policy readers in audit skill, execute skill, and repair-coordinator with fallback to defaults
+- Per-task-type baseline token budgets for cost_score (feature: 50k, refactor: 30k, bugfix: 20k, other: 40k)
+
+### Changed
+- `skills/learn/SKILL.md` gains Step 5 (Policy Update) with EMA, policy derivation, meta-validation, and baseline management
+- `skills/audit/SKILL.md` Step 3 reads Skip Policy and Model Policy; Step 5 Reflect captures tokens and computes reward vector
+- `skills/execute/SKILL.md` Step 3 reads Model Policy for executor model selection
+- `agents/repair-coordinator.md` reads Model Policy for retry 0-1 findings; retry >= 2 always Opus (non-negotiable)
+- `dynos_patterns.md` gains four new sections: Model Policy, Skip Policy, Effectiveness Scores, Baseline Policy
+- README updated with adaptive model selection and actor-critic self-improvement details
+
 ## [2.10.0] - 2026-04-02
 
 ### Added
