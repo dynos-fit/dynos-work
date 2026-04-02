@@ -35,9 +35,9 @@ dynos-work owns the full lifecycle:
 7. **Snapshot:** creates a git branch safety net before writing any code
 8. **Execute:** dispatches specialized executor subagents in parallel, each receiving only its relevant segment and criteria
 9. **Test:** runs the project's test suite and gates on pass/fail before auditing
-10. **Audit:** independent auditors run simultaneously, conditionally gated on task domains, scoped to only the files you changed
-11. **Repair:** converts findings to precise fixes, domain-aware re-audit loops back through only affected auditors
-12. **Gate:** only marks DONE when all auditors pass with evidence
+10. **Audit:** independent auditors run simultaneously with eager two-phase repair: repair begins as soon as the first auditor returns findings, while slower auditors continue running
+11. **Repair:** converts findings to precise fixes with parallel batch execution, model escalation on retries, and domain-aware re-audit scoped to only affected files
+12. **Gate:** only marks DONE when all auditors pass with evidence across both repair phases
 13. **Reflect:** generates a structured retrospective from the task's audit and repair data
 14. **Learn:** aggregates retrospectives across tasks into project memory, informing future planning and execution
 
@@ -86,10 +86,11 @@ DISCOVERY + DESIGN + CLASSIFICATION (single planner pass)
          │  CHECKPOINT_AUDIT (conditional auditor selection + diff-scoped)
          │      │
          │      ├── all pass → REFLECT (retrospective) → DONE
-         │      └── findings → REPAIR (domain-aware re-audit) ─┐
-         │                                                      │
-         └──────────────────────────────────────────────────────┘
-                              (repair loop, max 3 retries per finding)
+         │      └── findings → REPAIR PHASE 1 (eager, from first auditor) ─┐
+         │                     REPAIR PHASE 2 (late + re-audit findings)    │
+         │                                                                  │
+         └──────────────────────────────────────────────────────────────────┘
+                    (parallel batches, model escalation, max 3 retries per finding)
 ```
 
 ### Key behaviors
@@ -98,9 +99,15 @@ DISCOVERY + DESIGN + CLASSIFICATION (single planner pass)
 
 **Mandatory spec sign-off:** you always review and approve the normalized spec before execution begins, regardless of risk level
 
-**Conditional auditing:** 4 universal auditors (spec-completion, security, code-quality, dead-code) always run. Domain-specific auditors (ui, db-schema) only spawn when their domain is relevant, based on task classification and execution graph.
+**Conditional auditing:** 3 skip-exempt auditors (spec-completion, security, code-quality) always run. Skip-eligible auditors (dead-code, ui, db-schema) are skipped when they have a zero-finding streak of 3+ consecutive tasks, saving tokens without sacrificing safety.
 
 **Diff-scoped:** auditors only inspect files changed by the task, preventing false positives from pre-existing issues
+
+**Eager two-phase repair:** repair begins as soon as the first auditor returns findings (phase 1), while slower auditors continue running. Late auditor results feed into phase 2. Critical spec failures trigger immediate short-circuit to repair.
+
+**Parallel repair batches:** non-overlapping repair batches run concurrently. Only batches with file conflicts are serialized.
+
+**Model escalation:** findings that fail repair twice (retry >= 2) automatically escalate the executor to Opus, trading tokens for higher success probability.
 
 **Domain-aware repair:** on repair re-audit, only auditors whose domain was touched by the repair re-run, plus spec-completion and security always
 
@@ -164,7 +171,7 @@ dynos-work learns from its own performance. Each completed task generates struct
 
 ### How it works
 
-1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts by auditor and category, executor repair frequency, spec review iterations, repair cycle count, subagent spawn count, wasted spawns, and zero-finding streaks.
+1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts by auditor and category, executor repair frequency, spec review iterations, repair cycle count, subagent spawn count, wasted spawns, and per-auditor zero-finding streaks.
 
 2. **Learn:** automatically aggregates all retrospectives in the current project after each completed task. Writes `dynos_patterns.md` to Claude Code's project memory, which is auto-loaded into every future conversation. Synthesizes actionable prevention rules from recurring finding descriptions. Can also be run manually with `/dynos-work:learn`.
 
@@ -179,8 +186,9 @@ dynos-work learns from its own performance. Each completed task generates struct
 | Avg repair cycles by task type | Execution logs | Planner (risk assessment) |
 | Prevention rules | Finding descriptions | Executors (pre-flight validation) |
 | Spawn efficiency | Execution logs | Learn loop (waste tracking) |
+| Per-auditor zero-finding streaks | Audit reports | Audit skill (auditor skip decisions) |
 
-Patterns are per-project and update automatically after each completed task. The prevention rules compound over time: fewer findings lead to fewer repair cycles, fewer wasted spawns, and lower token costs. Run `/dynos-work:learn` manually to force a refresh or after importing retrospective data.
+Patterns are per-project and update automatically after each completed task. The prevention rules compound over time: fewer findings lead to fewer repair cycles, fewer wasted spawns, and lower token costs. Auditor skip streaks compound similarly: auditors that consistently find nothing are automatically skipped, reducing spawn count and cost. Run `/dynos-work:learn` manually to force a refresh or after importing retrospective data.
 
 ---
 
