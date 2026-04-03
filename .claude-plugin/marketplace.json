@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "dynos-work",
-      "description": "Audit-governed autonomous engineering system. Plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.",
+      "description": "Autonomous Software Foundry. Self-learning, human-directed. Uses RL trajectory memory and MCTS dreaming to surface better choices, then plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.",
       "version": "4.0.0",
       "source": "./",
       "author": {

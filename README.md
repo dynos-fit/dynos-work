@@ -251,6 +251,23 @@ The dashboard at `.dynos/dashboard.html` provides a visual Engineering Control C
 /plugin install dynos-work
 ```
 
+After installing, the following skills are available:
+
+| Skill | Command | Purpose |
+|---|---|---|
+| start | `/dynos-work:start [task]` | Unified entry point — discovery, dreaming, spec, plan |
+| execute | `/dynos-work:execute` | Build → test → audit |
+| audit | `/dynos-work:audit` | Checkpoint → repair loop → final gate |
+| learn | `/dynos-work:learn` | Aggregate retrospectives → update policies |
+| evolve | `/dynos-work:evolve` | Agent lifecycle management + proactive meta-audit |
+| maintain | `/dynos-work:maintain` | Autonomous background debt scanning + auto-fix PRs |
+| trajectory | `/dynos-work:trajectory` | Push/pull SAR sequences for DT memory |
+| status | `/dynos-work:status` | Show current stage, findings, open repairs |
+| resume | `/dynos-work:resume` | Resume an interrupted task |
+| plan | `/dynos-work:plan` | Replan after scope changes |
+| repair | `/dynos-work:repair` | Manually fix a specific finding |
+| investigate | `/dynos-work:investigate` | Deep root cause analysis |
+
 ---
 
 ## Contributing
