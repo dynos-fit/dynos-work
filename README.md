@@ -277,6 +277,47 @@ Common runtime files:
 - `.dynos/dashboard.html`
 - `.dynos/dashboard-data.json`
 
+## Multi-Project Setup
+
+`dynos-work` supports a global daemon that maintains multiple registered projects from a single background process.
+
+### Global Home
+
+All cross-project state lives under `~/.dynos/`. This includes the project registry, aggregated stats, portable prevention rules, and daemon logs. Each project keeps its own `.dynos/` directory for local task state, trajectories, and learned components.
+
+### Registering a Project
+
+From any project root:
+
+```bash
+python3 hooks/dynoregistry.py register .
+```
+
+This adds the project to `~/.dynos/registry.json`. To list all registered projects:
+
+```bash
+python3 hooks/dynoregistry.py list
+```
+
+Other registry commands: `unregister`, `status`, `pause`, `resume`, `set-active`. Run `python3 hooks/dynoregistry.py --help` for details.
+
+### Starting and Stopping the Global Daemon
+
+```bash
+python3 hooks/dynoglobal.py start    # background daemon
+python3 hooks/dynoglobal.py stop     # stop the daemon
+python3 hooks/dynoglobal.py status   # check daemon health
+python3 hooks/dynoglobal.py run-once # single maintenance sweep
+```
+
+The daemon loops over all registered projects, runs maintenance cycles, and then sleeps before repeating. Idle projects receive exponential backoff so active projects get priority.
+
+### Cross-Project Learning
+
+The global daemon aggregates anonymous statistics and portable prevention rules across all registered projects. It does not share raw data, file paths, task content, learned agents, or project-specific patterns between projects.
+
+Local project state always takes precedence. Global insights are additive: they inform maintenance and prevention but never override local decisions.
+
 ## Main Commands
 
 ### Workflow

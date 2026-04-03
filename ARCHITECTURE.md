@@ -205,6 +205,89 @@ When contributing, preserve these invariants:
 - Human approval gates should remain explicit at spec and plan boundaries.
 - Learned behavior should optimize choices inside guardrails, not redefine guardrails.
 
+## Multi-Project Architecture
+
+### Global vs Local State
+
+`dynos-work` separates state into two scopes:
+
+**Local state** (`.dynos/` inside each project):
+- Task directories, manifests, specs, plans, execution graphs
+- Trajectories and retrospectives
+- Learned agents and registry
+- Benchmarks, automation queues, dashboard artifacts
+- Policy overrides
+
+**Global state** (`~/.dynos/`):
+- `registry.json`: the project registry
+- `global.log`: daemon activity log
+- `daemon.pid`: PID file for the background daemon
+- Aggregated anonymous statistics
+- Portable prevention rules collected across projects
+
+### What Is Shared Across Projects
+
+The global daemon shares only:
+
+- Anonymous aggregate statistics (task counts, success rates, timing distributions)
+- Portable prevention rules (patterns that caused failures, stripped of project-specific context)
+
+The global daemon does **not** share:
+
+- File paths or directory structures
+- Task content, specs, plans, or execution graphs
+- Learned agents or skills
+- Project-specific patterns, trajectories, or retrospectives
+- Credentials or environment variables
+
+This boundary is enforced by design: the daemon reads local `.dynos/` state but writes cross-project outputs only to `~/.dynos/` in anonymized form.
+
+### Registry Schema
+
+The registry lives at `~/.dynos/registry.json`:
+
+```json
+{
+  "projects": [
+    {
+      "path": "/absolute/path/to/project",
+      "registered_at": "2026-04-03T12:00:00Z",
+      "last_active_at": "2026-04-03T14:30:00Z",
+      "status": "active"
+    }
+  ]
+}
+```
+
+Each entry tracks:
+
+- `path`: absolute filesystem path to the project root
+- `registered_at`: ISO timestamp of first registration
+- `last_active_at`: ISO timestamp of last activity (updated on registration, resume, or set-active)
+- `status`: one of `active` or `paused`
+
+### Daemon Lifecycle
+
+The global daemon follows this loop:
+
+1. **Start**: `dynoglobal.py start` forks a background process, writes `~/.dynos/daemon.pid`
+2. **Run loop**: the daemon iterates over all registered projects in `registry.json`
+3. **Per-project maintenance**: for each active project, run a maintenance cycle (validation sweeps, stale route checks, automation queue processing)
+4. **Backoff for idle projects**: projects whose `last_active_at` is old receive exponential backoff, so the daemon spends less time on dormant repos
+5. **Cross-project aggregation**: after visiting all projects, aggregate anonymous stats and update portable prevention rules in `~/.dynos/`
+6. **Sleep**: wait for the configured interval before repeating
+
+The daemon can be stopped with `dynoglobal.py stop`, which sends SIGTERM to the PID in the pidfile. `dynoglobal.py run-once` executes a single sweep without looping.
+
+### Runtime Files
+
+| File | Purpose |
+|---|---|
+| `hooks/dynoglobal.py` | Global daemon: start, stop, status, run-loop, run-once |
+| `hooks/dynoregistry.py` | Registry CLI: register, unregister, list, status, pause, resume, set-active |
+
+Both tools expose `--help` for all subcommands.
+
 ## Extension Guidelines
 
 ### When Adding A New Runtime Script

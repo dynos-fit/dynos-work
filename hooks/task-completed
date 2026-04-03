@@ -24,7 +24,10 @@ python3 hooks/dynoauto.py run --root . || true
 # --- Step 6: Refresh live dashboard artifacts ---
 python3 hooks/dynodashboard.py generate --root . || true
 
-# --- Step 7: Conditional auto-commit ---
+# --- Step 7: Mark project active in global registry ---
+python3 hooks/dynoregistry.py set-active "$(pwd)" || true
+
+# --- Step 8: Conditional auto-commit ---
 PROJECT_DIR=$(pwd | sed 's|/|-|g')
 SETTINGS="$HOME/.claude/projects/$PROJECT_DIR/settings.json"
 if [ -f "$SETTINGS" ] && grep -q '"dynos_auto_commit".*true' "$SETTINGS" 2>/dev/null; then
