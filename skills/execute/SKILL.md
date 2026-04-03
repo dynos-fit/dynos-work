@@ -78,11 +78,20 @@ After preflight validation, perform the following execution optimizations:
    - As soon as a segment completes (or is resolved from cache), if it is a high-risk domain (`security`, `db`), immediately spawn its corresponding **Auditor** (following the Skip and Model Policies in `audit` skill) in the background.
    - Append to log: `{timestamp} [PIPE] {auditor-name} — background audit triggered for {segment-id}`.
 
-**Model Policy lookup:** Before spawning executors (for non-cached segments), read `classification.type` from `manifest.json` -- this is the task's `task_type`. Then attempt to read the `## Model Policy` table from `dynos_patterns.md` in the project memory directory. Treat the table as advisory. Hard overrides still win: explicit retry escalation, security floors, and task-specific safety constraints.
+**Deterministic routing (MANDATORY):** Before spawning any executor, run the router to get a structured spawn plan:
+
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
+```
+
+This returns a JSON object with model, route mode, and agent path for each segment. Use these decisions directly:
+- `model`: pass as the model parameter when spawning the agent (null = use default)
+- `route_mode`: "generic" = use built-in agent, "learned" or "alongside" = read learned agent from `agent_path`
+- Log each decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
+
+Do NOT read dynos_patterns.md tables manually. The router handles model policy, agent routing, and security floors deterministically.
 
 **TDD-First Awareness:** Check if `.dynos/task-{id}/evidence/tdd-tests.md` exists. If it does, include this instruction to every executor: "A TDD test suite has already been committed. Your implementation must make those tests pass. Do NOT write new tests or modify existing test files."
-
-**Agent Routing lookup:** For non-cached segments, prefer the live registry route resolver: `python3 hooks/dynoroute.py {executor-name} {task_type} --root .`. If it returns `source = learned:{agent-name}` with `route_allowed = true`, use that learned agent and log: `{timestamp} [ROUTE] {executor-name} using learned:{agent-name} (composite: {score})`. If the resolver falls back to `generic`, use the built-in executor. The markdown `## Agent Routing` table in `dynos_patterns.md` is now explanatory memory, not the enforcement source of truth.
 
 Spawn the prioritized batch of non-cached executor agents in parallel.
 

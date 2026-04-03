@@ -25,11 +25,22 @@ If no snapshot exists (standalone audit), use `git diff --name-only HEAD`.
 
 Update `manifest.json` stage to `CHECKPOINT_AUDIT`.
 
-**Determine which auditors to spawn:**
+**Determine which auditors to spawn (DETERMINISTIC ROUTER):**
 
-Read `manifest.json` `classification` field, `execution-graph.json`, and the `fast_track` field from `manifest.json`.
+Read `manifest.json` for `classification` and `fast_track`. Then run the deterministic router:
 
-**Fast-track mode:** If `manifest.json` contains `"fast_track": true`, spawn ONLY `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of domain, streak, or policy. Use `haiku` model for `spec-completion-auditor` (low-risk spec checks don't need larger models). Use the default model for `security-auditor` (security floor enforcement still applies — never below opus). Append to log: `{timestamp} [FAST-TRACK] reduced audit set — spec-completion (haiku) + security only`. Then skip the remaining auditor selection logic below and proceed directly to spawning.
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" audit-plan --root . --task-type {task_type} --domains {comma-separated-domains} [--fast-track]
+```
+
+This returns a JSON plan with each auditor's action (spawn/skip), model, and route mode. **Use this plan directly.** Do not re-derive model, skip, or routing decisions from markdown tables.
+
+For each auditor in the plan:
+- If `action: "skip"`: log `{timestamp} [SKIP] {name} — {reason}` and do not spawn
+- If `action: "spawn"`: spawn with the specified `model` (null = default), using `agent_path` if `route_mode` is "learned" or "alongside"
+- Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
+
+The router handles fast-track reduction, skip policy, model policy, security floor enforcement, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions.
 
 **Normal mode (fast_track is false or absent):**
 

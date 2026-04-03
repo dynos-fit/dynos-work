@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Thin wrapper for dynorouter.py — works from any directory.
+# Usage: dynos-router audit-plan --root /path --task-type feature --domains ui
+#        dynos-router executor-plan --root /path --task-type feature --graph .dynos/task-xxx/execution-graph.json
+#        dynos-router resolve security-auditor feature --root /path
+HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
+PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" exec python3 "${HOOKS_DIR}/dynorouter.py" "$@"
