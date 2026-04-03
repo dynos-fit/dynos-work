@@ -49,6 +49,18 @@ If the fix passes ALL audits and tests:
    {timestamp} [MAINTAIN] Autonomous PR created: {pr-url} -- fixed {finding-description}
    ```
 
+### Step 5 -- Architectural Strategy Proposals (The Strategist)
+
+If the **Meta-Auditor** identifies a "Debt Cluster" (a module with > 20% of the project's historical findings):
+
+1. **Strategic Refactor Design:** Instead of fixing individual bugs, the maintainer spawns a **Lead Architect (Opus)** to design a clean-slate refactor of the entire module.
+2. **Simulation Sandbox Test:**
+   - Implement the refactored version in the **Autonomous Simulation Sandbox**.
+   - Compare the Quality Score and Audit Pass rate of the *old* logic vs the *new* proposed logic.
+3. **The Strategic PR:** If the new version is significantly cleaner/safer, open an **Architectural Proposal PR**. 
+   - Report the "Architecture Score" improvement.
+   - Include a visual breakdown of the new module's hierarchy.
+
 ## Hard Rules
 - **Non-Breaking:** If tests fail at any point, immediately abort and revert. Never push code that breaks tests.
 - **Monotonicity:** Never push a fix that lowers the overall `quality_score` of the project.

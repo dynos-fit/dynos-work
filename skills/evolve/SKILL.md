@@ -105,21 +105,26 @@ Remove learned agents that underperform their generic counterparts for 3 consecu
 
 Manage the lifecycle of learned auditor agents through `alongside` and `replace` modes based on finding overlap and quality EMAs.
 
-### Step 5 -- Simulation Benchmarking (Gold Standard Verification)
+### Step 5 -- Autonomous Simulation Sandbox (Zero-Risk Verification)
 
-For agents in `shadow` mode, before promotion to `alongside` or `replace`, the evolve skill triggers a **Synthetic Benchmark**.
+Perform an **Isolated & Secured Simulation** for agents in `shadow` mode:
 
-1. **Simulated Task Generation:** For the agent's target role, find a past task that required multiple repair cycles or had critical findings. 
-2. **Ground Truth Baseline:** Use the "Gold Standard" implementation of that task as the ground truth.
-3. **The Simulation:** 
-   - Temporarily restore the codebase to the state *before* that past task.
-   - Spawn the staged agent to perform the fix.
-   - Use the meta-auditor to compare the agent's output against the ground truth.
-4. **Promotion Threshold:** The agent must match or exceed the "Gold Standard" effectiveness score (0.95+) and pass all audits in the simulation.
-5. **Log result:** `{timestamp} [BENCH] {agent-name} simulation: {score} -- {PASS|FAIL}`.
-6. **Promotion:** On PASS, the agent moves from `.staging/` to the production auditor/executor directory.
+1. **Optimized Sandbox Creation:** Create a transient repository snapshot at `/tmp/dynos-sandbox-{id}`. 
+   - **Performance Hack:** Use `git clone --local` or direct symlinks for the `node_modules/` or `vendor/` folders to avoid redundant installs.
+2. **Security Jail:** The sandbox agent is strictly prohibited from:
+   - Initiating any outbound network requests (e.g., API calls, DB fetches).
+   - Deleting or Writing files outside of the `/tmp/dynos-sandbox-{id}` path.
+   - Accessing sensitive environment variables (e.g., `.env` files must be mocked).
+3. **Simulated Error Injection:** Find a historical "Failure Point" (a bug that was previously caught by a task auditor). Restore the sandbox files to that buggy state.
+4. **The Self-Correction Loop:** 
+   - Spawn the staged agent to identify and fix the issue.
+   - Allow **2 autonomous repair cycles** within the sandbox if first attempts fail.
+   - The agent must achieve a pass on **Unit Tests** and a **Security Audit** within the sandbox.
+5. **Promotion Certification:** On success, update the agent's composite score and mark for promotion.
+6. **Mandatory Sandbox Cleanup:** Immediately after completion (Success or Failure), **DELETE** the sandbox folder and everything in it.
+7. **Log Result:** `{timestamp} [SANDBOX] {agent-name} — Outcome: {PASS|RECOVERY|FAIL}, Adaptability: {score}, Cleanup: COMPLETE`.
 
-### Step 6 -- Proactive Meta-Audit (New)
+### Step 6 -- Proactive Meta-Audit (The Strategic Scanner)
 
 Once every 5 tasks, spawn a **Proactive Meta-Auditor** (Opus) to scan the entire repository (not just task diffs).
 1. It identifies architectural drift, security anti-patterns, or technical debt—specifically looking for patterns that *differ* from the current "Gold Standard" Reference Library.

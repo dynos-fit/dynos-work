@@ -133,6 +133,14 @@ If the environment variable `GLOBAL_DYNOS_MEMORY_PATH` is set, perform a cross-p
 3. **Pull Global Insights:** Surface matching global rules that aren't yet in the local project's ruleset.
 4. **Log sync:** `{timestamp} [GLOBAL_SYNC] {N} patterns pushed, {M} patterns pulled to/from global storage`.
 
+### Step 9 -- Human Insight Gate (Architectural Alignment)
+
+Before finalizing high-impact changes to `dynos_patterns.md`:
+
+1. **Impact Detection:** If a new **Prevention Rule** affects > 2 modules, OR a new **Gold Standard** replaces an existing one: **Trigger the Insight Gate**.
+2. **The Prompt:** Present the change to the user: "I've identified a new global pattern for {domain}. Should I authorize this as a project-wide standard? [Yes/No/Modify]".
+3. **Implicit Learning:** If the user modifies the rule, learn from the modification—update the rule with the user's specific feedback to reach a **Mutual Gold Standard**.
+
 Print:
 ```
 dynos-work: Patterns written to {path}/dynos_patterns.md
