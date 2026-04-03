@@ -368,6 +368,237 @@ def _render_markdown(pm: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Auto-improvement engine
+# Produces project-local .dynos/ changes, NOT global plugin file mutations.
+# ---------------------------------------------------------------------------
+
+IMPROVEMENT_LOG_PATH = ".dynos/improvements"
+
+
+def _improvements_dir(root: Path) -> Path:
+    return root / ".dynos" / "improvements"
+
+
+def propose_improvements(root: Path) -> list[dict]:
+    """Analyze postmortems and propose project-local improvements.
+
+    Improvements target .dynos/ state only:
+    - policy.json tuning
+    - learned agent generation
+    - prevention rule additions
+    - fast-track threshold changes
+
+    Never proposes changes to global plugin source files.
+    """
+    all_retros = collect_retrospectives(root)
+    if len(all_retros) < 3:
+        return []  # Not enough data
+
+    recent = all_retros[-5:]
+    proposals = []
+
+    # 1. Token budget tuning: if most recent tasks overrun, raise budget expectation in policy
+    overrun_tasks = []
+    for r in recent:
+        risk = r.get("task_risk_level", "medium")
+        tt = r.get("task_type", "feature")
+        tokens = _safe_float(r.get("total_token_usage"), 0)
+        budget = _expected_budget(risk, tt)
+        if tokens > budget * 1.5:
+            overrun_tasks.append({"task_id": r.get("task_id"), "tokens": int(tokens), "budget": budget})
+    if len(overrun_tasks) >= 2:
+        proposals.append({
+            "id": "imp-token-budget",
+            "type": "policy_tuning",
+            "target": ".dynos/policy.json",
+            "description": "Raise freshness_task_window or add token_budget_multiplier to reduce false overrun alerts",
+            "evidence": overrun_tasks,
+            "action": "adjust_policy",
+            "field": "token_budget_multiplier",
+            "suggested_value": 2.0,
+        })
+
+    # 2. Fast-track expansion: if low-risk tasks consistently pass without repair, widen fast-track
+    low_risk_tasks = [r for r in recent if r.get("task_risk_level") == "low"]
+    low_risk_clean = [r for r in low_risk_tasks if int(r.get("repair_cycle_count", 0) or 0) == 0]
+    if len(low_risk_clean) >= 3:
+        proposals.append({
+            "id": "imp-fast-track-expand",
+            "type": "policy_tuning",
+            "target": ".dynos/policy.json",
+            "description": "Low-risk tasks consistently pass without repair. Consider auto-skipping plan audit for fast-track tasks.",
+            "evidence": [{"task_id": r.get("task_id")} for r in low_risk_clean],
+            "action": "adjust_policy",
+            "field": "fast_track_skip_plan_audit",
+            "suggested_value": True,
+        })
+
+    # 3. Prevention rule generation: if same finding category appears 3+ times, add prevention rule
+    category_counts: dict[str, int] = {}
+    for r in all_retros:
+        for cat, count in r.get("findings_by_category", {}).items():
+            if isinstance(cat, str) and isinstance(count, (int, float)):
+                category_counts[cat] = category_counts.get(cat, 0) + int(count)
+    for cat, count in category_counts.items():
+        if count >= 5:
+            proposals.append({
+                "id": f"imp-prevent-{cat}",
+                "type": "prevention_rule",
+                "target": ".dynos/dynos_patterns.md",
+                "description": f"Finding category '{cat}' has {count} occurrences across all tasks. Add a prevention rule.",
+                "action": "add_prevention_rule",
+                "category": cat,
+                "total_occurrences": count,
+            })
+
+    # 4. Model tier recommendation: if quality is consistently high with default model, recommend haiku
+    default_high_quality = [
+        r for r in recent
+        if _safe_float(r.get("quality_score"), 0) >= 0.8
+        and r.get("agent_source") and all(v == "generic" for v in r.get("agent_source", {}).values())
+    ]
+    if len(default_high_quality) >= 3:
+        proposals.append({
+            "id": "imp-model-haiku",
+            "type": "model_recommendation",
+            "target": ".dynos/policy.json",
+            "description": "Default model produces high quality consistently. Safe to use haiku for non-security auditors to reduce cost.",
+            "evidence": [{"task_id": r.get("task_id"), "quality": _safe_float(r.get("quality_score"), 0)} for r in default_high_quality],
+            "action": "adjust_model_policy",
+            "suggested_value": "haiku for spec-completion-auditor and code-quality-auditor on low-risk tasks",
+        })
+
+    # 5. Learned agent seeding: if a (role, task_type) combo has 3+ tasks, propose seeding
+    role_type_counts: dict[tuple[str, str], int] = {}
+    for r in all_retros:
+        for role in r.get("executor_repair_frequency", {}):
+            tt = r.get("task_type", "")
+            if isinstance(role, str) and isinstance(tt, str):
+                role_type_counts[(role, tt)] = role_type_counts.get((role, tt), 0) + 1
+    for (role, tt), count in role_type_counts.items():
+        if count >= 3:
+            proposals.append({
+                "id": f"imp-seed-{role}-{tt}",
+                "type": "learned_agent_seed",
+                "target": f".dynos/learned-agents/executors/auto-{role.replace('-executor', '')}-{tt}.md",
+                "description": f"Role {role} on {tt} tasks has {count} observations. Seed a learned agent.",
+                "action": "seed_learned_agent",
+                "role": role,
+                "task_type": tt,
+                "observation_count": count,
+            })
+
+    return proposals
+
+
+def apply_improvement(root: Path, proposal: dict) -> dict:
+    """Apply a single improvement proposal to project-local state.
+
+    Only modifies files under .dynos/. Never touches plugin source.
+    Returns result dict with applied=True/False.
+    """
+    action = proposal.get("action", "")
+    result = {"id": proposal["id"], "applied": False, "reason": ""}
+
+    if action == "adjust_policy":
+        policy_path = root / ".dynos" / "policy.json"
+        policy = {}
+        if policy_path.exists():
+            try:
+                policy = load_json(policy_path)
+            except (json.JSONDecodeError, OSError):
+                policy = {}
+        field = proposal.get("field", "")
+        if field and field not in policy:
+            policy[field] = proposal.get("suggested_value")
+            write_json(policy_path, policy)
+            result["applied"] = True
+            result["reason"] = f"Set {field}={proposal.get('suggested_value')}"
+        else:
+            result["reason"] = f"Field {field} already exists in policy"
+
+    elif action == "seed_learned_agent":
+        role = proposal.get("role", "")
+        tt = proposal.get("task_type", "")
+        agent_name = f"auto-{role.replace('-executor', '')}-{tt}"
+        agent_dir = root / ".dynos" / "learned-agents" / "executors"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        agent_path = agent_dir / f"{agent_name}.md"
+        if not agent_path.exists():
+            agent_path.write_text(
+                f"# {agent_name}\n\n"
+                f"Auto-generated from postmortem analysis.\n"
+                f"Role: {role}, Task type: {tt}\n"
+                f"Observations: {proposal.get('observation_count', 0)}\n"
+                f"Generated: {now_iso()}\n"
+            )
+            result["applied"] = True
+            result["reason"] = f"Seeded {agent_path.name}"
+        else:
+            result["reason"] = f"Agent {agent_name} already exists"
+
+    else:
+        result["reason"] = f"Action '{action}' not auto-applicable (logged for manual review)"
+
+    return result
+
+
+def run_improvement_cycle(root: Path) -> dict:
+    """Full improvement cycle: propose, log, apply safe improvements."""
+    imp_dir = _improvements_dir(root)
+    imp_dir.mkdir(parents=True, exist_ok=True)
+
+    proposals = propose_improvements(root)
+    if not proposals:
+        return {"proposals": 0, "applied": 0, "results": []}
+
+    # Log proposals
+    log_path = imp_dir / f"proposals-{datetime.now(timezone.utc).strftime('%Y%m%d')}.json"
+    write_json(log_path, {
+        "generated_at": now_iso(),
+        "proposals": proposals,
+    })
+
+    # Apply safe improvements (policy tuning and agent seeding only)
+    safe_actions = {"adjust_policy", "seed_learned_agent"}
+    results = []
+    for p in proposals:
+        if p.get("action") in safe_actions:
+            r = apply_improvement(root, p)
+            results.append(r)
+        else:
+            results.append({"id": p["id"], "applied": False, "reason": "Requires manual review"})
+
+    # Log results
+    result_path = imp_dir / f"results-{datetime.now(timezone.utc).strftime('%Y%m%d')}.json"
+    write_json(result_path, {
+        "executed_at": now_iso(),
+        "results": results,
+    })
+
+    applied_count = sum(1 for r in results if r.get("applied"))
+    return {
+        "proposals": len(proposals),
+        "applied": applied_count,
+        "results": results,
+    }
+
+
+def cmd_improve(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    result = run_improvement_cycle(root)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_propose(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    proposals = propose_improvements(root)
+    print(json.dumps({"proposals": proposals}, indent=2))
+    return 0
+
+
 def cmd_generate(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     task_id = args.task_id
@@ -407,6 +638,14 @@ def build_parser() -> argparse.ArgumentParser:
     gen_all = subparsers.add_parser("generate-all", help="Generate postmortems for all tasks")
     gen_all.add_argument("--root", default=".")
     gen_all.set_defaults(func=cmd_generate_all)
+
+    propose = subparsers.add_parser("propose", help="Propose project-local improvements (dry run)")
+    propose.add_argument("--root", default=".")
+    propose.set_defaults(func=cmd_propose)
+
+    improve = subparsers.add_parser("improve", help="Propose and apply safe project-local improvements")
+    improve.add_argument("--root", default=".")
+    improve.set_defaults(func=cmd_improve)
 
     return parser
 

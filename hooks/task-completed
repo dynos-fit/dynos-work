@@ -21,6 +21,9 @@ python3 hooks/dynopatterns.py --root . || true
 # --- Step 5: Generate automatic postmortem ---
 python3 hooks/dynopostmortem.py generate --root . || true
 
+# --- Step 5b: Run improvement cycle (project-local only) ---
+python3 hooks/dynopostmortem.py improve --root . || true
+
 # --- Step 6: Auto-benchmark shadow challengers ---
 python3 hooks/dynoauto.py run --root . || true
 
