@@ -18,6 +18,7 @@ from dynoslib import (
     COMPOSITE_WEIGHTS,
 )
 from dynoglobal import project_dir
+from dynoslib import _persistent_project_dir
 
 
 # Token budgets by (risk_level, task_type)
@@ -520,7 +521,7 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
         role = proposal.get("role", "")
         tt = proposal.get("task_type", "")
         agent_name = f"auto-{role.replace('-executor', '')}-{tt}"
-        agent_dir = root / ".dynos" / "learned-agents" / "executors"
+        agent_dir = _persistent_project_dir(root) / "learned-agents" / "executors"
         agent_dir.mkdir(parents=True, exist_ok=True)
         agent_path = agent_dir / f"{agent_name}.md"
         if not agent_path.exists():

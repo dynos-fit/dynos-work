@@ -127,6 +127,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _persistent_project_dir(root: Path) -> Path:
+    """Returns ~/.dynos/projects/{slug}/ for persistent project state.
+
+    Stores accumulated intelligence: trajectories, patterns, learned agents,
+    benchmarks, policy. Survives repo .dynos/ cleanup.
+    """
+    dynos_home = Path(os.environ.get("DYNOS_HOME", str(Path.home() / ".dynos")))
+    slug = str(root.resolve()).strip("/").replace("/", "-")
+    d = dynos_home / "projects" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def validate_generated_html(html_path: Path) -> list[str]:
     """Validate generated HTML for common template rendering bugs.
 
@@ -584,11 +597,11 @@ def tasks_since(root: Path, task_id: str | None) -> int | None:
 
 
 def trajectories_store_path(root: Path) -> Path:
-    return root / ".dynos" / "trajectories.json"
+    return _persistent_project_dir(root) / "trajectories.json"
 
 
 def learned_agents_root(root: Path) -> Path:
-    return root / ".dynos" / "learned-agents"
+    return _persistent_project_dir(root) / "learned-agents"
 
 
 def learned_registry_path(root: Path) -> Path:
@@ -596,11 +609,11 @@ def learned_registry_path(root: Path) -> Path:
 
 
 def benchmark_history_path(root: Path) -> Path:
-    return root / ".dynos" / "benchmarks" / "history.json"
+    return _persistent_project_dir(root) / "benchmarks" / "history.json"
 
 
 def benchmark_index_path(root: Path) -> Path:
-    return root / ".dynos" / "benchmarks" / "index.json"
+    return _persistent_project_dir(root) / "benchmarks" / "index.json"
 
 
 def automation_queue_path(root: Path) -> Path:
@@ -796,7 +809,7 @@ def ensure_automation_queue(root: Path) -> dict:
 
 
 def benchmark_policy_config(root: Path) -> dict:
-    path = root / ".dynos" / "policy.json"
+    path = _persistent_project_dir(root) / "policy.json"
     default = {
         "freshness_task_window": 5,
         "active_rebenchmark_task_window": 3,

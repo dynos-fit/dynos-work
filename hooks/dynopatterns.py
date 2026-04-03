@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from dynoslib import collect_retrospectives, ensure_learned_registry, now_iso
+from dynoslib import collect_retrospectives, ensure_learned_registry, now_iso, _persistent_project_dir
 
 DEFAULT_TASK_TYPES = ["feature", "bugfix", "refactor", "migration", "ml", "full-stack"]
 DEFAULT_EXECUTOR_ROLES = [
@@ -34,7 +34,7 @@ def project_slug(root: Path) -> str:
 
 
 def local_patterns_path(root: Path) -> Path:
-    return root / ".dynos" / "dynos_patterns.md"
+    return _persistent_project_dir(root) / "dynos_patterns.md"
 
 
 def claude_patterns_path(root: Path) -> Path:

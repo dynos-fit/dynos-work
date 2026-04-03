@@ -12,6 +12,7 @@ from dynoslib import (
     ensure_learned_registry,
     register_learned_agent,
     now_iso,
+    _persistent_project_dir,
 )
 
 
@@ -49,7 +50,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
             continue
         # Generate a simple learned agent placeholder
         agent_name = f"auto-{role.replace('-executor', '')}-{task_type}"
-        agent_dir = root / ".dynos" / "learned-agents" / "executors"
+        agent_dir = _persistent_project_dir(root) / "learned-agents" / "executors"
         agent_dir.mkdir(parents=True, exist_ok=True)
         agent_path = agent_dir / f"{agent_name}.md"
         if not agent_path.exists():

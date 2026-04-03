@@ -235,7 +235,7 @@ def merge_policy(project_root: Path) -> dict:
         except (json.JSONDecodeError, FileNotFoundError, OSError):
             global_policy = {}
 
-    local_policy_file = project_root / ".dynos" / "policy.json"
+    local_policy_file = project_dir(project_root) / "policy.json"
     local_policy: dict = {}
     if local_policy_file.exists():
         try:

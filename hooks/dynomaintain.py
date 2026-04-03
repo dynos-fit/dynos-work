@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from dynoslib import load_json, now_iso
+from dynoslib import load_json, now_iso, _persistent_project_dir
 
 
 def maintenance_dir(root: Path) -> Path:
@@ -33,7 +33,7 @@ def stop_path(root: Path) -> Path:
 
 
 def policy_path(root: Path) -> Path:
-    return root / ".dynos" / "policy.json"
+    return _persistent_project_dir(root) / "policy.json"
 
 
 def maintainer_policy(root: Path) -> dict:
