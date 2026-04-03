@@ -62,6 +62,15 @@ python3 hooks/dynosctl.py validate-task .dynos/task-{id}
 
 ## Step 2 — Discovery + Design + Classification
 
+**Fast-track discovery skip:** Before spawning the planner, check if the task input is already well-scoped. A task is well-scoped when ALL of:
+- It names a specific file or narrow set of files
+- It states explicit constraints (e.g., "do not change X", "UI only", "single-file")
+- It describes a concrete, bounded change (not open-ended like "improve performance")
+
+When well-scoped: skip the planner spawn entirely. Instead, write `discovery-notes.md` with "No discovery needed — task is well-scoped." Write `design-decisions.md` with "No hard/critical design options — autonomous decisions only." Classify directly (infer type, domains, risk_level from the input). Then proceed to Step 2b (fast-track gate) and Step 3.
+
+When NOT well-scoped: spawn the planner as normal below.
+
 Spawn the Planner subagent (`dynos-work:planning`) with instruction:
 
 ```text

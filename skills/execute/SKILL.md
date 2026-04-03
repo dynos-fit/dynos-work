@@ -26,6 +26,10 @@ Append to log:
 
 ### Step 3 — Execute segments (Optimized Scheduler)
 
+**Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. Read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
+
+**Normal execution (fast_track is false or >1 segment):**
+
 Update `manifest.json` stage to `EXECUTION`. If available in this repo, use:
 
 ```text

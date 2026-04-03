@@ -29,7 +29,7 @@ Update `manifest.json` stage to `CHECKPOINT_AUDIT`.
 
 Read `manifest.json` `classification` field, `execution-graph.json`, and the `fast_track` field from `manifest.json`.
 
-**Fast-track mode:** If `manifest.json` contains `"fast_track": true`, spawn ONLY `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of domain, streak, or policy. Append to log: `{timestamp} [FAST-TRACK] reduced audit set — spec-completion + security only`. Then skip the remaining auditor selection logic below and proceed directly to spawning.
+**Fast-track mode:** If `manifest.json` contains `"fast_track": true`, spawn ONLY `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of domain, streak, or policy. Use `haiku` model for `spec-completion-auditor` (low-risk spec checks don't need larger models). Use the default model for `security-auditor` (security floor enforcement still applies — never below opus). Append to log: `{timestamp} [FAST-TRACK] reduced audit set — spec-completion (haiku) + security only`. Then skip the remaining auditor selection logic below and proceed directly to spawning.
 
 **Normal mode (fast_track is false or absent):**
 
