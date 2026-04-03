@@ -229,6 +229,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 12px;
       color: var(--muted);
     }}
+    .empty-state {{
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 28px 16px;
+      border-radius: 10px;
+      border: 1px dashed hsla(210 30% 80% / 0.14);
+      background: hsla(215 20% 14% / 0.4);
+      color: var(--muted);
+      font-size: 13px;
+      font-style: italic;
+      text-align: center;
+      min-height: 64px;
+    }}
+    .empty-state .tag {{
+      font-style: normal;
+    }}
     .tag {{
       display: inline-flex;
       align-items: center;
@@ -460,7 +479,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function renderRoutes(items) {{
       const target = document.getElementById('routes');
       if (!items.length) {{
-        target.innerHTML = `<div class="row"><span>No live learned routes</span><span class="tag warn">generic fallback</span></div>`;
+        target.innerHTML = `<div class="empty-state"><span>No live learned routes</span><span class="tag warn">generic fallback</span></div>`;
         return;
       }}
       target.innerHTML = items.map((item) => `
@@ -477,7 +496,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function renderList(id, items, emptyText, formatter) {{
       const target = document.getElementById(id);
       if (!items.length) {{
-        target.innerHTML = `<div class="row"><span>${{esc(emptyText)}}</span></div>`;
+        target.innerHTML = `<div class="empty-state"><span>${{esc(emptyText)}}</span></div>`;
         return;
       }}
       target.innerHTML = items.map(formatter).join('');
