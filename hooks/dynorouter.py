@@ -238,6 +238,18 @@ def resolve_route(root: Path, role: str, task_type: str) -> dict:
 # Full spawn plan
 # ---------------------------------------------------------------------------
 
+def load_prevention_rules(root: Path) -> list[dict]:
+    """Load project-local prevention rules from persistent storage."""
+    rules_path = _persistent_project_dir(root) / "prevention-rules.json"
+    if not rules_path.exists():
+        return []
+    try:
+        data = load_json(rules_path)
+        return data.get("rules", [])
+    except (json.JSONDecodeError, FileNotFoundError, OSError):
+        return []
+
+
 AUDITOR_ROLES = [
     "spec-completion-auditor",
     "security-auditor",
@@ -320,6 +332,7 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
 
     Returns structured decisions for each segment's executor.
     """
+    all_rules = load_prevention_rules(root)
     plan = {
         "generated_at": now_iso(),
         "task_type": task_type,
@@ -333,6 +346,9 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
         model_decision = resolve_model(root, executor, task_type)
         route_decision = resolve_route(root, executor, task_type)
 
+        # Filter prevention rules relevant to this executor
+        executor_rules = [r["rule"] for r in all_rules if r.get("rule")]
+
         plan["segments"].append({
             "segment_id": seg_id,
             "executor": executor,
@@ -343,6 +359,7 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
             "agent_path": route_decision["agent_path"],
             "agent_name": route_decision["agent_name"],
             "composite_score": route_decision["composite_score"],
+            "prevention_rules": executor_rules,
         })
 
     return plan

@@ -521,6 +521,55 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
         else:
             result["reason"] = f"Field {field} already exists in policy"
 
+    elif action == "adjust_model_policy":
+        policy_path = _persistent_project_dir(root) / "policy.json"
+        policy = {}
+        if policy_path.exists():
+            try:
+                policy = load_json(policy_path)
+            except (json.JSONDecodeError, OSError):
+                policy = {}
+        overrides = policy.get("model_overrides", {})
+        # Apply haiku for non-security low-risk auditors
+        changed = False
+        for role in ("spec-completion-auditor", "code-quality-auditor", "dead-code-auditor"):
+            for tt in ("feature", "bugfix", "refactor"):
+                key = f"{role}:{tt}"
+                if key not in overrides:
+                    overrides[key] = "haiku"
+                    changed = True
+        if changed:
+            policy["model_overrides"] = overrides
+            write_json(policy_path, policy)
+            result["applied"] = True
+            result["reason"] = f"Set haiku for {len(overrides)} non-security auditor:task_type pairs"
+        else:
+            result["reason"] = "Model overrides already set"
+
+    elif action == "add_prevention_rule":
+        # Write to a prevention-rules.json that the router/executor can read
+        rules_path = _persistent_project_dir(root) / "prevention-rules.json"
+        rules = []
+        if rules_path.exists():
+            try:
+                data = load_json(rules_path)
+                rules = data.get("rules", [])
+            except (json.JSONDecodeError, OSError):
+                rules = []
+        category = proposal.get("category", "")
+        existing_cats = {r.get("category") for r in rules}
+        if category and category not in existing_cats:
+            rules.append({
+                "category": category,
+                "rule": f"Category '{category}' has {proposal.get('total_occurrences', 0)} findings across tasks. Add extra scrutiny for {category}-class issues.",
+                "added_at": now_iso(),
+            })
+            write_json(rules_path, {"rules": rules, "updated_at": now_iso()})
+            result["applied"] = True
+            result["reason"] = f"Added prevention rule for category '{category}'"
+        else:
+            result["reason"] = f"Prevention rule for '{category}' already exists"
+
     elif action == "seed_learned_agent":
         role = proposal.get("role", "")
         tt = proposal.get("task_type", "")
@@ -564,7 +613,7 @@ def run_improvement_cycle(root: Path) -> dict:
     })
 
     # Apply safe improvements (policy tuning and agent seeding only)
-    safe_actions = {"adjust_policy", "seed_learned_agent"}
+    safe_actions = {"adjust_policy", "seed_learned_agent", "adjust_model_policy", "add_prevention_rule"}
     results = []
     for p in proposals:
         if p.get("action") in safe_actions:
