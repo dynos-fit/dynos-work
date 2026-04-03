@@ -1,13 +1,23 @@
 ---
 name: start
-description: "Primary entry point. Runs discovery+design+classification, spec normalization, spec review, plan+execution-graph generation, plan review, and spec coverage audit. When done, run /dynos-work:execute."
+description: "High-level autonomous entry point. Supports 'Founder Mode' for minimal prompts (MCTS/Dreaming/Curiosity bootstrap) and standard 'Discovery' for detailed specs. Manages all human-in-the-loop gates before execution."
 ---
 
 # dynos-work: Start
 
 You are the entry point for dynos-work. You own all human-in-the-loop gates before execution. When done, the task is ready for `/dynos-work:execute`.
 
-## What you do
+## Phase 0 -- Founder Mode (Strategic Bootstrap)
+
+If the user's **raw input** is minimal (typically < 50 words or a high-level vision):
+
+1. **Trigger the Founder Skill (`skills/founder/SKILL.md`)**: Skip standard discovery and hand off the task to the **Founder (The Strategist).**
+2. **Goal:** The Founder will perform the **Strategic Interrogation**, architecture selection (from Gold Standards), and **Dreaming (Scaffolding)** in the sandbox.
+3. **Transition:** After the Founder completes the bootstrap, it returns the generated `spec.md` and `plan.md`. Move directly to **Step 6: Plan Review**.
+
+## Standard Mode (Discovery + Design)
+
+If the user's raw input is detailed, proceed with the standard pipeline below.
 
 ### Step 1 — Initialize
 
