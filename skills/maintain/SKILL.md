@@ -79,7 +79,19 @@ To achieve a 100% "Set-and-Forget" backend, the maintainer can **Self-Merge** sp
    - Must achieve a **1.0 Quality Score** and **1.0 Security Score** from the Opus Ensemble auditors.
 3. **The Final Action:** If the above are met, the maintainer merges the branch directly into `main` and sends a notification.
 
+### Step 8 -- The Architectural Tournament (Recursive Benchmarking)
+
+To ensure the "Gold Standard" is perpetually optimized, the maintainer performs a **Search-Space Exploration**:
+
+1. **Variant Generation:** For a high-debt module, the maintainer drafts 3 **Architectural Branches** in the sandbox (e.g. `Variant A: Functional`, `Variant B: OOP`, `Variant C: Utility-driven`).
+2. **Playout Simulations:**
+   - **Performance:** instruction count, cyclomatic complexity check.
+   - **ROI:** token-cost of the implementation vs the potential debt reduction.
+   - **Quality:** composite finding-density score.
+3. **Winner Selection:** The variant with the highest **ROI/Efficiency Score** is selected as the **"Candidate for Push"**.
+4. **Final Proposal:** Present the user with the "Winner"'s data and the two rejected alternatives for comparison.
+
 ## Hard Rules
-- **Safe-Merging:** Never auto-merge a "Feature Request." These always require human strategic approval (Step 5).
-- **Audit-First:** The Auto-Merge policy is strictly prohibited unless a multi-model (Ensemble) audit has achieved zero findings.
-- **Downtime Shield:** Never auto-merge if any existing tests in the project are failing.
+- **Winner-Take-All:** Never present a refactor proposal unless a **Simulation Benchmark** has been completed for at least two alternate branches.
+- **ROI-First:** If a refactor's token-cost is > 50% of the anticipated maintenance savings over a 12-month horizon (estimated), abort the tournament ($ \mathcal{L} = \frac{\Delta \text{Debt}}{\text{Cost}} $).
+- **Safe-Merging:** Never auto-merge a "Tournament Winner" unless the human operator has explicitly verified the architectural philosophy (via human insight gate).
