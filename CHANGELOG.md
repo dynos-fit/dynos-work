@@ -7,7 +7,7 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
-## [2.0.0] - 2026-04-03
+## [4.0.0] - 2026-04-03
 ### "God-Mode" Evolution: The Autonomous Software Foundry
 
 This is a major architectural overhaul, transforming the system from a task-based plugin into a **Self-Learning, High-Performance Autonomous Engineering Platform.**
@@ -37,4 +37,4 @@ This is a major architectural overhaul, transforming the system from a task-base
 
 ---
 
-[2.0.0]: https://github.com/hassam/dynos-work/compare/v1.0.0...v2.0.0
+[4.0.0]: https://github.com/hassam/dynos-work/compare/v3.0.0...v4.0.0

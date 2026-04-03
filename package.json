@@ -1,6 +1,6 @@
 {
   "name": "dynos-work",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "description": "Audit-governed autonomous engineering system. Standalone — no dependencies required.",
   "license": "MIT",
   "skills": "./skills/",
