@@ -19,26 +19,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>dynos-work | Live Control Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
   <style>
     :root {{
-      --bg: hsl(210 30% 8%);
-      --bg-soft: hsl(214 26% 12%);
-      --panel: hsla(210 24% 16% / 0.88);
-      --panel-2: hsla(214 22% 20% / 0.82);
-      --line: hsla(210 40% 84% / 0.12);
-      --text: hsl(210 30% 94%);
-      --muted: hsl(212 18% 70%);
-      --gold: hsl(42 94% 64%);
-      --mint: hsl(156 63% 54%);
-      --rose: hsl(352 84% 66%);
-      --sky: hsl(198 88% 63%);
-      --amber: hsl(33 94% 61%);
-      --shadow: 0 20px 60px hsla(220 60% 2% / 0.45);
+      --bg: hsl(216 28% 7%);
+      --bg-soft: hsl(215 24% 11%);
+      --panel: hsla(214 22% 14% / 0.92);
+      --panel-2: hsla(215 20% 18% / 0.88);
+      --line: hsla(210 30% 80% / 0.10);
+      --text: hsl(210 20% 93%);
+      --muted: hsl(214 14% 64%);
+      --gold: hsl(43 90% 62%);
+      --mint: hsl(158 58% 50%);
+      --rose: hsl(350 78% 62%);
+      --sky: hsl(200 82% 60%);
+      --amber: hsl(34 88% 58%);
+      --shadow: 0 8px 32px hsla(220 60% 2% / 0.35), 0 2px 8px hsla(220 60% 2% / 0.25);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      font-family: "Segoe UI", ui-sans-serif, sans-serif;
+      font-family: "Inter", "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
       color: var(--text);
       background:
         radial-gradient(circle at top left, hsla(156 63% 54% / 0.14), transparent 32%),
@@ -46,10 +49,52 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         linear-gradient(160deg, var(--bg), hsl(220 28% 10%));
       min-height: 100vh;
     }}
+    .topbar {{
+      position: sticky;
+      top: 0;
+      z-index: 900;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 48px;
+      padding: 0 28px;
+      background: hsla(214 26% 10% / 0.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+    }}
+    .topbar-wordmark {{
+      font-family: "Inter", "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+      font-weight: 800;
+      font-size: 15px;
+      letter-spacing: 0.04em;
+      color: var(--text);
+    }}
+    .topbar-right {{
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }}
+    .live-dot {{
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--mint);
+      flex-shrink: 0;
+    }}
+    .topbar-updated {{
+      font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 320px;
+    }}
     .shell {{
       max-width: 1380px;
       margin: 0 auto;
       padding: 28px;
+      padding-top: 28px;
     }}
     .hero {{
       display: grid;
@@ -60,10 +105,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .panel {{
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 24px;
+      border-radius: 14px;
       box-shadow: var(--shadow);
-      backdrop-filter: blur(18px);
-      padding: 22px;
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      padding: 24px;
     }}
     .headline {{
       font-size: 13px;
@@ -90,9 +136,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       margin-top: 22px;
     }}
     .stat {{
-      background: var(--panel-2);
+      background: hsla(215 20% 16% / 0.72);
       border: 1px solid var(--line);
-      border-radius: 18px;
+      border-left: 3px solid hsla(43 90% 62% / 0.40);
+      border-radius: 10px;
       padding: 16px;
     }}
     .stat .label {{
@@ -105,6 +152,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 2rem;
       font-weight: 800;
       margin-top: 8px;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum";
     }}
     .meta {{
       display: flex;
@@ -139,8 +188,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       gap: 10px;
       font-size: 13px;
     }}
+    @keyframes shimmer {{
+      0% {{ background-position: -200% center; }}
+      100% {{ background-position: 200% center; }}
+    }}
     .track {{
-      height: 10px;
+      height: 8px;
       border-radius: 999px;
       background: hsla(210 20% 90% / 0.08);
       overflow: hidden;
@@ -148,15 +201,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .fill {{
       height: 100%;
       border-radius: inherit;
-      background: linear-gradient(90deg, var(--mint), var(--sky));
+      background:
+        linear-gradient(90deg, transparent, hsla(0 0% 100% / 0.18), transparent) no-repeat,
+        linear-gradient(90deg, var(--mint), var(--sky));
+      background-size: 200% 100%, 100% 100%;
+      animation: shimmer 2.4s ease-in-out infinite;
     }}
-    .warning .fill {{ background: linear-gradient(90deg, var(--amber), var(--rose)); }}
+    .warning .fill {{
+      background:
+        linear-gradient(90deg, transparent, hsla(0 0% 100% / 0.18), transparent) no-repeat,
+        linear-gradient(90deg, var(--amber), var(--rose));
+      background-size: 200% 100%, 100% 100%;
+      animation: shimmer 2.4s ease-in-out infinite;
+    }}
     .row {{
       display: flex;
       justify-content: space-between;
       gap: 12px;
       padding: 12px 14px;
-      border-radius: 16px;
+      border-radius: 10px;
       background: var(--panel-2);
       border: 1px solid var(--line);
       align-items: center;
@@ -167,29 +230,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }}
     .tag {{
       display: inline-flex;
-      padding: 6px 10px;
-      border-radius: 999px;
+      align-items: center;
+      padding: 5px 12px;
+      border-radius: 8px;
       font-size: 12px;
       font-weight: 700;
-      background: hsla(156 63% 54% / 0.14);
-      color: var(--mint);
-      border: 1px solid hsla(156 63% 54% / 0.24);
+      line-height: 1.4;
+      background: hsla(158 58% 50% / 0.14);
+      color: hsl(158 52% 58%);
+      border: 1px solid hsla(158 58% 50% / 0.22);
     }}
     .tag.warn {{
-      background: hsla(33 94% 61% / 0.14);
-      color: var(--amber);
-      border-color: hsla(33 94% 61% / 0.24);
+      background: hsla(34 88% 58% / 0.14);
+      color: hsl(34 82% 64%);
+      border-color: hsla(34 88% 58% / 0.22);
     }}
     .tag.danger {{
-      background: hsla(352 84% 66% / 0.14);
-      color: var(--rose);
-      border-color: hsla(352 84% 66% / 0.24);
+      background: hsla(350 78% 62% / 0.14);
+      color: hsl(350 72% 68%);
+      border-color: hsla(350 78% 62% / 0.22);
     }}
     .spark {{
       margin-top: 16px;
       width: 100%;
       height: 160px;
-      border-radius: 18px;
+      border-radius: 12px;
       background: linear-gradient(180deg, hsla(198 88% 63% / 0.08), transparent);
       border: 1px solid var(--line);
       position: relative;
@@ -200,13 +265,117 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       height: 100%;
       display: block;
     }}
+    @keyframes drawLine {{
+      from {{ stroke-dashoffset: var(--line-length); }}
+      to {{ stroke-dashoffset: 0; }}
+    }}
+    #sparkline polyline.spark-main {{
+      stroke-dasharray: var(--line-length);
+      stroke-dashoffset: var(--line-length);
+      animation: drawLine 1.2s ease-out forwards;
+    }}
+    #sparkline .spark-grid-line {{
+      stroke: hsla(210 20% 80% / 0.07);
+      stroke-width: 1;
+    }}
+    #sparkline .spark-dot {{
+      fill: hsl(198 88% 63%);
+      opacity: 0.85;
+    }}
+    #sparkline .spark-fill {{
+      opacity: 0.8;
+    }}
+    /* -- Entrance animations -- */
+    @keyframes fadeSlideIn {{
+      from {{ opacity: 0; transform: translateY(12px); }}
+      to {{ opacity: 1; transform: translateY(0); }}
+    }}
+    @keyframes pulse {{
+      0%, 100% {{ opacity: 1; transform: scale(1); }}
+      50% {{ opacity: 0.5; transform: scale(1.25); }}
+    }}
+    .panel {{
+      opacity: 0;
+      transform: translateY(12px);
+    }}
+    .stat {{
+      opacity: 0;
+      transform: translateY(12px);
+    }}
+    body.loaded .panel {{
+      animation: fadeSlideIn 0.5s ease-out forwards;
+    }}
+    body.loaded .stat {{
+      animation: fadeSlideIn 0.4s ease-out forwards;
+    }}
+    /* Staggered delays for panels */
+    body.loaded .hero > .panel:nth-child(1) {{ animation-delay: 0s; }}
+    body.loaded .hero > .panel:nth-child(2) {{ animation-delay: 0.08s; }}
+    body.loaded .grid .stack:nth-child(1) > .panel:nth-child(1) {{ animation-delay: 0.12s; }}
+    body.loaded .grid .stack:nth-child(1) > .panel:nth-child(2) {{ animation-delay: 0.18s; }}
+    body.loaded .grid .stack:nth-child(1) > .panel:nth-child(3) {{ animation-delay: 0.24s; }}
+    body.loaded .grid .stack:nth-child(2) > .panel:nth-child(1) {{ animation-delay: 0.16s; }}
+    body.loaded .grid .stack:nth-child(2) > .panel:nth-child(2) {{ animation-delay: 0.22s; }}
+    body.loaded .grid .stack:nth-child(2) > .panel:nth-child(3) {{ animation-delay: 0.28s; }}
+    /* Staggered delays for stat cards */
+    body.loaded .stats .stat:nth-child(1) {{ animation-delay: 0.1s; }}
+    body.loaded .stats .stat:nth-child(2) {{ animation-delay: 0.16s; }}
+    body.loaded .stats .stat:nth-child(3) {{ animation-delay: 0.22s; }}
+    body.loaded .stats .stat:nth-child(4) {{ animation-delay: 0.28s; }}
+    /* Live dot pulse */
+    .live-dot {{
+      animation: pulse 2s ease-in-out infinite;
+    }}
+    /* -- Hover effects -- */
+    .panel {{
+      transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+    }}
+    body.loaded .panel:hover {{
+      transform: translateY(-3px);
+      box-shadow: 0 24px 72px hsla(220 60% 2% / 0.55), 0 0 0 1px hsla(156 63% 54% / 0.18);
+      border-color: hsla(156 63% 54% / 0.28);
+    }}
+    .stat {{
+      transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    }}
+    body.loaded .stat:hover {{
+      transform: translateY(-2px);
+      box-shadow: 0 12px 36px hsla(220 60% 2% / 0.4), 0 0 0 1px hsla(42 94% 64% / 0.2);
+      border-color: hsla(42 94% 64% / 0.32);
+    }}
     @media (max-width: 980px) {{
       .hero, .grid {{ grid-template-columns: 1fr; }}
       .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .shell {{ padding: 20px; }}
+      .topbar {{ padding: 0 16px; }}
+      .topbar-updated {{ max-width: 220px; }}
+    }}
+    @media (max-width: 600px) {{
+      .hero, .grid {{ grid-template-columns: 1fr; }}
+      .stats {{ grid-template-columns: 1fr; }}
+      .shell {{ padding: 12px; }}
+      .topbar {{ padding: 0 12px; height: 44px; }}
+      .topbar-wordmark {{ font-size: 13px; }}
+      .topbar-updated {{ max-width: 140px; font-size: 11px; }}
+      .panel {{ padding: 16px; border-radius: 10px; }}
+      h1 {{ font-size: clamp(1.4rem, 5vw, 2rem); }}
+      .sub {{ font-size: 13px; }}
+      .stat .value {{ font-size: 1.5rem; }}
+      .row {{ padding: 10px 12px; font-size: 13px; }}
+      .row code {{ font-size: 11px; word-break: break-all; }}
+      .meta {{ font-size: 12px; }}
+      .spark {{ height: 120px; }}
     }}
   </style>
 </head>
 <body>
+  <nav class="topbar" role="navigation" aria-label="Dashboard navigation">
+    <span class="topbar-wordmark">dynos-work</span>
+    <div class="topbar-right">
+      <span class="live-dot" aria-label="Live status indicator"></span>
+      <span class="topbar-updated" id="updated" aria-live="polite"></span>
+    </div>
+  </nav>
   <div class="shell">
     <section class="hero">
       <div class="panel">
@@ -215,7 +384,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="sub">Live registry state, benchmark freshness, automation queue pressure, and promotion lineage, refreshed continuously from local runtime data.</div>
         <div class="stats" id="stats"></div>
         <div class="meta">
-          <span id="updated"></span>
           <span id="lineage"></span>
         </div>
       </div>
@@ -336,9 +504,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const y = 140 - ((value - min) / Math.max(0.0001, max - min || 1)) * 110;
         return `${{x}},${{y}}`;
       }}).join(' ');
+      var polyPoints = values.map((value, index) => {{
+        var x = values.length === 1 ? 300 : (index / (values.length - 1)) * 600;
+        var y = 140 - ((value - min) / Math.max(0.0001, max - min || 1)) * 110;
+        return [x, y];
+      }});
+      var firstX = polyPoints[0][0];
+      var lastX = polyPoints[polyPoints.length - 1][0];
+      var polygonPts = points + ` ${{lastX}},160 ${{firstX}},160`;
+      var dots = polyPoints.map(function(pt) {{
+        return `<circle class="spark-dot" cx="${{pt[0]}}" cy="${{pt[1]}}" r="3" />`;
+      }}).join('');
+      var lineLen = 0;
+      for (var pi = 1; pi < polyPoints.length; pi++) {{
+        var dx = polyPoints[pi][0] - polyPoints[pi - 1][0];
+        var dy = polyPoints[pi][1] - polyPoints[pi - 1][1];
+        lineLen += Math.sqrt(dx * dx + dy * dy);
+      }}
       svg.innerHTML = `
-        <polyline fill="none" stroke="hsl(198 88% 63%)" stroke-width="4" points="${{points}}" />
+        <defs>
+          <linearGradient id="sparkFillGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="hsl(200 82% 60%)" stop-opacity="0.32" />
+            <stop offset="100%" stop-color="hsl(200 82% 60%)" stop-opacity="0" />
+          </linearGradient>
+        </defs>
+        <line class="spark-grid-line" x1="0" y1="40" x2="600" y2="40" />
+        <line class="spark-grid-line" x1="0" y1="80" x2="600" y2="80" />
+        <line class="spark-grid-line" x1="0" y1="120" x2="600" y2="120" />
+        <polygon class="spark-fill" fill="url(#sparkFillGrad)" points="${{polygonPts}}" />
+        <polyline class="spark-main" fill="none" stroke="hsl(198 88% 63%)" stroke-width="4" points="${{points}}" style="--line-length:${{Math.ceil(lineLen)}}" />
         <polyline fill="none" stroke="hsla(198 88% 63% / 0.18)" stroke-width="12" points="${{points}}" />
+        ${{dots}}
       `;
     }}
     function render(data) {{
@@ -375,9 +571,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('updated').textContent = `Updated: ${{data.generated_at || data.registry_updated_at || 'unknown'}}`;
       document.getElementById('lineage').textContent = `Lineage: ${{data.lineage?.nodes || 0}} nodes / ${{data.lineage?.edges || 0}} edges`;
     }}
+    function animateCounters() {{
+      var elements = document.querySelectorAll('.stat .value');
+      for (var i = 0; i < elements.length; i++) {{
+        (function(el) {{
+          var text = el.textContent.trim();
+          var target = parseInt(text, 10);
+          if (isNaN(target) || target < 0) return;
+          var duration = 800;
+          var startTime = null;
+          el.textContent = '0';
+          function step(timestamp) {{
+            if (!startTime) startTime = timestamp;
+            var progress = Math.min((timestamp - startTime) / duration, 1);
+            var eased = 1 - Math.pow(1 - progress, 3);
+            el.textContent = String(Math.round(eased * target));
+            if (progress < 1) {{
+              requestAnimationFrame(step);
+            }}
+          }}
+          requestAnimationFrame(step);
+        }})(elements[i]);
+      }}
+    }}
     async function tick() {{
       const data = await loadData();
       render(data);
+      if (!window.__dynosFirstRender) {{
+        window.__dynosFirstRender = true;
+        document.body.classList.add('loaded');
+        animateCounters();
+      }}
     }}
     tick();
     setInterval(tick, 3000);
@@ -404,7 +628,8 @@ def write_dashboard(root: Path) -> dict:
     html_path = dynos_dir / "dashboard.html"
     data_path.write_text(json.dumps(payload, indent=2) + "\n")
     safe_json = json.dumps(payload).replace("</", "<\\/")
-    html = HTML_TEMPLATE.replace("__EMBEDDED_DATA__", safe_json)
+    html = HTML_TEMPLATE.replace("{{", "{").replace("}}", "}")
+    html = html.replace("__EMBEDDED_DATA__", safe_json)
     html_path.write_text(html)
     return {
         "html_path": str(html_path),

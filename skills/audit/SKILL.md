@@ -305,7 +305,7 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
      - For auditors that were **skipped** (not spawned) in this audit cycle: carry forward their streak value unchanged from the prior retrospective.
    - `executor_zero_repair_streak`: Read `repair-log.json`. Sort executor segments by execution order. Starting from the most recent, count consecutive executor segments that needed zero repairs (i.e., were not assigned any repair tasks). Stop counting at the first segment that had repairs. If `repair-log.json` is missing or malformed, set to `0`.
 9. Compute reward vector fields. Each score is clamped to the range `[0, 1]` (minimum 0, maximum 1):
-   - `quality_score`: `1 - (surviving_findings / total_findings)`. Where `surviving_findings` is the count of findings still present after the final re-audit (i.e., findings that were not resolved), and `total_findings` is the total number of unique findings discovered across all audit and re-audit passes. If `total_findings` is `0`, set `quality_score` to `1.0`.
+   - `quality_score`: `1 - (surviving_findings / total_findings)`. Where `surviving_findings` is the count of findings still present after the final re-audit (i.e., findings that were not resolved), and `total_findings` is the total number of unique findings discovered across all audit and re-audit passes. If `total_findings` is `0`, set `quality_score` to `0.9` (not 1.0, because zero findings may indicate auditor gaps rather than perfect quality; a perfect 1.0 should only come from resolving known findings).
    - `cost_score`: token-efficiency score derived from average tokens per spawn. Compute `avg_tokens_per_spawn = total_token_usage / max(1, subagent_spawn_count)`. Then compute `cost_score = 1 / (1 + (avg_tokens_per_spawn / 12000))`. If `total_token_usage` is `0` or `subagent_spawn_count` is `0`, set `cost_score` to `1.0`.
    - `efficiency_score`: `1 - (repair_cycle_count / 3)`. Uses the `repair_cycle_count` computed in substep 3.
 10. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
@@ -389,7 +389,7 @@ Append to log:
 {timestamp} [DONE] learn — dynos_patterns.md updated ({N} tasks aggregated)
 ```
 
-Write `completion.json`. Update stage to `DONE`. Append to log:
+Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `dynoslib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
 ```
 {timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE
 ```

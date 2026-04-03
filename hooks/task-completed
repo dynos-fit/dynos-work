@@ -10,10 +10,13 @@ set -u
 # --- Step 1: Learn trigger (always runs) ---
 claude -p "Run /dynos-work:learn for the most recently completed task" || true
 
-# --- Step 1b: Auto-benchmark shadow challengers ---
+# --- Step 1b: Refresh patterns file from live runtime state ---
+python3 hooks/dynopatterns.py --root . || true
+
+# --- Step 1c: Auto-benchmark shadow challengers ---
 python3 hooks/dynoauto.py run --root . || true
 
-# --- Step 1c: Refresh live dashboard artifacts ---
+# --- Step 1d: Refresh live dashboard artifacts ---
 python3 hooks/dynodashboard.py generate --root . || true
 
 # --- Step 2: Conditional auto-commit ---

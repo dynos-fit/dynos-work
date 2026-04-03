@@ -107,6 +107,7 @@ def run_python(root: Path, script_name: str, *args: str) -> tuple[subprocess.Com
 def maintenance_cycle(root: Path) -> dict:
     actions: list[dict] = []
     for script_name, args in (
+        ("dynopatterns.py", ("--root", str(root))),
         ("dynofixture.py", ("sync", "--root", str(root))),
         ("dynoauto.py", ("run", "--root", str(root))),
         ("dynodashboard.py", ("generate", "--root", str(root))),
