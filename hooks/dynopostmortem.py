@@ -17,6 +17,7 @@ from dynoslib import (
     _safe_float,
     COMPOSITE_WEIGHTS,
 )
+from dynoglobal import project_dir
 
 
 # Token budgets by (risk_level, task_type)
@@ -36,7 +37,7 @@ DEFAULT_BUDGET = 60000
 
 
 def postmortems_dir(root: Path) -> Path:
-    return root / ".dynos" / "postmortems"
+    return project_dir(root) / "postmortems"
 
 
 def _expected_budget(risk_level: str, task_type: str) -> int:
@@ -373,11 +374,8 @@ def _render_markdown(pm: dict) -> str:
 # Produces project-local .dynos/ changes, NOT global plugin file mutations.
 # ---------------------------------------------------------------------------
 
-IMPROVEMENT_LOG_PATH = ".dynos/improvements"
-
-
 def _improvements_dir(root: Path) -> Path:
-    return root / ".dynos" / "improvements"
+    return project_dir(root) / "improvements"
 
 
 def propose_improvements(root: Path) -> list[dict]:

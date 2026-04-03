@@ -33,14 +33,30 @@ def global_home() -> Path:
     return Path.home() / ".dynos"
 
 
-_GLOBAL_DIRS = ("registry", "patterns", "policy", "logs")
+_GLOBAL_DIRS = ("registry", "patterns", "policy", "logs", "projects")
 
 
 def ensure_global_dirs() -> None:
-    """Creates ~/.dynos/{registry,patterns,policy,logs} on first use."""
+    """Creates ~/.dynos/{registry,patterns,policy,logs,projects} on first use."""
     home = global_home()
     for name in _GLOBAL_DIRS:
         (home / name).mkdir(parents=True, exist_ok=True)
+
+
+def project_slug(root: Path) -> str:
+    """Convert a project root path to a safe directory name."""
+    return str(root.resolve()).strip("/").replace("/", "-")
+
+
+def project_dir(root: Path) -> Path:
+    """Returns ~/.dynos/projects/{slug}/ for persistent project-specific state.
+
+    This is the safe home for postmortems, improvements, and other
+    project-specific data that should not live in the repo's .dynos/.
+    """
+    d = global_home() / "projects" / project_slug(root)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def registry_path() -> Path:
