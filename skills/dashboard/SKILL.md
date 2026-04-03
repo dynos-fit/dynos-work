@@ -199,3 +199,26 @@ For each numeric column across chronologically ordered tasks:
 8. **Render output**: Print each section using the format above. Use consistent column widths. Right-align numeric columns.
 
 9. **Handle current policy state**: Show Model Recommendations and Skip Thresholds alongside the historical trends so the user sees both current policy and how the system has evolved.
+
+10. **Step 10 -- Generate Web Dashboard (Modern UI / The "Editor")**
+
+In addition to the terminal output, generate a standalone, high-performance web dashboard at `.dynos/dashboard.html`:
+
+1. **Design System:** Use the latest **Premium Design Aesthetics** (curated HSL colors, smooth Inter/Outfit typography, glassmorphism, and subtle micro-animations).
+2. **Interactive Visuals:** 
+   - **Quality Heatmap:** A visual grid of the repository's modules, colored by finding density (Green=Clean, Red=Debt-Heavy).
+   - **Trend Charts:** Interactive line charts for Quality Score and Token Cost over time.
+   - **Gold Standard Showcase:** A searchable carousel of the project's "Gold Standard" implementations.
+   - **Live Progress Tracer:** A visual "Dependency Map" (derived from the execution graph) showing the progress of any active task.
+3. **Control Center:** Include a "Maintenance Panel" to trigger the `maintain` or `learn` skills with a single click (via the Claude Code terminal if the user copies the command).
+
+Print:
+```
+dynos-work: Web Dashboard generated at .dynos/dashboard.html
+Open in your browser to see the live engineering control center.
+```
+
+## Hard Rules
+- **Self-Contained:** The `dashboard.html` file must contain all necessary CSS (embedded) and JS (embedded). No external dependencies beyond Google Fonts to ensure it works offline/locally.
+- **Aesthetic Excellence:** Use a dark-mode-first aesthetic with a premium, state-of-the-art feel. Avoid any default browser styling.
+- **Privacy First:** The dashboard only uses local files and does not send any data to external servers.

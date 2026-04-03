@@ -49,16 +49,48 @@ Before spawning, check whether any skip-eligible auditors should be skipped base
 
 1. Find the most recent completed task directory (not the current task). Look for `.dynos/task-*/task-retrospective.json` files, sort by task ID descending, and select the first one that is not the current task.
 2. Read the `auditor_zero_finding_streaks` field (object mapping auditor name to streak count). If the field is missing, the file does not exist, or the file contains the old single-integer `auditor_zero_finding_streak` format instead, treat all streaks as `0` (skip no one).
-3. **Determine skip threshold from Skip Policy table:** Read `dynos_patterns.md` from the project memory directory (`~/.claude/projects/<project>/memory/`, where `<project>` is derived from the cwd by replacing `/` with `-`). Look for a markdown table under the heading `## Skip Policy`. The table has columns `| Auditor | Skip Threshold |`. For each skip-eligible auditor, use its row's threshold value. If `dynos_patterns.md` is missing, unreadable, malformed, has no `## Skip Policy` section, or has no row for a given auditor (cold-start), fall back to a default threshold of `3`. Append to log when falling back:
+4. **Determine skip threshold from Skip Policy table:** Read `dynos_patterns.md` from the project memory directory (`~/.claude/projects/<project>/memory/`, where `<project>` is derived from the cwd by replacing `/` with `-`). Look for a markdown table under the heading `## Skip Policy`. The table has columns `| Auditor | Skip Threshold | Confidence |`. For each skip-eligible auditor, use its row's threshold value. If `dynos_patterns.md` is missing, unreadable, malformed, has no `## Skip Policy` section, or has no row for a given auditor (cold-start), fall back to a default threshold of `3`. Append to log when falling back:
    ```
    {timestamp} [WARN] policy table missing/corrupt -- using defaults
    ```
    Log this warning at most once per audit run, not per auditor.
-4. For each skip-eligible auditor (`dead-code-auditor`, `ui-auditor`, `db-schema-auditor`): if its streak value in `auditor_zero_finding_streaks` is `>=` the resolved skip threshold for that auditor, do not spawn it. Append to log:
+5. **Dynamic Rigor Scaling (Low Risk):** If the task `risk_level` (from `manifest.json`) is `"low"` AND a skip-eligible auditor's `Confidence` in the Skip Policy table is `> 0.9`, **double** its effective skip threshold for the current run. This rewards high-performing, stable agents by reducing their oversight on low-stakes tasks. Log:
+   ```
+   {timestamp} [RIGOR] aggressive skip enabled for {auditor-name} (low risk + high confidence)
+   ```
+6. For each skip-eligible auditor (`dead-code-auditor`, `ui-auditor`, `db-schema-auditor`): if its streak value in `auditor_zero_finding_streaks` is `>=` the resolved (and potentially scaled) skip threshold for that auditor, do not spawn it. Append to log:
    ```
    {timestamp} [SKIP] {auditor-name} — zero-finding streak {N} (threshold {T})
    ```
-5. Skip-exempt auditors (`security-auditor`, `spec-completion-auditor`, `code-quality-auditor`) are never skipped regardless of streak.
+7. Skip-exempt auditors (`security-auditor`, `spec-completion-auditor`, `code-quality-auditor`) are never skipped regardless of streak or rigor.
+
+**Ensemble Voting for High-Risk Audits (Model Optimization):**
+
+For auditors categorized as **High-Risk** (`security-auditor` and `db-schema-auditor`), use the ensemble voting strategy to minimize costs while maintaining high security:
+
+1.  **Initial Pass (Voting):** Do not spawn the recommended model (Opus) immediately. Instead, spawn **two (2) cheaper models** in parallel: one `Haiku` and one `Sonnet`.
+2.  **Agreement Check:**
+    *   If **both** models return **Zero Findings**: The audit is considered a **PASS**. Record the success and move to the next stage. Log:
+        ```
+        {timestamp} [VOTE] {auditor-name} — PASS (Haiku + Sonnet agree)
+        ```
+    *   If **either** model returns **One or More Findings** (even if they disagree on the specifics): Immediately discard the results of the voting pass and **Escalate** to the authoritative model (`Opus`). Log:
+        ```
+        {timestamp} [VOTE] {auditor-name} — disagreement/findings detected. Escalating to Opus for authoritative audit...
+        ```
+3.  **Authoritative Pass (Escalated):** Spawn the `security-auditor` or `db-schema-auditor` using `model: "opus"`. This result is final and binding. This ensures that we only pay the "Opus tax" when there is actual complexity or a potential issue to investigate.
+
+**Visual Audit Pass (Multi-Modal Verification):**
+
+For tasks where `domains` includes `"ui"`, perform a **Visual Audit** in addition to the standard code-based audits:
+
+1. **Environmental Setup:** Ensure the dev server is running (e.g., `npm run dev`). 
+2. **Screenshot Capture:** Use the **browser subagent** to navigate to the modified screen(s) and take a high-resolution screenshot. 
+3. **Visual Evaluation:** Use a **multi-modal model (Claude 3.5 Sonnet)** to audit the screenshot against the `Design Decisions` defined in the planning phase.
+   - Look for: visual regressions, layout shift, poor color contrast, and incorrect copy.
+   - Verify that the rendered UI matches the "Design Options" selected by the user.
+4. **Report findings:** Any visual findings are added to the main audit finding set with the category `vision-finding`. 
+5. **Log result:** `{timestamp} [VISION] UI audit complete -- {N} visual bugs found`.
 
 **Auditor model selection (Model Policy):**
 
@@ -66,20 +98,22 @@ Before spawning each auditor, determine which model to use:
 
 1. Read `dynos_patterns.md` from the project memory directory (same path as above). Look for a markdown table under the heading `## Model Policy`. The table has columns `| Role | Task Type | Recommended Model |`. Match each auditor name against the `Role` column and the current task's `task_type` against the `Task Type` column. Read `classification.type` from manifest — this is the task's `task_type`. Use the `Recommended Model` value from the matching row.
 2. If `dynos_patterns.md` is missing, unreadable, malformed, has no `## Model Policy` section, or has no matching row for a given auditor and task type, fall back to the default model. Log once per audit run if the policy table is unavailable (reuse the same `[WARN]` log from skip policy if already emitted; do not duplicate).
-3. **Security floor enforcement:** For `security-auditor`, the model must never be below `opus`. If the policy table recommends a model below `opus` (e.g., `sonnet`, `haiku`), override it to `opus`. This check applies at read time before the model value is used.
-4. For each auditor, append to log:
+3. **Ensemble Voting Trigger:** If the auditor is `security-auditor` or `db-schema-auditor`, follow the **Ensemble Voting** logic described above. This overrides the standard Model Policy selection.
+4. **Security floor enforcement:** For any *final* or *non-voting* spawn of `security-auditor`, the model must never be below `opus`.
+5. For each auditor, append to log:
    ```
-   {timestamp} [MODEL] {auditor-name} using {model} (source: {policy|default})
+   {timestamp} [MODEL] {auditor-name} using {model} (source: {policy|default|vote})
    ```
-   Use `policy` when the model came from a matching Model Policy row (even if overridden by the security floor). Use `default` when falling back due to missing policy.
+   Use `policy` when the model came from a matching Model Policy row. Use `default` when falling back. Use `vote` when the ensemble voting strategy was used.
 
 **Agent Routing (learned auditor selection):**
 
-After resolving skip and model policies, determine whether each auditor should use a generic prompt, a learned prompt, or both:
+After resolving skip, model, and voting policies, determine whether each auditor should use a generic prompt, a learned prompt, or both:
 
 1. Read `dynos_patterns.md` from the project memory directory (same path as above). Look for a markdown table under the heading `## Agent Routing`. The table has columns `| Role | Task Type | Agent Source | Agent Path | Composite Score | Mode |`. Match each auditor by looking up the `Role` column (matching auditor name) and the current task's `task_type` (from `classification.type` in manifest) against the `Task Type` column. Read `Mode` for alongside/replace, `Agent Path` for the learned agent `.md` file path, and `Composite Score` for logging. **Path validation:** If an `Agent Path` value does not start with `.dynos/learned-agents/` and is not `built-in`, treat the entry as invalid -- log `{timestamp} [WARN] invalid agent path: {path} -- using generic for {auditor-name}` and fall back to generic for that auditor. If `dynos_patterns.md` is missing, unreadable, has no `## Agent Routing` section, or has no matching row for a given auditor and task type, use generic for that auditor. Do not error. Reuse the existing `[WARN]` log line if already emitted for missing policy table; do not duplicate.
 2. **Security-auditor replace protection:** The `security-auditor` must NEVER be replaced by a learned auditor. Even if a learned security auditor exists in the Agent Routing table with mode=replace, always run the generic `security-auditor`. A learned security auditor may only run in alongside mode (supplementary, never replacing). This matches the monotonicity constraint (security-auditor never downgraded). If a replace entry is found for `security-auditor`, override it to alongside and log: `{timestamp} [WARN] security-auditor replace blocked -- forced to alongside (monotonicity)`.
-3. For each auditor that was not skipped, check its row in the Agent Routing table:
+3. **Voting Pass Restriction:** Learned auditors never partake in the initial Ensemble Voting pass. Only the generic `security-auditor` or `db-schema-auditor` definitions are used for the voting pass to ensure a consistent baseline.
+4. For each auditor that was not skipped, check its row in the Agent Routing table:
    - **No entry:** Use the generic auditor. Append to log:
      ```
      {timestamp} [ROUTE] {auditor-name} using generic (mode: default)
@@ -92,8 +126,8 @@ After resolving skip and model policies, determine whether each auditor should u
      ```
      {timestamp} [ROUTE] {auditor-name} using alongside (mode: alongside, composite: {score})
      ```
-4. **Finding deduplication in alongside mode:** When both generic and learned auditors produce findings for the same role, deduplicate before counting. Two findings are considered the same if they share the same dedup key: `{file}:{line}:{category}` (where `line` is the finding's reported line from the `location` field, and `category` is the finding ID prefix). If both auditors report the same finding, count it once. Retain the version from the learned auditor (preference for learned). The deduplicated finding set is what feeds into the repair pipeline and retrospective counts.
-5. **Alongside promotion tracking:** For each alongside auditor, record whether the learned auditor's findings are a superset of the generic auditor's findings (using dedup keys). The learn step reads this data to decide whether to promote from alongside to replace after 3 tasks.
+5. **Finding deduplication in alongside mode:** When both generic and learned auditors produce findings for the same role, deduplicate before counting. Two findings are considered the same if they share the same dedup key: `{file}:{line}:{category}` (where `line` is the finding's reported line from the `location` field, and `category` is the finding ID prefix). If both auditors report the same finding, count it once. Retain the version from the learned auditor (preference for learned). The deduplicated finding set is what feeds into the repair pipeline and retrospective counts.
+6. **Alongside promotion tracking:** For each alongside auditor, record whether the learned auditor's findings are a superset of the generic auditor's findings (using dedup keys). The learn step reads this data to decide whether to promote from alongside to replace after 3 tasks.
 
 Append to log:
 ```
@@ -105,7 +139,7 @@ Spawn the determined auditors simultaneously, passing the resolved model for eac
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
-**Token capture after auditor spawns:** After each auditor subagent spawn completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes). Store as `{auditor-name: token_count}`. If the Agent tool result does not include token usage, record `null` for that auditor and exclude it from any subsequent sum.
+**Token capture after auditor spawns:** After each auditor subagent spawn completes (including all voting/escalated passes), record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes). Store as `{auditor-name: token_count}`. If the Agent tool result does not include token usage, record `null` for that auditor and exclude it from any subsequent sum. For ensemble voting, the `token_count` is the **sum** of all voting and escalation spawns for that auditor.
 
 **Eager two-phase repair trigger:**
 

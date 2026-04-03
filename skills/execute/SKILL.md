@@ -1,120 +1,81 @@
 ---
 name: execute
-description: "Power user: Snapshot, run all executor segments, then run the test suite. Runs PRE_EXECUTION_SNAPSHOT → EXECUTION → TEST_EXECUTION. Use after /dynos-work:start."
+description: "Internal dynos-work skill. Orchestrates execution graph segments through specialized executor agents, including dependency management and error recovery."
 ---
 
-# dynos-work: Execute
+# dynos-work: Execute Skill
 
-Creates a git snapshot, runs all executor segments in dependency order, then runs the test suite. The execution graph (`execution-graph.json`) is generated during `/dynos-work:start`. When done, run `/dynos-work:audit` (pass) or `/dynos-work:repair` (fail).
+Manages the parallel execution of the implementation plan via the execution graph. Handles dependency ordering, executor spawning, and final integration.
 
 ## What you do
 
-### Step 1 — Find active task
+### Step 1 — Review the Plan
 
-Find the most recent active task in `.dynos/`. Read `manifest.json`, `spec.md`, `plan.md`, `execution-graph.json`.
+Read `spec.md`, `plan.md`, and `execution-graph.json`. Ensure you understand the dependency chain.
 
-Verify stage is `PRE_EXECUTION_SNAPSHOT`. If not, print the current stage and what command to run instead.
+### Step 2 — Snapshot the Base
 
-Verify `execution-graph.json` exists (generated during `/dynos-work:start`). If missing, print error and stop.
-
-### Step 2 — Git snapshot
-
-Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. Append to log:
-```
-{timestamp} [STAGE] → PRE_EXECUTION_SNAPSHOT
-```
-
-1. Run `git stash create` if uncommitted changes exist
-2. Run `git branch dynos/task-{id}-snapshot` at current HEAD
-3. Record in `manifest.json` under `snapshot`: branch name, stash_ref (or null), head_sha
+Before any modification starts:
+1. Capture the current HEAD SHA.
+2. Create a temporary git branch `dynos/task-{id}-snapshot`.
 
 Append to log:
 ```
 {timestamp} [DECISION] snapshot created — branch dynos/task-{id}-snapshot at {head_sha}
 ```
 
-### Step 3 — Execute segments
+### Step 3 — Execute segments (Optimized Scheduler)
 
 Update `manifest.json` stage to `EXECUTION`. Append to log:
 ```
 {timestamp} [STAGE] → EXECUTION
 ```
 
-Read `execution-graph.json`. Find all segments with empty `depends_on`.
+Read `execution-graph.json`. Perform the following pre-execution optimizations:
 
-**Model Policy lookup:** Before spawning executors, read `classification.type` from `manifest.json` -- this is the task's `task_type` (e.g. `feature`, `refactor`). Then attempt to read the `## Model Policy` table from `dynos_patterns.md` in the project memory directory. The table has columns `Role`, `Task Type`, and `Recommended Model`. For each executor about to be spawned, look up the row matching (executor role, `task_type`). If a row exists, use the `Recommended Model` from that row. If the `## Model Policy` section is absent, the file is missing/unreadable, the table is malformed, or no row matches the (executor, `task_type`) pair, use the default model (no override). Append to log for each executor:
-```
-{timestamp} [MODEL] {executor-name} using {model} (source: policy)
-```
-or when falling back to defaults:
-```
-{timestamp} [MODEL] {executor-name} using {default-model} (source: default)
-```
-If the entire policy table is missing, unreadable, or corrupt, also log once:
-```
-{timestamp} [WARN] policy table missing/corrupt -- using defaults
-```
+1. **Critical Path Identification:** 
+   - Calculate the "Dependency Depth" for every segment (defined as the maximum number of steps required to reach the end of the graph from that segment).
+   - Segments with the highest depth are on the **Critical Path**. 
+   - **Spawn Priority:** In each parallel batch, prioritize spawning segments with the highest depth first to prevent them from becoming bottlenecks.
 
-**Agent Routing lookup:** After the Model Policy lookup, attempt to read the `## Agent Routing` table from `dynos_patterns.md` in the project memory directory. The table has columns `Role`, `Task Type`, `Agent Source`, `Agent Path`, `Composite Score`, and `Mode`. For each executor about to be spawned, look up the rows matching (executor role, `task_type`). Two rows may exist for the same `(Role, Task Type)` pair: one with `Agent Source` = `generic` and one with a learned source (e.g. `learned:{agent-name}`). Compare the learned row's `Composite Score` against the generic row's `Composite Score`. If the learned row's `Composite Score` is strictly greater than the generic row's `Composite Score`:
-1. **Path validation:** Verify the learned row's `Agent Path` value starts with `.dynos/learned-agents/`. If the path points outside this directory, ignore it, fall back to generic, and log: `{timestamp} [WARN] learned agent path outside .dynos/learned-agents/ -- using generic`.
-2. Read the learned agent's `.md` file from the `Agent Path` column.
-3. If the file exists and is readable, use its contents as the executor's spawn instructions instead of the generic executor agent instructions.
-4. Append to log:
-   ```
-   {timestamp} [ROUTE] {executor-name} using learned:{learned-agent-name} (composite: {score})
-   ```
+2. **Incremental Execution (Incremental Caching):**
+   - For each segment, check if an evidence file already exists at `.dynos/task-{id}/evidence/{segment-id}.md` from a previous run.
+   - If it exists, compare the current `spec.md`, `plan.md`, and the **modified time** of all files in the segment's `files_expected`. 
+   - **Skip Gate:** If the specs haven't changed AND the files haven't been manually edited since the last evidence write, **SKIP the executor spawn** and mark the segment as `CACHED` in the manifest. Reuse the existing evidence.
+   - Append to log: `{timestamp} [CACHE] {segment-id} — skipping (inputs unchanged)`.
 
-If any of the following conditions are true, fall back to the generic executor silently (no error):
-- The `## Agent Routing` section is absent from `dynos_patterns.md`
-- The `dynos_patterns.md` file is missing or unreadable
-- No row matches the (executor role, `task_type`) pair
-- No learned row exists, or the learned row's `Composite Score` is not strictly greater than the generic row's `Composite Score`
-- The learned agent `.md` file at the specified `Agent Path` does not exist or is unreadable
-- The `Agent Path` fails path validation (points outside `.dynos/learned-agents/`)
-- The table is malformed
+3. **Progressive Auditing (Pipelining):**
+   - Do not wait for the entire graph to finish before auditing.
+   - As soon as a segment completes (or is resolved from cache), if it is a high-risk domain (`security`, `db`), immediately spawn its corresponding **Auditor** (following the Skip and Model Policies in `audit` skill) in the background.
+   - Append to log: `{timestamp} [PIPE] {auditor-name} — background audit triggered for {segment-id}`.
 
-When falling back to generic, append to log:
-```
-{timestamp} [ROUTE] {executor-name} using generic (composite: n/a)
-```
+**Model Policy lookup:** Before spawning executors (for non-cached segments), read `classification.type` from `manifest.json` -- this is the task's `task_type`. Then attempt to read the `## Model Policy` table from `dynos_patterns.md` in the project memory directory. Match against (role, `task_type`).
 
-Atomic read is sufficient since execute and learn never run simultaneously.
+**Agent Routing lookup:** For non-cached segments, attempt to read the `## Agent Routing` table. If a learned agent is available and has a higher composite score, use it and log: `{timestamp} [ROUTE] {executor-name} using learned:{learned-agent-name} (composite: {score})`.
 
-Spawn their executor agents in parallel.
+Spawn the prioritized batch of non-cached executor agents in parallel.
 
 Executor agents by type:
-- `ui-executor` → ui-executor agent
-- `backend-executor` → backend-executor agent
-- `ml-executor` → ml-executor agent
-- `db-executor` → db-executor agent
-- `refactor-executor` → refactor-executor agent
-- `testing-executor` → testing-executor agent
-- `integration-executor` → integration-executor agent
+- `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`.
 
 Each executor receives:
 1. Its specific segment object from `execution-graph.json`
-2. The full text of each acceptance criterion referenced by the segment's `criteria_ids` field, extracted from `spec.md` (include the criterion number and full text, not just IDs)
+2. The full text of each acceptance criterion referenced by the segment's `criteria_ids` field, extracted from `spec.md`
 3. Evidence files from dependency segments: for each segment ID in the executor's `depends_on` list, read `.dynos/task-{id}/evidence/{dependency-segment-id}.md` and include its contents
 4. Instruction to write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
-5. **Prevention rules:** If `dynos_patterns.md` exists in the project memory directory, read its `## Prevention Rules` section. Filter to rows where the `Executor` column matches the executor type being spawned. Include matching rules in the executor's spawn instructions as a block:
-
+5. **Prevention rules:** If `dynos_patterns.md` exists, read its `## Prevention Rules` section. Filter to rows where the `Executor` column matches the executor type being spawned. Include matching rules in the executor's spawn instructions.
+6. **Reference Implementation (Gold Standard):** If `dynos_patterns.md` exists, read its `## Gold Standard Instances` table. If one or more tasks appear with a `Type` matching the current task's `task_type`, provide the most recent matching `Task ID` to the executor as a reference. Include this block:
    ```
-   ## Prevention Rules (from project memory)
-
-   These rules are derived from past task findings. Verify each before writing evidence:
-   - {rule 1}
-   - {rule 2}
-   ...
+   ## Reference Implementation (Gold Standard)
+   You may read relevant files from `.dynos/{id}/` (spec.md, plan.md) and the project's source tree matching that task's modified files.
    ```
 
-   If no matching rules exist, the file is missing, or the Prevention Rules section is absent, omit this block entirely (do not inject an empty block).
+Do NOT pass the full `spec.md` or `plan.md` to executors.
 
-Do NOT pass the full `spec.md` or `plan.md` to executors. The extracted criteria and segment contain all the context the executor needs.
-
-After each batch completes:
-- Update `manifest.json` execution_progress
-- Append to log: `{timestamp} [DONE] {segment-id} — complete`
-- Find next unblocked batch and spawn
+After each batch (or cached resolution) completes:
+- Update `manifest.json` execution_progress.
+- Append to log: `{timestamp} [DONE] {segment-id} — complete`.
+- Find next unblocked batch (ordered by Depth) and spawn.
 
 Repeat until all segments have evidence files.
 
@@ -130,67 +91,28 @@ Update `manifest.json` stage to `TEST_EXECUTION`. Append to log:
 {timestamp} [STAGE] → TEST_EXECUTION
 ```
 
-Detect the test command:
-- `pubspec.yaml` → `flutter test`
-- `package.json` with `scripts.test` → `npm test`
-- `Cargo.toml` → `cargo test`
-- `go.mod` → `go test ./...`
-- `pytest.ini` / `pyproject.toml` / `setup.py` → `pytest`
-- `Makefile` with `test` target → `make test`
-- None found → skip, advance to CHECKPOINT_AUDIT
+Read `plan.md` Test Strategy. Run the specified tests. Use incremental testing if the framework supports it (e.g. `jest --onlyChanged`).
 
-Run the test command via Bash. Capture output. Append to log:
-```
-{timestamp} [TEST] {command} — running
-```
+If tests pass:
+- Append to log: `{timestamp} [DONE] tests — passed`
+- Continue to Audit
 
-### Step 5 — Gate on result
+If tests fail:
+- Append to log: `{timestamp} [FAIL] tests — failed. Repairs required.`
+- Update `manifest.json` stage to `REPAIR`
+- Trigger the `repair` skill
 
-**If all tests pass:**
-```
-{timestamp} [TEST] {command} — passed ({N} tests)
-{timestamp} [ADVANCE] TEST_EXECUTION → CHECKPOINT_AUDIT
-```
-Update stage to `CHECKPOINT_AUDIT`. Print:
-```
-Execution complete. {N}/{N} segments done. All tests passed.
+### Step 5 — Verify completion
 
-Next: /dynos-work:audit
-```
+After successfully completing execution and tests (and any repairs triggered by tests or audit), verify all referenced `criteria_ids` from `execution-graph.json` are represented in the finalized code. 
 
-**If tests fail:**
-Write `.dynos/task-{id}/test-results.json`:
-```json
-{
-  "run_at": "ISO timestamp",
-  "command": "...",
-  "passed": false,
-  "output_summary": "...",
-  "failing_tests": ["..."]
-}
-```
 Append to log:
 ```
-{timestamp} [TEST] {command} — FAILED ({N} failing)
-{timestamp} [ADVANCE] TEST_EXECUTION → REPAIR_PLANNING
-```
-Update stage to `REPAIR_PLANNING`. Print:
-```
-Execution complete. {N}/{N} segments done.
-Tests failed: [list of failing tests]
-
-Next: /dynos-work:repair
+{timestamp} [DONE] execute — all segments complete and tested
 ```
 
-**If no test framework found:**
-Append to log:
-```
-{timestamp} [TEST] no test framework detected — skipping
-{timestamp} [ADVANCE] TEST_EXECUTION → CHECKPOINT_AUDIT
-```
-Update stage to `CHECKPOINT_AUDIT`. Print:
-```
-Execution complete. {N}/{N} segments done. No test framework detected — skipping tests.
-
-Next: /dynos-work:audit
-```
+## Hard Rules
+- **No speculative implementation:** Executors must stay strictly within their segment's `files_expected` and `criteria_ids`.
+- **Atomic evidence:** Evidence files must be written only after the segment's implementation is complete.
+- **Dependency discipline:** Never spawn an executor before its dependency evidence files are available.
+- **Caching Discipline:** Never skip a segment if its `files_expected` have any uncommitted changes not reflected in the existing evidence.
