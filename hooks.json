@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "git diff --quiet"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" task-completed"
           }
         ]
       }

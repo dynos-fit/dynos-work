@@ -8,7 +8,7 @@
     {
       "name": "dynos-work",
       "description": "Audit-governed autonomous engineering system. Plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.",
-      "version": "2.11.0",
+      "version": "2.12.0",
       "source": "./",
       "author": {
         "name": "dynos.fit",

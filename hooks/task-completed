@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Hook: TaskCompleted
+# Runs after every task completion.
+#   1. Triggers the learn skill to aggregate retrospectives into project memory.
+#   2. Conditionally auto-commits if dynos_auto_commit is set.
+# Every fallible step uses "|| true" so failures never block the session.
+
+set -u
+
+# --- Step 1: Learn trigger (always runs) ---
+claude -p "Run /dynos-work:learn for the most recently completed task" || true
+
+# --- Step 2: Conditional auto-commit ---
+PROJECT_DIR=$(pwd | sed 's|/|-|g')
+SETTINGS="$HOME/.claude/projects/$PROJECT_DIR/settings.json"
+if [ -f "$SETTINGS" ] && grep -q '"dynos_auto_commit".*true' "$SETTINGS" 2>/dev/null; then
+  git add -u && git commit -m "dynos-work: auto-commit after task completion" || true
+fi

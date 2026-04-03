@@ -1,0 +1,32 @@
+{
+  "skill": "execution",
+  "description": "Container for executor sub-agents (backend, db, integration, ml, refactor, testing, ui). Each executor implements a segment from the execution graph.",
+  "input_schema": {
+    "segment": {
+      "type": "object",
+      "required": true,
+      "source": "execution-graph.json segment object passed by the execute skill"
+    },
+    "acceptance_criteria_text": {
+      "type": "string",
+      "required": true,
+      "source": "Extracted from spec.md based on segment criteria_ids"
+    },
+    "dependency_evidence": {
+      "type": "array",
+      "required": false,
+      "source": ".dynos/task-{id}/evidence/{dependency-segment-id}.md for each depends_on entry"
+    },
+    "prevention_rules": {
+      "type": "array",
+      "required": false,
+      "source": "Filtered from dynos_patterns.md Prevention Rules section matching executor type"
+    }
+  },
+  "output_schema": {
+    "evidence/{segment-id}.md": {
+      "type": "string",
+      "description": "Evidence file documenting files modified, integration points wired, failure cases handled, config/env required, and acceptance criteria satisfied"
+    }
+  }
+}

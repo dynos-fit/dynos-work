@@ -1,0 +1,39 @@
+{
+  "skill": "plan",
+  "description": "Re-run planning on an existing task. Runs PLANNING, PLAN_REVIEW, and PLAN_AUDIT phases.",
+  "input_schema": {
+    "manifest.json": {
+      "type": "object",
+      "required": true,
+      "source": ".dynos/task-{id}/manifest.json"
+    },
+    "spec.md": {
+      "type": "string",
+      "required": true,
+      "source": ".dynos/task-{id}/spec.md"
+    },
+    "design-decisions.md": {
+      "type": "string",
+      "required": false,
+      "source": ".dynos/task-{id}/design-decisions.md"
+    }
+  },
+  "output_schema": {
+    "plan.md": {
+      "type": "string",
+      "description": "Implementation plan with technical approach, module breakdown, data flow, error handling, test strategy"
+    },
+    "execution-graph.json": {
+      "type": "object",
+      "description": "Execution graph with segments declaring id, executor, description, files_expected, depends_on, parallelizable, criteria_ids"
+    },
+    "audit-reports/plan-audit-{timestamp}.json": {
+      "type": "object",
+      "description": "Spec coverage audit report verifying plan covers all acceptance criteria"
+    },
+    "execution-log.md": {
+      "type": "string",
+      "description": "Appended log entries for PLANNING, PLAN_REVIEW, PLAN_AUDIT stages"
+    }
+  }
+}

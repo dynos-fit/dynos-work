@@ -64,7 +64,7 @@ Before spawning, check whether any skip-eligible auditors should be skipped base
 
 Before spawning each auditor, determine which model to use:
 
-1. Read `dynos_patterns.md` from the project memory directory (same path as above). Look for a markdown table under the heading `## Model Policy`. The table has columns `| Role | Task Type | Recommended Model |`. Match each auditor name against the `Role` column and the current task's `task_type` (from `manifest.json` `classification.type`) against the `Task Type` column. Use the `Recommended Model` value from the matching row.
+1. Read `dynos_patterns.md` from the project memory directory (same path as above). Look for a markdown table under the heading `## Model Policy`. The table has columns `| Role | Task Type | Recommended Model |`. Match each auditor name against the `Role` column and the current task's `task_type` against the `Task Type` column. Read `classification.type` from manifest — this is the task's `task_type`. Use the `Recommended Model` value from the matching row.
 2. If `dynos_patterns.md` is missing, unreadable, malformed, has no `## Model Policy` section, or has no matching row for a given auditor and task type, fall back to the default model. Log once per audit run if the policy table is unavailable (reuse the same `[WARN]` log from skip policy if already emitted; do not duplicate).
 3. **Security floor enforcement:** For `security-auditor`, the model must never be below `opus`. If the policy table recommends a model below `opus` (e.g., `sonnet`, `haiku`), override it to `opus`. This check applies at read time before the model value is used.
 4. For each auditor, append to log:
@@ -83,7 +83,7 @@ Spawn the determined auditors simultaneously, passing the resolved model for eac
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
-**Token capture after auditor spawns:** After each auditor subagent spawn completes, record the token count from the spawn result metadata. Store as `{auditor-name: token_count}`. If the spawn result metadata does not include token usage, record `null` for that auditor and exclude it from any subsequent sum.
+**Token capture after auditor spawns:** After each auditor subagent spawn completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes). Store as `{auditor-name: token_count}`. If the Agent tool result does not include token usage, record `null` for that auditor and exclude it from any subsequent sum.
 
 **Eager two-phase repair trigger:**
 
@@ -116,7 +116,7 @@ Update stage to `REPAIR_PLANNING`. Append to log:
 
 Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
 
-**Token capture:** After `repair-coordinator` completes, record its token count from spawn result metadata as `{repair-coordinator: token_count}`. If unavailable, record `null`.
+**Token capture:** After `repair-coordinator` completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) as `{repair-coordinator: token_count}`. If unavailable, record `null`.
 
 Wait for completion. Update stage to `REPAIR_EXECUTION`. Append to log:
 ```
@@ -143,7 +143,7 @@ For each batch, spawn executor agents as assigned in `repair-log.json`:
 
 Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
 
-**Token capture:** After each executor subagent spawn completes, record its token count from spawn result metadata as `{executor-name: token_count}`. If multiple spawns use the same executor name, sum their token counts. If unavailable for a spawn, record `null` for that spawn and exclude it from the sum.
+**Token capture:** After each executor subagent spawn completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) as `{executor-name: token_count}`. If multiple spawns use the same executor name, sum their token counts. If unavailable for a spawn, record `null` for that spawn and exclude it from the sum.
 
 After all batches complete, append to log:
 ```
@@ -177,7 +177,7 @@ Spawn only:
 - Any auditor whose findings appear as tasks in the current phase's `repair-log.json` (repair-modified files only)
 - Skip auditors whose domain was not touched by the repair (e.g., if only backend files were repaired, skip `ui-auditor` even if it ran in the initial audit)
 
-**Token capture:** After each re-audit auditor spawn completes, record its token count (add to the running total for that auditor). If unavailable, record `null`.
+**Token capture:** After each re-audit auditor spawn completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) and add to the running total for that auditor. If unavailable, record `null`.
 
 Wait for results. Any new findings from re-audit are added to the phase 2 queue.
 
@@ -192,9 +192,9 @@ If queued findings exist, append to log:
 
 Spawn `repair-coordinator` with the phase 2 findings. The coordinator writes to `repair-log.json` with an incremented `repair_cycle` value (phase 2 overwrites with the new cycle).
 
-**Token capture:** After `repair-coordinator` completes, record its token count (add to running total for `repair-coordinator`). If unavailable, record `null`.
+**Token capture:** After `repair-coordinator` completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) and add to the running total for `repair-coordinator`. If unavailable, record `null`.
 
-Apply the same parallel batch spawning and model escalation logic as phase 1 (including token capture after each executor spawn).
+Apply the same parallel batch spawning and model escalation logic as phase 1 (including token capture via the `total_tokens` value from the Agent tool result after each executor spawn).
 
 **Retry count continuity:** Retry counts are continuous across phases. A finding first repaired in phase 1 at retry 1 and re-found in phase 2 is at retry 2, not retry 0. The `max_retries` limit (3) applies across both phases combined for a given finding.
 
@@ -240,7 +240,7 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
    - `executor_zero_repair_streak`: Read `repair-log.json`. Sort executor segments by execution order. Starting from the most recent, count consecutive executor segments that needed zero repairs (i.e., were not assigned any repair tasks). Stop counting at the first segment that had repairs. If `repair-log.json` is missing or malformed, set to `0`.
 8. Compute reward vector fields. Each score is clamped to the range `[0, 1]` (minimum 0, maximum 1):
    - `quality_score`: `1 - (surviving_findings / total_findings)`. Where `surviving_findings` is the count of findings still present after the final re-audit (i.e., findings that were not resolved), and `total_findings` is the total number of unique findings discovered across all audit and re-audit passes. If `total_findings` is `0`, set `quality_score` to `1.0`.
-   - `cost_score`: `1 - (total_token_usage / baseline_budget)`. Where `baseline_budget` is determined by the task's `task_type` (from `manifest.json` `classification.type`):
+   - `cost_score`: `1 - (total_token_usage / baseline_budget)`. Where `baseline_budget` is determined by the task's `task_type`. Read `classification.type` from manifest — this is the task's `task_type`. Budgets by type:
      - `feature`: 50000
      - `refactor`: 30000
      - `bugfix`: 20000

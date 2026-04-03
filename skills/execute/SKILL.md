@@ -42,7 +42,7 @@ Update `manifest.json` stage to `EXECUTION`. Append to log:
 
 Read `execution-graph.json`. Find all segments with empty `depends_on`.
 
-**Model Policy lookup:** Before spawning executors, read the task's `classification.type` from `manifest.json` (e.g. `feature`, `refactor`). Then attempt to read the `## Model Policy` table from `dynos_patterns.md` in the project memory directory. The table has columns `Role`, `Task Type`, and `Recommended Model`. For each executor about to be spawned, look up the row matching (executor role, task type). If a row exists, use the `Recommended Model` from that row. If the `## Model Policy` section is absent, the file is missing/unreadable, the table is malformed, or no row matches the (executor, task_type) pair, use the default model (no override). Append to log for each executor:
+**Model Policy lookup:** Before spawning executors, read `classification.type` from `manifest.json` -- this is the task's `task_type` (e.g. `feature`, `refactor`). Then attempt to read the `## Model Policy` table from `dynos_patterns.md` in the project memory directory. The table has columns `Role`, `Task Type`, and `Recommended Model`. For each executor about to be spawned, look up the row matching (executor role, `task_type`). If a row exists, use the `Recommended Model` from that row. If the `## Model Policy` section is absent, the file is missing/unreadable, the table is malformed, or no row matches the (executor, `task_type`) pair, use the default model (no override). Append to log for each executor:
 ```
 {timestamp} [MODEL] {executor-name} using {model} (source: policy)
 ```

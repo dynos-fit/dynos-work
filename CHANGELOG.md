@@ -2,6 +2,27 @@
 
 All notable changes to dynos-work are documented here.
 
+## [2.12.0] - 2026-04-03
+
+### Added
+- `/dynos-work:dry-run` skill with declarative contract validation: each pipeline skill has a `contract.json` sidecar declaring input/output schemas; dry-run validates the chain
+- `/dynos-work:dashboard` skill: hybrid data source rendering policy state from `dynos_patterns.md` plus time-series trends (token cost, model distribution, quality score) from retrospectives
+- UCB exploration bonus in model selection: `ucb_score = composite + 0.5 * sqrt(ln(total) / sample_count)` replaces pure composite, naturally exploring under-observed model/role/task_type triples
+- Prevention rule aging with FIFO eviction: rules carry `created_task_id`, oldest evicted first at 15-rule cap, 3-task eviction exemption prevents bulk flushing
+- Baseline Policy reconstruction from best 3-task quality window when no baseline exists
+- TaskCompleted hook activation: auto-triggers learn after task completion, conditional auto-commit gated on `dynos_auto_commit` in project settings.json
+- 12 `contract.json` sidecar files across all skill directories
+- Rule sanitization in learn skill to prevent prompt injection via finding descriptions
+
+### Changed
+- Token tracking extraction now specifies exact field path (`total_tokens` from Agent tool usage summary)
+- `classification.type` / `task_type` naming normalized with explicit mapping notes across audit, execute, and repair-coordinator
+- Auto-commit uses `git add -u` (tracked files only) instead of `git add -A` to prevent staging secrets
+- Prevention rules table gains `Created` column for age tracking
+
+### Removed
+- `agents/execution-coordinator.md` (orphaned, functionality absorbed by planning agent)
+
 ## [2.11.0] - 2026-04-02
 
 ### Added

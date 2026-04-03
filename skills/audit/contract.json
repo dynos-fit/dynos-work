@@ -1,0 +1,71 @@
+{
+  "skill": "audit",
+  "description": "Run checkpoint audit, two-phase repair loop, reflect, learn, then reach DONE.",
+  "input_schema": {
+    "manifest.json": {
+      "type": "object",
+      "required": true,
+      "source": ".dynos/task-{id}/manifest.json"
+    },
+    "spec.md": {
+      "type": "string",
+      "required": true,
+      "source": ".dynos/task-{id}/spec.md"
+    },
+    "execution-graph.json": {
+      "type": "object",
+      "required": true,
+      "source": ".dynos/task-{id}/execution-graph.json"
+    },
+    "evidence/{segment-id}.md": {
+      "type": "string",
+      "required": true,
+      "source": ".dynos/task-{id}/evidence/*.md"
+    },
+    "snapshot.head_sha": {
+      "type": "string",
+      "required": true,
+      "source": "manifest.json snapshot field"
+    },
+    "dynos_patterns.md": {
+      "type": "string",
+      "required": false,
+      "source": "~/.claude/projects/<project>/memory/dynos_patterns.md"
+    },
+    "prior_task-retrospective.json": {
+      "type": "object",
+      "required": false,
+      "source": ".dynos/task-*/task-retrospective.json (most recent prior task)"
+    }
+  },
+  "output_schema": {
+    "audit-reports/{auditor}-checkpoint-{timestamp}.json": {
+      "type": "object",
+      "description": "Audit report per auditor with findings array, auditor_name, severity levels"
+    },
+    "repair-log.json": {
+      "type": "object",
+      "description": "Repair plan with batches, tasks, assigned_executor, files, parallel flag, repair_cycle"
+    },
+    "audit-summary.json": {
+      "type": "object",
+      "description": "Summary of all audit results"
+    },
+    "task-retrospective.json": {
+      "type": "object",
+      "description": "Retrospective with findings_by_auditor, findings_by_category, executor_repair_frequency, repair_cycle_count, token_usage_by_agent, quality_score, cost_score, efficiency_score"
+    },
+    "completion.json": {
+      "type": "object",
+      "description": "Task completion record"
+    },
+    "dynos_patterns.md": {
+      "type": "string",
+      "description": "Updated learned patterns file in project memory directory"
+    },
+    "execution-log.md": {
+      "type": "string",
+      "description": "Appended log entries for CHECKPOINT_AUDIT, REPAIR, and DONE stages"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "skill": "learn",
+  "description": "Aggregate task retrospectives into project memory. Computes effectiveness scores, derives Model Policy and Skip Policy.",
+  "input_schema": {
+    "task-retrospective.json": {
+      "type": "object",
+      "required": true,
+      "source": "glob .dynos/task-*/task-retrospective.json",
+      "note": "Each retrospective is an object; the skill globs for multiple files"
+    },
+    "audit-reports": {
+      "type": "object",
+      "required": false,
+      "source": "glob .dynos/task-*/audit-reports/*.json",
+      "note": "Each audit report is an object; the skill globs for multiple files"
+    },
+    "existing_dynos_patterns.md": {
+      "type": "string",
+      "required": false,
+      "source": "~/.claude/projects/<project>/memory/dynos_patterns.md (for baseline policy preservation)"
+    }
+  },
+  "output_schema": {
+    "dynos_patterns.md": {
+      "type": "string",
+      "description": "Learned patterns file with top finding categories, executor reliability, avg repair cycles, prevention rules, spawn efficiency, effectiveness scores, model policy, skip policy, baseline policy"
+    }
+  }
+}
