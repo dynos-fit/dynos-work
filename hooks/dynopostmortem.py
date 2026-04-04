@@ -384,6 +384,26 @@ def _improvements_dir(root: Path) -> Path:
     return project_dir(root) / "improvements"
 
 
+def _load_applied_ids(root: Path) -> set:
+    """Load the set of proposal IDs that have been applied."""
+    path = _improvements_dir(root) / "applied-ids.json"
+    if path.exists():
+        data = load_json(path)
+        if isinstance(data, list):
+            return set(data)
+    return set()
+
+
+def _save_applied_id(root: Path, proposal_id: str) -> None:
+    """Record a proposal ID as applied."""
+    imp_dir = _improvements_dir(root)
+    imp_dir.mkdir(parents=True, exist_ok=True)
+    path = imp_dir / "applied-ids.json"
+    applied = _load_applied_ids(root)
+    applied.add(proposal_id)
+    write_json(path, sorted(applied))
+
+
 def propose_improvements(root: Path) -> list[dict]:
     """Analyze postmortems and propose project-local improvements.
 
@@ -399,6 +419,7 @@ def propose_improvements(root: Path) -> list[dict]:
     if len(all_retros) < 3:
         return []  # Not enough data
 
+    applied_ids = _load_applied_ids(root)
     recent = all_retros[-5:]
     proposals = []
 
@@ -493,7 +514,7 @@ def propose_improvements(root: Path) -> list[dict]:
                 "observation_count": count,
             })
 
-    return proposals
+    return [p for p in proposals if p.get("id") not in applied_ids]
 
 
 def apply_improvement(root: Path, proposal: dict) -> dict:
@@ -644,6 +665,8 @@ def run_improvement_cycle(root: Path) -> dict:
     for p in proposals:
         if p.get("action") in safe_actions:
             r = apply_improvement(root, p)
+            # Track as done whether freshly applied or already-exists
+            _save_applied_id(root, p["id"])
             results.append(r)
         else:
             results.append({"id": p["id"], "applied": False, "reason": "Requires manual review"})
@@ -679,29 +702,26 @@ def cmd_list_pending(args: argparse.Namespace) -> int:
         return 0
 
     pending = []
-    # Scan all proposal files, cross-reference with results
+    globally_applied = _load_applied_ids(root)
+    seen_ids = set()
+    # Scan all proposal files, cross-reference with applied tracker
     for pfile in sorted(imp_dir.glob("proposals-*.json")):
         pdata = load_json(pfile)
         if not isinstance(pdata, dict):
             continue
-        date_key = pfile.stem.replace("proposals-", "")
-        rfile = imp_dir / f"results-{date_key}.json"
-        rdata = load_json(rfile) if rfile.exists() else {}
-        applied_ids = set()
-        for r in (rdata.get("results", []) if isinstance(rdata, dict) else []):
-            if r.get("applied"):
-                applied_ids.add(r.get("id"))
 
         for p in pdata.get("proposals", []):
             pid = p.get("id", "")
-            if pid not in applied_ids:
-                pending.append({
-                    "id": pid,
-                    "type": p.get("type"),
-                    "action": p.get("action"),
-                    "description": p.get("description"),
-                    "source_file": str(pfile),
-                })
+            if pid in globally_applied or pid in seen_ids:
+                continue
+            seen_ids.add(pid)
+            pending.append({
+                "id": pid,
+                "type": p.get("type"),
+                "action": p.get("action"),
+                "description": p.get("description"),
+                "source_file": str(pfile),
+            })
 
     print(json.dumps({"pending": pending}, indent=2))
     return 0
@@ -731,6 +751,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
         return 1
 
     result = apply_improvement(root, found)
+    if result.get("applied"):
+        _save_applied_id(root, target_id)
     # Update the results file
     date_key = datetime.now(timezone.utc).strftime("%Y%m%d")
     result_path = imp_dir / f"results-{date_key}.json"
