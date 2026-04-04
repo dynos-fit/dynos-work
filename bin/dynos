@@ -81,6 +81,18 @@ case "$cmd" in
     echo "Registering project..."
     python3 "${HOOKS_DIR}/dynoregistry.py" register "$root" 2>/dev/null || true
     mkdir -p "$root/.dynos"
+    # Check if daemon already running
+    if python3 -c "
+import json, sys
+sys.path.insert(0, '${HOOKS_DIR}')
+from dynomaintain import current_pid
+from pathlib import Path
+pid = current_pid(Path('$root'))
+sys.exit(0 if pid else 1)
+" 2>/dev/null; then
+      echo "Daemon already running. Use 'dynos local stop --root .' to stop it first."
+      exit 0
+    fi
     echo "Starting local daemon..."
     python3 "${HOOKS_DIR}/dynomaintain.py" start --root "$root" $autofix 2>/dev/null || true
     echo ""
