@@ -76,6 +76,10 @@ def logs_dir() -> Path:
     return global_home() / "logs"
 
 
+def sweeps_log_path() -> Path:
+    return global_home() / "sweeps.jsonl"
+
+
 # ---------------------------------------------------------------------------
 # Registry helpers
 # ---------------------------------------------------------------------------
@@ -693,6 +697,20 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
 
             cleanup_old_logs()
 
+            sweep_entry = {
+                "sweep": sweep_count,
+                "executed_at": now_iso(),
+                "projects_total": len(projects),
+                "projects_maintained": maintained,
+                "per_project": per_project,
+                "ok": all(p.get("ok", False) for p in per_project) if per_project else True,
+            }
+            try:
+                with open(sweeps_log_path(), "a") as f:
+                    f.write(json.dumps(sweep_entry) + "\n")
+            except OSError:
+                pass
+
             log_global(
                 f"sweep #{sweep_count} complete: "
                 f"{maintained}/{len(projects)} projects maintained"
@@ -815,14 +833,59 @@ def cmd_status(args: argparse.Namespace) -> int:
             "status": entry.get("status", ""),
         })
 
+    # Sweep history from JSONL
+    sweep_count = 0
+    total_failures = 0
+    recent_sweeps: list[dict] = []
+    sp = sweeps_log_path()
+    if sp.exists():
+        try:
+            lines = sp.read_text().strip().splitlines()
+            sweeps = [json.loads(l) for l in lines if l.strip()]
+            sweep_count = len(sweeps)
+            total_failures = sum(1 for s in sweeps if not s.get("ok"))
+            recent_sweeps = [
+                {
+                    "sweep": s.get("sweep"),
+                    "executed_at": s.get("executed_at"),
+                    "ok": s.get("ok"),
+                    "projects_maintained": s.get("projects_maintained"),
+                    "projects_total": s.get("projects_total"),
+                }
+                for s in sweeps[-5:]
+            ]
+        except (json.JSONDecodeError, OSError):
+            pass
+
     payload = {
         "running": running,
         "pid": pid,
         "last_run_at": last_run_at,
+        "sweep_count": sweep_count,
+        "total_failures": total_failures,
+        "recent_sweeps": recent_sweeps,
         "projects_maintained": len(active_projects),
         "per_project_summary": per_project_summary,
     }
     print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Show recent global daemon sweep logs."""
+    sp = sweeps_log_path()
+    if not sp.exists():
+        print(json.dumps({"sweeps": [], "message": "No sweep logs yet"}))
+        return 0
+    try:
+        lines = sp.read_text().strip().splitlines()
+        sweeps = [json.loads(l) for l in lines if l.strip()]
+    except (json.JSONDecodeError, OSError) as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+    n = int(getattr(args, "last", None) or 10)
+    recent = sweeps[-n:]
+    print(json.dumps({"total_sweeps": len(sweeps), "showing": len(recent), "sweeps": recent}, indent=2))
     return 0
 
 
@@ -854,6 +917,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_run_loop = subparsers.add_parser("run-loop", help="Run the daemon loop in foreground")
     sp_run_loop.add_argument("--poll-seconds", type=int, default=3600)
     sp_run_loop.set_defaults(func=cmd_run_loop)
+
+    sp_logs = subparsers.add_parser("logs", help="Show recent global sweep logs")
+    sp_logs.add_argument("--last", default="10", help="Number of recent sweeps to show")
+    sp_logs.set_defaults(func=cmd_logs)
 
     return parser
 
