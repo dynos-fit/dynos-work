@@ -404,6 +404,35 @@ Append to log:
 {timestamp} [DONE] learn — dynos_patterns.md updated ({N} tasks aggregated)
 ```
 
+**Postmortem + Improve (inline -- no subagent):**
+
+After learn, run the postmortem and improvement cycle. These are deterministic Python scripts:
+
+```bash
+python3 "${PLUGIN_HOOKS}/dynopostmortem.py" generate --root "${PROJECT_ROOT}"
+python3 "${PLUGIN_HOOKS}/dynopostmortem.py" improve --root "${PROJECT_ROOT}"
+```
+
+If `PLUGIN_HOOKS` is not available, use the hooks directory relative to this skill file, or run:
+```bash
+python3 hooks/dynopostmortem.py generate --root .
+python3 hooks/dynopostmortem.py improve --root .
+```
+
+Append to log:
+```
+{timestamp} [DONE] postmortem — generated for {task_id}
+{timestamp} [DONE] improve — {N} proposals, {M} applied
+```
+
+If either step fails, log the error and continue. Do not block completion.
+
+**Trajectory rebuild (inline):**
+
+```bash
+python3 "${PLUGIN_HOOKS}/dynostrajectory.py" rebuild --root "${PROJECT_ROOT}"
+```
+
 Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `dynoslib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
 ```
 {timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE
