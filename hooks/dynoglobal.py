@@ -749,7 +749,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp_logs.add_argument("--last", default="10", help="Number of recent sweeps to show")
     sp_logs.set_defaults(func=cmd_logs)
 
+    sp_dash = subparsers.add_parser("dashboard", help="Generate global dashboard")
+    sp_dash.set_defaults(func=cmd_dashboard_shim)
+
     return parser
+
+
+def cmd_dashboard_shim(args: argparse.Namespace) -> int:
+    """Shim that imports and delegates to dynoglobal_dashboard."""
+    from dynoglobal_dashboard import cmd_dashboard
+    return cmd_dashboard(args)
 
 
 def main() -> int:
