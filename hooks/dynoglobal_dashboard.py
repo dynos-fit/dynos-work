@@ -1986,12 +1986,24 @@ def cmd_restart(args: object) -> int:
         except OSError:
             pass
         _dashboard_pid_path().unlink(missing_ok=True)
-        # Wait for process to die and port to release
         for _ in range(20):
             try:
                 os.kill(pid, 0)
                 time.sleep(0.25)
             except OSError:
                 break
-        time.sleep(0.5)  # extra buffer for port release
+    else:
+        # No PID file — kill by port as fallback
+        import subprocess as _sp
+        try:
+            r = _sp.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0 and r.stdout.strip():
+                for p in r.stdout.strip().split("\n"):
+                    try:
+                        os.kill(int(p), 9)
+                    except (ValueError, OSError):
+                        pass
+        except (FileNotFoundError, _sp.TimeoutExpired):
+            pass
+    time.sleep(0.5)
     return cmd_serve(args)

@@ -750,9 +750,28 @@ def cmd_kill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _kill_port(port: int) -> None:
+    """Kill any process holding a port (fallback when PID file is missing)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for pid_str in result.stdout.strip().split("\n"):
+                try:
+                    os.kill(int(pid_str), 9)
+                except (ValueError, OSError):
+                    pass
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
 def cmd_restart(args: argparse.Namespace) -> int:
     import signal, time
     root = Path(args.root).resolve()
+    port = getattr(args, "port", 8765)
     pid = _read_local_pid(root)
     if pid is not None:
         try:
@@ -767,7 +786,10 @@ def cmd_restart(args: argparse.Namespace) -> int:
                 time.sleep(0.25)
             except OSError:
                 break
-        time.sleep(0.5)
+    else:
+        # No PID file — kill by port as fallback
+        _kill_port(port)
+    time.sleep(0.5)
     return cmd_serve(args)
 
 
