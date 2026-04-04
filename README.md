@@ -417,11 +417,30 @@ dynos plan                        # planning policy resolution
 
 ## Installation
 
-One command:
+### Most users: Plugin only
+
+```
+/plugin marketplace add HassamSheikh/dynos-work
+```
+
+That's it. You get the full task pipeline:
+
+```
+/dynos-work:start [task]          # discover, spec, plan, approve
+/dynos-work:execute               # execute the plan
+/dynos-work:audit                 # audit, repair, done
+```
+
+No CLI, no daemons, no setup. Just slash commands in Claude Code.
+
+### Power users: CLI + daemons + dashboard + autofix
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/dynos-fit/dynos-work/main/install.sh | bash
+source ~/.bashrc
 ```
+
+This gives you the `dynos` CLI with everything: project daemons, global dashboard, autofix scanner, and all internal tools. See the [CLI](#cli) section above.
 
 Or clone and install:
 
@@ -431,28 +450,20 @@ cd dynos-work
 ./install.sh
 ```
 
-The installer:
-1. Clones (or updates) dynos-work to `~/.dynos-work`
-2. Adds `dynos` CLI to your PATH
-3. Creates `~/.dynos` global state directory
-4. Registers the current project (if in a git repo)
-5. Starts the local daemon (with autofix if `claude` + `gh` are available)
+### Contributors
 
-After install, open a new terminal (or `source ~/.bashrc`) and everything works.
-
-### Plugin install (Claude Code)
-
-If you use Claude Code as an IDE plugin:
-
-```
-/plugin marketplace add HassamSheikh/dynos-work
+```bash
+git clone https://github.com/dynos-fit/dynos-work.git
+cd dynos-work
+./install.sh --develop
 ```
 
-The slash commands (`/dynos-work:start`, `/dynos-work:execute`, `/dynos-work:audit`) work immediately after plugin install. The CLI setup above is only needed for the daemon, dashboard, and proactive scanner.
+Uses your local repo directly. Changes take effect immediately. Runs tests on setup.
 
 ### Requirements
 
-- **Required:** git, python3
+- **Plugin only:** Claude Code
+- **CLI install:** git, python3
 - **Recommended:** `gh` (GitHub CLI, for autofix PRs/issues), `claude` (Claude CLI, for autofix code changes)
 - **Optional:** `pip-audit` (dependency vulnerability scanning), `npm` (JS dependency scanning)
 
