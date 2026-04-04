@@ -522,19 +522,44 @@ dynos report --root .                      # generate report JSON
 
 ## Installation
 
+One command:
+
 ```bash
+curl -sSL https://raw.githubusercontent.com/dynos-fit/dynos-work/main/install.sh | bash
+```
+
+Or clone and install:
+
+```bash
+git clone https://github.com/dynos-fit/dynos-work.git
+cd dynos-work
+./install.sh
+```
+
+The installer:
+1. Clones (or updates) dynos-work to `~/.dynos-work`
+2. Adds `dynos` CLI to your PATH
+3. Creates `~/.dynos` global state directory
+4. Registers the current project (if in a git repo)
+5. Starts the local daemon (with autofix if `claude` + `gh` are available)
+
+After install, open a new terminal (or `source ~/.bashrc`) and everything works.
+
+### Plugin install (Claude Code)
+
+If you use Claude Code as an IDE plugin:
+
+```
 /plugin marketplace add HassamSheikh/dynos-work
-/plugin install dynos-work
 ```
 
-After installing, add the CLI tools to your PATH (one-time):
+The slash commands (`/dynos-work:start`, `/dynos-work:execute`, `/dynos-work:audit`) work immediately after plugin install. The CLI setup above is only needed for the daemon, dashboard, and proactive scanner.
 
-```bash
-echo 'export PATH="$HOME/.claude/plugins/marketplaces/dynos-work/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
+### Requirements
 
-This gives you `dynos-global`, `dynos-registry`, `dynos-postmortem`, and `dynos-router` commands from any directory.
+- **Required:** git, python3
+- **Recommended:** `gh` (GitHub CLI, for autofix PRs/issues), `claude` (Claude CLI, for autofix code changes)
+- **Optional:** `pip-audit` (dependency vulnerability scanning), `npm` (JS dependency scanning)
 
 ## Philosophy
 
