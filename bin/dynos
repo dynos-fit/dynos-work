@@ -29,6 +29,7 @@ Project commands:
 Global commands:
   global        Cross-project sweeper: start, stop, status, logs, run-once
   dashboard     Global dashboard: serve, stop, restart
+  list          List all registered projects
   registry      Project registration: register, unregister, list, pause, resume
 
 Internals (advanced):
@@ -109,6 +110,7 @@ sys.exit(0 if pid else 1)
   # --- Global commands ---
   global) exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@" ;;
   registry) exec python3 "${HOOKS_DIR}/dynoregistry.py" "$@" ;;
+  list) exec python3 "${HOOKS_DIR}/dynoregistry.py" list "$@" ;;
 
   # --- Global dashboard (top-level) ---
   dashboard)
