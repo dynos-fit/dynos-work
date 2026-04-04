@@ -7,7 +7,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(pwd)"
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 # --- Step 1: Learn — aggregate retrospectives into project memory ---
 claude -p "Run /dynos-work:learn for the most recently completed task" || true
