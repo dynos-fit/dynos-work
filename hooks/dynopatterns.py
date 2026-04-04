@@ -5,9 +5,10 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import argparse
+import json
 from pathlib import Path
 
-from dynoslib import collect_retrospectives, ensure_learned_registry, now_iso, _persistent_project_dir
+from dynoslib import collect_retrospectives, ensure_learned_registry, now_iso, _persistent_project_dir, load_json, write_json
 
 DEFAULT_TASK_TYPES = ["feature", "bugfix", "refactor", "migration", "ml", "full-stack"]
 DEFAULT_EXECUTOR_ROLES = [
@@ -100,13 +101,13 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _build_model_policy(
-    task_types: list[str],
-    executor_roles: list[str],
-    auditor_roles: list[str],
+def _build_model_policy_data(
     retrospectives: list[dict],
-) -> list[str]:
-    # Build (role, task_type) -> list of (model, quality) from retrospective data
+) -> dict[str, dict]:
+    """Compute model policy data: {role:task_type -> {model, sample_count, mean_quality}}.
+
+    Only includes entries with >= 2 observations (enough signal to recommend).
+    """
     observations: dict[tuple[str, str], list[tuple[str, float]]] = {}
     for retro in retrospectives:
         task_type = retro.get("task_type")
@@ -119,15 +120,31 @@ def _build_model_policy(
         for role, model in models.items():
             if isinstance(model, str) and model:
                 observations.setdefault((role, task_type), []).append((model, float(quality)))
-    # For each (role, task_type), pick the model with the highest average quality
-    best: dict[tuple[str, str], str] = {}
-    for key, obs_list in observations.items():
+    result: dict[str, dict] = {}
+    for (role, task_type), obs_list in observations.items():
         model_scores: dict[str, list[float]] = {}
         for model, quality in obs_list:
             model_scores.setdefault(model, []).append(quality)
         ranked = sorted(model_scores.items(), key=lambda x: -_mean(x[1]))
         if ranked and len(ranked[0][1]) >= 2:
-            best[key] = ranked[0][0]
+            best_model = ranked[0][0]
+            scores = ranked[0][1]
+            key = f"{role}:{task_type}"
+            result[key] = {
+                "model": best_model,
+                "sample_count": len(scores),
+                "mean_quality": round(_mean(scores), 4),
+            }
+    return result
+
+
+def _build_model_policy(
+    task_types: list[str],
+    executor_roles: list[str],
+    auditor_roles: list[str],
+    model_policy_data: dict[str, dict],
+) -> list[str]:
+    """Render model policy markdown from pre-computed data."""
     lines = [
         "## Model Policy",
         "",
@@ -136,17 +153,45 @@ def _build_model_policy(
     ]
     for role in sorted(set(executor_roles + auditor_roles)):
         for task_type in task_types:
-            model = best.get((role, task_type), "default")
+            key = f"{role}:{task_type}"
+            entry = model_policy_data.get(key)
+            model = entry["model"] if entry else "default"
             lines.append(f"| {role} | {task_type} | {model} |")
     return lines
 
 
-def _build_skip_policy(retrospectives: list[dict], auditor_roles: list[str]) -> list[str]:
+def _build_skip_policy_data(
+    retrospectives: list[dict],
+    auditor_roles: list[str],
+) -> dict[str, dict]:
+    """Compute skip policy data: {auditor -> {threshold, confidence}}.
+
+    Skip-exempt auditors are excluded.
+    """
     streaks: dict[str, list[float]] = {}
     for item in retrospectives:
         for role, value in item.get("auditor_zero_finding_streaks", {}).items():
             if isinstance(role, str) and isinstance(value, (int, float)):
                 streaks.setdefault(role, []).append(float(value))
+    result: dict[str, dict] = {}
+    for role in auditor_roles:
+        if role in SKIP_EXEMPT_AUDITORS:
+            continue
+        avg_streak = _mean(streaks.get(role, []))
+        threshold = max(3, min(6, int(round(avg_streak)) or 3))
+        confidence = min(0.99, round(avg_streak / 5, 2))
+        result[role] = {
+            "threshold": threshold,
+            "confidence": confidence,
+        }
+    return result
+
+
+def _build_skip_policy(
+    auditor_roles: list[str],
+    skip_policy_data: dict[str, dict],
+) -> list[str]:
+    """Render skip policy markdown from pre-computed data."""
     lines = [
         "## Skip Policy",
         "",
@@ -156,14 +201,53 @@ def _build_skip_policy(retrospectives: list[dict], auditor_roles: list[str]) -> 
     for role in auditor_roles:
         if role in SKIP_EXEMPT_AUDITORS:
             continue
-        avg_streak = _mean(streaks.get(role, []))
-        threshold = max(3, min(6, int(round(avg_streak)) or 3))
-        confidence = min(0.99, round(avg_streak / 5, 2))
-        lines.append(f"| {role} | {threshold} | {confidence:.2f} |")
+        entry = skip_policy_data.get(role, {"threshold": 3, "confidence": 0.0})
+        lines.append(f"| {role} | {entry['threshold']} | {entry['confidence']:.2f} |")
     return lines
 
 
-def _build_agent_routing(task_types: list[str], executor_roles: list[str], auditor_roles: list[str], registry: dict) -> list[str]:
+def _build_route_policy_data(
+    task_types: list[str],
+    executor_roles: list[str],
+    auditor_roles: list[str],
+    registry: dict,
+) -> dict[str, dict]:
+    """Compute route policy data: {role:task_type -> {mode, agent_path, agent_name, composite_score}}."""
+    result: dict[str, dict] = {}
+    for item in registry.get("agents", []):
+        role = str(item.get("role", ""))
+        task_type = str(item.get("task_type", ""))
+        if not role or not task_type:
+            continue
+        key = f"{role}:{task_type}"
+        composite = float(item.get("benchmark_summary", {}).get("mean_composite", 0.0) or 0.0)
+        result[key] = {
+            "mode": str(item.get("mode", "shadow")),
+            "agent_path": str(item.get("path", "")),
+            "agent_name": str(item.get("agent_name", "")),
+            "composite_score": round(composite, 4),
+        }
+    for role in sorted(set(executor_roles + auditor_roles)):
+        for task_type in task_types:
+            key = f"{role}:{task_type}"
+            if key not in result:
+                result[key] = {
+                    "mode": "generic",
+                    "agent_path": None,
+                    "agent_name": None,
+                    "composite_score": 0.0,
+                }
+    return result
+
+
+def _build_agent_routing(
+    task_types: list[str],
+    executor_roles: list[str],
+    auditor_roles: list[str],
+    registry: dict,
+    route_policy_data: dict[str, dict],
+) -> list[str]:
+    """Render agent routing markdown from pre-computed data."""
     lines = [
         "## Agent Routing",
         "",
@@ -202,13 +286,106 @@ def _build_agent_routing(task_types: list[str], executor_roles: list[str], audit
     return lines
 
 
-def build_patterns_markdown(root: Path) -> str:
+def _migrate_model_overrides(root: Path, model_policy_data: dict[str, dict]) -> dict[str, dict]:
+    """Migrate model_overrides from policy.json into model-policy.json data.
+
+    Entries from policy.json are seeded with source "explicit_policy".
+    Existing explicit_policy entries in model-policy.json are preserved.
+    After successful migration, model_overrides is removed from policy.json.
+    Returns the merged model policy data.
+    """
+    persistent = _persistent_project_dir(root)
+    policy_path = persistent / "policy.json"
+    mp_path = persistent / "model-policy.json"
+
+    # Load existing model-policy.json to preserve explicit_policy entries
+    existing_mp: dict[str, dict] = {}
+    if mp_path.exists():
+        try:
+            existing_mp = load_json(mp_path)
+        except (json.JSONDecodeError, OSError):
+            existing_mp = {}
+
+    # Load policy.json for migration
+    policy: dict = {}
+    if policy_path.exists():
+        try:
+            policy = load_json(policy_path)
+        except (json.JSONDecodeError, OSError):
+            policy = {}
+
+    overrides = policy.get("model_overrides", {})
+
+    # Start with computed data
+    merged = dict(model_policy_data)
+
+    # Layer on migrated overrides with source "explicit_policy",
+    # but do not overwrite existing explicit_policy entries
+    for key, model in overrides.items():
+        if isinstance(model, str) and key not in existing_mp:
+            merged[key] = {
+                "model": model,
+                "source": "explicit_policy",
+                "sample_count": 0,
+                "mean_quality": 0.0,
+            }
+
+    # Preserve existing explicit_policy entries from model-policy.json
+    for key, entry in existing_mp.items():
+        if isinstance(entry, dict) and entry.get("source") == "explicit_policy":
+            merged[key] = entry
+
+    # Remove model_overrides from policy.json after migration
+    if "model_overrides" in policy:
+        del policy["model_overrides"]
+        write_json(policy_path, policy)
+
+    return merged
+
+
+def _write_policy_json_files(
+    root: Path,
+    model_policy_data: dict[str, dict],
+    skip_policy_data: dict[str, dict],
+    route_policy_data: dict[str, dict],
+) -> None:
+    """Write all three JSON policy files atomically."""
+    persistent = _persistent_project_dir(root)
+    write_json(persistent / "model-policy.json", model_policy_data)
+    write_json(persistent / "skip-policy.json", skip_policy_data)
+    write_json(persistent / "route-policy.json", route_policy_data)
+
+
+def build_patterns_markdown(
+    root: Path,
+    *,
+    model_policy_data: dict[str, dict] | None = None,
+    skip_policy_data: dict[str, dict] | None = None,
+    route_policy_data: dict[str, dict] | None = None,
+) -> str:
+    """Build the dynos_patterns.md content.
+
+    When policy data dicts are provided, uses them directly (data-first path).
+    When called without them, computes the data inline (backward compat).
+    """
     retrospectives = collect_retrospectives(root)
     registry = ensure_learned_registry(root)
     task_types = _observed_task_types(retrospectives, registry)
     executor_roles = _observed_executor_roles(retrospectives, registry)
     auditor_roles = _observed_auditor_roles(retrospectives, registry)
-    active_routes = sum(1 for item in registry.get("agents", []) if item.get("route_allowed"))
+
+    if model_policy_data is None:
+        model_policy_data = _build_model_policy_data(retrospectives)
+    if skip_policy_data is None:
+        skip_policy_data = _build_skip_policy_data(retrospectives, auditor_roles)
+    if route_policy_data is None:
+        route_policy_data = _build_route_policy_data(
+            task_types, executor_roles, auditor_roles, registry
+        )
+
+    active_routes = sum(
+        1 for item in registry.get("agents", []) if item.get("route_allowed")
+    )
     lines = [
         "# dynos-work Patterns",
         "",
@@ -250,17 +427,56 @@ def build_patterns_markdown(root: Path) -> str:
             task_id = str(item.get("task_id"))
             task_type = str(item.get("task_type"))
             score = float(item.get("quality_score", 0.0))
-            lines.append(f"| {task_id} | {task_type} | High-quality completed task (quality {score:.2f}). |")
+            lines.append(
+                f"| {task_id} | {task_type} | High-quality completed task (quality {score:.2f}). |"
+            )
     else:
         lines.append("| none | n/a | No completed retrospectives available yet. |")
-    lines.extend([""] + _build_model_policy(task_types, executor_roles, auditor_roles, retrospectives))
-    lines.extend([""] + _build_skip_policy(retrospectives, auditor_roles))
-    lines.extend([""] + _build_agent_routing(task_types, executor_roles, auditor_roles, registry))
+    lines.extend(
+        [""]
+        + _build_model_policy(task_types, executor_roles, auditor_roles, model_policy_data)
+    )
+    lines.extend([""] + _build_skip_policy(auditor_roles, skip_policy_data))
+    lines.extend(
+        [""]
+        + _build_agent_routing(
+            task_types, executor_roles, auditor_roles, registry, route_policy_data
+        )
+    )
     return "\n".join(lines) + "\n"
 
 
 def write_patterns(root: Path) -> dict:
-    content = build_patterns_markdown(root)
+    """Generate policy data, write JSON files, then render and write markdown."""
+    # Step 1: Collect source data
+    retrospectives = collect_retrospectives(root)
+    registry = ensure_learned_registry(root)
+    task_types = _observed_task_types(retrospectives, registry)
+    executor_roles = _observed_executor_roles(retrospectives, registry)
+    auditor_roles = _observed_auditor_roles(retrospectives, registry)
+
+    # Step 2: Compute policy data structures
+    model_policy_data = _build_model_policy_data(retrospectives)
+    skip_policy_data = _build_skip_policy_data(retrospectives, auditor_roles)
+    route_policy_data = _build_route_policy_data(
+        task_types, executor_roles, auditor_roles, registry
+    )
+
+    # Step 3: Migrate model_overrides from policy.json (merges with computed data)
+    model_policy_data = _migrate_model_overrides(root, model_policy_data)
+
+    # Step 4: Write JSON policy files
+    _write_policy_json_files(root, model_policy_data, skip_policy_data, route_policy_data)
+
+    # Step 5: Render markdown from the same data
+    content = build_patterns_markdown(
+        root,
+        model_policy_data=model_policy_data,
+        skip_policy_data=skip_policy_data,
+        route_policy_data=route_policy_data,
+    )
+
+    # Step 6: Write markdown files
     written: list[str] = []
     failed: list[dict] = []
     for path in pattern_paths(root):
@@ -283,7 +499,7 @@ def main() -> int:
     parser.add_argument("--root", default=".")
     args = parser.parse_args()
     result = write_patterns(Path(args.root).resolve())
-    print(__import__("json").dumps(result, indent=2))
+    print(json.dumps(result, indent=2))
     return 0
 
 

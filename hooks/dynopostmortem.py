@@ -523,7 +523,8 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
             result["reason"] = f"Field {field} already exists in policy"
 
     elif action == "adjust_model_policy":
-        policy_path = _persistent_project_dir(root) / "policy.json"
+        persistent = _persistent_project_dir(root)
+        policy_path = persistent / "policy.json"
         policy = {}
         if policy_path.exists():
             try:
@@ -546,6 +547,30 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
             result["reason"] = f"Set haiku for {len(overrides)} non-security auditor:task_type pairs"
         else:
             result["reason"] = "Model overrides already set"
+
+        # Write recommendations to model-policy.json, preserving explicit_policy entries
+        mp_path = persistent / "model-policy.json"
+        model_policy = {}
+        if mp_path.exists():
+            try:
+                model_policy = load_json(mp_path)
+            except (json.JSONDecodeError, OSError):
+                model_policy = {}
+        mp_changed = False
+        for role in ("spec-completion-auditor", "code-quality-auditor", "dead-code-auditor"):
+            for tt in ("feature", "bugfix", "refactor"):
+                key = f"{role}:{tt}"
+                existing = model_policy.get(key, {})
+                if existing.get("source") == "explicit_policy":
+                    continue
+                model_policy[key] = {
+                    "model": "haiku",
+                    "source": "postmortem_recommendation",
+                }
+                mp_changed = True
+        if mp_changed:
+            write_json(mp_path, model_policy)
+            result["applied"] = True
 
     elif action == "add_prevention_rule":
         # Write to a prevention-rules.json that the router/executor can read

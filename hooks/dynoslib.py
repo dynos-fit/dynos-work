@@ -639,33 +639,105 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     return float(value) if isinstance(value, (int, float)) else default
 
 
+# Token usage estimates per model when real data is unavailable
+TOKEN_ESTIMATES = {"opus": 45000, "sonnet": 25000, "haiku": 12000, "default": 20000}
+
+
+def compute_quality_score(findings_by_auditor: dict, repair_cycle_count: int) -> float:
+    """Deterministic quality score from structured audit data.
+
+    Never trust LLM-written quality_score — always recompute from findings.
+    """
+    if not isinstance(findings_by_auditor, dict):
+        return 0.9
+    total_findings = sum(v for v in findings_by_auditor.values() if isinstance(v, (int, float)))
+    if total_findings == 0:
+        return 0.9  # Zero findings may indicate auditor gaps, not perfection
+    repairs = max(0, int(repair_cycle_count or 0))
+    if repairs > 0:
+        # Heuristic: each repair cycle resolves ~2 findings
+        surviving = max(0, total_findings - repairs * 2)
+        return max(0.0, 1 - (surviving / total_findings))
+    return 1 / (1 + total_findings)
+
+
+def estimate_token_usage(subagent_spawn_count: int, model_used_by_agent: dict) -> int:
+    """Estimate total token usage when real data is unavailable."""
+    if isinstance(model_used_by_agent, dict) and model_used_by_agent:
+        return sum(
+            TOKEN_ESTIMATES.get(m, TOKEN_ESTIMATES["default"])
+            for m in model_used_by_agent.values()
+            if isinstance(m, str)
+        ) or subagent_spawn_count * TOKEN_ESTIMATES["default"]
+    return max(1, int(subagent_spawn_count or 0)) * TOKEN_ESTIMATES["default"]
+
+
+def validate_retrospective_scores(retro: dict) -> dict:
+    """Recompute quality/cost/efficiency scores deterministically, overwriting LLM values."""
+    retro = dict(retro)  # shallow copy
+    findings_by_auditor = retro.get("findings_by_auditor", {})
+    repair_cycles = int(retro.get("repair_cycle_count", 0) or 0)
+    spec_iterations = int(retro.get("spec_review_iterations", 0) or 0)
+    subagent_spawns = int(retro.get("subagent_spawn_count", 0) or 0)
+    risk_level = str(retro.get("task_risk_level", "medium"))
+    agent_source = retro.get("agent_source", {})
+    model_used = retro.get("model_used_by_agent", {})
+
+    # Quality — always deterministic
+    retro["quality_score"] = compute_quality_score(findings_by_auditor, repair_cycles)
+
+    # Efficiency
+    retro["efficiency_score"] = max(0.0, 1 - (repair_cycles / 3) - (max(0, spec_iterations - 1) * 0.1))
+
+    # Cost — use estimated tokens if real data missing
+    total_tokens = _safe_float(retro.get("total_token_usage"), 0.0)
+    token_estimated = False
+    if total_tokens == 0 and subagent_spawns > 0:
+        total_tokens = float(estimate_token_usage(subagent_spawns, model_used))
+        token_estimated = True
+    budget = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}.get(risk_level, 12000)
+    avg_tokens = total_tokens / max(1, subagent_spawns)
+    cost_score = max(0.0, min(1.0, 1 / (1 + (avg_tokens / budget))))
+    if isinstance(agent_source, dict) and agent_source and all(v == "generic" for v in agent_source.values()):
+        cost_score = max(0.0, cost_score - 0.05)
+    retro["cost_score"] = cost_score
+    if token_estimated:
+        retro["token_usage_estimated"] = True
+
+    return retro
+
+
 def make_trajectory_entry(retrospective: dict) -> dict:
     findings = retrospective.get("findings_by_category", {})
     categories = findings if isinstance(findings, dict) else {}
     task_domains = retrospective.get("task_domains", "")
     domains = [part.strip() for part in task_domains.split(",") if part.strip()]
-    quality_score = _safe_float(retrospective.get("quality_score"), 0.0)
-    cost_score = _safe_float(retrospective.get("cost_score"), 0.0)
-    efficiency_score = _safe_float(retrospective.get("efficiency_score"), 0.0)
-    if quality_score == 0 and cost_score == 0 and efficiency_score == 0:
-        total_findings = sum(v for v in categories.values() if isinstance(v, int))
-        repair_cycles = int(retrospective.get("repair_cycle_count", 0) or 0)
-        spec_iterations = int(retrospective.get("spec_review_iterations", 0) or 0)
-        total_tokens = _safe_float(retrospective.get("total_token_usage"), 0.0)
-        subagent_spawns = int(retrospective.get("subagent_spawn_count", 0) or 0)
-        risk_level = str(retrospective.get("task_risk_level", "medium"))
-        agent_source = retrospective.get("agent_source", {})
-        # Quality: cap at 0.9 when zero findings (may indicate auditor gaps)
-        quality_score = 0.9 if total_findings == 0 else 1 / (1 + total_findings)
-        # Efficiency: penalize repair cycles and excess spec iterations
-        efficiency_score = max(0.0, 1 - (repair_cycles / 3) - (max(0, spec_iterations - 1) * 0.1))
-        # Cost: normalize by risk-level token budget per spawn
-        budget_per_spawn = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}.get(risk_level, 12000)
-        avg_tokens = total_tokens / max(1, subagent_spawns)
-        cost_score = max(0.0, min(1.0, 1 / (1 + (avg_tokens / budget_per_spawn))))
-        # Penalty: all-generic routing means no learned leverage
-        if isinstance(agent_source, dict) and agent_source and all(v == "generic" for v in agent_source.values()):
-            cost_score = max(0.0, cost_score - 0.05)
+
+    # Always recompute quality deterministically — never trust LLM-written value
+    findings_by_auditor = retrospective.get("findings_by_auditor", {})
+    repair_cycles = int(retrospective.get("repair_cycle_count", 0) or 0)
+    quality_score = compute_quality_score(findings_by_auditor, repair_cycles)
+
+    # Re-derive efficiency
+    spec_iterations = int(retrospective.get("spec_review_iterations", 0) or 0)
+    efficiency_score = max(0.0, 1 - (repair_cycles / 3) - (max(0, spec_iterations - 1) * 0.1))
+
+    # Re-derive cost with token estimation
+    total_tokens = _safe_float(retrospective.get("total_token_usage"), 0.0)
+    subagent_spawns = int(retrospective.get("subagent_spawn_count", 0) or 0)
+    token_estimated = False
+    if total_tokens == 0 and subagent_spawns > 0:
+        model_used = retrospective.get("model_used_by_agent", {})
+        total_tokens = float(estimate_token_usage(subagent_spawns, model_used))
+        token_estimated = True
+    risk_level = str(retrospective.get("task_risk_level", "medium"))
+    budget_per_spawn = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}.get(risk_level, 12000)
+    avg_tokens = total_tokens / max(1, subagent_spawns)
+    cost_score = max(0.0, min(1.0, 1 / (1 + (avg_tokens / budget_per_spawn))))
+    agent_source = retrospective.get("agent_source", {})
+    if isinstance(agent_source, dict) and agent_source and all(v == "generic" for v in agent_source.values()):
+        cost_score = max(0.0, cost_score - 0.05)
+
     wq, we, wc = COMPOSITE_WEIGHTS
     reward = round(wq * quality_score + we * efficiency_score + wc * cost_score, 6)
     return {
@@ -692,6 +764,7 @@ def make_trajectory_entry(retrospective: dict) -> dict:
             "cost_score": cost_score,
             "efficiency_score": efficiency_score,
             "composite_reward": reward,
+            "token_usage_estimated": token_estimated,
         },
         "outcome": retrospective.get("task_outcome", "UNKNOWN"),
     }

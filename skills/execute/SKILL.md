@@ -103,12 +103,7 @@ Each executor receives:
 2. The full text of each acceptance criterion referenced by the segment's `criteria_ids` field, extracted from `spec.md`
 3. Evidence files from dependency segments: for each segment ID in the executor's `depends_on` list, read `.dynos/task-{id}/evidence/{dependency-segment-id}.md` and include its contents
 4. Instruction to write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
-5. **Prevention rules:** If `dynos_patterns.md` exists, read its `## Prevention Rules` section. Filter to rows where the `Executor` column matches the executor type being spawned. Include matching rules in the executor's spawn instructions.
-6. **Reference Implementation (Gold Standard):** If `dynos_patterns.md` exists, read its `## Gold Standard Instances` table. If one or more tasks appear with a `Type` matching the current task's `task_type`, provide the most recent matching `Task ID` to the executor as a reference. Include this block:
-   ```
-   ## Reference Implementation (Gold Standard)
-   You may read relevant files from `.dynos/{id}/` (spec.md, plan.md) and the project's source tree matching that task's modified files.
-   ```
+5. **Prevention rules and gold standard:** The router's executor-plan output (called above) and the planner's `policy-packet.json` (generated via `dynoplanner.py task-policy`) include prevention rules filtered by executor type and gold standard references for the current task type. Pass the relevant entries from these outputs to each executor's spawn instructions. Do not read `dynos_patterns.md` tables manually.
 
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 

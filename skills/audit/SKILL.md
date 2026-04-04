@@ -40,109 +40,13 @@ For each auditor in the plan:
 - If `action: "spawn"`: spawn with the specified `model` (null = default), using `agent_path` if `route_mode` is "learned" or "alongside"
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
 
-The router handles fast-track reduction, skip policy, model policy, security floor enforcement, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions.
+The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
-**Normal mode (fast_track is false or absent):**
+**Ensemble Voting for High-Risk Audits:** For `security-auditor` and `db-schema-auditor`, the router marks them for ensemble voting. Spawn two cheaper models (Haiku + Sonnet) in parallel first. If both return zero findings, the audit passes (`[VOTE] ... PASS`). If either returns findings, discard voting results and escalate to Opus (`[VOTE] ... Escalating to Opus`). The Opus result is final and binding.
 
-**Always spawn (universal, skip-exempt auditors):**
-- `spec-completion-auditor`
-- `security-auditor`
-- `code-quality-auditor`
+**Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log: `{timestamp} [VISION] UI audit complete -- {N} visual bugs found`.
 
-**Always spawn (skip-eligible universal auditor):**
-- `dead-code-auditor`
-
-**Conditionally spawn (skip-eligible):**
-- `ui-auditor` — spawn only if classification `domains` includes `"ui"` OR any segment in `execution-graph.json` has `executor` value `"ui-executor"`
-- `db-schema-auditor` — spawn only if classification `domains` includes `"db"` OR any segment in `execution-graph.json` has `executor` value `"db-executor"`
-
-**When classification is null or missing:** spawn only the 4 universal auditors. Skip `ui-auditor` and `db-schema-auditor`.
-
-**Auditor skip on zero-finding streak (Skip Policy):**
-
-Before spawning, check whether any skip-eligible auditors should be skipped based on their zero-finding streak from prior tasks.
-
-1. Find the most recent completed task directory (not the current task). Look for `.dynos/task-*/task-retrospective.json` files, sort by task ID descending, and select the first one that is not the current task.
-2. Read the `auditor_zero_finding_streaks` field (object mapping auditor name to streak count). If the field is missing, the file does not exist, or the file contains the old single-integer `auditor_zero_finding_streak` format instead, treat all streaks as `0` (skip no one).
-4. **Determine skip threshold from Skip Policy table:** Read `dynos_patterns.md` from the project memory directory (`~/.claude/projects/<project>/memory/`, where `<project>` is derived from the cwd by replacing `/` with `-`). Look for a markdown table under the heading `## Skip Policy`. The table has columns `| Auditor | Skip Threshold | Confidence |`. For each skip-eligible auditor, use its row's threshold value. If `dynos_patterns.md` is missing, unreadable, malformed, has no `## Skip Policy` section, or has no row for a given auditor (cold-start), fall back to a default threshold of `3`. Append to log when falling back:
-   ```
-   {timestamp} [WARN] policy table missing/corrupt -- using defaults
-   ```
-   Log this warning at most once per audit run, not per auditor.
-5. **Dynamic Rigor Scaling (Low Risk):** If the task `risk_level` (from `manifest.json`) is `"low"` AND a skip-eligible auditor's `Confidence` in the Skip Policy table is `> 0.9`, **double** its effective skip threshold for the current run. This rewards high-performing, stable agents by reducing their oversight on low-stakes tasks. Log:
-   ```
-   {timestamp} [RIGOR] aggressive skip enabled for {auditor-name} (low risk + high confidence)
-   ```
-6. For each skip-eligible auditor (`dead-code-auditor`, `ui-auditor`, `db-schema-auditor`): if its streak value in `auditor_zero_finding_streaks` is `>=` the resolved (and potentially scaled) skip threshold for that auditor, do not spawn it. Append to log:
-   ```
-   {timestamp} [SKIP] {auditor-name} — zero-finding streak {N} (threshold {T})
-   ```
-7. Skip-exempt auditors (`security-auditor`, `spec-completion-auditor`, `code-quality-auditor`) are never skipped regardless of streak or rigor.
-
-**Ensemble Voting for High-Risk Audits (Model Optimization):**
-
-For auditors categorized as **High-Risk** (`security-auditor` and `db-schema-auditor`), use the ensemble voting strategy to minimize costs while maintaining high security:
-
-1.  **Initial Pass (Voting):** Do not spawn the recommended model (Opus) immediately. Instead, spawn **two (2) cheaper models** in parallel: one `Haiku` and one `Sonnet`.
-2.  **Agreement Check:**
-    *   If **both** models return **Zero Findings**: The audit is considered a **PASS**. Record the success and move to the next stage. Log:
-        ```
-        {timestamp} [VOTE] {auditor-name} — PASS (Haiku + Sonnet agree)
-        ```
-    *   If **either** model returns **One or More Findings** (even if they disagree on the specifics): Immediately discard the results of the voting pass and **Escalate** to the authoritative model (`Opus`). Log:
-        ```
-        {timestamp} [VOTE] {auditor-name} — disagreement/findings detected. Escalating to Opus for authoritative audit...
-        ```
-3.  **Authoritative Pass (Escalated):** Spawn the `security-auditor` or `db-schema-auditor` using `model: "opus"`. This result is final and binding. This ensures that we only pay the "Opus tax" when there is actual complexity or a potential issue to investigate.
-
-**Visual Audit Pass (Multi-Modal Verification):**
-
-For tasks where `domains` includes `"ui"`, perform a **Visual Audit** in addition to the standard code-based audits:
-
-1. **Environmental Setup:** Ensure the dev server is running (e.g., `npm run dev`). 
-2. **Screenshot Capture:** Use the **browser subagent** to navigate to the modified screen(s) and take a high-resolution screenshot. 
-3. **Visual Evaluation:** Use a **multi-modal model (Claude 3.5 Sonnet)** to audit the screenshot against the `Design Decisions` defined in the planning phase.
-   - Look for: visual regressions, layout shift, poor color contrast, and incorrect copy.
-   - Verify that the rendered UI matches the "Design Options" selected by the user.
-4. **Report findings:** Any visual findings are added to the main audit finding set with the category `vision-finding`. 
-5. **Log result:** `{timestamp} [VISION] UI audit complete -- {N} visual bugs found`.
-
-**Auditor model selection (Model Policy):**
-
-Before spawning each auditor, determine which model to use:
-
-1. Read `dynos_patterns.md` from the project memory directory (same path as above). Look for a markdown table under the heading `## Model Policy`. The table has columns `| Role | Task Type | Recommended Model |`. Match each auditor name against the `Role` column and the current task's `task_type` against the `Task Type` column. Read `classification.type` from manifest — this is the task's `task_type`. Use the `Recommended Model` value from the matching row.
-2. If `dynos_patterns.md` is missing, unreadable, malformed, has no `## Model Policy` section, or has no matching row for a given auditor and task type, fall back to the default model. Log once per audit run if the policy table is unavailable (reuse the same `[WARN]` log from skip policy if already emitted; do not duplicate).
-3. **Ensemble Voting Trigger:** If the auditor is `security-auditor` or `db-schema-auditor`, follow the **Ensemble Voting** logic described above. This overrides the standard Model Policy selection.
-4. **Security floor enforcement:** For any *final* or *non-voting* spawn of `security-auditor`, the model must never be below `opus`.
-5. For each auditor, append to log:
-   ```
-   {timestamp} [MODEL] {auditor-name} using {model} (source: {policy|default|vote})
-   ```
-   Use `policy` when the model came from a matching Model Policy row. Use `default` when falling back. Use `vote` when the ensemble voting strategy was used.
-
-**Agent Routing (learned auditor selection):**
-
-After resolving skip, model, and voting policies, determine whether each auditor should use a generic prompt, a learned prompt, or both:
-
-1. Prefer the live registry resolver: `python3 hooks/dynoroute.py {auditor-name} {task_type} --root .`. Match the current auditor name and `classification.type` from `manifest.json`. If the resolver returns `source = learned:{agent-name}` with `route_allowed = true`, use that entry's `path`, `mode`, and `composite`. If it returns `generic`, use the built-in auditor. The markdown `## Agent Routing` table in `dynos_patterns.md` is explanatory memory only and should not override the live registry.
-2. **Security-auditor replace protection:** The `security-auditor` must NEVER be replaced by a learned auditor. Even if a learned security auditor exists in the Agent Routing table with mode=replace, always run the generic `security-auditor`. A learned security auditor may only run in alongside mode (supplementary, never replacing). This matches the monotonicity constraint (security-auditor never downgraded). If a replace entry is found for `security-auditor`, override it to alongside and log: `{timestamp} [WARN] security-auditor replace blocked -- forced to alongside (monotonicity)`.
-3. **Voting Pass Restriction:** Learned auditors never partake in the initial Ensemble Voting pass. Only the generic `security-auditor` or `db-schema-auditor` definitions are used for the voting pass to ensure a consistent baseline.
-4. For each auditor that was not skipped, check its row in the Agent Routing table:
-   - **No entry:** Use the generic auditor. Append to log:
-     ```
-     {timestamp} [ROUTE] {auditor-name} using generic (mode: default)
-     ```
-   - **Mode = `replace`:** Use only the learned auditor prompt (from the `Agent Path` column). Do not spawn the generic auditor for this role. Append to log:
-     ```
-     {timestamp} [ROUTE] {auditor-name} using learned:{agent-name} (mode: replace, composite: {score})
-     ```
-   - **Mode = `alongside`:** Spawn BOTH the generic auditor AND the learned auditor for this role. Both run in parallel and both produce audit reports. Append to log:
-     ```
-     {timestamp} [ROUTE] {auditor-name} using alongside (mode: alongside, composite: {score})
-     ```
-5. **Finding deduplication in alongside mode:** When both generic and learned auditors produce findings for the same role, deduplicate before counting. Two findings are considered the same if they share the same dedup key: `{file}:{line}:{category}` (where `line` is the finding's reported line from the `location` field, and `category` is the finding ID prefix). If both auditors report the same finding, count it once. Retain the version from the learned auditor (preference for learned). The deduplicated finding set is what feeds into the repair pipeline and retrospective counts.
-6. **Alongside promotion tracking:** For each alongside auditor, record whether the learned auditor's findings are a superset of the generic auditor's findings (using dedup keys). The learn step reads this data to decide whether to promote from alongside to replace after 3 tasks.
+**Alongside mode deduplication:** When generic and learned auditors both produce findings for the same role, deduplicate by key `{file}:{line}:{category}`. Count duplicates once, preferring the learned version. The deduplicated set feeds into repair and retrospective counts. Track whether learned findings are a superset of generic findings (for promotion decisions by the learn step).
 
 Append to log:
 ```
@@ -154,7 +58,7 @@ Spawn the determined auditors simultaneously, passing the resolved model for eac
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
-**Token capture after auditor spawns:** After each auditor subagent spawn completes (including all voting/escalated passes), record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes). Store as `{auditor-name: token_count}`. If the Agent tool result does not include token usage, record `null` for that auditor and exclude it from any subsequent sum. For ensemble voting, the `token_count` is the **sum** of all voting and escalation spawns for that auditor.
+**Token capture (applies to all subagent spawns in Steps 3-4):** After each subagent completes, record `total_tokens` from the Agent tool result as `{agent-name: token_count}`. If unavailable, record `null` and exclude from sums. For ensemble voting, sum all voting and escalation spawns. For agents spawned multiple times, sum their counts.
 
 **Eager two-phase repair trigger:**
 
@@ -187,8 +91,6 @@ Update stage to `REPAIR_PLANNING`. Append to log:
 
 Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
 
-**Token capture:** After `repair-coordinator` completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) as `{repair-coordinator: token_count}`. If unavailable, record `null`.
-
 Wait for completion. Update stage to `REPAIR_EXECUTION`. Append to log:
 ```
 {timestamp} [STAGE] → REPAIR_EXECUTION
@@ -207,50 +109,18 @@ Append to log when spawning parallel batches:
 For each batch, spawn executor agents as assigned in `repair-log.json`:
 - `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`
 
-**Model escalation:** For each finding where `retry_count >= 2`, spawn the executor with `model_override: "opus"` in the subagent spawn configuration. Findings at retry 0 or 1 use the default model. This is a per-finding model routing change, not an instruction-text change. Two findings in the same batch may have different retry counts and therefore different model assignments. Append to log:
-```
-{timestamp} [ESCALATE] finding {finding-id} retry {N} -> opus
-```
+**Model escalation:** For findings with `retry_count >= 2`, spawn with `model_override: "opus"`. Log: `{timestamp} [ESCALATE] finding {finding-id} retry {N} -> opus`.
 
 Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
-
-**Token capture:** After each executor subagent spawn completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) as `{executor-name: token_count}`. If multiple spawns use the same executor name, sum their token counts. If unavailable for a spawn, record `null` for that spawn and exclude it from the sum.
 
 After all batches complete, append to log:
 ```
 {timestamp} [DONE] repair-execution-p1 — all phase 1 fixes applied
 ```
 
-**Late-finding conflict resolution:**
+**Late-finding conflict resolution:** All findings from auditors that complete while phase 1 is running are queued for phase 2, regardless of file overlap.
 
-While phase 1 repair is running, remaining auditors from Step 3 may complete. Collect their results:
-
-1. If a late auditor reports findings in files currently being repaired by phase 1, those findings are **not** applied to phase 1. They are queued for phase 2.
-2. If a late auditor reports findings in files **not** being repaired by phase 1, those findings are also queued for phase 2.
-3. All late findings go to phase 2, regardless of file overlap.
-
-**Phase 1 re-audit (domain-aware, incremental scope):**
-
-Before spawning re-audit auditors, determine which files were modified during phase 1 repair:
-1. Read `repair-log.json` task entries to collect the list of files each executor was assigned to modify.
-2. Additionally run `git diff --name-only` against the pre-repair commit (the commit hash recorded before repair execution began) to catch any files modified that were not explicitly listed.
-3. Union these two sets into the **repair-modified file list**.
-
-Scope re-audit auditors to only the repair-modified file list -- NOT the full original diff scope from Step 2. This avoids redundantly re-auditing files that were already clean.
-
-**Exception:** `spec-completion-auditor` always receives the **original full diff scope** (from Step 2), since spec completion checks overall requirement coverage across the entire task, not file-level issues.
-
-All re-audit auditors still receive the previous audit reports for context (so they know what was originally found and what to verify as fixed).
-
-Spawn only:
-- `spec-completion-auditor` (always, full original diff scope)
-- `security-auditor` (always, repair-modified files only)
-- Any auditor whose findings appear as tasks in the current phase's `repair-log.json` (repair-modified files only)
-- Skip auditors whose domain was not touched by the repair (e.g., if only backend files were repaired, skip `ui-auditor` even if it ran in the initial audit)
-
-**Token capture:** After each re-audit auditor spawn completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) and add to the running total for that auditor. If unavailable, record `null`.
-
-Wait for results. Any new findings from re-audit are added to the phase 2 queue.
+**Phase 1 re-audit (domain-aware, incremental scope):** Compute the repair-modified file list by unioning `repair-log.json` task file lists with `git diff --name-only` against the pre-repair commit. Scope re-audit to only these files (not the full Step 2 diff). Exception: `spec-completion-auditor` always gets the original full diff scope. All re-audit auditors receive previous reports for context. Spawn only: `spec-completion-auditor` (full scope), `security-auditor` (repair files), and auditors whose findings appear in this phase's repair-log (repair files). Skip domain-unrelated auditors. New findings from re-audit are added to the phase 2 queue.
 
 **Phase 2 — Late findings and re-audit findings repair:**
 
@@ -263,9 +133,7 @@ If queued findings exist, append to log:
 
 Spawn `repair-coordinator` with the phase 2 findings. The coordinator writes to `repair-log.json` with an incremented `repair_cycle` value (phase 2 overwrites with the new cycle).
 
-**Token capture:** After `repair-coordinator` completes, record the token count from the Agent tool result (the `total_tokens` value from the usage summary returned when the subagent completes) and add to the running total for `repair-coordinator`. If unavailable, record `null`.
-
-Apply the same parallel batch spawning and model escalation logic as phase 1 (including token capture via the `total_tokens` value from the Agent tool result after each executor spawn).
+Apply the same parallel batch spawning and model escalation logic as phase 1.
 
 **Retry count continuity:** Retry counts are continuous across phases. A finding first repaired in phase 1 at retry 1 and re-found in phase 2 is at retry 2, not retry 0. The `max_retries` limit (3) applies across both phases combined for a given finding.
 
@@ -274,10 +142,7 @@ After phase 2 repairs complete, run a phase 2 re-audit using the same domain-awa
 - If all clear after phase 2 re-audit: append `{timestamp} [DONE] repair-execution-p2 — all phase 2 fixes applied` to log. Proceed to Step 5.
 - If new findings remain: increment `retry_count` for each finding. If any finding has exceeded 3 retries, set stage to `FAILED`, append `[FAILED] max retries exceeded for: {finding-ids}`, and stop. Otherwise loop back into another repair cycle (continuing phase 2).
 
-**Degenerate cases:**
-
-- If no late auditors exist (all auditors completed before phase 1 began, or all skippable auditors were skipped), phase 2 only contains re-audit findings (if any). If no re-audit findings exist, phase 2 is skipped entirely.
-- If no blocking findings exist from any auditor, both phases are skipped and behavior is identical to the previous pipeline (proceed directly to Step 5).
+**Degenerate cases:** If no late auditors exist, phase 2 only contains re-audit findings (skip if none). If no blocking findings from any auditor, both phases are skipped entirely.
 
 ### Step 5 — Gate to DONE
 
@@ -297,32 +162,24 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
    - If the file is missing or malformed, set executor repair frequency to `{}` and repair cycle count to `0`.
 4. Scan `.dynos/task-{id}/execution-log.md`. Count lines matching the pattern `[HUMAN] SPEC_REVIEW`. This is the **spec review iteration count**. If the file is missing, set to `0`.
 5. Read `manifest.json`. Flatten the `classification` object into scalar fields: `task_type` (string), `task_domains` (comma-separated string, e.g. "ui,backend"), `task_risk_level` (string). Set **task outcome** to `DONE` (this gate only runs for successful completion).
-6. Compute token usage and model tracking fields:
-   - `token_usage_by_agent`: Collect all per-agent token counts recorded during Steps 3 and 4 (auditor spawns, repair-coordinator spawns, executor spawns, re-audit spawns). Produce an object mapping agent name to total token count. If a given agent's token count was recorded as `null` (metadata unavailable), include it in the object with value `null`.
-   - `total_token_usage`: Sum all non-null values in `token_usage_by_agent`. If all values are `null`, set to `0`.
-   - `model_used_by_agent`: Collect the actual model used by each subagent spawn during Steps 3 and 4. Produce an object mapping agent name to model name string. This records the actual model used at spawn time, not the recommended model from policy. If the model information is unavailable from spawn metadata, record `null` for that agent.
-   - `agent_source`: For each auditor spawned during Step 3, record its routing source. Produce an object mapping agent name to source string. Values are `"generic"` (default/no routing entry), `"learned:{prompt-name}"` (replace mode), or for alongside mode, record both entries: `"{auditor-name}"` maps to `"generic"` and `"{auditor-name}:learned"` maps to `"learned:{prompt-name}"`. This field enables the learn step to correlate agent routing decisions with quality outcomes.
-7. Compute agent routing overlap data (alongside mode only):
-   - For each auditor that ran in alongside mode during Step 3, compare the deduplicated finding sets from the generic and learned spawns.
-   - Compute the dedup key set for each: `{file}:{line}:{category}`.
-   - Record `alongside_overlap`: an object mapping auditor name to an object with:
-     - `generic_finding_keys`: array of dedup keys from the generic auditor
-     - `learned_finding_keys`: array of dedup keys from the learned auditor
-     - `learned_is_superset`: boolean, true if every key in `generic_finding_keys` also appears in `learned_finding_keys`
-     - `alongside_task_count`: integer, the current alongside task count for this auditor (incremented from the prior retrospective's value, or 1 if no prior value)
-   - If no auditors ran in alongside mode, set `alongside_overlap` to `{}`.
-8. Compute spawn/waste tracking fields:
-   - `subagent_spawn_count`: Scan `.dynos/task-{id}/execution-log.md`. Count all lines containing `[SPAWN]`. If the file is missing, set to `0`.
-   - `wasted_spawns`: Count auditor runs that produced zero findings. For each parsed audit report from step 1, if the `findings` array is empty (length 0), increment this counter.
-   - `auditor_zero_finding_streaks`: Compute per-auditor zero-finding streaks. Read the most recent prior task's `task-retrospective.json` (not the current task) to get the previous streak values. If it does not exist, or uses the old single-integer `auditor_zero_finding_streak` format, treat all prior streaks as `0`.
-     - For each auditor that was **spawned** in this audit cycle and produced **zero findings**: increment its streak from the prior retrospective value by 1.
-     - For each auditor that was **spawned** and produced **one or more findings**: reset its streak to `0`.
-     - For auditors that were **skipped** (not spawned) in this audit cycle: carry forward their streak value unchanged from the prior retrospective.
-   - `executor_zero_repair_streak`: Read `repair-log.json`. Sort executor segments by execution order. Starting from the most recent, count consecutive executor segments that needed zero repairs (i.e., were not assigned any repair tasks). Stop counting at the first segment that had repairs. If `repair-log.json` is missing or malformed, set to `0`.
-9. Compute reward vector fields. Each score is clamped to the range `[0, 1]` (minimum 0, maximum 1):
-   - `quality_score`: `1 - (surviving_findings / total_findings)`. Where `surviving_findings` is the count of findings still present after the final re-audit (i.e., findings that were not resolved), and `total_findings` is the total number of unique findings discovered across all audit and re-audit passes. If `total_findings` is `0`, set `quality_score` to `0.9` (not 1.0, because zero findings may indicate auditor gaps rather than perfect quality; a perfect 1.0 should only come from resolving known findings).
-   - `cost_score`: token-efficiency score normalized by task risk level. Compute `avg_tokens_per_spawn = total_token_usage / max(1, subagent_spawn_count)`. Determine budget per spawn by `risk_level`: low=8000, medium=12000, high=18000, critical=25000 (default 12000). Then compute `cost_score = 1 / (1 + (avg_tokens_per_spawn / budget))`. If `total_token_usage` is `0` or `subagent_spawn_count` is `0`, set `cost_score` to `1.0`. Additionally, if ALL agents used default routing (every entry in `agent_source` is `"generic"`), apply a `0.05` penalty: `cost_score = max(0, cost_score - 0.05)`. This penalizes cold-start/default-fallback runs that could not leverage learned routing.
-   - `efficiency_score`: `1 - (repair_cycle_count / 3) - (max(0, spec_review_iterations - 1) * 0.1)`. Uses the `repair_cycle_count` computed in substep 3 and the `spec_review_iterations` computed in substep 4. Multiple spec review iterations indicate the spec required rework, which is an efficiency cost.
+6. Compute token and model tracking:
+   - `token_usage_by_agent`: map agent name to total token count from Steps 3-4 (null if unavailable).
+   - `total_token_usage`: sum of non-null values (0 if all null).
+   - `model_used_by_agent`: map agent name to actual model used at spawn time (null if unavailable).
+   - `agent_source`: map agent name to routing source: `"generic"`, `"learned:{prompt-name}"`, or for alongside mode both `"{name}": "generic"` and `"{name}:learned": "learned:{prompt-name}"`.
+7. Compute alongside overlap (only for alongside-mode auditors):
+   - Compare generic vs learned finding sets using dedup keys `{file}:{line}:{category}`.
+   - Record per-auditor: `generic_finding_keys`, `learned_finding_keys`, `learned_is_superset` (boolean), `alongside_task_count` (incremented from prior retrospective, or 1).
+   - Empty `{}` if no alongside auditors ran.
+8. Compute spawn/waste tracking:
+   - `subagent_spawn_count`: count `[SPAWN]` lines in execution-log.md (0 if missing).
+   - `wasted_spawns`: count auditor reports with empty findings arrays.
+   - `auditor_zero_finding_streaks`: per-auditor streaks from prior retrospective. Spawned + zero findings = increment; spawned + findings = reset to 0; skipped = carry forward. If prior retro missing or uses old format, treat prior streaks as 0.
+   - `executor_zero_repair_streak`: consecutive most-recent executor segments with zero repair tasks (0 if repair-log missing).
+9. Compute reward vector (each score clamped to `[0, 1]`):
+   - `quality_score`: `1 - (surviving_findings / total_findings)`. If total is 0, use `0.9` (not 1.0 -- zero findings may indicate auditor gaps).
+   - `cost_score`: `1 / (1 + (avg_tokens_per_spawn / budget))` where budget varies by risk (low=8K, med=12K, high=18K, critical=25K). `1.0` if no tokens/spawns. Apply `-0.05` penalty if all agents are generic (cold-start).
+   - `efficiency_score`: `1 - (repair_cycles / 3) - (max(0, spec_reviews - 1) * 0.1)`.
 10. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
 
 ```json
@@ -352,57 +209,14 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
 }
 ```
 
-If no audit reports or repair logs exist, write the file with zeroed-out counts:
-
-```json
-{
-  "task_id": "task-{id}",
-  "task_outcome": "DONE",
-  "task_type": "feature",
-  "task_domains": "backend",
-  "task_risk_level": "low",
-  "findings_by_auditor": {},
-  "findings_by_category": {},
-  "executor_repair_frequency": {},
-  "spec_review_iterations": 0,
-  "repair_cycle_count": 0,
-  "subagent_spawn_count": 0,
-  "wasted_spawns": 0,
-  "auditor_zero_finding_streaks": {},
-  "executor_zero_repair_streak": 0,
-  "token_usage_by_agent": {},
-  "total_token_usage": 0,
-  "model_used_by_agent": {},
-  "agent_source": {},
-  "alongside_overlap": {},
-  "quality_score": 1.0,
-  "cost_score": 1.0,
-  "efficiency_score": 1.0
-}
-```
-
-Old retrospectives from prior tasks that lack the `token_usage_by_agent`, `total_token_usage`, `model_used_by_agent`, `agent_source`, `alongside_overlap`, `quality_score`, `cost_score`, or `efficiency_score` fields are treated as missing data (default `null`), not errors. The learn skill and any aggregation logic must handle their absence gracefully.
+If no audit reports or repair logs exist, write the same structure with zeroed-out counts (empty objects `{}`, zeros, and `1.0` for scores). Old retrospectives missing newer fields (`token_usage_by_agent`, `total_token_usage`, `model_used_by_agent`, `agent_source`, `alongside_overlap`, `quality_score`, `cost_score`, `efficiency_score`) are treated as `null`, not errors.
 
 Append to log:
 ```
 {timestamp} [DONE] reflect — task-retrospective.json written
 ```
 
-**Learn (inline -- no subagent):**
-
-After writing the retrospective, automatically aggregate all retrospectives in the project into the memory file. Follow the steps in `skills/learn/SKILL.md`:
-
-1. Scan all `.dynos/task-*/task-retrospective.json` files in the current working directory.
-2. Aggregate: top 5 finding categories, executor reliability rankings, average repair cycles by task type, prevention rules (from finding descriptions), and spawn efficiency metrics.
-3. Determine project memory path (`~/.claude/projects/<project>/memory/` where `<project>` is derived from the cwd by replacing `/` with `-`).
-4. Write (or overwrite) `dynos_patterns.md` to the project memory directory using the format defined in `skills/learn/SKILL.md`.
-
-If no retrospective files are found (edge case), skip silently.
-
-Append to log:
-```
-{timestamp} [DONE] learn — dynos_patterns.md updated ({N} tasks aggregated)
-```
+**Learn (inline -- no subagent):** After writing the retrospective, aggregate all `.dynos/task-*/task-retrospective.json` files following `skills/learn/SKILL.md`. Write `dynos_patterns.md` to the project memory directory. Skip silently if no retrospectives found. Log: `{timestamp} [DONE] learn — dynos_patterns.md updated ({N} tasks aggregated)`.
 
 **Trajectory rebuild (inline):**
 

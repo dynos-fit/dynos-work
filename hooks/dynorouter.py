@@ -31,29 +31,63 @@ SECURITY_FLOOR_MODEL = "opus"
 DEFAULT_MODEL = None  # None means "use whatever the caller's default is"
 
 
+def _read_policy_json(root: Path, filename: str, key: str) -> dict | None:
+    """Read a value from a JSON policy file in the persistent project dir.
+
+    Returns the value dict for *key* if found, None otherwise.
+    Gracefully handles missing files and corrupt JSON.
+    """
+    try:
+        policy_path = _persistent_project_dir(root) / filename
+        data = json.loads(policy_path.read_text())
+        if isinstance(data, dict) and key in data:
+            return data[key]
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
 def resolve_model(root: Path, role: str, task_type: str) -> dict:
     """Determine which model an agent should use.
 
-    Returns {"model": str|None, "source": "policy"|"default"|"security_floor"}.
+    Priority order:
+      1. policy.json model_overrides  -> source: "explicit_policy"
+      2. model-policy.json            -> source: "learned_history"
+      3. dynos_patterns.md markdown   -> source: "learned_history"
+      4. no match                     -> source: "default"
+      5. security floor enforcement   -> source: "security_floor"
+
+    Returns {"model": str|None, "source": str}.
     """
     policy = project_policy(root)
-    # Check for role-specific model override in policy
-    model_overrides = policy.get("model_overrides", {})
     key = f"{role}:{task_type}"
 
+    # 1. Explicit policy.json overrides (highest priority)
+    model_overrides = policy.get("model_overrides", {})
     model = model_overrides.get(key) or model_overrides.get(role)
-    source = "policy" if model else "default"
+    if model:
+        source = "explicit_policy"
+    else:
+        source = "default"
 
-    # Also check patterns file for Model Policy table
-    if not model:
-        patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
-        if patterns_path.exists():
-            try:
-                model = _parse_model_from_patterns(patterns_path, role, task_type)
-                if model and model != "default":
-                    source = "policy"
-            except (OSError, ValueError):
-                pass
+        # 2. JSON policy file (learned history)
+        entry = _read_policy_json(root, "model-policy.json", key)
+        if entry and isinstance(entry, dict) and entry.get("model"):
+            model = entry["model"]
+            source = "learned_history"
+
+        # 3. Markdown fallback
+        if not model:
+            patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
+            if patterns_path.exists():
+                try:
+                    model = _parse_model_from_patterns(patterns_path, role, task_type)
+                    if model and model != "default":
+                        source = "learned_history"
+                    else:
+                        model = None
+                except (OSError, ValueError):
+                    pass
 
     # Security floor: security-auditor never below opus
     if role == "security-auditor":
@@ -117,26 +151,35 @@ def resolve_skip(root: Path, auditor: str, task_type: str) -> dict:
 
 
 def _get_skip_threshold(root: Path, auditor: str) -> int:
-    """Read skip threshold from patterns file or fall back to default."""
+    """Read skip threshold for *auditor*.
+
+    Priority: skip-policy.json -> dynos_patterns.md markdown -> DEFAULT_SKIP_THRESHOLD.
+    """
+    # 1. JSON policy file
+    entry = _read_policy_json(root, "skip-policy.json", auditor)
+    if entry and isinstance(entry, dict) and "threshold" in entry:
+        return int(entry["threshold"])
+
+    # 2. Markdown fallback
     patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
-    if not patterns_path.exists():
-        return DEFAULT_SKIP_THRESHOLD
-    try:
-        text = patterns_path.read_text()
-        in_table = False
-        for line in text.splitlines():
-            if "## Skip Policy" in line:
-                in_table = True
-                continue
-            if in_table and line.startswith("## "):
-                break
-            if not in_table or not line.startswith("|") or "---" in line or "Auditor" in line:
-                continue
-            parts = [p.strip() for p in line.split("|") if p.strip()]
-            if len(parts) >= 2 and parts[0] == auditor:
-                return int(parts[1])
-    except (OSError, ValueError):
-        pass
+    if patterns_path.exists():
+        try:
+            text = patterns_path.read_text()
+            in_table = False
+            for line in text.splitlines():
+                if "## Skip Policy" in line:
+                    in_table = True
+                    continue
+                if in_table and line.startswith("## "):
+                    break
+                if not in_table or not line.startswith("|") or "---" in line or "Auditor" in line:
+                    continue
+                parts = [p.strip() for p in line.split("|") if p.strip()]
+                if len(parts) >= 2 and parts[0] == auditor:
+                    return int(parts[1])
+        except (OSError, ValueError):
+            pass
+
     return DEFAULT_SKIP_THRESHOLD
 
 
