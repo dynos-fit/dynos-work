@@ -24,7 +24,7 @@ Getting started:
 Project commands:
   local         Project daemon: start, stop, status, logs, run-once
   local dashboard  Per-project dashboard (generate or serve)
-  proactive     Autonomous autofix scanner (scan, list, clear)
+  autofix       Autofix scanner (scan, list, clear)
 
 Global commands:
   global        Cross-project sweeper: start, stop, status, logs, run-once
@@ -108,7 +108,7 @@ sys.exit(0 if pid else 1)
     exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@"
     ;;
   maintain) exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@" ;;
-  proactive) exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@" ;;
+  autofix|proactive) exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@" ;;
 
   # --- Global commands ---
   global) exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@" ;;
