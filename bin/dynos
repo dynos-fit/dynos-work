@@ -30,7 +30,9 @@ Global commands:
   global        Cross-project sweeper: start, stop, status, logs, run-once
   dashboard     Global dashboard: serve, stop, restart
   list          List all registered projects
-  remove        Unregister a project
+  remove        Unregister a project (default: current dir)
+  pause         Pause maintenance for a project
+  resume        Resume maintenance for a project
   registry      Project registration: register, unregister, list, pause, resume
 
 Internals (advanced):
@@ -112,7 +114,43 @@ sys.exit(0 if pid else 1)
   global) exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@" ;;
   registry) exec python3 "${HOOKS_DIR}/dynoregistry.py" "$@" ;;
   list) exec python3 "${HOOKS_DIR}/dynoregistry.py" list "$@" ;;
-  remove) exec python3 "${HOOKS_DIR}/dynoregistry.py" unregister "$@" ;;
+  remove)
+    # dynos remove [--root /path] or dynos remove /path (positional)
+    target="$(pwd)"
+    for arg in "$@"; do
+      case "$arg" in
+        --root) shift; target="$1"; shift ;;
+        --root=*) target="${arg#--root=}" ;;
+        -*) ;;
+        *) target="$arg" ;;
+      esac
+    done
+    exec python3 "${HOOKS_DIR}/dynoregistry.py" unregister "$target"
+    ;;
+  pause)
+    target="$(pwd)"
+    for arg in "$@"; do
+      case "$arg" in
+        --root) shift; target="$1"; shift ;;
+        --root=*) target="${arg#--root=}" ;;
+        -*) ;;
+        *) target="$arg" ;;
+      esac
+    done
+    exec python3 "${HOOKS_DIR}/dynoregistry.py" pause "$target"
+    ;;
+  resume)
+    target="$(pwd)"
+    for arg in "$@"; do
+      case "$arg" in
+        --root) shift; target="$1"; shift ;;
+        --root=*) target="${arg#--root=}" ;;
+        -*) ;;
+        *) target="$arg" ;;
+      esac
+    done
+    exec python3 "${HOOKS_DIR}/dynoregistry.py" resume "$target"
+    ;;
 
   # --- Global dashboard (top-level) ---
   dashboard)

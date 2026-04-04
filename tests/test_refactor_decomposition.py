@@ -683,6 +683,8 @@ class TestBinDynosUnchanged:
         "init",
         "list",
         "remove",
+        "pause",
+        "resume",
     ]
 
     def test_bin_dynos_exists(self) -> None:
