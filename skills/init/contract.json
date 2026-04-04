@@ -1,0 +1,6 @@
+{
+  "name": "init",
+  "description": "Set up the current project: register with dynos-work and start the local daemon.",
+  "input_schema": {},
+  "output_schema": {}
+}

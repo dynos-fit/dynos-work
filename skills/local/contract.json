@@ -1,0 +1,6 @@
+{
+  "name": "local",
+  "description": "Manage the project daemon: start, stop, status, logs, run-once, dashboard.",
+  "input_schema": {},
+  "output_schema": {}
+}
