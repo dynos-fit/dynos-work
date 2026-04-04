@@ -16,7 +16,7 @@ Manage the local project daemon.
 /dynos-work:local status             # show daemon status
 /dynos-work:local logs               # show cycle history
 /dynos-work:local run-once           # run single maintenance cycle
-/dynos-work:local dashboard          # generate per-project dashboard
+/dynos-work:local dashboard          # generate per-project HTML dashboard
 ```
 
 ## What you do
@@ -55,7 +55,7 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomainta
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynodashboard.py" generate --root .
 ```
 
-Print the path to the generated HTML file.
+Print the path to the generated HTML file. This is generate-only (no server). The global dashboard (`/dynos-work:dashboard`) is the web server for all projects.
 
 ## Default
 

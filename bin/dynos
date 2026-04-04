@@ -100,10 +100,10 @@ sys.exit(0 if pid else 1)
 
   # --- Project commands ---
   local)
-    # Check if first arg is "dashboard" — route to per-project dashboard
+    # dynos local dashboard → generate only (no serve, global dashboard is the server)
     if [ $# -gt 0 ] && [ "$1" = "dashboard" ]; then
       shift
-      exec python3 "${HOOKS_DIR}/dynodashboard.py" "$@"
+      exec python3 "${HOOKS_DIR}/dynodashboard.py" generate "$@"
     fi
     exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@"
     ;;

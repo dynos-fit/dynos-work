@@ -799,17 +799,6 @@ def build_parser() -> argparse.ArgumentParser:
     generate = subparsers.add_parser("generate", help="Generate dashboard HTML and live JSON")
     generate.add_argument("--root", default=".")
     generate.set_defaults(func=cmd_generate)
-    serve = subparsers.add_parser("serve", help="Serve live dashboard locally with refreshable JSON")
-    serve.add_argument("--root", default=".")
-    serve.add_argument("--port", type=int, default=8765)
-    serve.set_defaults(func=cmd_serve)
-    kill = subparsers.add_parser("kill", help="Stop the dashboard server")
-    kill.add_argument("--root", default=".")
-    kill.set_defaults(func=cmd_kill)
-    restart = subparsers.add_parser("restart", help="Restart the dashboard server")
-    restart.add_argument("--root", default=".")
-    restart.add_argument("--port", type=int, default=8765)
-    restart.set_defaults(func=cmd_restart)
     return parser
 
 
