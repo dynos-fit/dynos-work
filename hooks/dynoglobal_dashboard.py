@@ -381,13 +381,14 @@ def _gather_maintenance_data(project_root: Path) -> dict:
     return result
 
 
-def _gather_recent_prs() -> list[dict]:
-    """Run gh pr list to get recent PRs. Returns empty list if gh unavailable."""
+def _gather_autofix_prs(project_path: str) -> list[dict]:
+    """Get autofix PRs for a specific project. Returns empty list if gh unavailable or none found."""
     import subprocess
     try:
         proc = subprocess.run(
-            ["gh", "pr", "list", "--state", "all", "--limit", "5",
-             "--json", "number,title,state,createdAt,url"],
+            ["gh", "pr", "list", "--state", "all", "--limit", "10",
+             "--search", "dynos/auto-fix in:head",
+             "--json", "number,title,state,createdAt,url,headRefName"],
             capture_output=True, text=True, timeout=15,
         )
         if proc.returncode != 0:
@@ -396,13 +397,14 @@ def _gather_recent_prs() -> list[dict]:
         if not isinstance(data, list):
             return []
         prs = []
-        for pr in data[:5]:
+        for pr in data:
             prs.append({
                 "number": pr.get("number", 0),
                 "title": pr.get("title", ""),
                 "state": pr.get("state", "UNKNOWN"),
                 "created_at": pr.get("createdAt", ""),
                 "url": pr.get("url", ""),
+                "branch": pr.get("headRefName", ""),
             })
         return prs
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
@@ -476,7 +478,10 @@ def build_global_payload() -> dict:
     daemon_status = gather_global_daemon_status()
     all_projects = gather_all_projects()
     aggregates = compute_aggregate_stats(all_projects["active"])
-    recent_prs = _gather_recent_prs()
+
+    # Gather autofix PRs per active project
+    for proj in all_projects["active"]:
+        proj["autofix_prs"] = _gather_autofix_prs(proj.get("path", ""))
 
     return {
         "generated_at": now_iso(),
@@ -484,7 +489,6 @@ def build_global_payload() -> dict:
         "active_projects": all_projects["active"],
         "inactive_projects": all_projects["inactive"],
         "aggregates": aggregates,
-        "recent_prs": recent_prs,
     }
 
 
@@ -953,6 +957,46 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'</div>'
     )
 
+    # --- Autofix PRs ---
+    autofix_prs = proj.get("autofix_prs", [])
+    if autofix_prs:
+        pr_rows = ""
+        for pr in autofix_prs:
+            pr_num = pr.get("number", 0)
+            pr_title = _esc(pr.get("title", ""))
+            if len(pr_title) > 70:
+                pr_title = pr_title[:67] + "..."
+            pr_state = pr.get("state", "UNKNOWN").upper()
+            pr_created = _esc(pr.get("created_at", "")[:10])
+            pr_branch = _esc(pr.get("branch", ""))
+            if pr_state == "MERGED":
+                st_style = 'style="font-size:10px;padding:2px 7px;"'
+            elif pr_state == "OPEN":
+                st_style = 'style="font-size:10px;padding:2px 7px;background:hsla(200 82% 60% / 0.14);color:hsl(200 76% 64%);border-color:hsla(200 82% 60% / 0.22);"'
+            else:
+                st_style = 'style="font-size:10px;padding:2px 7px;background:hsla(210 14% 64% / 0.14);color:var(--muted);border-color:hsla(210 14% 64% / 0.22);"'
+            pr_rows += (
+                f'<div class="pr-row">'
+                f'<span class="mono" style="flex-shrink:0;">#{pr_num}</span>'
+                f'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{pr_title}</span>'
+                f'<span class="tag" {st_style}>{pr_state}</span>'
+                f'<span class="mini" style="flex-shrink:0;">{pr_created}</span>'
+                f'</div>'
+            )
+        autofix_section = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Autofix Pull Requests</div>'
+            f'{pr_rows}'
+            f'</div>'
+        )
+    else:
+        autofix_section = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Autofix Pull Requests</div>'
+            f'<div class="mini" style="color:var(--muted);">No autofix PRs yet. Enable with <code>dynos local start --autofix</code></div>'
+            f'</div>'
+        )
+
     # --- Lineage ---
     lineage = payload.get("lineage", {})
     lineage_nodes = lineage.get("nodes", 0)
@@ -977,6 +1021,7 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'{bench_section}'
         f'{findings_section}'
         f'{alerts_section}'
+        f'{autofix_section}'
         f'{lineage_line}'
         f'</div>'
         f'</div>'
@@ -1089,53 +1134,6 @@ def _render_html(payload: dict) -> str:
         f'</div>'
     )
 
-    # --- Recent PRs section ---
-    recent_prs = payload.get("recent_prs", [])
-    if recent_prs:
-        pr_items = ""
-        for pr in recent_prs:
-            pr_num = pr.get("number", 0)
-            pr_title = _esc(pr.get("title", ""))
-            # Truncate long titles
-            if len(pr_title) > 60:
-                pr_title = pr_title[:57] + "..."
-            pr_state = pr.get("state", "UNKNOWN").upper()
-            pr_created = _esc(pr.get("created_at", "")[:10])
-            pr_url = _esc(pr.get("url", ""))
-
-            if pr_state == "MERGED":
-                pr_tag_class = "tag"
-                pr_tag_style = 'style="font-size:10px;padding:2px 7px;"'
-            elif pr_state == "OPEN":
-                pr_tag_class = "tag"
-                pr_tag_style = 'style="font-size:10px;padding:2px 7px;background:hsla(200 82% 60% / 0.14);color:hsl(200 76% 64%);border-color:hsla(200 82% 60% / 0.22);"'
-            else:
-                pr_tag_class = "tag"
-                pr_tag_style = 'style="font-size:10px;padding:2px 7px;background:hsla(210 14% 64% / 0.14);color:var(--muted);border-color:hsla(210 14% 64% / 0.22);"'
-
-            pr_items += (
-                f'<div class="pr-row">'
-                f'<span class="mono" style="flex-shrink:0;">#{pr_num}</span>'
-                f'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{pr_title}</span>'
-                f'<span class="{pr_tag_class}" {pr_tag_style}>{pr_state}</span>'
-                f'<span class="mini" style="flex-shrink:0;">{pr_created}</span>'
-                f'</div>'
-            )
-        prs_panel = (
-            f'<div class="panel" style="margin-bottom:24px;">'
-            f'<div class="headline">Recent Pull Requests</div>'
-            f'{pr_items}'
-            f'</div>'
-        )
-    else:
-        prs_panel = (
-            f'<div class="panel" style="margin-bottom:24px;">'
-            f'<div class="headline">Recent Pull Requests</div>'
-            f'<div class="empty-state" style="min-height:40px;padding:12px 16px;">'
-            f'<span>GitHub CLI not available or no recent pull requests.</span></div>'
-            f'</div>'
-        )
-
     # --- Section 2: Compact project cards ---
     if active_projects:
         cards_html = "\n".join(_render_compact_card(p, i) for i, p in enumerate(active_projects))
@@ -1177,7 +1175,7 @@ def _render_html(payload: dict) -> str:
     html = html.replace("__DAEMON_PANEL__", daemon_panel)
     html = html.replace("__STAT_CARDS__", stat_cards)
     html = html.replace("__CROSS_PANEL__", cross_panel)
-    html = html.replace("__PRS_PANEL__", prs_panel)
+    html = html.replace("__PRS_PANEL__", "")
     html = html.replace("__CARDS_SECTION__", cards_section)
     html = html.replace("__DETAIL_CONTAINER__", detail_container)
     html = html.replace("__INACTIVE_SECTION__", inactive_section)
