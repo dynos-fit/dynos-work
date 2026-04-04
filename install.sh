@@ -267,10 +267,10 @@ main() {
     echo ""
     echo "  Full docs: https://github.com/dynos-fit/dynos-work"
     echo ""
-
-    # Restart shell so PATH takes effect immediately
-    echo "  Reloading shell..."
-    exec "$SHELL"
+    echo "  To activate dynos CLI, run:"
+    echo ""
+    echo "    source $SHELL_RC"
+    echo ""
 }
 
 main "$@"
