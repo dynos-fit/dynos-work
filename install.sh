@@ -146,6 +146,14 @@ step_daemon() {
         return
     fi
 
+    # Check if already running
+    local status
+    status=$(PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynomaintain.py" status --root "$project_dir" 2>/dev/null) || status='{}'
+    if echo "$status" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('running') else 1)" 2>/dev/null; then
+        ok "Local daemon already running"
+        return
+    fi
+
     local autofix_flag=""
     if command -v claude >/dev/null 2>&1 && command -v gh >/dev/null 2>&1; then
         autofix_flag="--autofix"
@@ -177,6 +185,14 @@ step_plugin() {
 }
 
 step_global_daemon() {
+    # Check if already running
+    local status
+    status=$(PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynoglobal.py" status 2>/dev/null) || status='{}'
+    if echo "$status" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('running') else 1)" 2>/dev/null; then
+        ok "Global daemon already running"
+        return
+    fi
+
     info "Starting global daemon"
     PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynoglobal.py" start >/dev/null 2>&1 || true
     ok "Global daemon started (sweeps all registered projects)"
