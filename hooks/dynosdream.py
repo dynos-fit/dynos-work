@@ -165,14 +165,7 @@ def write_sandbox_artifacts(sandbox: Path, payload: dict, certificates: list[dic
     (sandbox / "design-certificates.json").write_text(json.dumps(certificates, indent=2) + "\n")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("options_json", help="JSON file with task_id, subtask, and options")
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--iterations", type=int, default=12)
-    parser.add_argument("--keep-sandbox", action="store_true")
-    args = parser.parse_args()
-
+def cmd_dream(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     payload = json.loads(Path(args.options_json).read_text())
     task_id = payload.get("task_id", "task")
@@ -224,5 +217,16 @@ def main() -> int:
     return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("options_json", help="JSON file with task_id, subtask, and options")
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--iterations", type=int, default=12)
+    parser.add_argument("--keep-sandbox", action="store_true")
+    parser.set_defaults(func=cmd_dream)
+    return parser
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from dyno_cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))

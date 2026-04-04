@@ -101,17 +101,21 @@ def encode_state(root: Path, target: Path | None = None) -> dict:
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--target")
-    args = parser.parse_args()
-
+def cmd_state(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     target = Path(args.target).resolve() if args.target else None
     print(json.dumps(encode_state(root, target), indent=2))
     return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--target")
+    parser.set_defaults(func=cmd_state)
+    return parser
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from dyno_cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))

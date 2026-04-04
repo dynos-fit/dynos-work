@@ -110,55 +110,71 @@ def run_python(root: Path, script_name: str, *args: str) -> tuple[subprocess.Com
 
 
 def maintenance_cycle(root: Path) -> dict:
-    actions: list[dict] = []
-    for script_name, args in (
-        ("dynostrajectory.py", ("rebuild", "--root", str(root))),
-        ("dynopatterns.py", ("--root", str(root))),
-        ("dynopostmortem.py", ("generate-all", "--root", str(root))),
-        ("dynopostmortem.py", ("improve", "--root", str(root))),
-        ("dynofixture.py", ("sync", "--root", str(root))),
-        ("dynoauto.py", ("run", "--root", str(root))),
-        ("dynodashboard.py", ("generate", "--root", str(root))),
-        ("dynoreport.py", ("--root", str(root))),
-    ):
-        completed, payload = run_python(root, script_name, *args)
-        action = {
-            "name": script_name,
-            "returncode": completed.returncode,
-        }
-        if payload is not None:
-            action["result"] = payload
-        if completed.stderr.strip():
-            action["stderr"] = completed.stderr.strip()
-        actions.append(action)
-    cycle = {
-        "executed_at": now_iso(),
-        "actions": actions,
-        "ok": all(item["returncode"] == 0 for item in actions),
-        "failed_steps": [a["name"] for a in actions if a["returncode"] != 0],
-        "duration_steps": len(actions),
-    }
-    # Append to cycle log (JSONL — one line per cycle, append-only)
-    lp = log_path(root)
-    lp.parent.mkdir(parents=True, exist_ok=True)
-    with open(lp, "a") as f:
-        f.write(json.dumps(cycle) + "\n")
-    # Read cycle count from log
+    lock_file = maintenance_dir(root) / "cycle.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(lock_file, "w")
     try:
-        cycle_count = sum(1 for _ in open(lp))
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        cycle_count = 1
-    write_status(
-        root,
-        {
-            "updated_at": now_iso(),
-            "running": False,
-            "last_cycle": cycle,
-            "cycle_count": cycle_count,
-            "pid": current_pid(root),
-        },
-    )
-    return cycle
+        lock_fd.close()
+        return {
+            "executed_at": now_iso(),
+            "ok": True,
+            "skipped": True,
+            "reason": "cycle lock held by another process",
+            "actions": [],
+        }
+    try:
+        actions: list[dict] = []
+        for script_name, args in (
+            ("dynostrajectory.py", ("rebuild", "--root", str(root))),
+            ("dynopatterns.py", ("--root", str(root))),
+            ("dynopostmortem.py", ("generate-all", "--root", str(root))),
+            ("dynopostmortem.py", ("improve", "--root", str(root))),
+            ("dynofixture.py", ("sync", "--root", str(root))),
+            ("dynoauto.py", ("run", "--root", str(root))),
+            ("dynodashboard.py", ("generate", "--root", str(root))),
+            ("dynoreport.py", ("--root", str(root))),
+        ):
+            completed, payload = run_python(root, script_name, *args)
+            action = {
+                "name": script_name,
+                "returncode": completed.returncode,
+            }
+            if payload is not None:
+                action["result"] = payload
+            if completed.stderr.strip():
+                action["stderr"] = completed.stderr.strip()
+            actions.append(action)
+        cycle = {
+            "executed_at": now_iso(),
+            "actions": actions,
+            "ok": all(item["returncode"] == 0 for item in actions),
+            "failed_steps": [a["name"] for a in actions if a["returncode"] != 0],
+            "duration_steps": len(actions),
+        }
+        lp = log_path(root)
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        with open(lp, "a") as f:
+            f.write(json.dumps(cycle) + "\n")
+        try:
+            cycle_count = sum(1 for _ in open(lp))
+        except OSError:
+            cycle_count = 1
+        write_status(
+            root,
+            {
+                "updated_at": now_iso(),
+                "running": False,
+                "last_cycle": cycle,
+                "cycle_count": cycle_count,
+                "pid": current_pid(root),
+            },
+        )
+        return cycle
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def cmd_run_once(args: argparse.Namespace) -> int:
