@@ -100,14 +100,11 @@ step_path() {
     detect_shell_rc
     local path_line="export PATH=\"$BIN_DIR:\$PATH\""
 
-    # Remove any old dynos-work PATH entries that point elsewhere
-    if [ "$DEV_MODE" = true ]; then
-        local old_path="$HOME/.dynos-work/bin"
-        if grep -qF "$old_path" "$SHELL_RC" 2>/dev/null; then
-            # Remove old user-install PATH entry
-            sed -i "\|$old_path|d" "$SHELL_RC" 2>/dev/null || true
-            warn "Removed old user-install PATH entry ($old_path)"
-        fi
+    # Remove any old dynos-work PATH entries that point to a different directory
+    if grep -q "dynos-work" "$SHELL_RC" 2>/dev/null; then
+        # Remove lines with dynos-work CLI comment and old PATH entries
+        sed -i "/# dynos-work CLI/d" "$SHELL_RC" 2>/dev/null || true
+        sed -i "/dynos-work\/bin/d" "$SHELL_RC" 2>/dev/null || true
     fi
 
     if grep -qF "$BIN_DIR" "$SHELL_RC" 2>/dev/null; then
@@ -180,8 +177,11 @@ step_plugin() {
     fi
 
     info "Installing dynos-work plugin"
-    claude plugin install dynos-work 2>/dev/null || true
-    ok "Claude Code plugin installed (slash commands ready)"
+    if claude plugin install dynos-work 2>/dev/null; then
+        ok "Claude Code plugin installed (slash commands ready)"
+    else
+        warn "Plugin install failed. Install manually in Claude Code: /plugin install dynos-work"
+    fi
 }
 
 step_global_daemon() {
