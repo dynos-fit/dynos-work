@@ -686,14 +686,89 @@ class RestrictedHandler(SimpleHTTPRequestHandler):
         pass
 
 
+def _local_pid_path(root: Path) -> Path:
+    return root / ".dynos" / "dashboard.pid"
+
+
+def _read_local_pid(root: Path) -> int | None:
+    pid_path = _local_pid_path(root)
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except (ValueError, OSError):
+        pid_path.unlink(missing_ok=True)
+        return None
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
+    existing = _read_local_pid(root)
+    if existing:
+        print(json.dumps({"ok": False, "error": f"dashboard server already running (PID {existing}). Use 'kill' first."}))
+        return 1
     write_dashboard(root)
-    os.chdir(root / ".dynos")
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), RestrictedHandler)
+    serve_dir = str(root / ".dynos")
+    handler_cls = type("H", (RestrictedHandler,), {"__init__": lambda self, *a, **kw: super(type(self), self).__init__(*a, directory=serve_dir, **kw)})
+
+    pid_path = _local_pid_path(root)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(os.getpid()))
+
+    class _ReuseServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+        allow_reuse_port = True
+
     print(json.dumps({"url": f"http://127.0.0.1:{args.port}/dashboard.html"}, indent=2))
-    server.serve_forever()
+    server = _ReuseServer(("127.0.0.1", args.port), handler_cls)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        pid_path.unlink(missing_ok=True)
     return 0
+
+
+def cmd_kill(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    pid = _read_local_pid(root)
+    if pid is None:
+        print(json.dumps({"ok": True, "message": "no dashboard server running"}))
+        return 0
+    import signal
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(json.dumps({"ok": True, "message": f"killed dashboard server (PID {pid})"}))
+    except OSError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
+    _local_pid_path(root).unlink(missing_ok=True)
+    return 0
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    import signal, time
+    root = Path(args.root).resolve()
+    pid = _read_local_pid(root)
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(json.dumps({"message": f"killed old server (PID {pid})"}), flush=True)
+        except OSError:
+            pass
+        _local_pid_path(root).unlink(missing_ok=True)
+        for _ in range(20):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.25)
+            except OSError:
+                break
+        time.sleep(0.5)
+    return cmd_serve(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -706,6 +781,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--root", default=".")
     serve.add_argument("--port", type=int, default=8765)
     serve.set_defaults(func=cmd_serve)
+    kill = subparsers.add_parser("kill", help="Stop the dashboard server")
+    kill.add_argument("--root", default=".")
+    kill.set_defaults(func=cmd_kill)
+    restart = subparsers.add_parser("restart", help="Restart the dashboard server")
+    restart.add_argument("--root", default=".")
+    restart.add_argument("--port", type=int, default=8765)
+    restart.set_defaults(func=cmd_restart)
     return parser
 
 
