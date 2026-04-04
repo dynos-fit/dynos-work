@@ -506,7 +506,7 @@ def propose_improvements(root: Path) -> list[dict]:
             proposals.append({
                 "id": f"imp-seed-{role}-{tt}",
                 "type": "learned_agent_seed",
-                "target": f".dynos/learned-agents/executors/auto-{role.replace('-executor', '')}-{tt}.md",
+                "target": str(_persistent_project_dir(root) / "learned-agents" / "executors" / f"auto-{role.replace('-executor', '')}-{tt}.md"),
                 "description": f"Role {role} on {tt} tasks has {count} observations. Seed a learned agent.",
                 "action": "seed_learned_agent",
                 "role": role,

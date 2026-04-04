@@ -241,10 +241,21 @@ def resolve_route(root: Path, role: str, task_type: str) -> dict:
             "source": f"shadow (not yet promoted): {agent_name}",
         }
 
-    # Path validation
-    if agent_path and not agent_path.startswith(".dynos/learned-agents/"):
-        # Check persistent dir
-        full_path = _persistent_project_dir(root) / "learned-agents" / Path(agent_path).name
+    # Path validation — resolve against persistent dir
+    if agent_path:
+        p = Path(agent_path)
+        # Try as absolute first, then persistent dir, then repo-relative
+        if p.is_absolute():
+            full_path = p
+        else:
+            persistent_root = _persistent_project_dir(root) / "learned-agents"
+            full_path = persistent_root / p.name
+            if not full_path.exists():
+                # Try relative to persistent learned-agents
+                full_path = persistent_root / p
+            if not full_path.exists():
+                # Last resort: repo-relative
+                full_path = root / p
         if not full_path.exists():
             return {
                 "mode": "generic",
@@ -253,20 +264,6 @@ def resolve_route(root: Path, role: str, task_type: str) -> dict:
                 "composite_score": composite,
                 "source": f"learned agent file not found: {agent_path}",
             }
-        agent_path = str(full_path)
-    else:
-        full_path = root / agent_path if agent_path else None
-        if full_path and not full_path.exists():
-            # Try persistent dir
-            full_path = _persistent_project_dir(root) / Path(agent_path).relative_to(".dynos")
-            if not full_path.exists():
-                return {
-                    "mode": "generic",
-                    "agent_path": None,
-                    "agent_name": agent_name,
-                    "composite_score": composite,
-                    "source": f"learned agent file not found: {agent_path}",
-                }
             agent_path = str(full_path)
 
     return {
