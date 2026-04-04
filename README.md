@@ -354,6 +354,15 @@ Local project state always takes precedence. Global insights are additive: they 
 /plugin install dynos-work
 ```
 
+After installing, add the CLI tools to your PATH (one-time):
+
+```bash
+echo 'export PATH="$HOME/.claude/plugins/marketplaces/dynos-work/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+This gives you `dynos-global`, `dynos-registry`, `dynos-postmortem`, and `dynos-router` commands from any directory.
+
 ## Philosophy
 
 `dynos-work` is strict on one point:
