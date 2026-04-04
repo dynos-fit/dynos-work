@@ -59,12 +59,15 @@ parse_args() {
 }
 
 resolve_dirs() {
-    if [ "$DEV_MODE" = true ]; then
-        # Developer mode: use the repo we're currently in
-        INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
-        if [ ! -f "$INSTALL_DIR/bin/dynos" ]; then
-            fail "Not in a dynos-work repo. Run from the repo root or clone it first."
+    # Auto-detect: if running from inside a dynos-work repo, use it
+    local script_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [ -f "$script_dir/bin/dynos" ] && [ -d "$script_dir/hooks" ]; then
+        INSTALL_DIR="$script_dir"
+        if [ "$DEV_MODE" = false ]; then
+            info "Detected dynos-work repo at $script_dir — using it directly"
         fi
+    elif [ "$DEV_MODE" = true ]; then
+        fail "Not in a dynos-work repo. Run from the repo root."
     else
         INSTALL_DIR="${DYNOS_INSTALL_DIR:-$HOME/.dynos-work}"
     fi
