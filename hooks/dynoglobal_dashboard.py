@@ -240,6 +240,7 @@ def gather_all_projects() -> dict:
 
             sparkline_svg = build_sparkline_svg(quality_scores, width=400, height=60)
             health = derive_health_tag(data)
+            maintenance = _gather_maintenance_data(proj_path)
 
             active_projects.append({
                 "name": name,
@@ -254,6 +255,7 @@ def gather_all_projects() -> dict:
                 "learned_routes": summary.get("active_routes", 0),
                 "last_cycle_at": payload.get("generated_at", ""),
                 "daemon_running": _check_project_daemon(proj_path),
+                "maintenance": maintenance,
                 "payload": payload,
                 "retrospectives": retrospectives,
             })
@@ -298,6 +300,113 @@ def _check_project_daemon(project_path: Path) -> bool:
         return True
     except (ValueError, OSError):
         return False
+
+
+def _gather_maintenance_data(project_root: Path) -> dict:
+    """Read .dynos/maintenance/status.json and cycles.jsonl for a project."""
+    result: dict = {
+        "daemon_running": False,
+        "daemon_pid": None,
+        "poll_seconds": None,
+        "last_cycle_at": None,
+        "last_cycle_actions": [],
+        "cycle_history": [],
+    }
+    maint_dir = project_root / ".dynos" / "maintenance"
+
+    # Read status.json
+    status_path = maint_dir / "status.json"
+    if status_path.exists():
+        try:
+            data = json.loads(status_path.read_text())
+            result["daemon_running"] = data.get("running", False)
+            result["daemon_pid"] = data.get("pid")
+            result["poll_seconds"] = data.get("poll_seconds")
+            last_cycle = data.get("last_cycle", {})
+            result["last_cycle_at"] = last_cycle.get("executed_at")
+            actions_raw = last_cycle.get("actions", [])
+            actions = []
+            for a in actions_raw:
+                if not isinstance(a, dict):
+                    continue
+                name = a.get("name", "unknown")
+                rc = a.get("returncode", -1)
+                # Build a human-readable summary from the result
+                res = a.get("result", {})
+                summary_parts = []
+                if isinstance(res, dict):
+                    for k, v in res.items():
+                        if isinstance(v, list):
+                            summary_parts.append(f"{len(v)} {k}")
+                        elif isinstance(v, (int, float)):
+                            summary_parts.append(f"{k}: {v}")
+                        elif isinstance(v, str) and len(v) < 60:
+                            summary_parts.append(f"{k}: {v}")
+                summary_text = ", ".join(summary_parts[:3]) if summary_parts else "completed"
+                actions.append({
+                    "name": name,
+                    "returncode": rc,
+                    "summary": summary_text,
+                })
+            result["last_cycle_actions"] = actions
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Read cycles.jsonl (last 5 lines)
+    cycles_path = maint_dir / "cycles.jsonl"
+    if cycles_path.exists():
+        try:
+            lines = cycles_path.read_text().strip().splitlines()
+            recent_lines = lines[-5:] if len(lines) > 5 else lines
+            for line in recent_lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    cycle = json.loads(stripped)
+                    cycle_actions = cycle.get("actions", [])
+                    total_actions = len(cycle_actions)
+                    failed = sum(1 for a in cycle_actions if isinstance(a, dict) and a.get("returncode", 0) != 0)
+                    result["cycle_history"].append({
+                        "executed_at": cycle.get("executed_at", "unknown"),
+                        "total_actions": total_actions,
+                        "failed_actions": failed,
+                        "passed": failed == 0,
+                    })
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            pass
+
+    return result
+
+
+def _gather_recent_prs() -> list[dict]:
+    """Run gh pr list to get recent PRs. Returns empty list if gh unavailable."""
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "list", "--state", "all", "--limit", "5",
+             "--json", "number,title,state,createdAt,url"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode != 0:
+            return []
+        data = json.loads(proc.stdout)
+        if not isinstance(data, list):
+            return []
+        prs = []
+        for pr in data[:5]:
+            prs.append({
+                "number": pr.get("number", 0),
+                "title": pr.get("title", ""),
+                "state": pr.get("state", "UNKNOWN"),
+                "created_at": pr.get("createdAt", ""),
+                "url": pr.get("url", ""),
+            })
+        return prs
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        return []
 
 
 def compute_aggregate_stats(projects: list[dict]) -> dict:
@@ -367,6 +476,7 @@ def build_global_payload() -> dict:
     daemon_status = gather_global_daemon_status()
     all_projects = gather_all_projects()
     aggregates = compute_aggregate_stats(all_projects["active"])
+    recent_prs = _gather_recent_prs()
 
     return {
         "generated_at": now_iso(),
@@ -374,6 +484,7 @@ def build_global_payload() -> dict:
         "active_projects": all_projects["active"],
         "inactive_projects": all_projects["inactive"],
         "aggregates": aggregates,
+        "recent_prs": recent_prs,
     }
 
 
@@ -440,6 +551,14 @@ def _render_compact_card(proj: dict, index: int) -> str:
         '<span class="mini" style="font-style:italic;">no data</span>'
     )
 
+    # Daemon status dot and last cycle time
+    maintenance = proj.get("maintenance", {})
+    maint_daemon_running = maintenance.get("daemon_running", daemon_running)
+    daemon_dot_color = "var(--mint)" if maint_daemon_running else "var(--rose)"
+    daemon_dot_label = "daemon running" if maint_daemon_running else "daemon stopped"
+    last_cycle_at = maintenance.get("last_cycle_at", "")
+    last_cycle_display = _esc(last_cycle_at[:16].replace("T", " ")) if last_cycle_at else "no cycles"
+
     return (
         f'<div class="panel pcard" data-project-id="{index}" '
         f'role="button" tabindex="0" aria-label="Show details for {name}">'
@@ -455,6 +574,12 @@ def _render_compact_card(proj: dict, index: int) -> str:
         f'<span class="mini">{learned_routes} routes</span>'
         f'<span class="{daemon_class}" style="font-size:10px;padding:2px 7px;">{daemon_label}</span>'
         f'</div>'
+        f'</div>'
+        f'<div class="pcard-daemon-row">'
+        f'<span class="daemon-dot" style="background:{daemon_dot_color};" '
+        f'aria-label="{daemon_dot_label}"></span>'
+        f'<span class="mini">{daemon_dot_label}</span>'
+        f'<span class="mini" style="margin-left:auto;">{last_cycle_display}</span>'
         f'</div>'
         f'<div class="pcard-spark">{spark_html}</div>'
         f'</div>'
@@ -740,6 +865,94 @@ def _render_project_detail(proj: dict, index: int) -> str:
             f'</div>'
         )
 
+    # --- Maintenance section ---
+    maintenance = proj.get("maintenance", {})
+    maint_daemon_running = maintenance.get("daemon_running", False)
+    maint_pid = maintenance.get("daemon_pid")
+    maint_poll = maintenance.get("poll_seconds")
+    maint_last_cycle = maintenance.get("last_cycle_at", "")
+    maint_actions = maintenance.get("last_cycle_actions", [])
+    maint_history = maintenance.get("cycle_history", [])
+
+    maint_status_class = "tag" if maint_daemon_running else "tag danger"
+    maint_status_label = f"running (PID {maint_pid})" if maint_daemon_running and maint_pid else "stopped"
+    poll_display = f"every {maint_poll}s" if maint_poll else "n/a"
+    maint_cycle_display = _esc(maint_last_cycle) if maint_last_cycle else "no cycles recorded"
+
+    # Daemon status row
+    maint_header_html = (
+        f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
+        f'<span class="{maint_status_class}" style="font-size:11px;padding:3px 8px;">{_esc(maint_status_label)}</span>'
+        f'<span class="mini">Poll: {_esc(poll_display)}</span>'
+        f'<span class="mini">Last cycle: {maint_cycle_display}</span>'
+        f'</div>'
+    )
+
+    # Last Cycle Actions table
+    if maint_actions:
+        action_rows = ""
+        for act in maint_actions:
+            act_name = _esc(act.get("name", "unknown"))
+            act_rc = act.get("returncode", -1)
+            act_summary = _esc(act.get("summary", ""))
+            rc_class = "tag" if act_rc == 0 else "tag danger"
+            rc_label = "OK" if act_rc == 0 else f"FAIL ({act_rc})"
+            action_rows += (
+                f'<div class="maint-action-row">'
+                f'<span class="mono">{act_name}</span>'
+                f'<span class="{rc_class}" style="font-size:10px;padding:2px 7px;">{rc_label}</span>'
+                f'<span class="mini" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{act_summary}</span>'
+                f'</div>'
+            )
+        actions_html = (
+            f'<div class="maint-subsection">'
+            f'<div class="mini" style="font-weight:700;margin-bottom:6px;">Last Cycle Actions</div>'
+            f'{action_rows}'
+            f'</div>'
+        )
+    else:
+        actions_html = (
+            f'<div class="empty-state" style="min-height:40px;padding:10px 16px;">'
+            f'<span>No cycle actions recorded. Start the maintenance daemon to see results.</span></div>'
+        )
+
+    # Cycle History (last 5)
+    if maint_history:
+        history_rows = ""
+        for cyc in reversed(maint_history):
+            cyc_at = _esc(cyc.get("executed_at", "unknown"))
+            cyc_total = cyc.get("total_actions", 0)
+            cyc_failed = cyc.get("failed_actions", 0)
+            cyc_passed = cyc.get("passed", True)
+            cyc_class = "tag" if cyc_passed else "tag danger"
+            cyc_label = f"{cyc_total} actions, all passed" if cyc_passed else f"{cyc_total} actions, {cyc_failed} failed"
+            history_rows += (
+                f'<div class="maint-action-row">'
+                f'<span class="mini" style="min-width:140px;">{cyc_at}</span>'
+                f'<span class="{cyc_class}" style="font-size:10px;padding:2px 7px;">{cyc_label}</span>'
+                f'</div>'
+            )
+        history_html = (
+            f'<div class="maint-subsection">'
+            f'<div class="mini" style="font-weight:700;margin-bottom:6px;">Cycle History (last 5)</div>'
+            f'{history_rows}'
+            f'</div>'
+        )
+    else:
+        history_html = (
+            f'<div class="empty-state" style="min-height:40px;padding:10px 16px;">'
+            f'<span>No cycle history yet.</span></div>'
+        )
+
+    maintenance_section = (
+        f'<div class="detail-section">'
+        f'<div class="section-title">Maintenance</div>'
+        f'{maint_header_html}'
+        f'{actions_html}'
+        f'{history_html}'
+        f'</div>'
+    )
+
     # --- Lineage ---
     lineage = payload.get("lineage", {})
     lineage_nodes = lineage.get("nodes", 0)
@@ -759,6 +972,7 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'{stats_row}'
         f'{sparkline_section}'
         f'{routes_section}'
+        f'{maintenance_section}'
         f'{tasks_section}'
         f'{bench_section}'
         f'{findings_section}'
@@ -875,6 +1089,53 @@ def _render_html(payload: dict) -> str:
         f'</div>'
     )
 
+    # --- Recent PRs section ---
+    recent_prs = payload.get("recent_prs", [])
+    if recent_prs:
+        pr_items = ""
+        for pr in recent_prs:
+            pr_num = pr.get("number", 0)
+            pr_title = _esc(pr.get("title", ""))
+            # Truncate long titles
+            if len(pr_title) > 60:
+                pr_title = pr_title[:57] + "..."
+            pr_state = pr.get("state", "UNKNOWN").upper()
+            pr_created = _esc(pr.get("created_at", "")[:10])
+            pr_url = _esc(pr.get("url", ""))
+
+            if pr_state == "MERGED":
+                pr_tag_class = "tag"
+                pr_tag_style = 'style="font-size:10px;padding:2px 7px;"'
+            elif pr_state == "OPEN":
+                pr_tag_class = "tag"
+                pr_tag_style = 'style="font-size:10px;padding:2px 7px;background:hsla(200 82% 60% / 0.14);color:hsl(200 76% 64%);border-color:hsla(200 82% 60% / 0.22);"'
+            else:
+                pr_tag_class = "tag"
+                pr_tag_style = 'style="font-size:10px;padding:2px 7px;background:hsla(210 14% 64% / 0.14);color:var(--muted);border-color:hsla(210 14% 64% / 0.22);"'
+
+            pr_items += (
+                f'<div class="pr-row">'
+                f'<span class="mono" style="flex-shrink:0;">#{pr_num}</span>'
+                f'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{pr_title}</span>'
+                f'<span class="{pr_tag_class}" {pr_tag_style}>{pr_state}</span>'
+                f'<span class="mini" style="flex-shrink:0;">{pr_created}</span>'
+                f'</div>'
+            )
+        prs_panel = (
+            f'<div class="panel" style="margin-bottom:24px;">'
+            f'<div class="headline">Recent Pull Requests</div>'
+            f'{pr_items}'
+            f'</div>'
+        )
+    else:
+        prs_panel = (
+            f'<div class="panel" style="margin-bottom:24px;">'
+            f'<div class="headline">Recent Pull Requests</div>'
+            f'<div class="empty-state" style="min-height:40px;padding:12px 16px;">'
+            f'<span>GitHub CLI not available or no recent pull requests.</span></div>'
+            f'</div>'
+        )
+
     # --- Section 2: Compact project cards ---
     if active_projects:
         cards_html = "\n".join(_render_compact_card(p, i) for i, p in enumerate(active_projects))
@@ -916,6 +1177,7 @@ def _render_html(payload: dict) -> str:
     html = html.replace("__DAEMON_PANEL__", daemon_panel)
     html = html.replace("__STAT_CARDS__", stat_cards)
     html = html.replace("__CROSS_PANEL__", cross_panel)
+    html = html.replace("__PRS_PANEL__", prs_panel)
     html = html.replace("__CARDS_SECTION__", cards_section)
     html = html.replace("__DETAIL_CONTAINER__", detail_container)
     html = html.replace("__INACTIVE_SECTION__", inactive_section)
@@ -1339,6 +1601,49 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
       margin-bottom: 6px;
       font-size: 13px;
     }}
+    /* --- Daemon dot on compact cards --- */
+    .daemon-dot {{
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }}
+    .pcard-daemon-row {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid var(--line);
+    }}
+    /* --- Maintenance action rows --- */
+    .maint-action-row {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      margin-bottom: 4px;
+      font-size: 13px;
+    }}
+    .maint-subsection {{
+      margin-top: 10px;
+    }}
+    /* --- PR rows --- */
+    .pr-row {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      border-radius: 10px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      margin-bottom: 6px;
+      font-size: 13px;
+    }}
     /* --- Inactive project cards --- */
     .project-grid {{
       display: grid;
@@ -1419,6 +1724,7 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
     __DAEMON_PANEL__
     __STAT_CARDS__
     __CROSS_PANEL__
+    __PRS_PANEL__
     <!-- Section 2: Project Cards Grid -->
     __CARDS_SECTION__
     <!-- Section 3: Project Detail (hidden, toggled by JS) -->
