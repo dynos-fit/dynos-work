@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -17,6 +18,11 @@ class LearningRuntimeTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
         (self.root / ".dynos").mkdir()
+        # Redirect persistent state to temp dir
+        self.dynos_home = self.root / ".dynos-home"
+        self.dynos_home.mkdir()
+        self._orig_dynos_home = os.environ.get("DYNOS_HOME")
+        os.environ["DYNOS_HOME"] = str(self.dynos_home)
         self.make_task(
             "task-20260401-001",
             {
@@ -63,12 +69,22 @@ class LearningRuntimeTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        if self._orig_dynos_home is None:
+            os.environ.pop("DYNOS_HOME", None)
+        else:
+            os.environ["DYNOS_HOME"] = self._orig_dynos_home
         self.tempdir.cleanup()
 
     def make_task(self, task_id: str, retrospective: dict) -> None:
         task_dir = self.root / ".dynos" / task_id
         task_dir.mkdir(parents=True)
         (task_dir / "task-retrospective.json").write_text(json.dumps(retrospective, indent=2) + "\n")
+
+    @property
+    def persistent_dir(self) -> Path:
+        """The persistent project dir under DYNOS_HOME for the temp root."""
+        slug = str(self.root.resolve()).strip("/").replace("/", "-")
+        return self.dynos_home / "projects" / slug
 
     def run_py(self, script: str, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -77,6 +93,7 @@ class LearningRuntimeTests(unittest.TestCase):
             text=True,
             capture_output=True,
             check=False,
+            env={**os.environ, "DYNOS_HOME": str(self.dynos_home)},
         )
 
     def test_rebuild_trajectory_store_and_search(self) -> None:
@@ -153,7 +170,7 @@ class LearningRuntimeTests(unittest.TestCase):
         output = json.loads(promote.stdout)
         self.assertEqual(output["target_mode"], "replace")
 
-        registry = json.loads((self.root / ".dynos" / "learned-agents" / "registry.json").read_text())
+        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
         self.assertEqual(agent["mode"], "replace")
         self.assertEqual(agent["last_evaluation"]["recommendation"], "promote_replace")
@@ -250,11 +267,11 @@ class LearningRuntimeTests(unittest.TestCase):
         payload = json.loads(bench.stdout)
         self.assertEqual(payload["item_kind"], "skill")
         self.assertEqual(payload["evaluation"]["target_mode"], "replace")
-        registry = json.loads((self.root / ".dynos" / "learned-agents" / "registry.json").read_text())
+        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
         skill = registry["agents"][0]
         self.assertEqual(skill["item_kind"], "skill")
         self.assertEqual(skill["mode"], "replace")
-        history = json.loads((self.root / ".dynos" / "benchmarks" / "history.json").read_text())
+        history = json.loads((self.persistent_dir / "benchmarks" / "history.json").read_text())
         self.assertEqual(len(history["runs"]), 1)
 
     def test_sandbox_benchmark_runner_executes_commands(self) -> None:
@@ -470,7 +487,7 @@ class LearningRuntimeTests(unittest.TestCase):
             str(self.root),
         )
         self.assertEqual(promote.returncode, 0, promote.stdout + promote.stderr)
-        registry = json.loads((self.root / ".dynos" / "learned-agents" / "registry.json").read_text())
+        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
         self.assertIn(agent["mode"], {"alongside", "replace"})
         self.assertTrue(agent["route_allowed"])
@@ -530,7 +547,7 @@ class LearningRuntimeTests(unittest.TestCase):
         payload = json.loads(bench.stdout)
         self.assertTrue(payload["evaluation"]["blocked_by_category"])
         self.assertEqual(payload["evaluation"]["recommendation"], "reject")
-        registry = json.loads((self.root / ".dynos" / "learned-agents" / "registry.json").read_text())
+        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
         self.assertEqual(agent["status"], "demoted_on_regression")
         self.assertFalse(agent["route_allowed"])
@@ -714,7 +731,7 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(auto.returncode, 0, auto.stdout + auto.stderr)
         payload = json.loads(auto.stdout)
         self.assertEqual(payload["executed"], 1)
-        registry = json.loads((self.root / ".dynos" / "learned-agents" / "registry.json").read_text())
+        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
         self.assertEqual(agent["mode"], "replace")
         self.assertTrue(agent["route_allowed"])
@@ -879,8 +896,8 @@ class LearningRuntimeTests(unittest.TestCase):
         patterns = self.run_py("dynopatterns.py", "--root", str(self.root))
         self.assertEqual(patterns.returncode, 0, patterns.stdout + patterns.stderr)
         payload = json.loads(patterns.stdout)
-        self.assertIn(str(self.root / ".dynos" / "dynos_patterns.md"), payload["written_paths"])
-        content = (self.root / ".dynos" / "dynos_patterns.md").read_text()
+        self.assertIn(str(self.persistent_dir / "dynos_patterns.md"), payload["written_paths"])
+        content = (self.persistent_dir / "dynos_patterns.md").read_text()
         self.assertIn("## Model Policy", content)
         self.assertIn("## Skip Policy", content)
         self.assertIn("## Agent Routing", content)
@@ -1028,12 +1045,12 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         status = json.loads((self.root / ".dynos" / "maintenance" / "status.json").read_text())
         self.assertIn("last_cycle", status)
-        registry = json.loads((self.root / ".dynos" / "learned-agents" / "registry.json").read_text())
+        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
         self.assertIn(agent["mode"], {"alongside", "replace"})
         self.assertTrue(agent["route_allowed"])
         self.assertTrue((self.root / ".dynos" / "dashboard.html").exists())
-        self.assertTrue((self.root / ".dynos" / "dynos_patterns.md").exists())
+        self.assertTrue((self.persistent_dir / "dynos_patterns.md").exists())
 
     def test_maintainer_invoke_alias_runs(self) -> None:
         invoke = self.run_py("dynomaintain.py", "invoke", "--root", str(self.root))
