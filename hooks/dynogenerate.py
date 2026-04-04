@@ -99,14 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--item-kind", choices=["agent", "skill"], default="agent")
     parser.add_argument("--source-task", action="append", default=[])
     parser.add_argument("--root", default=".")
+    parser.set_defaults(func=cmd_generate)
     return parser
 
 
-def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-    return cmd_generate(args)
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from dyno_cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))

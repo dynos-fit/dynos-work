@@ -70,13 +70,18 @@ def build_lineage(root: Path) -> dict:
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", default=".")
-    args = parser.parse_args()
+def cmd_lineage(args: argparse.Namespace) -> int:
     print(json.dumps(build_lineage(Path(args.root).resolve()), indent=2))
     return 0
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", default=".")
+    parser.set_defaults(func=cmd_lineage)
+    return parser
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from dyno_cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))

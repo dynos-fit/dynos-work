@@ -16,8 +16,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dynoslib import collect_retrospectives, load_json, now_iso, write_json
-from dynomaintain import maintenance_cycle
+from dynoslib import load_json, now_iso, write_json
+from dynoslib_core import project_dir, is_pid_running
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -47,17 +47,6 @@ def ensure_global_dirs() -> None:
 def project_slug(root: Path) -> str:
     """Convert a project root path to a safe directory name."""
     return str(root.resolve()).strip("/").replace("/", "-")
-
-
-def project_dir(root: Path) -> Path:
-    """Returns ~/.dynos/projects/{slug}/ for persistent project-specific state.
-
-    This is the safe home for postmortems, improvements, and other
-    project-specific data that should not live in the repo's .dynos/.
-    """
-    d = global_home() / "projects" / project_slug(root)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
 
 
 def registry_path() -> Path:
@@ -254,209 +243,31 @@ def merge_policy(project_root: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Statistics extraction (anonymous only)
+# Statistics extraction (delegated to dynoglobal_stats)
 # ---------------------------------------------------------------------------
-
-def extract_project_stats(project_root: Path) -> dict:
-    """Extract anonymous abstract statistics from a single project.
-
-    Returns counts by type, executor reliability rates, average quality
-    scores, and prevention rule frequencies.  No file paths, task
-    descriptions, or project-specific content is included.
-    """
-    project_root = project_root.resolve()
-    retrospectives = collect_retrospectives(project_root)
-
-    task_counts_by_type: dict[str, int] = {}
-    quality_scores: list[float] = []
-    executor_repair_totals: dict[str, list[float]] = {}
-    prevention_rules: dict[str, int] = {}
-    rule_executors: dict[str, str] = {}
-
-    for retro in retrospectives:
-        task_type = retro.get("task_type")
-        if isinstance(task_type, str) and task_type:
-            task_counts_by_type[task_type] = task_counts_by_type.get(task_type, 0) + 1
-
-        qs = retro.get("quality_score")
-        if isinstance(qs, (int, float)):
-            quality_scores.append(float(qs))
-
-        repair_freq = retro.get("executor_repair_frequency", {})
-        if isinstance(repair_freq, dict):
-            for role, count in repair_freq.items():
-                if isinstance(role, str) and isinstance(count, (int, float)):
-                    executor_repair_totals.setdefault(role, []).append(float(count))
-
-        rules = retro.get("prevention_rules", [])
-        if isinstance(rules, list):
-            for rule in rules:
-                rule_text = None
-                rule_executor = "unknown"
-                if isinstance(rule, str) and rule:
-                    rule_text = rule
-                elif isinstance(rule, dict):
-                    candidate = rule.get("rule") or rule.get("text")
-                    if isinstance(candidate, str) and candidate:
-                        rule_text = candidate
-                    rule_executor = str(rule.get("executor", "unknown"))
-                if rule_text:
-                    prevention_rules[rule_text] = prevention_rules.get(rule_text, 0) + 1
-                    rule_executors[rule_text] = rule_executor
-
-    total_tasks = sum(task_counts_by_type.values())
-    avg_quality = (sum(quality_scores) / len(quality_scores)) if quality_scores else 0.0
-
-    executor_reliability: dict[str, float] = {}
-    for role, counts in executor_repair_totals.items():
-        avg_repairs = sum(counts) / len(counts) if counts else 0.0
-        executor_reliability[role] = round(max(0.0, 1.0 - avg_repairs * 0.1), 3)
-
-    return {
-        "total_tasks": total_tasks,
-        "task_counts_by_type": task_counts_by_type,
-        "average_quality_score": round(avg_quality, 3),
-        "executor_reliability": executor_reliability,
-        "prevention_rule_frequencies": prevention_rules,
-        "prevention_rule_executors": rule_executors,
-    }
+from dynoglobal_stats import extract_project_stats  # noqa: E402
 
 
 def aggregate_cross_project_stats() -> dict:
-    """Aggregate anonymous stats from all registered projects.
-
-    Writes results to ~/.dynos/patterns/cross-project-stats.json keyed by
-    metric name (not by project).  Returns the aggregated dict.
-    """
-    ensure_global_dirs()
-    projects = list_projects()
-
-    agg_task_counts: dict[str, int] = {}
-    agg_quality_scores: list[float] = []
-    agg_executor_reliability: dict[str, list[float]] = {}
-    agg_prevention_rules: dict[str, int] = {}
-    project_count = 0
-
-    for proj in projects:
-        proj_path = Path(proj.get("path", ""))
-        if not proj_path.is_dir():
-            continue
-        try:
-            stats = extract_project_stats(proj_path)
-        except OSError:
-            log_global(f"failed to extract stats from project at {proj_path}")
-            continue
-
-        project_count += 1
-
-        for task_type, count in stats.get("task_counts_by_type", {}).items():
-            agg_task_counts[task_type] = agg_task_counts.get(task_type, 0) + count
-
-        avg_q = stats.get("average_quality_score", 0.0)
-        if isinstance(avg_q, (int, float)) and avg_q > 0:
-            agg_quality_scores.append(float(avg_q))
-
-        for role, rate in stats.get("executor_reliability", {}).items():
-            if isinstance(rate, (int, float)):
-                agg_executor_reliability.setdefault(role, []).append(float(rate))
-
-        for rule, freq in stats.get("prevention_rule_frequencies", {}).items():
-            agg_prevention_rules[rule] = agg_prevention_rules.get(rule, 0) + freq
-
-    overall_quality = (
-        round(sum(agg_quality_scores) / len(agg_quality_scores), 3)
-        if agg_quality_scores
-        else 0.0
+    """Aggregate anonymous stats from all registered projects."""
+    from dynoglobal_stats import aggregate_cross_project_stats as _agg
+    return _agg(
+        list_projects_fn=list_projects,
+        ensure_global_dirs_fn=ensure_global_dirs,
+        patterns_dir_fn=patterns_dir,
+        log_global_fn=log_global,
     )
-    reliability_means: dict[str, float] = {}
-    for role, rates in agg_executor_reliability.items():
-        reliability_means[role] = round(sum(rates) / len(rates), 3) if rates else 0.0
-
-    result = {
-        "aggregated_at": now_iso(),
-        "project_count": project_count,
-        "total_tasks": sum(agg_task_counts.values()),
-        "task_counts_by_type": agg_task_counts,
-        "average_quality_score": overall_quality,
-        "executor_reliability": reliability_means,
-        "prevention_rule_frequencies": agg_prevention_rules,
-    }
-
-    output_path = patterns_dir() / "cross-project-stats.json"
-    write_json(output_path, result)
-    log_global(json.dumps({
-        "action": "aggregate_cross_project_stats",
-        "projects_aggregated": project_count,
-        "total_tasks": result["total_tasks"],
-        "average_quality_score": result["average_quality_score"],
-        "timestamp": now_iso(),
-    }))
-    return result
 
 
 def promote_prevention_rules() -> dict:
-    """Promote prevention rules appearing in 2+ distinct projects.
-
-    Reads per-project stats (via extract_project_stats), finds rules that
-    appear in at least 2 distinct projects, and writes them to
-    ~/.dynos/patterns/global-prevention-rules.json.
-
-    Returns the promoted rules dict.
-    """
-    ensure_global_dirs()
-    projects = list_projects()
-
-    rule_project_count: dict[str, int] = {}
-    rule_executor_map: dict[str, str] = {}
-
-    for proj in projects:
-        proj_path = Path(proj.get("path", ""))
-        if not proj_path.is_dir():
-            continue
-        try:
-            stats = extract_project_stats(proj_path)
-        except OSError:
-            continue
-
-        seen_in_project: set[str] = set()
-        for rule in stats.get("prevention_rule_frequencies", {}):
-            if isinstance(rule, str) and rule and rule not in seen_in_project:
-                seen_in_project.add(rule)
-                rule_project_count[rule] = rule_project_count.get(rule, 0) + 1
-        for rule, executor in stats.get("prevention_rule_executors", {}).items():
-            if isinstance(rule, str) and isinstance(executor, str):
-                rule_executor_map.setdefault(rule, executor)
-
-    promoted = {
-        rule: count
-        for rule, count in rule_project_count.items()
-        if count >= 2
-    }
-
-    promotion_ts = now_iso()
-    result = {
-        "promoted_at": promotion_ts,
-        "threshold": 2,
-        "rules": [
-            {
-                "rule": rule,
-                "executor": rule_executor_map.get(rule, "unknown"),
-                "project_count": count,
-                "promotion_timestamp": promotion_ts,
-            }
-            for rule, count in sorted(promoted.items(), key=lambda x: -x[1])
-        ],
-    }
-
-    output_path = patterns_dir() / "global-prevention-rules.json"
-    write_json(output_path, result)
-    log_global(json.dumps({
-        "action": "promote_prevention_rules",
-        "rules_promoted": len(result["rules"]),
-        "threshold": 2,
-        "timestamp": promotion_ts,
-    }))
-    return result
+    """Promote prevention rules appearing in 2+ distinct projects."""
+    from dynoglobal_stats import promote_prevention_rules as _promote
+    return _promote(
+        list_projects_fn=list_projects,
+        ensure_global_dirs_fn=ensure_global_dirs,
+        patterns_dir_fn=patterns_dir,
+        log_global_fn=log_global,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -515,15 +326,6 @@ def daemon_pid_path() -> Path:
 def daemon_stop_path() -> Path:
     """Stop sentinel file for the global daemon."""
     return global_home() / "stop"
-
-
-def is_pid_running(pid: int) -> bool:
-    """Check whether a PID is alive."""
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 def current_daemon_pid() -> int | None:
@@ -597,6 +399,31 @@ def _stop_handler(signum: int, frame: object) -> None:
     _SHOULD_STOP = True
 
 
+def _run_maintenance_cycle(root: Path) -> dict:
+    """Run maintenance_cycle via subprocess to avoid tight coupling.
+
+    Invokes dynomaintain.py run-once and parses the JSON output.
+    """
+    hooks_dir = Path(__file__).resolve().parent
+    result = subprocess.run(
+        [sys.executable, str(hooks_dir / "dynomaintain.py"), "run-once", "--root", str(root)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            pass
+    return {
+        "executed_at": now_iso(),
+        "ok": False,
+        "error": result.stderr.strip() if result.stderr else f"exit code {result.returncode}",
+        "actions": [],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Daemon commands
 # ---------------------------------------------------------------------------
@@ -617,9 +444,9 @@ def cmd_run_once(args: argparse.Namespace) -> int:
             log_global(f"skipping missing project directory: {proj_path}")
             continue
         try:
-            cycle = maintenance_cycle(root)
-        except OSError as exc:
-            log_global(f"maintenance_cycle failed for {proj_path}: {exc}")
+            cycle = _run_maintenance_cycle(root)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log_global(f"_run_maintenance_cycle failed for {proj_path}: {exc}")
             cycle = {"executed_at": now_iso(), "ok": False, "error": str(exc), "actions": []}
         _log_project_cycle(proj_path, cycle)
         results.append({"project": proj_path, "cycle": cycle})
@@ -677,9 +504,9 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
                     log_global(f"skipping missing project directory: {proj_path}")
                     continue
                 try:
-                    cycle = maintenance_cycle(root)
+                    cycle = _run_maintenance_cycle(root)
                 except OSError as exc:
-                    log_global(f"maintenance_cycle failed for {proj_path}: {exc}")
+                    log_global(f"_run_maintenance_cycle failed for {proj_path}: {exc}")
                     cycle = {
                         "executed_at": now_iso(),
                         "ok": False,

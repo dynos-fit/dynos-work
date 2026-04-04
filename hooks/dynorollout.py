@@ -81,14 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("fixture_json")
     parser.add_argument("--root", default=".")
     parser.add_argument("--update-registry", action="store_true")
+    parser.set_defaults(func=cmd_run)
     return parser
 
 
-def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-    return cmd_run(args)
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from dyno_cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))

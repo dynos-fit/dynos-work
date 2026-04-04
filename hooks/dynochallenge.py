@@ -78,18 +78,7 @@ def parse_commands(raw: list[str]) -> list[list[str]]:
     return commands
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("task_id")
-    parser.add_argument("agent_name")
-    parser.add_argument("role")
-    parser.add_argument("task_type")
-    parser.add_argument("--item-kind", choices=["agent", "skill"], default="agent")
-    parser.add_argument("--baseline-command", action="append", required=True)
-    parser.add_argument("--candidate-command", action="append", required=True)
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--update-registry", action="store_true")
-    args = parser.parse_args()
+def cmd_challenge(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     entry = _find_entry(root, args.agent_name, args.role, args.task_type, args.item_kind)
     fixture_path = synthesize_task_rollout(
@@ -107,5 +96,21 @@ def main() -> int:
     return rollout_cmd_run(rollout_args)
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("task_id")
+    parser.add_argument("agent_name")
+    parser.add_argument("role")
+    parser.add_argument("task_type")
+    parser.add_argument("--item-kind", choices=["agent", "skill"], default="agent")
+    parser.add_argument("--baseline-command", action="append", required=True)
+    parser.add_argument("--candidate-command", action="append", required=True)
+    parser.add_argument("--root", default=".")
+    parser.add_argument("--update-registry", action="store_true")
+    parser.set_defaults(func=cmd_challenge)
+    return parser
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from dyno_cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))
