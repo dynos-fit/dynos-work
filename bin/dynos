@@ -108,7 +108,59 @@ sys.exit(0 if pid else 1)
     exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@"
     ;;
   maintain) exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@" ;;
-  autofix|proactive) exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@" ;;
+  autofix|proactive)
+    # dynos autofix scan [/path]  — scan one or all registered projects
+    # dynos autofix list [/path]  — list findings
+    # dynos autofix clear [/path] — clear findings
+    if [ $# -gt 0 ] && [ "$1" = "scan" ]; then
+      shift
+      target="${1:-}"
+      if [ -z "$target" ]; then
+        # Scan ALL registered projects
+        projects=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${HOOKS_DIR}')
+from dynoglobal import load_registry
+reg = load_registry()
+for p in reg.get('projects', []):
+    if p.get('status') == 'active':
+        print(p['path'])
+" 2>/dev/null)
+        if [ -z "$projects" ]; then
+          echo "No registered projects found. Run 'dynos init' in a project first." >&2
+          exit 1
+        fi
+        echo "Scanning all registered projects..."
+        echo ""
+        while IFS= read -r proj; do
+          echo "━━━ $proj"
+          python3 "${HOOKS_DIR}/dynoproactive.py" scan --root "$proj" 2>/dev/null || true
+          echo ""
+        done <<< "$projects"
+      else
+        # Scan specific path — check if registered
+        resolved=$(cd "$target" 2>/dev/null && pwd) || { echo "Error: $target does not exist" >&2; exit 1; }
+        is_registered=$(python3 -c "
+import sys, json
+sys.path.insert(0, '${HOOKS_DIR}')
+from dynoglobal import load_registry
+reg = load_registry()
+for p in reg.get('projects', []):
+    if p['path'] == '$resolved':
+        print('yes')
+        sys.exit(0)
+print('no')
+" 2>/dev/null)
+        if [ "$is_registered" != "yes" ]; then
+          echo "Error: $resolved is not a registered project. Run 'dynos init' there first." >&2
+          exit 1
+        fi
+        exec python3 "${HOOKS_DIR}/dynoproactive.py" scan --root "$resolved"
+      fi
+    else
+      exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@"
+    fi
+    ;;
 
   # --- Global commands ---
   global) exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@" ;;
