@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import json
-import os
 import sys
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -808,16 +807,24 @@ def write_global_dashboard(payload: dict) -> dict:
 _ALLOWED_SERVE_FILES = {"global-dashboard.html", "global-dashboard-data.json"}
 
 
-class _RestrictedHandler(SimpleHTTPRequestHandler):
-    def do_GET(self) -> None:
-        path = self.path.split("?")[0].lstrip("/")
-        if path not in _ALLOWED_SERVE_FILES:
-            self.send_error(HTTPStatus.FORBIDDEN, "Access denied")
-            return
-        super().do_GET()
+def _make_restricted_handler(serve_dir: str) -> type:
+    """Create a handler class bound to a specific directory."""
 
-    def log_message(self, format: str, *args: object) -> None:
-        pass
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, directory=serve_dir, **kwargs)  # type: ignore[arg-type]
+
+        def do_GET(self) -> None:
+            path = self.path.split("?")[0].lstrip("/")
+            if path not in _ALLOWED_SERVE_FILES:
+                self.send_error(HTTPStatus.FORBIDDEN, "Access denied")
+                return
+            super().do_GET()
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    return Handler
 
 
 def cmd_dashboard(args: object) -> int:
@@ -847,14 +854,14 @@ def cmd_serve(args: object) -> int:
     write_global_dashboard(payload)
 
     from dynoglobal import global_home
-    serve_dir = global_home()
-    os.chdir(serve_dir)
+    serve_dir = str(global_home())
+    handler_cls = _make_restricted_handler(serve_dir)
 
     url = f"http://127.0.0.1:{port}/global-dashboard.html"
     print(json.dumps({"url": url}, indent=2))
     sys.stdout.flush()
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), _RestrictedHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
