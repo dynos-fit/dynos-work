@@ -679,6 +679,7 @@ class TestBinDynosUnchanged:
         "maintain",
         "bench",
         "report",
+        "proactive",
     ]
 
     def test_bin_dynos_exists(self) -> None:

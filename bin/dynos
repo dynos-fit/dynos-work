@@ -34,6 +34,7 @@ Subcommands:
   maintain    Alias for 'local'                       (dynomaintain.py)
   bench       Benchmark runner                        (dynobench.py)
   report      Generate reports                        (dynoreport.py)
+  proactive   Autonomous autofix scanner              (dynoproactive.py)
 
 Run 'dynos <subcommand> --help' for details.
 EOF
@@ -61,6 +62,7 @@ case "$cmd" in
   maintain)   exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@" ;;
   bench)      exec python3 "${HOOKS_DIR}/dynobench.py" "$@" ;;
   report)     exec python3 "${HOOKS_DIR}/dynoreport.py" "$@" ;;
+  proactive)  exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@" ;;
   help|-h|--help) usage ;;
   *) echo "Unknown subcommand: $cmd" >&2; usage >&2; exit 1 ;;
 esac
