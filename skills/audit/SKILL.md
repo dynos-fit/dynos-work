@@ -58,7 +58,19 @@ Spawn the determined auditors simultaneously, passing the resolved model for eac
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
-**Token capture (applies to all subagent spawns in Steps 3-4):** After each subagent completes, record `total_tokens` from the Agent tool result as `{agent-name: token_count}`. If unavailable, record `null` and exclude from sums. For ensemble voting, sum all voting and escalation spawns. For agents spawned multiple times, sum their counts.
+**Token capture (applies to all subagent spawns in Steps 3-4):** After each subagent completes, read `total_tokens` from the Agent tool result's usage summary. Immediately append the entry to `.dynos/task-{id}/token-usage.json` using this format:
+
+```python
+# Read or initialize
+import json
+path = ".dynos/task-{id}/token-usage.json"
+data = json.load(open(path)) if os.path.exists(path) else {"agents": {}, "total": 0}
+data["agents"][agent_name] = data["agents"].get(agent_name, 0) + token_count
+data["total"] = sum(v for v in data["agents"].values() if isinstance(v, (int, float)))
+json.dump(data, open(path, "w"), indent=2)
+```
+
+Write to this file after EVERY subagent spawn — auditors, repair-coordinator, executors, re-audit passes. This file is the durable record of token usage. The retrospective's `token_usage_by_agent` and `total_token_usage` fields should be populated from this file, not from memory. If `total_tokens` is unavailable from a spawn result, record `null` for that agent and exclude it from the sum.
 
 **Eager two-phase repair trigger:**
 
@@ -163,8 +175,8 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
 4. Scan `.dynos/task-{id}/execution-log.md`. Count lines matching the pattern `[HUMAN] SPEC_REVIEW`. This is the **spec review iteration count**. If the file is missing, set to `0`.
 5. Read `manifest.json`. Flatten the `classification` object into scalar fields: `task_type` (string), `task_domains` (comma-separated string, e.g. "ui,backend"), `task_risk_level` (string). Set **task outcome** to `DONE` (this gate only runs for successful completion).
 6. Compute token and model tracking:
-   - `token_usage_by_agent`: map agent name to total token count from Steps 3-4 (null if unavailable).
-   - `total_token_usage`: sum of non-null values (0 if all null).
+   - `token_usage_by_agent`: Read `.dynos/task-{id}/token-usage.json`. Use its `agents` dict directly. If the file is missing (token capture failed), fall back to `{}`.
+   - `total_token_usage`: Read the `total` field from `token-usage.json`. If the file is missing, set to `0`.
    - `model_used_by_agent`: map agent name to actual model used at spawn time (null if unavailable).
    - `agent_source`: map agent name to routing source: `"generic"`, `"learned:{prompt-name}"`, or for alongside mode both `"{name}": "generic"` and `"{name}:learned": "learned:{prompt-name}"`.
 7. Compute alongside overlap (only for alongside-mode auditors):

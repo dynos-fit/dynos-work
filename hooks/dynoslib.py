@@ -672,7 +672,17 @@ def estimate_token_usage(subagent_spawn_count: int, model_used_by_agent: dict) -
     return max(1, int(subagent_spawn_count or 0)) * TOKEN_ESTIMATES["default"]
 
 
-def validate_retrospective_scores(retro: dict) -> dict:
+def load_token_usage(task_dir: Path) -> dict:
+    """Read token-usage.json written by the audit skill during subagent spawns."""
+    path = task_dir / "token-usage.json"
+    if path.exists():
+        data = load_json(path)
+        if isinstance(data, dict) and "agents" in data:
+            return data
+    return {"agents": {}, "total": 0}
+
+
+def validate_retrospective_scores(retro: dict, task_dir: Path | None = None) -> dict:
     """Recompute quality/cost/efficiency scores deterministically, overwriting LLM values."""
     retro = dict(retro)  # shallow copy
     findings_by_auditor = retro.get("findings_by_auditor", {})
@@ -689,9 +699,17 @@ def validate_retrospective_scores(retro: dict) -> dict:
     # Efficiency
     retro["efficiency_score"] = max(0.0, 1 - (repair_cycles / 3) - (max(0, spec_iterations - 1) * 0.1))
 
-    # Cost — use estimated tokens if real data missing
-    total_tokens = _safe_float(retro.get("total_token_usage"), 0.0)
+    # Cost — try token-usage.json first, then retrospective field, then estimate
+    total_tokens = 0.0
     token_estimated = False
+    if task_dir is not None:
+        token_data = load_token_usage(task_dir)
+        total_tokens = float(token_data.get("total", 0))
+        if total_tokens > 0:
+            retro["token_usage_by_agent"] = token_data["agents"]
+            retro["total_token_usage"] = int(total_tokens)
+    if total_tokens == 0:
+        total_tokens = _safe_float(retro.get("total_token_usage"), 0.0)
     if total_tokens == 0 and subagent_spawns > 0:
         total_tokens = float(estimate_token_usage(subagent_spawns, model_used))
         token_estimated = True

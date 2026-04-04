@@ -150,6 +150,42 @@ class TestValidateRetrospectiveScores(unittest.TestCase):
         self.assertFalse(fixed.get("token_usage_estimated", False))
 
 
+class TestLoadTokenUsage(unittest.TestCase):
+    """load_token_usage reads token-usage.json from task directory."""
+
+    def test_reads_valid_file(self) -> None:
+        import tempfile
+        from dynoslib import load_token_usage
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td)
+            (task_dir / "token-usage.json").write_text(
+                '{"agents": {"security-auditor": 45000, "cq-auditor": 12000}, "total": 57000}'
+            )
+            data = load_token_usage(task_dir)
+            self.assertEqual(data["total"], 57000)
+            self.assertEqual(data["agents"]["security-auditor"], 45000)
+
+    def test_missing_file_returns_empty(self) -> None:
+        import tempfile
+        from dynoslib import load_token_usage
+        with tempfile.TemporaryDirectory() as td:
+            data = load_token_usage(Path(td))
+            self.assertEqual(data, {"agents": {}, "total": 0})
+
+    def test_validate_uses_token_file(self) -> None:
+        import tempfile
+        from dynoslib import validate_retrospective_scores
+        with tempfile.TemporaryDirectory() as td:
+            task_dir = Path(td)
+            (task_dir / "token-usage.json").write_text(
+                '{"agents": {"sec": 45000}, "total": 45000}'
+            )
+            retro = _make_retrospective(tokens=0, spawns=1, findings_by_auditor={})
+            fixed = validate_retrospective_scores(retro, task_dir=task_dir)
+            self.assertEqual(fixed["total_token_usage"], 45000)
+            self.assertFalse(fixed.get("token_usage_estimated", False))
+
+
 class TestMakeTrajectoryEntry(unittest.TestCase):
     """AC 2, 4: make_trajectory_entry() always recomputes quality and estimates tokens."""
 
