@@ -1,61 +1,60 @@
 ---
 name: autofix
-description: "Internal dynos-work skill. Run the autofix scanner: detect technical debt, open PRs for low-risk fixes, open issues for high-risk findings."
+description: "Toggle automatic code scanning. Finds bugs, dead code, and security issues — opens PRs with fixes while you sleep."
 ---
 
 # dynos-work: Autofix
 
-Run the proactive scanner to detect and fix technical debt.
+Toggle automatic code scanning and fixing for the current project.
 
 ## Usage
 
 ```
-/dynos-work:autofix                  # scan all registered projects
-/dynos-work:autofix scan             # same as above
-/dynos-work:autofix scan /path       # scan one project (must be registered)
-/dynos-work:autofix list             # show current findings
-/dynos-work:autofix clear            # reset findings history
+/dynos-work:autofix on        # enable autofix
+/dynos-work:autofix off       # disable autofix
+/dynos-work:autofix status    # check if enabled
 ```
 
 ## What you do
 
-### scan (default)
+Parse the user's argument (on, off, or status).
 
-If no path is given, scan ALL registered active projects:
+### on
 
+1. Ensure the project is registered and daemon is running:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 -c "
-import json, sys
-sys.path.insert(0, '${PLUGIN_HOOKS}')
-from dynoglobal import load_registry
-reg = load_registry()
-for p in reg.get('projects', []):
-    if p.get('status') == 'active':
-        print(p['path'])
-"
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoregistry.py" register "$(pwd)" 2>/dev/null || true
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root "$(pwd)" --autofix 2>/dev/null || true
 ```
 
-For each project path, run:
-```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoproactive.py" scan --root <path>
+2. Print:
+```
+Autofix enabled. Your code will be scanned for bugs, dead code, and security issues.
+Safe fixes will open PRs automatically. Risky findings will open GitHub issues for your review.
 ```
 
-Print the JSON results for each project.
+### off
 
-If a specific path is given, check it is registered first (query the registry). If not registered, tell the user to run `/dynos-work:init` in that project first.
-
-### list
-
+1. Remove the autofix flag:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoproactive.py" list --root .
+rm -f "$(pwd)/.dynos/maintenance/autofix.enabled"
 ```
 
-Print the findings in a human-readable format.
-
-### clear
-
-```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoproactive.py" clear --root .
+2. Print:
+```
+Autofix disabled. The daemon will continue running for learning (patterns, postmortems) but won't scan or fix code.
+To re-enable: /dynos-work:autofix on
 ```
 
-Confirm the reset.
+### status
+
+1. Check the flag:
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" status --root "$(pwd)"
+```
+
+2. Print whether autofix is on or off, daemon running or stopped, and last scan time if available.
+
+### Default (no argument)
+
+Show the status.
