@@ -15,11 +15,11 @@ from pathlib import Path
 from dynodashboard import build_dashboard_payload
 from dynoglobal import (
     current_daemon_pid,
-    extract_project_stats,
     load_registry,
     log_global,
     sweeps_log_path,
 )
+from dynoglobal_stats import extract_project_stats
 from dynoslib import now_iso, validate_generated_html, write_json
 
 
@@ -241,6 +241,7 @@ def gather_all_projects() -> dict:
             sparkline_svg = build_sparkline_svg(quality_scores, width=400, height=60)
             health = derive_health_tag(data)
             maintenance = _gather_maintenance_data(proj_path)
+            autofix_cost = _gather_autofix_cost(proj_path)
 
             active_projects.append({
                 "name": name,
@@ -256,6 +257,7 @@ def gather_all_projects() -> dict:
                 "last_cycle_at": payload.get("generated_at", ""),
                 "daemon_running": _check_project_daemon(proj_path),
                 "maintenance": maintenance,
+                "autofix_cost": autofix_cost,
                 "payload": payload,
                 "retrospectives": retrospectives,
             })
@@ -385,6 +387,51 @@ def _gather_maintenance_data(project_root: Path) -> dict:
     return result
 
 
+def _gather_autofix_cost(project_root: Path) -> dict:
+    """Read proactive-findings.json and scan-coverage.json for autofix cost data.
+
+    proactive-findings.json may be:
+      - a dict with a top-level ``cost`` key (newer format)
+      - a list of findings (older format, no cost data)
+
+    scan-coverage.json has ``last_scan_at`` at top level.
+
+    Returns a dict with haiku_invocations, fix_invocations, estimated_cost_usd,
+    and last_scan_at -- or an empty dict if no data is available.
+    """
+    result: dict = {}
+    dynos_dir = project_root / ".dynos"
+
+    # Read proactive-findings.json for cost data
+    findings_path = dynos_dir / "proactive-findings.json"
+    if findings_path.exists():
+        try:
+            data = json.loads(findings_path.read_text())
+            if isinstance(data, dict):
+                cost = data.get("cost", {})
+                if isinstance(cost, dict):
+                    result["haiku_invocations"] = cost.get("haiku_invocations", 0)
+                    result["fix_invocations"] = cost.get("fix_invocations", 0)
+                    result["estimated_cost_usd"] = cost.get("estimated_cost_usd", 0.0)
+            # list format has no cost data -- leave result empty for cost fields
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Read scan-coverage.json for last_scan_at
+    coverage_path = dynos_dir / "scan-coverage.json"
+    if coverage_path.exists():
+        try:
+            cov_data = json.loads(coverage_path.read_text())
+            if isinstance(cov_data, dict):
+                last_scan = cov_data.get("last_scan_at", "")
+                if last_scan:
+                    result["last_scan_at"] = last_scan
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return result
+
+
 def _gather_autofix_prs(project_path: str) -> list[dict]:
     """Get autofix PRs for a specific project. Returns empty list if gh unavailable or none found."""
     import subprocess
@@ -423,6 +470,7 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
     active_count = 0
     total_benchmark_runs = 0
     total_findings = 0
+    total_autofix_cost_usd = 0.0
     total_learned_components = 0
     total_shadow_components = 0
     total_demoted_components = 0
@@ -445,6 +493,10 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
             active_count += 1
 
         total_benchmark_runs += summary.get("benchmark_runs", 0)
+        autofix_cost = proj.get("autofix_cost", {})
+        cost_val = autofix_cost.get("estimated_cost_usd", 0.0)
+        if isinstance(cost_val, (int, float)):
+            total_autofix_cost_usd += float(cost_val)
         total_learned_components += summary.get("learned_components", 0)
         total_shadow_components += summary.get("shadow_components", 0)
         total_demoted_components += summary.get("demoted_components", 0)
@@ -468,6 +520,7 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
         "active_count": active_count,
         "total_benchmark_runs": total_benchmark_runs,
         "total_findings": total_findings,
+        "total_autofix_cost_usd": round(total_autofix_cost_usd, 2),
         "total_learned_components": total_learned_components,
         "total_shadow_components": total_shadow_components,
         "total_demoted_components": total_demoted_components,
@@ -567,6 +620,13 @@ def _render_compact_card(proj: dict, index: int) -> str:
     last_cycle_at = maintenance.get("last_cycle_at", "")
     last_cycle_display = _esc(last_cycle_at[:16].replace("T", " ")) if last_cycle_at else "no cycles"
 
+    # Autofix cost line for compact card
+    autofix_cost = proj.get("autofix_cost", {})
+    af_cost_usd = autofix_cost.get("estimated_cost_usd", 0.0)
+    af_cost_line = ""
+    if isinstance(af_cost_usd, (int, float)) and af_cost_usd > 0:
+        af_cost_line = f'<span class="mini" style="margin-left:6px;">${af_cost_usd:.2f} autofix</span>'
+
     return (
         f'<div class="panel pcard" data-project-id="{index}" '
         f'role="button" tabindex="0" aria-label="Show details for {name}">'
@@ -588,6 +648,7 @@ def _render_compact_card(proj: dict, index: int) -> str:
         f'aria-label="{daemon_dot_label}"></span>'
         f'<span class="mini">{daemon_dot_label}</span>'
         f'{"<span class=\"tag\" style=\"font-size:9px;padding:1px 6px;margin-left:6px;\">autofix</span>" if maintenance.get("autofix_enabled") else ""}'
+        f'{af_cost_line}'
         f'<span class="mini" style="margin-left:auto;">{last_cycle_display}</span>'
         f'</div>'
         f'<div class="pcard-spark">{spark_html}</div>'
@@ -897,6 +958,38 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'</div>'
     )
 
+    # Autofix cost line
+    autofix_cost = proj.get("autofix_cost", {})
+    af_haiku = autofix_cost.get("haiku_invocations", 0)
+    af_fix = autofix_cost.get("fix_invocations", 0)
+    af_usd = autofix_cost.get("estimated_cost_usd", 0.0)
+    af_scan_at = autofix_cost.get("last_scan_at", "")
+    if af_haiku or af_fix or af_usd:
+        af_scan_display = _esc(af_scan_at[:16].replace("T", " ")) if af_scan_at else "unknown"
+        autofix_cost_html = (
+            f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
+            f'<span class="mini" style="font-weight:700;">Autofix:</span>'
+            f'<span class="mini">{af_haiku} Haiku calls, {af_fix} fix calls, ~${af_usd:.2f} estimated cost</span>'
+            f'<span class="mini">Last scan: {af_scan_display}</span>'
+            f'</div>'
+        )
+    elif af_scan_at:
+        af_scan_display = _esc(af_scan_at[:16].replace("T", " "))
+        autofix_cost_html = (
+            f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
+            f'<span class="mini" style="font-weight:700;">Autofix:</span>'
+            f'<span class="mini">No cost data available</span>'
+            f'<span class="mini">Last scan: {af_scan_display}</span>'
+            f'</div>'
+        )
+    else:
+        autofix_cost_html = (
+            f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
+            f'<span class="mini" style="font-weight:700;">Autofix:</span>'
+            f'<span class="mini" style="font-style:italic;">No scan data available</span>'
+            f'</div>'
+        )
+
     # Last Cycle Actions table
     if maint_actions:
         action_rows = ""
@@ -957,6 +1050,7 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'<div class="detail-section">'
         f'<div class="section-title">Maintenance</div>'
         f'{maint_header_html}'
+        f'{autofix_cost_html}'
         f'{actions_html}'
         f'{history_html}'
         f'</div>'
@@ -1104,6 +1198,15 @@ def _render_html(payload: dict) -> str:
     total_learned = aggregates.get("total_learned_routes", 0)
     total_benchmarks = aggregates.get("total_benchmark_runs", 0)
     total_findings = aggregates.get("total_findings", 0)
+    total_autofix_cost = aggregates.get("total_autofix_cost_usd", 0.0)
+
+    # Autofix cost color: mint if $0, amber if > $1, rose if > $10
+    if total_autofix_cost > 10:
+        autofix_cost_color = "var(--rose)"
+    elif total_autofix_cost > 1:
+        autofix_cost_color = "var(--amber)"
+    else:
+        autofix_cost_color = "var(--mint)"
 
     stat_cards = (
         f'<section class="agg-stats" id="stats">'
@@ -1114,6 +1217,8 @@ def _render_html(payload: dict) -> str:
         f'<div class="stat"><div class="label">Benchmark Runs</div><div class="value">{total_benchmarks}</div></div>'
         f'<div class="stat"><div class="label">Active Projects</div><div class="value">{active_count}</div></div>'
         f'<div class="stat"><div class="label">Total Findings</div><div class="value">{total_findings}</div></div>'
+        f'<div class="stat"><div class="label">Autofix Cost</div>'
+        f'<div class="value" style="color:{autofix_cost_color}">${total_autofix_cost:.2f}</div></div>'
         f'</section>'
     )
 
@@ -1296,7 +1401,7 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
     /* --- Aggregate stat cards (6-col grid) --- */
     .agg-stats {{
       display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
       gap: 14px;
       margin-bottom: 24px;
     }}
@@ -1681,6 +1786,7 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
     body.loaded .agg-stats .stat:nth-child(4) {{ animation-delay: 0.18s; }}
     body.loaded .agg-stats .stat:nth-child(5) {{ animation-delay: 0.22s; }}
     body.loaded .agg-stats .stat:nth-child(6) {{ animation-delay: 0.26s; }}
+    body.loaded .agg-stats .stat:nth-child(7) {{ animation-delay: 0.30s; }}
     /* Detail panel should not hover-lift */
     .project-detail .panel:hover {{
       transform: none;
