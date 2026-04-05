@@ -267,6 +267,37 @@ def _detect_dependency_vulns(root: Path) -> list[dict]:
 # Detection: Dead code (AC 4)
 # ---------------------------------------------------------------------------
 
+def _detect_syntax_errors(root: Path) -> list[dict]:
+    """Check all Python files for syntax errors."""
+    findings: list[dict] = []
+    hooks_dir = root / "hooks"
+    if not hooks_dir.is_dir():
+        return findings
+
+    for py_file in sorted(hooks_dir.glob("*.py")):
+        try:
+            source = py_file.read_text()
+            ast.parse(source, filename=py_file.name)
+        except SyntaxError as exc:
+            fid = f"syntax-error-{py_file.name}-{exc.lineno or 0}"
+            findings.append(_make_finding(
+                finding_id=fid,
+                severity="medium",
+                category="syntax-error",
+                description=f"Syntax error in {py_file.name} line {exc.lineno}: {exc.msg}",
+                evidence={
+                    "file": f"hooks/{py_file.name}",
+                    "line": exc.lineno,
+                    "message": exc.msg,
+                    "text": (exc.text or "").strip(),
+                },
+            ))
+        except OSError:
+            continue
+
+    return findings
+
+
 def _detect_dead_code(root: Path) -> list[dict]:
     findings: list[dict] = []
     hooks_dir = root / "hooks"
@@ -1088,6 +1119,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     # Run all four detectors
     new_findings: list[dict] = []
+    new_findings.extend(_detect_syntax_errors(root))
     new_findings.extend(_detect_recurring_audit(root))
     new_findings.extend(_detect_dependency_vulns(root))
     new_findings.extend(_detect_dead_code(root))
