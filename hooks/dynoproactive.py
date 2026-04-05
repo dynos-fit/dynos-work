@@ -569,16 +569,38 @@ def _save_scan_coverage(root: Path, coverage: dict) -> None:
 def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]:
     """Score all Python files by risk priority. Higher = scan first."""
 
-    # Find all Python files in the project (not just hooks/)
-    py_files: list[Path] = []
-    for pattern in ("hooks/*.py", "*.py", "tests/*.py"):
-        py_files.extend(root.glob(pattern))
+    # Find all source files in the project (any language)
+    _SOURCE_EXTENSIONS = {
+        ".py", ".js", ".ts", ".tsx", ".jsx",
+        ".go", ".rs", ".rb", ".java", ".kt",
+        ".c", ".cpp", ".h", ".hpp", ".cs",
+        ".swift", ".dart", ".lua", ".php",
+        ".sh", ".bash", ".zsh",
+    }
+    _IGNORE_DIRS = {
+        ".git", ".dynos", "node_modules", "__pycache__", ".venv",
+        "venv", "dist", "build", ".next", ".nuxt", "target",
+        "vendor", ".tox", ".mypy_cache", ".pytest_cache",
+    }
+
+    all_files: list[Path] = []
+    for item in root.rglob("*"):
+        if not item.is_file():
+            continue
+        if item.suffix not in _SOURCE_EXTENSIONS:
+            continue
+        # Skip ignored directories
+        parts = item.relative_to(root).parts
+        if any(p in _IGNORE_DIRS for p in parts):
+            continue
+        all_files.append(item)
+
     # Deduplicate
     seen: set[str] = set()
     unique_files: list[Path] = []
-    for f in py_files:
+    for f in all_files:
         rel = str(f.relative_to(root))
-        if rel not in seen and f.is_file():
+        if rel not in seen:
             seen.add(rel)
             unique_files.append(f)
 
@@ -612,9 +634,20 @@ def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]
             prev_findings[efile] = prev_findings.get(efile, 0) + 1
 
     # 3. Test coverage: check if a test file exists for each source file
+    # Collect test file names (any language, common patterns)
     test_files: set[str] = set()
-    for tf in root.glob("tests/*.py"):
-        test_files.add(tf.stem)  # test_foo -> foo
+    for test_dir in ("tests", "test", "__tests__", "spec"):
+        for tf in (root / test_dir).rglob("*") if (root / test_dir).is_dir() else []:
+            if tf.is_file():
+                stem = tf.stem
+                # Strip common test prefixes/suffixes: test_foo, foo_test, foo.test, foo.spec
+                for prefix in ("test_", "test-"):
+                    if stem.startswith(prefix):
+                        stem = stem[len(prefix):]
+                for suffix in ("_test", "-test", ".test", "_spec", "-spec", ".spec"):
+                    if stem.endswith(suffix):
+                        stem = stem[:-len(suffix)]
+                test_files.add(stem)
 
     scored: list[tuple[Path, float]] = []
     for f in unique_files:
