@@ -182,11 +182,6 @@ def unregister_project(root: Path) -> dict:
     return reg
 
 
-def set_project_active(root: Path) -> dict:
-    """Mark project as active and update last_active_at."""
-    return set_project_status(root, "active")
-
-
 def set_project_status(root: Path, status: str) -> dict:
     """Set project status. Must be one of: active, paused, archived."""
     if status not in _VALID_STATUSES:

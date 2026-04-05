@@ -138,12 +138,12 @@ class TestRegistryCRUD:
         set_project_status(proj, "active")  # no error
 
     def test_set_active_updates_last_active_at(self, tmp_path):
-        from dynoglobal import register_project, set_project_active, list_projects
+        from dynoglobal import register_project, set_project_status, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
         before = list_projects()[0]["last_active_at"]
-        set_project_active(proj)
+        set_project_status(proj, "active")
         after = list_projects()[0]["last_active_at"]
         assert after >= before
 
