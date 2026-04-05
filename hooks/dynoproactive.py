@@ -1037,6 +1037,7 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             f"- Do NOT refactor surrounding code.\n"
             f"- Do NOT run `git push` or push to any remote. The caller handles pushing.\n"
             f"- Do NOT create PRs. The caller handles PR creation.\n"
+            f"- Do NOT register this directory as a project. Do NOT run dynos registry or dynos init.\n"
             f"- Stay on the current branch `{branch_name}`. Do NOT create new branches.\n"
             f"- Commit message: [autofix] {description[:80]}"
         )
