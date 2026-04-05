@@ -825,9 +825,28 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, timeout=5, cwd=str(root),
         )
-        base_branch = base_result.stdout.strip() if base_result.returncode == 0 else "main"
-        if base_branch == "HEAD":
-            base_branch = "main"  # detached HEAD fallback
+        base_branch = base_result.stdout.strip() if base_result.returncode == 0 else ""
+        if not base_branch or base_branch == "HEAD":
+            # Detached HEAD — find the default branch
+            default_result = subprocess.run(
+                ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                capture_output=True, text=True, timeout=5, cwd=str(root),
+            )
+            if default_result.returncode == 0:
+                # refs/remotes/origin/main → main
+                base_branch = default_result.stdout.strip().split("/")[-1]
+            else:
+                # Last resort: check if main or master exists
+                for candidate in ("main", "master"):
+                    check = subprocess.run(
+                        ["git", "rev-parse", "--verify", candidate],
+                        capture_output=True, timeout=5, cwd=str(root),
+                    )
+                    if check.returncode == 0:
+                        base_branch = candidate
+                        break
+                else:
+                    base_branch = "main"
     except (subprocess.TimeoutExpired, OSError):
         base_branch = "main"
 
