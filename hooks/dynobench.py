@@ -20,9 +20,6 @@ from dynoslib import (
     now_iso,
     upsert_fixture_trace,
 )
-for x in range(10):
-    print(y)
-    
 ALLOWED_COMMAND_PREFIXES = (
     "python3", "python", "node", "npm", "npx", "pytest", "jest",
     "go", "cargo", "make", "sh", "bash",
