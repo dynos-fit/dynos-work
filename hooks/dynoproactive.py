@@ -48,6 +48,7 @@ VALID_CATEGORIES = {"recurring-audit", "dependency-vuln", "dead-code", "architec
 VALID_STATUSES = {
     "new", "fixed", "issue-opened", "failed",
     "skipped-dedup", "already-exists", "permanently_failed",
+    "rate-limited", "suppressed-policy",
 }
 
 
@@ -62,6 +63,123 @@ def _log(msg: str) -> None:
 
 def _findings_path(root: Path) -> Path:
     return root / ".dynos" / "proactive-findings.json"
+
+
+def _autofix_policy_path(root: Path) -> Path:
+    return _persistent_project_dir(root) / "autofix-policy.json"
+
+
+def _autofix_metrics_path(root: Path) -> Path:
+    return _persistent_project_dir(root) / "autofix-metrics.json"
+
+
+def _autofix_benchmarks_path(root: Path) -> Path:
+    return _persistent_project_dir(root) / "autofix-benchmarks.json"
+
+
+def _default_category_policy(category: str) -> dict:
+    mode = "autofix"
+    base_confidence = 0.75
+    if category == "syntax-error":
+        base_confidence = 0.95
+    elif category == "dead-code":
+        base_confidence = 0.88
+    elif category == "llm-review":
+        base_confidence = 0.70
+    elif category in {"dependency-vuln", "architectural-drift", "recurring-audit"}:
+        mode = "issue-only"
+        base_confidence = 0.35
+    return {
+        "enabled": True,
+        "mode": mode,
+        "min_confidence_autofix": 0.65,
+        "confidence": base_confidence,
+        "stats": {
+            "proposed": 0,
+            "merged": 0,
+            "closed_unmerged": 0,
+            "reverted": 0,
+            "verification_failed": 0,
+            "issues_opened": 0,
+        },
+    }
+
+
+def _default_autofix_policy() -> dict:
+    return {
+        "max_prs_per_day": 3,
+        "max_open_prs": 5,
+        "cooldown_after_failures": 2,
+        "allow_dependency_file_changes": False,
+        "suppressions": [],
+        "categories": {
+            category: _default_category_policy(category)
+            for category in sorted(VALID_CATEGORIES)
+        },
+    }
+
+
+def _normalize_autofix_policy(data: dict | None) -> dict:
+    default = _default_autofix_policy()
+    if not isinstance(data, dict):
+        return default
+    merged = dict(default)
+    if isinstance(data.get("max_prs_per_day"), int) and data["max_prs_per_day"] > 0:
+        merged["max_prs_per_day"] = data["max_prs_per_day"]
+    if isinstance(data.get("max_open_prs"), int) and data["max_open_prs"] >= 0:
+        merged["max_open_prs"] = data["max_open_prs"]
+    if isinstance(data.get("cooldown_after_failures"), int) and data["cooldown_after_failures"] >= 0:
+        merged["cooldown_after_failures"] = data["cooldown_after_failures"]
+    if isinstance(data.get("allow_dependency_file_changes"), bool):
+        merged["allow_dependency_file_changes"] = data["allow_dependency_file_changes"]
+    if isinstance(data.get("suppressions"), list):
+        merged["suppressions"] = data["suppressions"]
+
+    categories = dict(default["categories"])
+    data_categories = data.get("categories", {})
+    if isinstance(data_categories, dict):
+        for category in VALID_CATEGORIES:
+            base = dict(categories[category])
+            incoming = data_categories.get(category, {})
+            if isinstance(incoming, dict):
+                if isinstance(incoming.get("enabled"), bool):
+                    base["enabled"] = incoming["enabled"]
+                if incoming.get("mode") in {"autofix", "issue-only", "disabled"}:
+                    base["mode"] = incoming["mode"]
+                if isinstance(incoming.get("min_confidence_autofix"), (int, float)):
+                    base["min_confidence_autofix"] = float(incoming["min_confidence_autofix"])
+                if isinstance(incoming.get("confidence"), (int, float)):
+                    base["confidence"] = round(float(incoming["confidence"]), 3)
+                stats = dict(base["stats"])
+                incoming_stats = incoming.get("stats", {})
+                if isinstance(incoming_stats, dict):
+                    for key in stats:
+                        if isinstance(incoming_stats.get(key), int) and incoming_stats[key] >= 0:
+                            stats[key] = incoming_stats[key]
+                base["stats"] = stats
+            categories[category] = base
+    merged["categories"] = categories
+    return merged
+
+
+def _load_autofix_policy(root: Path) -> dict:
+    path = _autofix_policy_path(root)
+    if not path.exists() or not path.read_text().strip():
+        data = _default_autofix_policy()
+        write_json(path, data)
+        return data
+    try:
+        raw = load_json(path)
+    except (json.JSONDecodeError, FileNotFoundError, OSError):
+        raw = {}
+    data = _normalize_autofix_policy(raw)
+    if data != raw:
+        write_json(path, data)
+    return data
+
+
+def _save_autofix_policy(root: Path, policy: dict) -> None:
+    write_json(_autofix_policy_path(root), _normalize_autofix_policy(policy))
 
 
 def _load_findings(root: Path) -> list[dict]:
@@ -209,9 +327,20 @@ def _make_finding(
         "processed_at": None,
         "attempt_count": 0,
         "pr_number": None,
+        "pr_url": None,
+        "pr_state": None,
+        "merge_outcome": None,
+        "branch_name": None,
         "issue_number": None,
+        "issue_url": None,
         "suppressed_until": None,
+        "suppression_reason": None,
         "fail_reason": None,
+        "fixability": None,
+        "confidence_score": None,
+        "rollout_mode": None,
+        "verification": {},
+        "pr_quality_score": None,
     }
 
 
@@ -1064,6 +1193,205 @@ def _dedup_finding(finding: dict, existing: list[dict]) -> str | None:
     return None
 
 
+def _suppression_reason(finding: dict, policy: dict) -> str | None:
+    for entry in policy.get("suppressions", []):
+        if not isinstance(entry, dict):
+            continue
+        until = str(entry.get("until", "") or "")
+        if until:
+            try:
+                until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
+                if until_dt < datetime.now(timezone.utc):
+                    continue
+            except ValueError:
+                pass
+        finding_id = str(entry.get("finding_id", "") or "")
+        if finding_id and finding_id == finding.get("finding_id"):
+            return str(entry.get("reason", "suppressed by finding id"))
+        category = str(entry.get("category", "") or "")
+        if category and category != finding.get("category"):
+            continue
+        path_prefix = str(entry.get("path_prefix", "") or "")
+        evidence_file = str(finding.get("evidence", {}).get("file", "") or "")
+        if path_prefix and not evidence_file.startswith(path_prefix):
+            continue
+        if category or path_prefix:
+            return str(entry.get("reason", "suppressed by policy"))
+    return None
+
+
+def _rate_limit_snapshot(policy: dict, findings: list[dict]) -> dict:
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    open_prs = 0
+    prs_today = 0
+    recent_failures = 0
+    for finding in findings:
+        if finding.get("pr_number") and finding.get("merge_outcome") in (None, "open"):
+            open_prs += 1
+        processed_at = str(finding.get("processed_at", "") or "")
+        if processed_at:
+            try:
+                processed_dt = datetime.fromisoformat(processed_at.replace("Z", "+00:00"))
+                if processed_dt.date() == today and finding.get("pr_number"):
+                    prs_today += 1
+                if (
+                    processed_dt > now - timedelta(days=1)
+                    and finding.get("status") in {"failed", "permanently_failed"}
+                ):
+                    recent_failures += 1
+            except ValueError:
+                pass
+    return {
+        "prs_today": prs_today,
+        "open_prs": open_prs,
+        "recent_failures": recent_failures,
+        "max_prs_per_day": int(policy.get("max_prs_per_day", 3) or 3),
+        "max_open_prs": int(policy.get("max_open_prs", 5) or 5),
+        "cooldown_after_failures": int(policy.get("cooldown_after_failures", 2) or 2),
+    }
+
+
+def _rate_limit_reason(policy: dict, findings: list[dict]) -> str | None:
+    snapshot = _rate_limit_snapshot(policy, findings)
+    if snapshot["prs_today"] >= snapshot["max_prs_per_day"]:
+        return f"max_prs_per_day reached ({snapshot['prs_today']}/{snapshot['max_prs_per_day']})"
+    if snapshot["open_prs"] >= snapshot["max_open_prs"]:
+        return f"max_open_prs reached ({snapshot['open_prs']}/{snapshot['max_open_prs']})"
+    if snapshot["recent_failures"] >= snapshot["cooldown_after_failures"]:
+        return (
+            f"cooldown_after_failures reached "
+            f"({snapshot['recent_failures']}/{snapshot['cooldown_after_failures']})"
+        )
+    return None
+
+
+def _recompute_category_confidence(policy: dict) -> dict:
+    categories = policy.get("categories", {})
+    for category, config in categories.items():
+        if not isinstance(config, dict):
+            continue
+        stats = config.get("stats", {})
+        if not isinstance(stats, dict):
+            continue
+        merged = int(stats.get("merged", 0) or 0)
+        closed_unmerged = int(stats.get("closed_unmerged", 0) or 0)
+        reverted = int(stats.get("reverted", 0) or 0)
+        verification_failed = int(stats.get("verification_failed", 0) or 0)
+        prior_success = 2.0
+        prior_failure = 1.0
+        failures = closed_unmerged + reverted + verification_failed
+        confidence = (merged + prior_success) / (merged + failures + prior_success + prior_failure)
+        if category == "syntax-error":
+            confidence = max(confidence, 0.9)
+        config["confidence"] = round(confidence, 3)
+    return policy
+
+
+def _build_autofix_benchmarks(root: Path, findings: list[dict], policy: dict) -> dict:
+    categories: dict[str, dict] = {}
+    recent_prs: list[dict] = []
+    for finding in findings:
+        category = str(finding.get("category", "unknown"))
+        bucket = categories.setdefault(category, {
+            "findings": 0,
+            "autofix_prs": 0,
+            "merged": 0,
+            "closed_unmerged": 0,
+            "reverted": 0,
+            "issues_opened": 0,
+            "verification_failed": 0,
+            "avg_pr_quality_score": 0.0,
+            "_quality_scores": [],
+        })
+        bucket["findings"] += 1
+        status = finding.get("status")
+        outcome = finding.get("merge_outcome")
+        if status == "issue-opened":
+            bucket["issues_opened"] += 1
+        if str(finding.get("fail_reason", "")).startswith("verification_failed"):
+            bucket["verification_failed"] += 1
+        if finding.get("pr_number"):
+            bucket["autofix_prs"] += 1
+            if outcome == "merged":
+                bucket["merged"] += 1
+            elif outcome == "closed_unmerged":
+                bucket["closed_unmerged"] += 1
+            elif outcome == "reverted":
+                bucket["reverted"] += 1
+            pr_quality = finding.get("pr_quality_score")
+            if isinstance(pr_quality, (int, float)):
+                bucket["_quality_scores"].append(float(pr_quality))
+            recent_prs.append({
+                "finding_id": finding.get("finding_id"),
+                "category": category,
+                "number": finding.get("pr_number"),
+                "state": (finding.get("pr_state") or "UNKNOWN").upper(),
+                "merge_outcome": outcome,
+                "title": finding.get("description", ""),
+                "created_at": finding.get("processed_at"),
+                "url": finding.get("pr_url"),
+                "branch": finding.get("branch_name"),
+            })
+    for bucket in categories.values():
+        scores = bucket.pop("_quality_scores")
+        bucket["avg_pr_quality_score"] = round(sum(scores) / len(scores), 3) if scores else 0.0
+        pr_count = bucket["autofix_prs"]
+        bucket["merge_rate"] = round(bucket["merged"] / pr_count, 3) if pr_count else 0.0
+    recent_prs.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+    benchmarks = {
+        "generated_at": now_iso(),
+        "categories": categories,
+        "recent_prs": recent_prs[:10],
+        "policy": {
+            "max_prs_per_day": policy.get("max_prs_per_day"),
+            "max_open_prs": policy.get("max_open_prs"),
+        },
+    }
+    write_json(_autofix_benchmarks_path(root), benchmarks)
+    return benchmarks
+
+
+def _write_autofix_metrics(root: Path, findings: list[dict], policy: dict) -> dict:
+    snapshot = _rate_limit_snapshot(policy, findings)
+    suppressions = policy.get("suppressions", [])
+    categories = {}
+    for category, config in policy.get("categories", {}).items():
+        if not isinstance(config, dict):
+            continue
+        stats = config.get("stats", {})
+        categories[category] = {
+            "mode": config.get("mode", "issue-only"),
+            "enabled": bool(config.get("enabled", True)),
+            "confidence": config.get("confidence", 0.0),
+            "merged": int(stats.get("merged", 0) or 0),
+            "closed_unmerged": int(stats.get("closed_unmerged", 0) or 0),
+            "reverted": int(stats.get("reverted", 0) or 0),
+            "issues_opened": int(stats.get("issues_opened", 0) or 0),
+            "verification_failed": int(stats.get("verification_failed", 0) or 0),
+        }
+    totals = {
+        "findings": len(findings),
+        "open_prs": snapshot["open_prs"],
+        "prs_today": snapshot["prs_today"],
+        "recent_failures": snapshot["recent_failures"],
+        "suppression_count": len(suppressions),
+        "merged": sum(v["merged"] for v in categories.values()),
+        "closed_unmerged": sum(v["closed_unmerged"] for v in categories.values()),
+        "reverted": sum(v["reverted"] for v in categories.values()),
+        "issues_opened": sum(v["issues_opened"] for v in categories.values()),
+    }
+    metrics = {
+        "generated_at": now_iso(),
+        "totals": totals,
+        "rate_limits": snapshot,
+        "categories": categories,
+        "recent_prs": _build_autofix_benchmarks(root, findings, policy).get("recent_prs", []),
+    }
+    write_json(_autofix_metrics_path(root), metrics)
+    return metrics
+
+
 # ---------------------------------------------------------------------------
 # Pre-action checks (AC 16)
 # ---------------------------------------------------------------------------
@@ -1138,8 +1466,15 @@ def _classify_fixability(finding: dict) -> str:
 # Post-fix verification gate (AC 9b)
 # ---------------------------------------------------------------------------
 
-def _verify_fix(root: Path, worktree_path: str, finding: dict) -> tuple[bool, str]:
-    """Verify a fix before push. Returns (ok, reason)."""
+def _verify_fix(root: Path, worktree_path: str, finding: dict, policy: dict | None = None) -> tuple[bool, str, dict]:
+    """Verify a fix before push. Returns (ok, reason, report)."""
+    report: dict = {
+        "changed_files": [],
+        "python_files_checked": [],
+        "targeted_tests": [],
+        "total_changes": 0,
+    }
+    policy = policy or _load_autofix_policy(root)
     # 1. Syntax-check every changed .py file
     try:
         diff_result = subprocess.run(
@@ -1148,7 +1483,30 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict) -> tuple[bool, st
         )
         changed_files = [f.strip() for f in diff_result.stdout.splitlines() if f.strip()]
     except (subprocess.TimeoutExpired, OSError):
-        return False, "could not determine changed files"
+        return False, "could not determine changed files", report
+    report["changed_files"] = changed_files
+
+    if not changed_files:
+        return False, "no changed files detected", report
+
+    forbidden_prefixes = (".dynos/", ".git/")
+    for changed in changed_files:
+        if changed.startswith(forbidden_prefixes):
+            return False, f"forbidden path changed: {changed}", report
+
+    binary_exts = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".tar", ".gz", ".woff", ".woff2"}
+    for changed in changed_files:
+        if Path(changed).suffix.lower() in binary_exts:
+            return False, f"binary file changed: {changed}", report
+
+    dependency_files = {
+        "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+        "requirements.txt", "requirements-dev.txt", "poetry.lock", "pyproject.toml",
+    }
+    if not policy.get("allow_dependency_file_changes", False):
+        for changed in changed_files:
+            if Path(changed).name in dependency_files and finding.get("category") != "dependency-vuln":
+                return False, f"unexpected dependency file change: {changed}", report
 
     for changed in changed_files:
         if not changed.endswith(".py"):
@@ -1159,10 +1517,11 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict) -> tuple[bool, st
         try:
             source = full_path.read_text()
             ast.parse(source, filename=changed)
+            report["python_files_checked"].append(changed)
         except SyntaxError as exc:
-            return False, f"syntax error in {changed} line {exc.lineno}: {exc.msg}"
+            return False, f"syntax error in {changed} line {exc.lineno}: {exc.msg}", report
         except (OSError, UnicodeDecodeError) as exc:
-            return False, f"could not read {changed}: {exc}"
+            return False, f"could not read {changed}: {exc}", report
 
     # 2. Check diff size: max 500 added+removed lines, max 10 files
     try:
@@ -1172,10 +1531,10 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict) -> tuple[bool, st
         )
         stat_lines = stat_result.stdout.strip().splitlines()
     except (subprocess.TimeoutExpired, OSError):
-        return False, "could not get diff stat"
+        return False, "could not get diff stat", report
 
     if len(changed_files) > 10:
-        return False, f"too many files changed ({len(changed_files)} > 10)"
+        return False, f"too many files changed ({len(changed_files)} > 10)", report
 
     # Parse the summary line for insertions/deletions
     if stat_lines:
@@ -1183,12 +1542,13 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict) -> tuple[bool, st
         total_changes = 0
         for match in re.finditer(r"(\d+) (?:insertion|deletion)", summary):
             total_changes += int(match.group(1))
+        report["total_changes"] = total_changes
         if total_changes > 500:
-            return False, f"diff too large ({total_changes} lines > 500)"
+            return False, f"diff too large ({total_changes} lines > 500)", report
 
     # 3. Changed files should be within scope (match finding's evidence.file)
     evidence_file = finding.get("evidence", {}).get("file", "")
-    if evidence_file and changed_files:
+    if evidence_file and changed_files and evidence_file not in changed_files:
         # Normalize paths for comparison
         evidence_dir = str(Path(evidence_file).parent)
         for changed in changed_files:
@@ -1198,9 +1558,31 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict) -> tuple[bool, st
                     and not changed.startswith("tests/")
                     and not changed.startswith("test/")
                     and changed != evidence_file):
-                return False, f"out-of-scope change: {changed} (expected near {evidence_file})"
+                return False, f"out-of-scope change: {changed} (expected near {evidence_file})", report
 
-    return True, ""
+    # 4. Run a targeted test file when there is an obvious match.
+    evidence_stem = Path(evidence_file).stem if evidence_file else ""
+    candidate_tests = []
+    if evidence_stem:
+        candidate_tests.extend([
+            Path(worktree_path) / "tests" / f"test_{evidence_stem}.py",
+            Path(worktree_path) / "test" / f"test_{evidence_stem}.py",
+        ])
+    for test_path in candidate_tests:
+        if not test_path.exists():
+            continue
+        result = subprocess.run(
+            ["python3", "-m", "pytest", "-q", str(test_path)],
+            capture_output=True, text=True, timeout=90, cwd=worktree_path,
+        )
+        report["targeted_tests"].append({
+            "path": str(test_path.relative_to(Path(worktree_path))),
+            "returncode": result.returncode,
+        })
+        if result.returncode != 0:
+            return False, f"targeted test failed: {test_path.name}", report
+
+    return True, "", report
 
 
 # ---------------------------------------------------------------------------
@@ -1219,11 +1601,88 @@ def _is_git_dirty(root: Path) -> bool:
         return True  # Assume dirty on error to be safe
 
 
-def _autofix_finding(finding: dict, root: Path) -> dict:
+def _compute_pr_quality_score(verification: dict) -> float:
+    score = 1.0
+    total_changes = int(verification.get("total_changes", 0) or 0)
+    changed_files = verification.get("changed_files", [])
+    targeted_tests = verification.get("targeted_tests", [])
+    score -= min(total_changes / 1000.0, 0.25)
+    score -= min(max(len(changed_files) - 1, 0) * 0.03, 0.15)
+    if targeted_tests:
+        if all(t.get("returncode") == 0 for t in targeted_tests if isinstance(t, dict)):
+            score += 0.05
+        else:
+            score -= 0.15
+    if verification.get("python_files_checked"):
+        score += 0.03
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _sync_outcomes(root: Path, findings: list[dict], policy: dict) -> tuple[list[dict], dict]:
+    if not shutil.which("gh"):
+        metrics = _write_autofix_metrics(root, findings, _recompute_category_confidence(policy))
+        return findings, metrics
+
+    for finding in findings:
+        category = str(finding.get("category", "") or "")
+        if category not in policy.get("categories", {}):
+            continue
+        category_stats = policy["categories"][category]["stats"]
+        pr_number = finding.get("pr_number")
+        if pr_number:
+            try:
+                result = subprocess.run(
+                    ["gh", "pr", "view", str(pr_number), "--json", "state,mergedAt,closedAt,url"],
+                    capture_output=True, text=True, timeout=20, cwd=str(root),
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    data = json.loads(result.stdout)
+                    state = str(data.get("state", "OPEN")).upper()
+                    finding["pr_state"] = state
+                    finding["pr_url"] = data.get("url") or finding.get("pr_url")
+                    if state == "MERGED" or data.get("mergedAt"):
+                        if finding.get("merge_outcome") != "merged":
+                            category_stats["merged"] += 1
+                        finding["merge_outcome"] = "merged"
+                        finding["merged_at"] = data.get("mergedAt")
+                    elif state == "CLOSED":
+                        if finding.get("merge_outcome") != "closed_unmerged":
+                            category_stats["closed_unmerged"] += 1
+                        finding["merge_outcome"] = "closed_unmerged"
+                        finding["closed_at"] = data.get("closedAt")
+                    else:
+                        finding["merge_outcome"] = "open"
+            except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+                pass
+        issue_number = finding.get("issue_number")
+        if issue_number:
+            try:
+                result = subprocess.run(
+                    ["gh", "issue", "view", str(issue_number), "--json", "state,url,closedAt"],
+                    capture_output=True, text=True, timeout=20, cwd=str(root),
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    data = json.loads(result.stdout)
+                    finding["issue_url"] = data.get("url") or finding.get("issue_url")
+                    finding["issue_state"] = str(data.get("state", "OPEN")).upper()
+                    finding["issue_closed_at"] = data.get("closedAt")
+            except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+                pass
+
+    policy = _recompute_category_confidence(policy)
+    _save_autofix_policy(root, policy)
+    metrics = _write_autofix_metrics(root, findings, policy)
+    return findings, metrics
+
+
+def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> dict:
     """Attempt auto-fix for a low/medium severity finding. Returns updated finding."""
+    policy = policy or _load_autofix_policy(root)
     finding_id = finding["finding_id"]
     description = finding["description"]
     evidence_str = json.dumps(finding.get("evidence", {}), indent=2)
+    category = str(finding.get("category", "") or "")
+    category_stats = policy.get("categories", {}).get(category, {}).get("stats", {})
 
     # Pre-checks
     if not shutil.which("claude"):
@@ -1254,6 +1713,8 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
     repo_slug = str(root).strip("/").replace("/", "-")[:40]
     branch_name = f"dynos/auto-fix-{finding_id}"
     worktree_path = f"/tmp/dynos-autofix-{repo_slug}-{finding_id}"
+    finding["branch_name"] = branch_name
+    category_stats["proposed"] = int(category_stats.get("proposed", 0) or 0) + 1
 
     # Detect current branch for PR base
     try:
@@ -1403,13 +1864,16 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
                 return finding
 
             # Post-fix verification gate
-            verify_ok, verify_reason = _verify_fix(root, worktree_path, finding)
+            verify_ok, verify_reason, verify_report = _verify_fix(root, worktree_path, finding, policy)
+            finding["verification"] = verify_report
             if not verify_ok:
                 finding["status"] = "failed"
                 finding["fail_reason"] = f"verification_failed: {verify_reason}"
                 finding["processed_at"] = now_iso()
+                category_stats["verification_failed"] = int(category_stats.get("verification_failed", 0) or 0) + 1
                 _log(f"Verification failed for {finding_id}: {verify_reason}")
                 return finding
+            finding["pr_quality_score"] = _compute_pr_quality_score(verify_report)
 
             # Push branch to remote
             push_result = subprocess.run(
@@ -1488,6 +1952,9 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
                             pass
                 finding["status"] = "fixed"
                 finding["pr_number"] = pr_number
+                finding["pr_url"] = pr_url
+                finding["pr_state"] = "OPEN"
+                finding["merge_outcome"] = "open"
                 finding["processed_at"] = now_iso()
                 _log(f"PR created for {finding_id}: {pr_url}")
             else:
@@ -1567,11 +2034,14 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
 # Risk-based routing: GitHub issue for high/critical (AC 10)
 # ---------------------------------------------------------------------------
 
-def _open_github_issue(finding: dict, root: Path) -> dict:
+def _open_github_issue(finding: dict, root: Path, policy: dict | None = None) -> dict:
     """Open a GitHub issue for findings that aren't actionable code fixes (e.g., recurring patterns)."""
+    policy = policy or _load_autofix_policy(root)
     finding_id = finding["finding_id"]
     description = finding["description"]
     evidence_str = json.dumps(finding.get("evidence", {}), indent=2)
+    category = str(finding.get("category", "") or "")
+    category_stats = policy.get("categories", {}).get(category, {}).get("stats", {})
 
     if not shutil.which("gh"):
         finding["status"] = "failed"
@@ -1641,7 +2111,9 @@ def _open_github_issue(finding: dict, root: Path) -> dict:
                         pass
             finding["status"] = "issue-opened"
             finding["issue_number"] = issue_number
+            finding["issue_url"] = issue_url
             finding["processed_at"] = now_iso()
+            category_stats["issues_opened"] = int(category_stats.get("issues_opened", 0) or 0) + 1
             _log(f"Issue created for {finding_id}: {issue_url}")
         else:
             finding["status"] = "failed"
@@ -1690,8 +2162,15 @@ def _check_category_health(category: str, findings: list[dict]) -> tuple[str, st
     return "ok", ""
 
 
-def _process_finding(finding: dict, root: Path) -> dict:
-    """Route and process a single finding based on severity."""
+def _process_finding(
+    finding: dict,
+    root: Path,
+    policy: dict | None = None,
+    findings: list[dict] | None = None,
+) -> dict:
+    """Route and process a single finding based on policy, confidence, and rate limits."""
+    policy = policy or _load_autofix_policy(root)
+    findings = findings or []
     finding["attempt_count"] = finding.get("attempt_count", 0) + 1
 
     # Retry guard: max 2 attempts
@@ -1719,17 +2198,46 @@ def _process_finding(finding: dict, root: Path) -> dict:
     # Classify fixability for routing
     fixability = _classify_fixability(finding)
     finding["fixability"] = fixability
+    category_config = policy.get("categories", {}).get(category, _default_category_policy(category))
+    confidence = float(category_config.get("confidence", 0.0) or 0.0)
+    finding["confidence_score"] = round(confidence, 3)
+
+    suppression = _suppression_reason(finding, policy)
+    if suppression:
+        finding["status"] = "suppressed-policy"
+        finding["suppression_reason"] = suppression
+        finding["processed_at"] = now_iso()
+        return finding
+
+    if not category_config.get("enabled", True) or category_config.get("mode") == "disabled":
+        finding["status"] = "suppressed-policy"
+        finding["suppression_reason"] = "category disabled by autofix policy"
+        finding["processed_at"] = now_iso()
+        return finding
 
     # Recurring audit findings are not actionable code fixes — open issue only
     if category == "recurring-audit":
-        return _open_github_issue(finding, root)
+        finding["rollout_mode"] = "issue-only"
+        return _open_github_issue(finding, root, policy)
 
     # Route based on fixability classification
-    if fixability == "review-only":
-        return _open_github_issue(finding, root)
+    if (
+        fixability == "review-only"
+        or category_config.get("mode") == "issue-only"
+        or confidence < float(category_config.get("min_confidence_autofix", 0.65) or 0.65)
+    ):
+        finding["rollout_mode"] = "issue-only"
+        return _open_github_issue(finding, root, policy)
 
     # "deterministic" and "likely-safe" go through autofix
-    return _autofix_finding(finding, root)
+    rate_limit = _rate_limit_reason(policy, findings)
+    if rate_limit:
+        finding["status"] = "rate-limited"
+        finding["fail_reason"] = rate_limit
+        finding["processed_at"] = now_iso()
+        return finding
+    finding["rollout_mode"] = "autofix"
+    return _autofix_finding(finding, root, policy)
 
 
 # ---------------------------------------------------------------------------
@@ -1772,12 +2280,14 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
     start_time = time.monotonic()
 
     _log(f"Starting proactive scan on {root}")
+    policy = _load_autofix_policy(root)
 
     # Cleanup merged autofix branches
     _cleanup_merged_branches(root)
 
     # Load existing findings for dedup
     existing_findings = _load_findings(root)
+    existing_findings, pre_metrics = _sync_outcomes(root, existing_findings, policy)
 
     # Prune old findings
     existing_findings = _prune_findings(existing_findings)
@@ -1819,6 +2329,8 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
         "fixed": 0,
         "issues_opened": 0,
         "failed": 0,
+        "rate_limited": 0,
+        "suppressed": 0,
     }
     by_category: dict[str, int] = {}
     by_severity: dict[str, int] = {}
@@ -1838,7 +2350,7 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
             summary_counts["failed"] += 1
             continue
 
-        processed = _process_finding(finding, root)
+        processed = _process_finding(finding, root, policy, existing_findings)
 
         # Handle retry: if failed and under attempt limit, keep as-is for next cycle
         if processed["status"] == "failed" and processed["attempt_count"] < MAX_ATTEMPTS:
@@ -1853,6 +2365,10 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
             summary_counts["fixed"] += 1
         elif status == "issue-opened":
             summary_counts["issues_opened"] += 1
+        elif status == "rate-limited":
+            summary_counts["rate_limited"] += 1
+        elif status == "suppressed-policy":
+            summary_counts["suppressed"] += 1
         elif status in ("failed", "permanently_failed"):
             summary_counts["failed"] += 1
 
@@ -1876,6 +2392,10 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
     # Persist all findings (AC 13)
     # Store category health in findings file
     _save_findings(root, existing_findings)
+    policy = _recompute_category_confidence(policy)
+    _save_autofix_policy(root, policy)
+    metrics = _write_autofix_metrics(root, existing_findings, policy)
+    benchmarks = _build_autofix_benchmarks(root, existing_findings, policy)
 
     # Write category_health to the findings JSON
     all_categories = set()
@@ -1928,7 +2448,11 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
             "fixed": summary_counts["fixed"],
             "issues_opened": summary_counts["issues_opened"],
             "failed": summary_counts["failed"],
+            "rate_limited": summary_counts["rate_limited"],
+            "suppressed": summary_counts["suppressed"],
         },
+        "autofix_metrics": metrics,
+        "autofix_benchmarks": benchmarks,
         "cost": {
             "haiku_invocations": haiku_invocations,
             "fix_invocations": fix_invocations,
@@ -1972,6 +2496,76 @@ def cmd_clear(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    policy = _load_autofix_policy(root)
+    print(json.dumps(policy, indent=2))
+    return 0
+
+
+def cmd_sync_outcomes(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    findings = _load_findings(root)
+    policy = _load_autofix_policy(root)
+    findings, metrics = _sync_outcomes(root, findings, policy)
+    _save_findings(root, findings)
+    print(json.dumps({"synced": True, "count": len(findings), "metrics": metrics}, indent=2))
+    return 0
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    findings = _load_findings(root)
+    policy = _load_autofix_policy(root)
+    benchmarks = _build_autofix_benchmarks(root, findings, policy)
+    print(json.dumps(benchmarks, indent=2))
+    return 0
+
+
+def cmd_suppress_add(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    policy = _load_autofix_policy(root)
+    entry = {
+        "finding_id": args.finding_id,
+        "category": args.category,
+        "path_prefix": args.path_prefix,
+        "until": (
+            datetime.now(timezone.utc) + timedelta(days=int(args.days))
+        ).isoformat() if args.days else None,
+        "reason": args.reason or "manual suppression",
+    }
+    policy.setdefault("suppressions", []).append(entry)
+    _save_autofix_policy(root, policy)
+    print(json.dumps({"added": entry}, indent=2))
+    return 0
+
+
+def cmd_suppress_list(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    policy = _load_autofix_policy(root)
+    print(json.dumps(policy.get("suppressions", []), indent=2))
+    return 0
+
+
+def cmd_suppress_remove(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    policy = _load_autofix_policy(root)
+    before = list(policy.get("suppressions", []))
+    remaining = []
+    for entry in before:
+        if args.finding_id and entry.get("finding_id") == args.finding_id:
+            continue
+        if args.category and entry.get("category") == args.category:
+            continue
+        if args.path_prefix and entry.get("path_prefix") == args.path_prefix:
+            continue
+        remaining.append(entry)
+    policy["suppressions"] = remaining
+    _save_autofix_policy(root, policy)
+    print(json.dumps({"removed": len(before) - len(remaining), "remaining": remaining}, indent=2))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # CLI (argparse + set_defaults pattern)
 # ---------------------------------------------------------------------------
@@ -1997,6 +2591,45 @@ def build_parser() -> argparse.ArgumentParser:
     p_clear = sub.add_parser("clear", help="Clear findings file")
     p_clear.add_argument("--root", default=".", help="Project root path")
     p_clear.set_defaults(func=cmd_clear)
+
+    # policy
+    p_policy = sub.add_parser("policy", help="Show current autofix policy")
+    p_policy.add_argument("--root", default=".", help="Project root path")
+    p_policy.set_defaults(func=cmd_policy)
+
+    # sync-outcomes
+    p_sync = sub.add_parser("sync-outcomes", help="Refresh PR/issue outcomes and metrics")
+    p_sync.add_argument("--root", default=".", help="Project root path")
+    p_sync.set_defaults(func=cmd_sync_outcomes)
+
+    # benchmark
+    p_benchmark = sub.add_parser("benchmark", help="Build autofix benchmark summary from findings")
+    p_benchmark.add_argument("--root", default=".", help="Project root path")
+    p_benchmark.set_defaults(func=cmd_benchmark)
+
+    # suppress
+    p_suppress = sub.add_parser("suppress", help="Manage autofix suppressions")
+    suppress_sub = p_suppress.add_subparsers(dest="suppress_command", required=True)
+
+    p_suppress_add = suppress_sub.add_parser("add", help="Add a suppression rule")
+    p_suppress_add.add_argument("--root", default=".", help="Project root path")
+    p_suppress_add.add_argument("--finding-id", default=None, help="Specific finding id to suppress")
+    p_suppress_add.add_argument("--category", default=None, help="Category to suppress")
+    p_suppress_add.add_argument("--path-prefix", default=None, help="Path prefix to suppress")
+    p_suppress_add.add_argument("--days", type=int, default=30, help="Suppression duration in days")
+    p_suppress_add.add_argument("--reason", default="manual suppression", help="Why this suppression exists")
+    p_suppress_add.set_defaults(func=cmd_suppress_add)
+
+    p_suppress_list = suppress_sub.add_parser("list", help="List suppressions")
+    p_suppress_list.add_argument("--root", default=".", help="Project root path")
+    p_suppress_list.set_defaults(func=cmd_suppress_list)
+
+    p_suppress_remove = suppress_sub.add_parser("remove", help="Remove suppressions")
+    p_suppress_remove.add_argument("--root", default=".", help="Project root path")
+    p_suppress_remove.add_argument("--finding-id", default=None, help="Specific finding id to remove")
+    p_suppress_remove.add_argument("--category", default=None, help="Category suppression to remove")
+    p_suppress_remove.add_argument("--path-prefix", default=None, help="Path prefix suppression to remove")
+    p_suppress_remove.set_defaults(func=cmd_suppress_remove)
 
     return parser
 
