@@ -206,38 +206,6 @@ def list_projects() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Policy merge
-# ---------------------------------------------------------------------------
-
-def merge_policy(project_root: Path) -> dict:
-    """Merge local project policy over global policy.
-
-    Local keys win over global keys; absent local keys fall through to global
-    defaults.  A project never sees raw data from another project.
-    """
-    ensure_global_dirs()
-    gp_path = global_policy_path()
-    global_policy: dict = {}
-    if gp_path.exists():
-        try:
-            global_policy = load_json(gp_path)
-        except (json.JSONDecodeError, FileNotFoundError, OSError):
-            global_policy = {}
-
-    local_policy_file = project_dir(project_root) / "policy.json"
-    local_policy: dict = {}
-    if local_policy_file.exists():
-        try:
-            local_policy = load_json(local_policy_file)
-        except (json.JSONDecodeError, FileNotFoundError, OSError):
-            local_policy = {}
-
-    merged = dict(global_policy)
-    merged.update(local_policy)
-    return merged
-
-
-# ---------------------------------------------------------------------------
 # Statistics extraction (delegated to dynoglobal_stats)
 # ---------------------------------------------------------------------------
 
