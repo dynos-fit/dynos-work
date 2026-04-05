@@ -479,6 +479,184 @@ def _detect_architectural_drift(root: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Category 5: LLM review pass (Haiku)
+# ---------------------------------------------------------------------------
+
+_HAIKU_REVIEW_PROMPT = """You are a thorough code auditor. Analyze the following source files for issues.
+
+Follow the evidence — read the actual code, trace actual values, follow actual execution paths.
+
+Look for:
+1. **Logic bugs** — incorrect conditions, off-by-one errors, wrong variable used, missing edge cases
+2. **Security issues** — injection risks, unvalidated input at system boundaries, secrets in code, unsafe deserialization
+3. **Error handling gaps** — swallowed exceptions, missing try/except around I/O, bare except clauses that hide bugs
+4. **Race conditions** — shared mutable state without locks, TOCTOU patterns, async gaps
+5. **Data integrity** — writes without validation, missing null checks at boundaries, type confusion
+6. **Anti-patterns** — God functions (>100 lines doing too much), circular dependencies, hidden side effects
+
+Do NOT flag:
+- Style preferences (naming conventions, import order)
+- Missing type hints or docstrings
+- Dead code or unused imports (handled by another scanner)
+- Anything that is clearly intentional and correct
+
+For each issue found, return ONLY a JSON array. Each item must have:
+- "description": one sentence describing the issue
+- "file": the filename
+- "line": approximate line number
+- "severity": "low", "medium", "high", or "critical"
+- "category_detail": which of the 6 categories above
+
+If no issues are found, return an empty array: []
+
+Return ONLY the JSON array, no other text.
+
+FILES TO REVIEW:
+"""
+
+
+def _detect_llm_review(root: Path) -> list[dict]:
+    """Run a Haiku LLM pass over recently changed or high-churn files."""
+    findings: list[dict] = []
+
+    if not shutil.which("claude"):
+        _log("Skipping LLM review: claude CLI not available")
+        return findings
+
+    # Identify files to review: recently modified hooks (last 7 days) or files
+    # that appeared in recent retrospective findings
+    hooks_dir = root / "hooks"
+    if not hooks_dir.is_dir():
+        return findings
+
+    # Get files modified in last 7 days
+    recent_files: list[Path] = []
+    try:
+        result = subprocess.run(
+            ["git", "log", "--since=7 days ago", "--name-only", "--pretty=format:", "--diff-filter=M"],
+            capture_output=True, text=True, timeout=10, cwd=root,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                line = line.strip()
+                if line and line.endswith(".py") and (root / line).exists():
+                    recent_files.append(root / line)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Fallback: if no recent changes, review the largest hook files
+    if not recent_files:
+        py_files = sorted(hooks_dir.glob("*.py"), key=lambda f: f.stat().st_size, reverse=True)
+        recent_files = py_files[:5]
+
+    # Deduplicate and limit to 5 files (keep Haiku fast)
+    seen: set[str] = set()
+    review_files: list[Path] = []
+    for f in recent_files:
+        name = str(f.relative_to(root))
+        if name not in seen and len(review_files) < 5:
+            seen.add(name)
+            review_files.append(f)
+
+    if not review_files:
+        return findings
+
+    # Build the prompt with file contents
+    prompt = _HAIKU_REVIEW_PROMPT
+    for f in review_files:
+        try:
+            content = f.read_text()
+            rel = str(f.relative_to(root))
+            # Truncate very large files to first 200 lines
+            lines = content.splitlines()
+            if len(lines) > 200:
+                content = "\n".join(lines[:200]) + f"\n... (truncated, {len(lines)} total lines)"
+            prompt += f"\n--- {rel} ---\n{content}\n"
+        except OSError:
+            continue
+
+    _log(f"Running Haiku LLM review on {len(review_files)} files: {[str(f.relative_to(root)) for f in review_files]}")
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--model", "haiku", "--dangerously-skip-permissions"],
+            capture_output=True, text=True, timeout=120, cwd=root,
+        )
+    except subprocess.TimeoutExpired:
+        _log("Haiku review timed out after 120s")
+        return findings
+    except OSError as exc:
+        _log(f"Haiku review failed: {exc}")
+        return findings
+
+    if result.returncode != 0:
+        _log(f"Haiku review exited {result.returncode}")
+        return findings
+
+    # Parse the JSON response
+    output = result.stdout.strip()
+    # Claude may wrap response in markdown code block
+    if output.startswith("```"):
+        lines = output.splitlines()
+        output = "\n".join(l for l in lines if not l.startswith("```"))
+        output = output.strip()
+
+    try:
+        issues = json.loads(output)
+    except json.JSONDecodeError:
+        # Try to find JSON array in the output
+        start = output.find("[")
+        end = output.rfind("]")
+        if start >= 0 and end > start:
+            try:
+                issues = json.loads(output[start:end + 1])
+            except json.JSONDecodeError:
+                _log(f"Could not parse Haiku response as JSON")
+                return findings
+        else:
+            _log(f"No JSON array found in Haiku response")
+            return findings
+
+    if not isinstance(issues, list):
+        return findings
+
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        desc = str(issue.get("description", ""))
+        file_name = str(issue.get("file", ""))
+        line_num = issue.get("line", 0)
+        severity = str(issue.get("severity", "low"))
+        cat_detail = str(issue.get("category_detail", ""))
+
+        if not desc or not file_name:
+            continue
+
+        # Validate severity
+        if severity not in ("low", "medium", "high", "critical"):
+            severity = "medium"
+
+        fid_raw = f"llm-review-{file_name}-{line_num}-{desc[:50]}"
+        fid = f"llm-review-{hashlib.sha256(fid_raw.encode()).hexdigest()[:16]}"
+
+        findings.append(_make_finding(
+            finding_id=fid,
+            severity=severity,
+            category="llm-review",
+            description=f"[{cat_detail}] {desc}",
+            evidence={
+                "file": file_name,
+                "line": line_num,
+                "category_detail": cat_detail,
+                "reviewer": "haiku",
+            },
+        ))
+
+    _log(f"Haiku review found {len(findings)} issues")
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Multi-level dedup (AC 8)
 # ---------------------------------------------------------------------------
 
@@ -897,6 +1075,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     new_findings.extend(_detect_dependency_vulns(root))
     new_findings.extend(_detect_dead_code(root))
     new_findings.extend(_detect_architectural_drift(root))
+    new_findings.extend(_detect_llm_review(root))
 
     _log(f"Detected {len(new_findings)} raw findings")
 
