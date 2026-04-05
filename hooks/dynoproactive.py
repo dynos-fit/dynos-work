@@ -1040,13 +1040,20 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             f"- Stay on the current branch `{branch_name}`. Do NOT create new branches.\n"
             f"- Commit message: [autofix] {description[:80]}"
         )
-        _log(f"Running foundry pipeline for {finding_id}")
+        # Select model based on severity
+        severity = finding.get("severity", "low")
+        claude_cmd = [
+            "claude", "-p", prompt,
+            "--dangerously-skip-permissions",
+            "--disallowedTools", "Bash(git push*) Bash(gh pr*)",
+        ]
+        if severity in ("high", "critical"):
+            claude_cmd.extend(["--model", "opus"])
+            _log(f"Running foundry pipeline for {finding_id} (opus — {severity} severity)")
+        else:
+            _log(f"Running foundry pipeline for {finding_id}")
         claude_result = subprocess.run(
-            [
-                "claude", "-p", prompt,
-                "--dangerously-skip-permissions",
-                "--disallowedTools", "Bash(git push*) Bash(gh pr*)",
-            ],
+            claude_cmd,
             capture_output=True, text=True, timeout=600, cwd=worktree_path,
         )
 
@@ -1177,6 +1184,26 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
         finding["processed_at"] = now_iso()
         _log(f"OS error for {finding_id}: {exc}")
     finally:
+        # Copy retrospectives back to main repo before cleanup
+        try:
+            wt_dynos = Path(worktree_path) / ".dynos"
+            if wt_dynos.is_dir():
+                import shutil as _sh
+                for task_dir in wt_dynos.glob("task-*"):
+                    retro = task_dir / "task-retrospective.json"
+                    if retro.exists():
+                        dest_dir = root / ".dynos" / task_dir.name
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        _sh.copy2(str(retro), str(dest_dir / "task-retrospective.json"))
+                        _log(f"Copied retrospective from worktree: {task_dir.name}")
+                        # Also copy manifest and spec for trajectory context
+                        for extra in ("manifest.json", "spec.md", "execution-log.md"):
+                            src = task_dir / extra
+                            if src.exists():
+                                _sh.copy2(str(src), str(dest_dir / extra))
+        except OSError as exc:
+            _log(f"Warning: retrospective copy failed: {exc}")
+
         # Always clean up worktree
         try:
             subprocess.run(
@@ -1302,20 +1329,13 @@ def _process_finding(finding: dict, root: Path) -> dict:
         _log(f"Finding {finding['finding_id']} permanently failed after {MAX_ATTEMPTS} attempts")
         return finding
 
-    severity = finding.get("severity", "medium")
     category = finding.get("category", "")
-    # Recurring audit findings are not actionable code fixes — always open issue
+    # Recurring audit findings are not actionable code fixes — open issue only
     if category == "recurring-audit":
         return _open_issue_high_critical(finding)
-    if severity in ("low", "medium"):
-        return _autofix_low_medium(finding, root)
-    elif severity in ("high", "critical"):
-        return _open_issue_high_critical(finding)
-    else:
-        finding["status"] = "failed"
-        finding["fail_reason"] = f"unknown_severity: {severity}"
-        finding["processed_at"] = now_iso()
-        return finding
+    # Everything else goes through the autofix pipeline
+    # High/critical findings use Opus with extended thinking
+    return _autofix_low_medium(finding, root)
 
 
 # ---------------------------------------------------------------------------
