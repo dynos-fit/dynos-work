@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Autonomous autofix scanner for dynos-work.
 
-Detects technical debt across four categories (recurring audit findings,
-dependency vulnerabilities, dead code, architectural drift), then routes
-each finding through a risk-based pipeline: low/medium findings trigger
-auto-fix via git worktree + claude CLI + PR, while high/critical findings
-open GitHub issues for human review.
+Detects technical debt across six categories (syntax errors, recurring audit
+findings, dependency vulnerabilities, dead code, architectural drift, and
+LLM code review), then routes each finding through the autofix pipeline:
+git worktree + Claude foundry pipeline + PR. High/critical findings use
+Opus for maximum reasoning. Recurring audit patterns open GitHub issues
+(not actionable code fixes).
 
 All logging goes to stderr. Only final JSON goes to stdout.
 """
@@ -40,7 +41,7 @@ from dynopatterns import local_patterns_path
 SCAN_TIMEOUT_SECONDS = 600
 MAX_ATTEMPTS = 2
 VALID_SEVERITIES = {"low", "medium", "high", "critical"}
-VALID_CATEGORIES = {"recurring-audit", "dependency-vuln", "dead-code", "architectural-drift"}
+VALID_CATEGORIES = {"recurring-audit", "dependency-vuln", "dead-code", "architectural-drift", "syntax-error", "llm-review"}
 VALID_STATUSES = {
     "new", "fixed", "issue-opened", "failed",
     "skipped-dedup", "already-exists", "permanently_failed",
@@ -181,10 +182,20 @@ def _detect_dependency_vulns(root: Path) -> list[dict]:
                         if not isinstance(v, dict):
                             continue
                         vuln_id = str(v.get("id", "unknown"))
-                        raw_severity = str(v.get("fix_versions", ["unknown"])[0] if v.get("fix_versions") else "unknown")
+                        # Map pip-audit aliases field to severity
+                        vuln_aliases = v.get("aliases", [])
                         vuln_desc = str(v.get("description", "No description"))
+                        # Infer severity from description keywords
+                        desc_lower = vuln_desc.lower()
+                        if any(w in desc_lower for w in ("critical", "remote code", "rce", "arbitrary code")):
+                            severity = "critical"
+                        elif any(w in desc_lower for w in ("high", "injection", "overflow", "bypass")):
+                            severity = "high"
+                        elif any(w in desc_lower for w in ("medium", "moderate", "denial")):
+                            severity = "medium"
+                        else:
+                            severity = "low"
                         finding_id = f"dep-vuln-{pkg_name}-{vuln_id}"
-                        severity = "high"
                         findings.append(_make_finding(
                             finding_id=finding_id,
                             severity=severity,
@@ -967,8 +978,10 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
         _log(f"PR already exists for {finding_id}, skipping")
         return finding
 
+    # Repo-scoped names to avoid collisions across projects
+    repo_slug = str(root).strip("/").replace("/", "-")[:40]
     branch_name = f"dynos/auto-fix-{finding_id}"
-    worktree_path = f"/tmp/dynos-autofix-{finding_id}"
+    worktree_path = f"/tmp/dynos-autofix-{repo_slug}-{finding_id}"
 
     # Detect current branch for PR base
     try:
@@ -1044,8 +1057,8 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
         severity = finding.get("severity", "low")
         claude_cmd = [
             "claude", "-p", prompt,
-            "--dangerously-skip-permissions",
-            "--disallowedTools", "Bash(git push*) Bash(gh pr*)",
+            "--permission-mode", "auto",
+            "--allowedTools", "Read Edit Write Glob Grep Bash(python*) Bash(pytest*) Bash(git add*) Bash(git commit*) Bash(git diff*) Bash(git status*) Bash(git log*)",
         ]
         if severity in ("high", "critical"):
             claude_cmd.extend(["--model", "opus"])
@@ -1072,7 +1085,7 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             if not has_changes:
                 # Claude ran but made no changes — check if it committed already
                 log_check = subprocess.run(
-                    ["git", "log", "main..HEAD", "--oneline"],
+                    ["git", "log", f"{base_branch}..HEAD", "--oneline"],
                     capture_output=True, text=True, timeout=10, cwd=worktree_path,
                 )
                 has_changes = bool(log_check.stdout.strip())
@@ -1196,11 +1209,21 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
                         dest_dir.mkdir(parents=True, exist_ok=True)
                         _sh.copy2(str(retro), str(dest_dir / "task-retrospective.json"))
                         _log(f"Copied retrospective from worktree: {task_dir.name}")
-                        # Also copy manifest and spec for trajectory context
-                        for extra in ("manifest.json", "spec.md", "execution-log.md"):
+                        # Copy full task artifacts for trajectory context
+                        for extra in ("manifest.json", "spec.md", "plan.md",
+                                      "execution-log.md", "execution-graph.json",
+                                      "discovery-notes.md", "design-decisions.md",
+                                      "raw-input.md", "completion.json", "audit-summary.json"):
                             src = task_dir / extra
                             if src.exists():
                                 _sh.copy2(str(src), str(dest_dir / extra))
+                        # Copy evidence directory
+                        evidence_dir = task_dir / "evidence"
+                        if evidence_dir.is_dir():
+                            dest_evidence = dest_dir / "evidence"
+                            if dest_evidence.exists():
+                                _sh.rmtree(str(dest_evidence))
+                            _sh.copytree(str(evidence_dir), str(dest_evidence))
         except OSError as exc:
             _log(f"Warning: retrospective copy failed: {exc}")
 

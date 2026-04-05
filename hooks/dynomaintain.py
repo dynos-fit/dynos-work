@@ -200,12 +200,26 @@ def _run_autofix(root: Path) -> dict:
             try:
                 return json.loads(result.stdout)
             except json.JSONDecodeError:
-                pass
-        return {"autofix": "completed", "returncode": result.returncode}
-    except subprocess.TimeoutExpired:
-        return {"autofix": "timeout"}
+                return {
+                    "autofix": "completed",
+                    "returncode": result.returncode,
+                    "stdout_preview": result.stdout[:500],
+                    "parse_error": "stdout was not valid JSON",
+                }
+        return {
+            "autofix": "completed",
+            "returncode": result.returncode,
+            "stderr_preview": (result.stderr or "")[:500],
+            "stdout_preview": (result.stdout or "")[:500],
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "autofix": "timeout",
+            "timeout_seconds": 1800,
+            "stderr_preview": (exc.stderr or "")[:500] if exc.stderr else "",
+        }
     except OSError as exc:
-        return {"autofix": "error", "error": str(exc)}
+        return {"autofix": "error", "error": str(exc), "errno": getattr(exc, "errno", None)}
 
 
 def cmd_run_once(args: argparse.Namespace) -> int:
