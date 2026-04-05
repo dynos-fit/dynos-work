@@ -758,7 +758,7 @@ def _detect_llm_review(root: Path) -> list[dict]:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", prompt, "--model", "haiku", "--dangerously-skip-permissions"],
+            ["claude", "-p", prompt, "--model", "haiku"],
             capture_output=True, text=True, timeout=600, cwd=root,
         )
     except subprocess.TimeoutExpired:
