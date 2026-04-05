@@ -19,6 +19,8 @@ from pathlib import Path
 from dynoslib import load_json, now_iso, write_json
 from dynoslib_core import project_dir, is_pid_running
 
+__all__ = ["merge_policy"]
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
