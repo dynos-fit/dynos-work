@@ -7,7 +7,6 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 import argparse
 import json
 import random
-import re
 import shutil
 import tempfile
 from pathlib import Path
