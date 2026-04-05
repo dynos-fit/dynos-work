@@ -635,7 +635,7 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
         )
         _log(f"Running claude for {finding_id}")
         claude_result = subprocess.run(
-            ["claude", "-p", prompt, "--yes"],
+            ["claude", "-p", prompt, "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=300, cwd=worktree_path,
         )
 
