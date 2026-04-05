@@ -947,7 +947,7 @@ def _is_git_dirty(root: Path) -> bool:
         return True  # Assume dirty on error to be safe
 
 
-def _autofix_low_medium(finding: dict, root: Path) -> dict:
+def _autofix_finding(finding: dict, root: Path) -> dict:
     """Attempt auto-fix for a low/medium severity finding. Returns updated finding."""
     finding_id = finding["finding_id"]
     description = finding["description"]
@@ -1244,8 +1244,8 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
 # Risk-based routing: GitHub issue for high/critical (AC 10)
 # ---------------------------------------------------------------------------
 
-def _open_issue_high_critical(finding: dict) -> dict:
-    """Open a GitHub issue for a high/critical severity finding."""
+def _open_github_issue(finding: dict) -> dict:
+    """Open a GitHub issue for findings that aren't actionable code fixes (e.g., recurring patterns)."""
     finding_id = finding["finding_id"]
     description = finding["description"]
     evidence_str = json.dumps(finding.get("evidence", {}), indent=2)
@@ -1355,10 +1355,10 @@ def _process_finding(finding: dict, root: Path) -> dict:
     category = finding.get("category", "")
     # Recurring audit findings are not actionable code fixes — open issue only
     if category == "recurring-audit":
-        return _open_issue_high_critical(finding)
+        return _open_github_issue(finding)
     # Everything else goes through the autofix pipeline
     # High/critical findings use Opus with extended thinking
-    return _autofix_low_medium(finding, root)
+    return _autofix_finding(finding, root)
 
 
 # ---------------------------------------------------------------------------
