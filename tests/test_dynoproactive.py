@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,16 +15,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 from dynoproactive import (
     _classify_fixability,
+    _compute_pr_quality_score,
     _compute_file_scores,
     _dedup_finding,
     _description_hash,
     _detect_dead_code,
     _detect_syntax_errors,
+    _load_autofix_policy,
     _load_findings,
     _load_scan_coverage,
     _make_finding,
     _process_finding,
+    _rate_limit_reason,
+    _recompute_category_confidence,
     _save_scan_coverage,
+    _suppression_reason,
+    _sync_outcomes,
     _verify_fix,
     VALID_CATEGORIES,
 )
@@ -34,10 +41,11 @@ from dynoproactive import (
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def tmp_project(tmp_path: Path) -> Path:
+def tmp_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create a minimal git-initialized project with some Python files."""
     import subprocess
     (tmp_path / ".dynos").mkdir()
+    monkeypatch.setenv("DYNOS_HOME", str(tmp_path / ".dynos-home"))
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
@@ -221,22 +229,33 @@ class TestFindingsPersistence:
 # ---------------------------------------------------------------------------
 
 class TestProcessFindingRouting:
-    def test_all_severities_use_autofix(self, tmp_project: Path) -> None:
-        """All findings go through autofix regardless of severity."""
-        for sev in ("low", "medium", "high", "critical"):
-            finding = _make_finding(f"sev-{sev}", sev, "dead-code", "desc", {})
-            with patch("dynoproactive._autofix_finding") as autofix_mock:
-                autofix_mock.side_effect = lambda f, root: {**f, "status": "fixed"}
-                result = _process_finding(finding, tmp_project)
-            autofix_mock.assert_called_once()
-            assert result["status"] == "fixed"
+    def test_low_confidence_category_routes_to_issue(self, tmp_project: Path) -> None:
+        finding = _make_finding("dc-low", "low", "dead-code", "desc", {})
+        policy = _load_autofix_policy(tmp_project)
+        policy["categories"]["dead-code"]["confidence"] = 0.2
+        with patch("dynoproactive._open_github_issue") as issue_mock, \
+             patch("dynoproactive._autofix_finding") as autofix_mock:
+            issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project, policy)
+        issue_mock.assert_called_once()
+        autofix_mock.assert_not_called()
+        assert result["status"] == "issue-opened"
+
+    def test_autofixable_dead_code_uses_autofix(self, tmp_project: Path) -> None:
+        finding = _make_finding("dc-ok", "low", "dead-code", "desc", {})
+        policy = _load_autofix_policy(tmp_project)
+        with patch("dynoproactive._autofix_finding") as autofix_mock:
+            autofix_mock.side_effect = lambda f, root, policy=None: {**f, "status": "fixed"}
+            result = _process_finding(finding, tmp_project, policy)
+        autofix_mock.assert_called_once()
+        assert result["status"] == "fixed"
 
     def test_recurring_audit_opens_issue_not_autofix(self, tmp_project: Path) -> None:
         """Recurring audit findings are not fixable code — they open issues."""
         finding = _make_finding("recurring-1", "medium", "recurring-audit", "desc", {})
         with patch("dynoproactive._open_github_issue") as issue_mock, \
              patch("dynoproactive._autofix_finding") as autofix_mock:
-            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
+            issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project)
         issue_mock.assert_called_once()
         autofix_mock.assert_not_called()
@@ -249,13 +268,31 @@ class TestProcessFindingRouting:
         assert result["status"] == "permanently_failed"
         assert result["suppressed_until"] is not None
 
+    def test_suppression_policy_skips_finding(self, tmp_project: Path) -> None:
+        finding = _make_finding("sup-1", "low", "dead-code", "desc", {"file": "hooks/good.py"})
+        policy = _load_autofix_policy(tmp_project)
+        policy["suppressions"] = [{"category": "dead-code", "path_prefix": "hooks/", "reason": "quiet path"}]
+        result = _process_finding(finding, tmp_project, policy)
+        assert result["status"] == "suppressed-policy"
+        assert result["suppression_reason"] == "quiet path"
+
+    def test_rate_limit_blocks_autofix(self, tmp_project: Path) -> None:
+        finding = _make_finding("rl-1", "low", "dead-code", "desc", {})
+        policy = _load_autofix_policy(tmp_project)
+        policy["max_prs_per_day"] = 1
+        existing = [_make_finding("done-1", "low", "dead-code", "desc", {})]
+        existing[0]["pr_number"] = 10
+        existing[0]["processed_at"] = datetime.now(timezone.utc).isoformat()
+        result = _process_finding(finding, tmp_project, policy, existing)
+        assert result["status"] == "rate-limited"
+
     def test_review_only_opens_issue(self, tmp_project: Path) -> None:
         """High-severity llm-review findings route to issue, not autofix."""
         finding = _make_finding("llm-high-1", "high", "llm-review", "critical bug", {})
         with patch("dynoproactive._open_github_issue") as issue_mock, \
              patch("dynoproactive._autofix_finding") as autofix_mock:
-            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
-            result = _process_finding(finding, tmp_project)
+            issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project, _load_autofix_policy(tmp_project))
         issue_mock.assert_called_once()
         autofix_mock.assert_not_called()
         assert result["status"] == "issue-opened"
@@ -266,8 +303,8 @@ class TestProcessFindingRouting:
         finding = _make_finding("dep-1", "medium", "dependency-vuln", "vuln", {})
         with patch("dynoproactive._open_github_issue") as issue_mock, \
              patch("dynoproactive._autofix_finding") as autofix_mock:
-            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
-            result = _process_finding(finding, tmp_project)
+            issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project, _load_autofix_policy(tmp_project))
         issue_mock.assert_called_once()
         autofix_mock.assert_not_called()
         assert result["fixability"] == "review-only"
@@ -277,8 +314,8 @@ class TestProcessFindingRouting:
         finding = _make_finding("drift-1", "medium", "architectural-drift", "drift", {})
         with patch("dynoproactive._open_github_issue") as issue_mock, \
              patch("dynoproactive._autofix_finding") as autofix_mock:
-            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
-            result = _process_finding(finding, tmp_project)
+            issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project, _load_autofix_policy(tmp_project))
         issue_mock.assert_called_once()
         autofix_mock.assert_not_called()
         assert result["fixability"] == "review-only"
@@ -344,9 +381,10 @@ class TestVerifyFix:
         subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True)
         subprocess.run(["git", "commit", "-m", "test change"], cwd=worktree, capture_output=True)
         finding = _make_finding("vf-1", "low", "dead-code", "desc", {"file": "hooks/good.py"})
-        ok, reason = _verify_fix(tmp_project, worktree, finding)
+        ok, reason, report = _verify_fix(tmp_project, worktree, finding)
         assert ok is True
         assert reason == ""
+        assert "hooks/good.py" in report["changed_files"]
 
     def test_syntax_error_fails(self, tmp_project: Path) -> None:
         """A change that introduces a syntax error fails verification."""
@@ -356,9 +394,84 @@ class TestVerifyFix:
         subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True)
         subprocess.run(["git", "commit", "-m", "break syntax"], cwd=worktree, capture_output=True)
         finding = _make_finding("vf-2", "low", "dead-code", "desc", {"file": "hooks/good.py"})
-        ok, reason = _verify_fix(tmp_project, worktree, finding)
+        ok, reason, _report = _verify_fix(tmp_project, worktree, finding)
         assert ok is False
         assert "syntax error" in reason
+
+    def test_dependency_file_change_fails_for_non_dependency_finding(self, tmp_project: Path) -> None:
+        import subprocess
+        worktree = str(tmp_project)
+        (tmp_project / "requirements.txt").write_text("pytest==8.0.0\n")
+        subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "deps"], cwd=worktree, capture_output=True)
+        finding = _make_finding("vf-3", "low", "dead-code", "desc", {"file": "hooks/good.py"})
+        ok, reason, _report = _verify_fix(tmp_project, worktree, finding)
+        assert ok is False
+        assert "dependency file change" in reason
+
+
+class TestPolicyHelpers:
+    def test_suppression_reason_matches_category_and_path(self, tmp_project: Path) -> None:
+        policy = _load_autofix_policy(tmp_project)
+        policy["suppressions"] = [{"category": "dead-code", "path_prefix": "hooks/", "reason": "noise"}]
+        finding = _make_finding("sup-2", "low", "dead-code", "desc", {"file": "hooks/good.py"})
+        assert _suppression_reason(finding, policy) == "noise"
+
+    def test_rate_limit_reason_detects_open_pr_cap(self, tmp_project: Path) -> None:
+        policy = _load_autofix_policy(tmp_project)
+        policy["max_open_prs"] = 1
+        finding = _make_finding("open-1", "low", "dead-code", "desc", {})
+        finding["pr_number"] = 11
+        finding["merge_outcome"] = "open"
+        assert "max_open_prs" in _rate_limit_reason(policy, [finding])
+
+    def test_confidence_recompute_rewards_merged_history(self, tmp_project: Path) -> None:
+        policy = _load_autofix_policy(tmp_project)
+        policy["categories"]["dead-code"]["stats"]["merged"] = 5
+        policy["categories"]["dead-code"]["stats"]["closed_unmerged"] = 0
+        updated = _recompute_category_confidence(policy)
+        assert updated["categories"]["dead-code"]["confidence"] > 0.8
+
+    def test_pr_quality_score_rewards_small_verified_change(self) -> None:
+        score = _compute_pr_quality_score({
+            "changed_files": ["hooks/good.py"],
+            "python_files_checked": ["hooks/good.py"],
+            "targeted_tests": [{"path": "tests/test_good.py", "returncode": 0}],
+            "total_changes": 12,
+        })
+        assert score > 0.8
+
+
+class TestOutcomeSync:
+    def test_sync_outcomes_updates_merge_state_and_metrics(self, tmp_project: Path) -> None:
+        findings = [_make_finding("sync-1", "low", "dead-code", "desc", {})]
+        findings[0]["pr_number"] = 12
+        findings[0]["status"] = "fixed"
+        policy = _load_autofix_policy(tmp_project)
+
+        class Result:
+            def __init__(self, stdout: str, returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.returncode = returncode
+
+        def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd[:3] == ["gh", "pr", "view"]:
+                return Result(json.dumps({
+                    "state": "MERGED",
+                    "mergedAt": "2026-04-04T12:00:00Z",
+                    "closedAt": "2026-04-04T12:00:00Z",
+                    "url": "https://example.test/pr/12",
+                }))
+            if cmd[:3] == ["gh", "issue", "view"]:
+                return Result("{}")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch("dynoproactive.shutil.which", return_value="/usr/bin/gh"), \
+             patch("dynoproactive.subprocess.run", side_effect=fake_run):
+            updated, metrics = _sync_outcomes(tmp_project, findings, policy)
+
+        assert updated[0]["merge_outcome"] == "merged"
+        assert metrics["totals"]["merged"] >= 1
 
 
 # ---------------------------------------------------------------------------

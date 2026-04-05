@@ -20,7 +20,7 @@ from dynoglobal import (
     log_global,
     sweeps_log_path,
 )
-from dynoslib import now_iso, validate_generated_html, write_json
+from dynoslib import _persistent_project_dir, now_iso, validate_generated_html, write_json
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,28 @@ def gather_project_data(project_path: Path) -> dict:
         "payload": payload,
         "stats": stats,
         "quality_scores": quality_scores,
+        "autofix_state": _gather_autofix_state(project_path),
     }
+
+
+def _gather_autofix_state(project_root: Path) -> dict:
+    state = {
+        "metrics": {},
+        "benchmarks": {},
+    }
+    persistent = _persistent_project_dir(project_root)
+    metrics_path = persistent / "autofix-metrics.json"
+    benchmarks_path = persistent / "autofix-benchmarks.json"
+    for key, path in (("metrics", metrics_path), ("benchmarks", benchmarks_path)):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                state[key] = data
+        except (json.JSONDecodeError, OSError):
+            continue
+    return state
 
 
 def _extract_quality_scores(project_path: Path) -> list[float]:
@@ -199,6 +220,7 @@ def gather_all_projects() -> dict:
         "last_cycle_at": "",
         "payload": {},
         "retrospectives": [],
+        "autofix_state": {"metrics": {}, "benchmarks": {}},
     }
 
     for entry in projects_list:
@@ -258,6 +280,7 @@ def gather_all_projects() -> dict:
                 "maintenance": maintenance,
                 "payload": payload,
                 "retrospectives": retrospectives,
+                "autofix_state": data.get("autofix_state", {"metrics": {}, "benchmarks": {}}),
             })
         except (OSError, json.JSONDecodeError) as exc:
             log_global(f"global dashboard: error extracting project {proj_path_str}: {exc}")
@@ -387,6 +410,17 @@ def _gather_maintenance_data(project_root: Path) -> dict:
 
 def _gather_autofix_prs(project_path: str) -> list[dict]:
     """Get autofix PRs for a specific project. Returns empty list if gh unavailable or none found."""
+    project_root = Path(project_path)
+    persistent = _persistent_project_dir(project_root)
+    metrics_path = persistent / "autofix-metrics.json"
+    if metrics_path.exists():
+        try:
+            data = json.loads(metrics_path.read_text())
+            recent = data.get("recent_prs", [])
+            if isinstance(recent, list) and recent:
+                return recent
+        except (json.JSONDecodeError, OSError):
+            pass
     import subprocess
     try:
         proc = subprocess.run(
@@ -429,12 +463,17 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
     total_tracked_fixtures = 0
     total_coverage_gaps = 0
     total_automation_queue = 0
+    total_autofix_open_prs = 0
+    total_autofix_merged = 0
+    total_autofix_suppressions = 0
 
     for proj in projects:
         stats = proj.get("stats", {})
         payload = proj.get("payload", {})
         summary = payload.get("summary", {})
         retrospectives = proj.get("retrospectives", [])
+        autofix_metrics = proj.get("autofix_state", {}).get("metrics", {})
+        autofix_totals = autofix_metrics.get("totals", {})
 
         total_tasks += stats.get("total_tasks", 0)
         avg_q = stats.get("average_quality_score", 0.0)
@@ -451,6 +490,9 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
         total_tracked_fixtures += summary.get("tracked_fixtures", 0)
         total_coverage_gaps += summary.get("coverage_gaps", 0)
         total_automation_queue += summary.get("queued_automation_jobs", 0)
+        total_autofix_open_prs += int(autofix_totals.get("open_prs", 0) or 0)
+        total_autofix_merged += int(autofix_totals.get("merged", 0) or 0)
+        total_autofix_suppressions += int(autofix_totals.get("suppression_count", 0) or 0)
 
         for retro in retrospectives:
             fbc = retro.get("findings_by_category", {})
@@ -474,6 +516,9 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
         "total_tracked_fixtures": total_tracked_fixtures,
         "total_coverage_gaps": total_coverage_gaps,
         "total_automation_queue": total_automation_queue,
+        "total_autofix_open_prs": total_autofix_open_prs,
+        "total_autofix_merged": total_autofix_merged,
+        "total_autofix_suppressions": total_autofix_suppressions,
     }
 
 
@@ -964,6 +1009,25 @@ def _render_project_detail(proj: dict, index: int) -> str:
 
     # --- Autofix PRs ---
     autofix_prs = proj.get("autofix_prs", [])
+    autofix_state = proj.get("autofix_state", {})
+    autofix_metrics = autofix_state.get("metrics", {})
+    autofix_totals = autofix_metrics.get("totals", {})
+    autofix_categories = autofix_metrics.get("categories", {})
+    top_autofix = sorted(
+        (
+            {
+                "name": name,
+                "confidence": data.get("confidence", 0.0),
+                "mode": data.get("mode", "issue-only"),
+                "merged": data.get("merged", 0),
+                "issues_opened": data.get("issues_opened", 0),
+            }
+            for name, data in autofix_categories.items()
+            if isinstance(data, dict)
+        ),
+        key=lambda item: (item["merged"], item["confidence"]),
+        reverse=True,
+    )[:4]
     if autofix_prs:
         pr_rows = ""
         for pr in autofix_prs:
@@ -1002,6 +1066,33 @@ def _render_project_detail(proj: dict, index: int) -> str:
             f'</div>'
         )
 
+    if autofix_totals or top_autofix:
+        top_rows = ""
+        for item in top_autofix:
+            top_rows += (
+                f'<div class="maint-action-row">'
+                f'<span class="mono">{_esc(item["name"])}</span>'
+                f'<span class="tag" style="font-size:10px;padding:2px 7px;">{_esc(item["mode"])}</span>'
+                f'<span class="mini">conf {float(item["confidence"]):.2f}</span>'
+                f'<span class="mini">merged {int(item["merged"])}</span>'
+                f'<span class="mini">issues {int(item["issues_opened"])}</span>'
+                f'</div>'
+            )
+        autofix_metrics_section = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Autofix Metrics</div>'
+            f'<div class="cross-summary">'
+            f'<span>Open PRs: <strong>{int(autofix_totals.get("open_prs", 0) or 0)}</strong></span>'
+            f'<span>Merged: <strong>{int(autofix_totals.get("merged", 0) or 0)}</strong></span>'
+            f'<span>Closed: <strong>{int(autofix_totals.get("closed_unmerged", 0) or 0)}</strong></span>'
+            f'<span>Suppressions: <strong>{int(autofix_totals.get("suppression_count", 0) or 0)}</strong></span>'
+            f'</div>'
+            f'{top_rows}'
+            f'</div>'
+        )
+    else:
+        autofix_metrics_section = ""
+
     # --- Lineage ---
     lineage = payload.get("lineage", {})
     lineage_nodes = lineage.get("nodes", 0)
@@ -1027,6 +1118,7 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'{findings_section}'
         f'{alerts_section}'
         f'{autofix_section}'
+        f'{autofix_metrics_section}'
         f'{lineage_line}'
         f'</div>'
         f'</div>'
@@ -1124,6 +1216,9 @@ def _render_html(payload: dict) -> str:
     tf = aggregates.get("total_tracked_fixtures", 0)
     cg = aggregates.get("total_coverage_gaps", 0)
     aq = aggregates.get("total_automation_queue", 0)
+    ao = aggregates.get("total_autofix_open_prs", 0)
+    am = aggregates.get("total_autofix_merged", 0)
+    asp = aggregates.get("total_autofix_suppressions", 0)
 
     cross_panel = (
         f'<div class="panel" style="margin-bottom:24px;">'
@@ -1135,6 +1230,9 @@ def _render_html(payload: dict) -> str:
         f'<span>Tracked fixtures: <strong>{tf}</strong></span>'
         f'<span>Coverage gaps: <strong>{cg}</strong></span>'
         f'<span>Automation queue: <strong>{aq}</strong></span>'
+        f'<span>Autofix open PRs: <strong>{ao}</strong></span>'
+        f'<span>Autofix merged: <strong>{am}</strong></span>'
+        f'<span>Autofix suppressions: <strong>{asp}</strong></span>'
         f'</div>'
         f'</div>'
     )
