@@ -6,8 +6,6 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 from dynoslib import (
@@ -19,7 +17,6 @@ from dynoslib import (
     _persistent_project_dir,
     project_policy,
     project_dir,
-    COMPOSITE_WEIGHTS,
 )
 
 
@@ -379,16 +376,11 @@ def _render_markdown(pm: dict) -> str:
 # Auto-improvement engine (delegated to dynopostmortem_improve)
 # ---------------------------------------------------------------------------
 from dynopostmortem_improve import (  # noqa: E402
-    _improvements_dir,
-    _load_applied_ids,
-    _save_applied_id,
     apply_improvement,
     cmd_approve,
     cmd_improve,
     cmd_list_pending,
     cmd_propose,
-    propose_improvements,
-    run_improvement_cycle,
 )
 
 

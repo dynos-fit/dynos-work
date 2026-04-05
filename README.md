@@ -69,6 +69,55 @@ What they mean:
 
 There are more advanced skills in the repo, but the system is supposed to use its own internal tooling automatically. The README should not expect normal users to run low-level Python commands by hand.
 
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        YOU (the user)                           │
+│                                                                 │
+│   /dynos-work:start "fix the login bug"                         │
+│        │                                                        │
+│        ▼                                                        │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              FOUNDRY PIPELINE (per task)                │   │
+│   │                                                         │   │
+│   │   discover ─→ spec ─→ plan ─→ execute ─→ audit ─→ done │   │
+│   │      │          │       │                         │     │   │
+│   │   you answer  you     you                    retrospective  │
+│   │   questions   approve approve                  written  │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│        │                                                        │
+│        ▼                                                        │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              LEARNING LOOP (background daemon)          │   │
+│   │                                                         │   │
+│   │   trajectories ─→ patterns ─→ postmortems               │   │
+│   │        ─→ improvements ─→ fixtures ─→ benchmarks         │   │
+│   │                                                         │   │
+│   │   Makes the system smarter over time.                   │   │
+│   │   Runs every hour. No user action needed.               │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│        │                                                        │
+│        ▼                                                        │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              AUTOFIX (optional, --autofix)              │   │
+│   │                                                         │   │
+│   │   scan codebase ─→ detect debt ─→ route by severity     │   │
+│   │                                                         │   │
+│   │   low/medium: worktree ─→ claude fix ─→ open PR         │   │
+│   │   high/critical: open GitHub issue for human review     │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              DASHBOARD (dynos dashboard)                │   │
+│   │                                                         │   │
+│   │   All projects in one page. Quality trends, routes,     │   │
+│   │   benchmarks, findings, daemon health, autofix PRs.     │   │
+│   │   Click any project card for full detail.               │   │
+│   └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ## How A Task Flows
 
 ### 1. Start
