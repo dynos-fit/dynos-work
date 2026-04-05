@@ -546,51 +546,157 @@ FILES TO REVIEW:
 """
 
 
+def _scan_coverage_path(root: Path) -> Path:
+    return root / ".dynos" / "scan-coverage.json"
+
+
+def _load_scan_coverage(root: Path) -> dict:
+    path = _scan_coverage_path(root)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"files": {}}
+
+
+def _save_scan_coverage(root: Path, coverage: dict) -> None:
+    path = _scan_coverage_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, coverage)
+
+
+def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]:
+    """Score all Python files by risk priority. Higher = scan first."""
+
+    # Find all Python files in the project (not just hooks/)
+    py_files: list[Path] = []
+    for pattern in ("hooks/*.py", "*.py", "tests/*.py"):
+        py_files.extend(root.glob(pattern))
+    # Deduplicate
+    seen: set[str] = set()
+    unique_files: list[Path] = []
+    for f in py_files:
+        rel = str(f.relative_to(root))
+        if rel not in seen and f.is_file():
+            seen.add(rel)
+            unique_files.append(f)
+
+    if not unique_files:
+        return []
+
+    now = datetime.now(timezone.utc)
+    file_coverage = coverage.get("files", {})
+
+    # 1. Git churn: commits per file in last 30 days
+    churn: dict[str, int] = {}
+    try:
+        result = subprocess.run(
+            ["git", "log", "--since=30 days ago", "--name-only", "--pretty=format:"],
+            capture_output=True, text=True, timeout=15, cwd=root,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line:
+                    churn[line] = churn.get(line, 0) + 1
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # 2. Previous findings from proactive-findings.json
+    prev_findings: dict[str, int] = {}
+    existing = _load_findings(root)
+    for f in existing:
+        efile = f.get("evidence", {}).get("file", "")
+        if efile:
+            prev_findings[efile] = prev_findings.get(efile, 0) + 1
+
+    # 3. Test coverage: check if a test file exists for each source file
+    test_files: set[str] = set()
+    for tf in root.glob("tests/*.py"):
+        test_files.add(tf.stem)  # test_foo -> foo
+
+    scored: list[tuple[Path, float]] = []
+    for f in unique_files:
+        rel = str(f.relative_to(root))
+        score = 0.0
+
+        # Churn score (0-10, normalized)
+        file_churn = churn.get(rel, 0)
+        score += min(file_churn, 10) * 3  # max 30
+
+        # Complexity score (line count, rough proxy)
+        try:
+            line_count = len(f.read_text().splitlines())
+        except OSError:
+            line_count = 0
+        score += min(line_count / 50, 10) * 2  # max 20 (1000+ lines = max)
+
+        # No test file
+        stem = f.stem
+        if f"test_{stem}" not in test_files:
+            score += 5
+
+        # Previous findings boost
+        if rel in prev_findings:
+            score += prev_findings[rel] * 3
+
+        # Cooldown: recently scanned files get deprioritized
+        file_info = file_coverage.get(rel, {})
+        last_scanned = file_info.get("last_scanned_at", "")
+        if last_scanned:
+            try:
+                scanned_dt = datetime.fromisoformat(last_scanned.replace("Z", "+00:00"))
+                days_since = (now - scanned_dt).total_seconds() / 86400
+                if days_since < 1:
+                    score -= 100  # scanned today, skip
+                elif days_since < 3:
+                    score -= 30  # scanned recently, deprioritize
+                elif days_since < 7:
+                    score -= 10  # mild deprioritization
+            except (ValueError, TypeError):
+                pass
+
+        # Last scan was clean? Minor deprioritization
+        if file_info.get("last_result") == "clean":
+            score -= 5
+
+        scored.append((f, score))
+
+    # Sort by score descending
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
+
+
 def _detect_llm_review(root: Path) -> list[dict]:
-    """Run a Haiku LLM pass over recently changed or high-churn files."""
+    """Run a Haiku LLM pass over risk-prioritized files."""
     findings: list[dict] = []
 
     if not shutil.which("claude"):
         _log("Skipping LLM review: claude CLI not available")
         return findings
 
-    # Identify files to review: recently modified hooks (last 7 days) or files
-    # that appeared in recent retrospective findings
-    hooks_dir = root / "hooks"
-    if not hooks_dir.is_dir():
+    # Load scan coverage and compute scores
+    coverage = _load_scan_coverage(root)
+    scored_files = _compute_file_scores(root, coverage)
+
+    if not scored_files:
         return findings
 
-    # Get files modified in last 7 days
-    recent_files: list[Path] = []
-    try:
-        result = subprocess.run(
-            ["git", "log", "--since=7 days ago", "--name-only", "--pretty=format:", "--diff-filter=M"],
-            capture_output=True, text=True, timeout=10, cwd=root,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().splitlines():
-                line = line.strip()
-                if line and line.endswith(".py") and (root / line).exists():
-                    recent_files.append(root / line)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-
-    # Fallback: if no recent changes, review the largest hook files
-    if not recent_files:
-        py_files = sorted(hooks_dir.glob("*.py"), key=lambda f: f.stat().st_size, reverse=True)
-        recent_files = py_files[:5]
-
-    # Deduplicate and limit to 5 files (keep Haiku fast)
-    seen: set[str] = set()
+    # Take top 5 files by risk score (skip files with score < 0)
     review_files: list[Path] = []
-    for f in recent_files:
-        name = str(f.relative_to(root))
-        if name not in seen and len(review_files) < 5:
-            seen.add(name)
-            review_files.append(f)
+    for f, score in scored_files:
+        if score < 0:
+            continue
+        review_files.append(f)
+        if len(review_files) >= 5:
+            break
 
     if not review_files:
+        _log("All files recently scanned, skipping LLM review this cycle")
         return findings
+
+    _log(f"File scores (top 10): {[(str(f.relative_to(root)), round(s, 1)) for f, s in scored_files[:10]]}")
 
     # Build the prompt with file contents
     prompt = _HAIKU_REVIEW_PROMPT
@@ -684,6 +790,20 @@ def _detect_llm_review(root: Path) -> list[dict]:
         ))
 
     _log(f"Haiku review found {len(findings)} issues")
+
+    # Update scan coverage
+    file_coverage = coverage.get("files", {})
+    files_with_findings = {f.get("evidence", {}).get("file", "") for f in findings}
+    for f in review_files:
+        rel = str(f.relative_to(root))
+        file_coverage[rel] = {
+            "last_scanned_at": now_iso(),
+            "last_result": "findings" if rel in files_with_findings else "clean",
+        }
+    coverage["files"] = file_coverage
+    coverage["last_scan_at"] = now_iso()
+    _save_scan_coverage(root, coverage)
+
     return findings
 
 
