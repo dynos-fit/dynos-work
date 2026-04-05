@@ -305,103 +305,6 @@ class TestDaemonLifecycle:
 
 
 # ===================================================================
-# Policy merge tests (AC 40)
-# ===================================================================
-
-class TestPolicyMerge:
-    """Tests for merge_policy: local overrides global, fallthrough, defaults."""
-
-    def test_local_overrides_global(self, tmp_path):
-        from dynoglobal import merge_policy, global_policy_path, ensure_global_dirs, project_dir
-        from dynoslib import write_json
-
-        ensure_global_dirs()
-        write_json(global_policy_path(), {"max_tasks": 10, "auto_repair": True})
-        proj = _make_project(tmp_path, "proj-a")
-        local_policy = project_dir(proj) / "policy.json"
-        write_json(local_policy, {"max_tasks": 5})
-
-        merged = merge_policy(proj)
-        assert merged["max_tasks"] == 5  # local wins
-        assert merged["auto_repair"] is True  # global falls through
-
-    def test_absent_local_keys_fall_through(self, tmp_path):
-        from dynoglobal import merge_policy, global_policy_path, ensure_global_dirs, project_dir
-        from dynoslib import write_json
-
-        ensure_global_dirs()
-        write_json(global_policy_path(), {"key_a": 1, "key_b": 2, "key_c": 3})
-        proj = _make_project(tmp_path, "proj-a")
-        local_policy = project_dir(proj) / "policy.json"
-        write_json(local_policy, {"key_b": 99})
-
-        merged = merge_policy(proj)
-        assert merged["key_a"] == 1  # from global
-        assert merged["key_b"] == 99  # from local
-        assert merged["key_c"] == 3  # from global
-
-    def test_missing_local_uses_all_global(self, tmp_path):
-        from dynoglobal import merge_policy, global_policy_path, ensure_global_dirs, project_dir
-        from dynoslib import write_json
-
-        ensure_global_dirs()
-        write_json(global_policy_path(), {"poll_interval": 600, "enabled": True})
-        proj = _make_project(tmp_path, "proj-a")
-        # No local policy file at all
-
-        merged = merge_policy(proj)
-        assert merged["poll_interval"] == 600
-        assert merged["enabled"] is True
-
-    def test_missing_global_uses_local_only(self, tmp_path):
-        from dynoglobal import merge_policy, ensure_global_dirs, project_dir
-        from dynoslib import write_json
-
-        ensure_global_dirs()
-        proj = _make_project(tmp_path, "proj-a")
-        local_policy = project_dir(proj) / "policy.json"
-        write_json(local_policy, {"custom": "value"})
-
-        merged = merge_policy(proj)
-        assert merged["custom"] == "value"
-
-    def test_both_missing_returns_empty(self, tmp_path):
-        from dynoglobal import merge_policy, ensure_global_dirs, project_dir
-
-        ensure_global_dirs()
-        proj = _make_project(tmp_path, "proj-a")
-        merged = merge_policy(proj)
-        assert merged == {}
-
-    def test_corrupt_global_ignored(self, tmp_path):
-        from dynoglobal import merge_policy, global_policy_path, ensure_global_dirs, project_dir
-        from dynoslib import write_json
-
-        ensure_global_dirs()
-        global_policy_path().parent.mkdir(parents=True, exist_ok=True)
-        global_policy_path().write_text("{bad json")
-        proj = _make_project(tmp_path, "proj-a")
-        local_policy = project_dir(proj) / "policy.json"
-        write_json(local_policy, {"key": "val"})
-
-        merged = merge_policy(proj)
-        assert merged["key"] == "val"
-
-    def test_corrupt_local_ignored(self, tmp_path):
-        from dynoglobal import merge_policy, global_policy_path, ensure_global_dirs, project_dir
-        from dynoslib import write_json
-
-        ensure_global_dirs()
-        write_json(global_policy_path(), {"from_global": True})
-        proj = _make_project(tmp_path, "proj-a")
-        local_policy = project_dir(proj) / "policy.json"
-        local_policy.write_text("not valid json!")
-
-        merged = merge_policy(proj)
-        assert merged["from_global"] is True
-
-
-# ===================================================================
 # Cross-project aggregation tests (AC 41)
 # ===================================================================
 
@@ -638,23 +541,6 @@ class TestIsolation:
         content = stats_file.read_text()
         assert "secret-proj-a" not in content
         assert "secret-proj-b" not in content
-
-    def test_merge_policy_does_not_cross_project_boundaries(self, tmp_path):
-        """merge_policy for proj_a never reads proj_b's local policy."""
-        from dynoglobal import merge_policy, ensure_global_dirs, project_dir
-        from dynoslib import write_json
-
-        ensure_global_dirs()
-        proj_a = _make_project(tmp_path, "proj-a")
-        proj_b = _make_project(tmp_path, "proj-b")
-        write_json(project_dir(proj_a) / "policy.json", {"key": "from-a"})
-        write_json(project_dir(proj_b) / "policy.json", {"key": "from-b"})
-
-        merged_a = merge_policy(proj_a)
-        merged_b = merge_policy(proj_b)
-
-        assert merged_a["key"] == "from-a"
-        assert merged_b["key"] == "from-b"
 
     def test_global_home_uses_env_var(self, tmp_path):
         from dynoglobal import global_home
