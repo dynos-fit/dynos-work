@@ -376,7 +376,6 @@ def _render_markdown(pm: dict) -> str:
 # Auto-improvement engine (delegated to dynopostmortem_improve)
 # ---------------------------------------------------------------------------
 from dynopostmortem_improve import (  # noqa: E402
-    apply_improvement,
     cmd_approve,
     cmd_improve,
     cmd_list_pending,
