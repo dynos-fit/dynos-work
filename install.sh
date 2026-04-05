@@ -171,9 +171,9 @@ step_plugin() {
     fi
 
     # Check if marketplace is added
-    if ! claude plugin marketplace list 2>/dev/null | grep -q "HassamSheikh"; then
+    if ! claude plugin marketplace list 2>/dev/null | grep -q "dynos-work"; then
         info "Adding dynos-work marketplace"
-        claude plugin marketplace add HassamSheikh/dynos-work 2>/dev/null || true
+        claude plugin marketplace add dynos-fit/dynos-work 2>/dev/null || true
     fi
 
     info "Installing dynos-work plugin"

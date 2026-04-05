@@ -11,7 +11,8 @@ A Claude Code plugin that checks its own work, learns from mistakes, and fixes y
 ## Install
 
 ```
-/plugin marketplace add HassamSheikh/dynos-work
+claude plugin marketplace add dynos-fit/dynos-work
+claude plugin install dynos-work
 ```
 
 ## Use
