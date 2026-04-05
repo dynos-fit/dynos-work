@@ -21,6 +21,7 @@ from dynoproactive import (
     _load_findings,
     _load_scan_coverage,
     _make_finding,
+    _process_finding,
     _save_scan_coverage,
     VALID_CATEGORIES,
 )
@@ -211,3 +212,37 @@ class TestFindingsPersistence:
         h3 = _description_hash("different description")
         assert h1 == h2
         assert h1 != h3
+
+
+# ---------------------------------------------------------------------------
+# Risk routing
+# ---------------------------------------------------------------------------
+
+class TestProcessFindingRouting:
+    def test_all_severities_use_autofix(self, tmp_project: Path) -> None:
+        """All findings go through autofix regardless of severity."""
+        for sev in ("low", "medium", "high", "critical"):
+            finding = _make_finding(f"sev-{sev}", sev, "dead-code", "desc", {})
+            with patch("dynoproactive._autofix_finding") as autofix_mock:
+                autofix_mock.side_effect = lambda f, root: {**f, "status": "fixed"}
+                result = _process_finding(finding, tmp_project)
+            autofix_mock.assert_called_once()
+            assert result["status"] == "fixed"
+
+    def test_recurring_audit_opens_issue_not_autofix(self, tmp_project: Path) -> None:
+        """Recurring audit findings are not fixable code — they open issues."""
+        finding = _make_finding("recurring-1", "medium", "recurring-audit", "desc", {})
+        with patch("dynoproactive._open_github_issue") as issue_mock, \
+             patch("dynoproactive._autofix_finding") as autofix_mock:
+            issue_mock.side_effect = lambda f: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project)
+        issue_mock.assert_called_once()
+        autofix_mock.assert_not_called()
+        assert result["status"] == "issue-opened"
+
+    def test_max_attempts_permanently_fails(self, tmp_project: Path) -> None:
+        finding = _make_finding("retry-1", "low", "dead-code", "desc", {})
+        finding["attempt_count"] = 2  # already at max
+        result = _process_finding(finding, tmp_project)
+        assert result["status"] == "permanently_failed"
+        assert result["suppressed_until"] is not None

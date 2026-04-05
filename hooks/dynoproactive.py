@@ -3,10 +3,10 @@
 
 Detects technical debt across six categories (syntax errors, recurring audit
 findings, dependency vulnerabilities, dead code, architectural drift, and
-LLM code review), then routes each finding through the autofix pipeline:
-git worktree + Claude foundry pipeline + PR. High/critical findings use
-Opus for maximum reasoning. Recurring audit patterns open GitHub issues
-(not actionable code fixes).
+LLM code review), then routes each finding through a risk-based pipeline:
+low/medium actionable findings go through the autofix pipeline
+(git worktree + Claude foundry pipeline + PR), while recurring patterns and
+high/critical findings open GitHub issues for human review.
 
 All logging goes to stderr. Only final JSON goes to stdout.
 """
@@ -1353,11 +1353,12 @@ def _process_finding(finding: dict, root: Path) -> dict:
         return finding
 
     category = finding.get("category", "")
+
     # Recurring audit findings are not actionable code fixes — open issue only
     if category == "recurring-audit":
         return _open_github_issue(finding)
-    # Everything else goes through the autofix pipeline
-    # High/critical findings use Opus with extended thinking
+
+    # All other findings go through autofix. High/critical use Opus.
     return _autofix_finding(finding, root)
 
 
