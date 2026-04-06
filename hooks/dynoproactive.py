@@ -1756,11 +1756,12 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
         shutil.rmtree(worktree_path, ignore_errors=True)
 
     try:
-        # Create worktree
+        # Create worktree from the default branch, not the user's current branch.
+        # This ensures PRs always target main/master regardless of what the user
+        # is working on.
         _log(f"Creating worktree at {worktree_path}")
-        # Branch from current HEAD (whatever branch the user is on)
         subprocess.run(
-            ["git", "worktree", "add", "--detach", worktree_path, "HEAD"],
+            ["git", "worktree", "add", "--detach", worktree_path, base_branch],
             capture_output=True, text=True, timeout=30, cwd=str(root), check=True,
         )
         # Delete stale branch from previous failed attempt if it exists
