@@ -369,6 +369,9 @@ def _detect_recurring_audit(root: Path) -> list[dict]:
             if isinstance(cat, str) and isinstance(count, (int, float)) and count > 0:
                 category_tasks.setdefault(cat, []).append(task_id)
 
+    # Require at least 3 tasks before flagging recurring patterns
+    if task_count < 3:
+        return findings
     threshold = task_count * 0.5
     for cat, task_ids in category_tasks.items():
         if len(task_ids) > threshold:
