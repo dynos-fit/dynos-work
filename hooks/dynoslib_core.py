@@ -158,9 +158,19 @@ def _persistent_project_dir(root: Path) -> Path:
 
     Stores accumulated intelligence: trajectories, patterns, learned agents,
     benchmarks, policy. Survives repo .dynos/ cleanup.
+
+    Refuses to create directories for /tmp/ paths to prevent autofix
+    worktrees from polluting persistent storage.
     """
+    resolved = str(root.resolve())
+    if os.environ.get("DYNOS_AUTOFIX_WORKTREE") == "1" and resolved.startswith("/tmp/"):
+        # Autofix worktrees are ephemeral — don't pollute ~/.dynos/projects/
+        ephemeral = root.resolve() / ".dynos" / "ephemeral-project"
+        ephemeral.mkdir(parents=True, exist_ok=True)
+        return ephemeral
+
     dynos_home = Path(os.environ.get("DYNOS_HOME", str(Path.home() / ".dynos")))
-    slug = str(root.resolve()).strip("/").replace("/", "-")
+    slug = resolved.strip("/").replace("/", "-")
     d = dynos_home / "projects" / slug
     d.mkdir(parents=True, exist_ok=True)
     return d

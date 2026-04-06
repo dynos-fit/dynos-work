@@ -24,7 +24,7 @@ Getting started:
 Project commands:
   local         Project daemon: start, stop, status, logs, run-once
   local dashboard  Per-project dashboard (generate or serve)
-  autofix       Autofix scanner (scan, list, clear)
+  autofix       Autofix scanner (status, scan, list, clear)
 
 Global commands:
   global        Cross-project sweeper: start, stop, status, logs, run-once
@@ -112,7 +112,37 @@ sys.exit(0 if pid else 1)
     # dynos autofix scan [/path]  — scan one or all registered projects
     # dynos autofix list [/path]  — list findings
     # dynos autofix clear [/path] — clear findings
-    if [ $# -gt 0 ] && [ "$1" = "scan" ]; then
+    if [ $# -gt 0 ] && [ "$1" = "status" ]; then
+      shift
+      target="${1:-$(pwd)}"
+      resolved=$(cd "$target" 2>/dev/null && pwd) || { echo "Error: $target does not exist" >&2; exit 1; }
+      enabled="OFF"
+      [ -f "$resolved/.dynos/maintenance/autofix.enabled" ] && enabled="ON"
+      daemon="not running"
+      if python3 -c "
+import sys
+sys.path.insert(0, '${HOOKS_DIR}')
+from dynomaintain import current_pid
+from pathlib import Path
+pid = current_pid(Path('$resolved'))
+sys.exit(0 if pid else 1)
+" 2>/dev/null; then
+        daemon="running"
+      fi
+      echo "Autofix: $enabled"
+      echo "Daemon:  $daemon"
+      echo "Project: $resolved"
+      if [ "$enabled" = "ON" ] && [ -f "$resolved/.dynos/proactive-findings.json" ]; then
+        count=$(python3 -c "
+import json
+data = json.load(open('$resolved/.dynos/proactive-findings.json'))
+findings = data.get('findings', [])
+print(len([f for f in findings if f.get('status') != 'suppressed']))
+" 2>/dev/null || echo "0")
+        echo "Active findings: $count"
+      fi
+      exit 0
+    elif [ $# -gt 0 ] && [ "$1" = "scan" ]; then
       shift
       target="${1:-}"
       if [ -z "$target" ]; then

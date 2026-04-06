@@ -19,6 +19,7 @@ import ast
 import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1805,9 +1806,12 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
             _log(f"Running foundry pipeline for {finding_id} (opus — {severity} severity)")
         else:
             _log(f"Running foundry pipeline for {finding_id}")
+        # Tell session-start to skip registration and daemon for worktrees
+        worktree_env = {**os.environ, "DYNOS_AUTOFIX_WORKTREE": "1"}
         claude_result = subprocess.run(
             claude_cmd,
             capture_output=True, text=True, timeout=600, cwd=worktree_path,
+            env=worktree_env,
         )
 
         if claude_result.returncode == 0:

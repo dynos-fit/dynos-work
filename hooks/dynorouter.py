@@ -421,6 +421,12 @@ AUDITOR_ROLES = [
     "db-schema-auditor",
 ]
 
+# Ensemble voting: these auditors get two cheap models first.
+# If both return zero findings, pass. If either finds something, escalate to opus.
+ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
+ENSEMBLE_VOTING_MODELS = ["haiku", "sonnet"]
+ENSEMBLE_ESCALATION_MODEL = "opus"
+
 
 def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track: bool = False) -> dict:
     """Build a complete, deterministic audit spawn plan.
@@ -474,7 +480,7 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
         # Route selection
         route_decision = resolve_route(root, auditor, task_type)
 
-        plan["auditors"].append({
+        entry = {
             "name": auditor,
             "action": "spawn",
             "model": model_decision["model"],
@@ -484,7 +490,17 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
             "agent_path": route_decision["agent_path"],
             "agent_name": route_decision["agent_name"],
             "composite_score": route_decision["composite_score"],
-        })
+        }
+
+        # Ensemble voting for high-risk auditors
+        if auditor in ENSEMBLE_AUDITORS and not fast_track:
+            entry["ensemble"] = True
+            entry["ensemble_voting_models"] = list(ENSEMBLE_VOTING_MODELS)
+            entry["ensemble_escalation_model"] = ENSEMBLE_ESCALATION_MODEL
+        else:
+            entry["ensemble"] = False
+
+        plan["auditors"].append(entry)
 
     return plan
 

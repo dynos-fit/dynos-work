@@ -52,7 +52,13 @@ For each auditor in the plan:
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
-**Ensemble Voting for High-Risk Audits:** For `security-auditor` and `db-schema-auditor`, the router marks them for ensemble voting. Spawn two cheaper models (Haiku + Sonnet) in parallel first. If both return zero findings, the audit passes (`[VOTE] ... PASS`). If either returns findings, discard voting results and escalate to Opus (`[VOTE] ... Escalating to Opus`). The Opus result is final and binding.
+**Ensemble Voting:** If the router plan has `"ensemble": true` for an auditor, follow this protocol instead of a single spawn:
+
+1. Spawn two auditors in parallel using the models listed in `ensemble_voting_models` (e.g., haiku and sonnet)
+2. If both return zero findings: the audit passes for this auditor. Log: `{timestamp} [VOTE] {name} — PASS (both models agree: zero findings)`
+3. If either returns findings: discard both voting results and escalate by spawning with `ensemble_escalation_model` (opus). The escalation result is final and binding. Log: `{timestamp} [VOTE] {name} — Escalating to {escalation_model}`
+
+If `"ensemble": false`, spawn normally with the single model from the plan.
 
 **Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log: `{timestamp} [VISION] UI audit complete -- {N} visual bugs found`.
 
