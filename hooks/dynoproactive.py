@@ -1453,8 +1453,6 @@ def _classify_fixability(finding: dict) -> str:
         return "likely-safe"
 
     if category == "llm-review":
-        if severity in ("high", "critical"):
-            return "review-only"
         return "likely-safe"
 
     if category in ("architectural-drift", "dependency-vuln", "recurring-audit"):
@@ -2205,13 +2203,10 @@ def _process_finding(
 
     # Retry guard: max 2 attempts
     if finding["attempt_count"] > MAX_ATTEMPTS:
-        finding["status"] = "permanently_failed"
-        finding["suppressed_until"] = (
-            datetime.now(timezone.utc) + timedelta(days=36500)
-        ).isoformat()
-        finding["processed_at"] = now_iso()
-        _log(f"Finding {finding['finding_id']} permanently failed after {MAX_ATTEMPTS} attempts")
-        return finding
+        # Autofix failed — fall back to opening a GitHub issue
+        _log(f"Finding {finding['finding_id']} failed {MAX_ATTEMPTS} fix attempts, falling back to issue")
+        finding["rollout_mode"] = "issue-only"
+        return _open_github_issue(finding, root, policy)
 
     category = finding.get("category", "")
 

@@ -264,12 +264,14 @@ class TestProcessFindingRouting:
         autofix_mock.assert_not_called()
         assert result["status"] == "issue-opened"
 
-    def test_max_attempts_permanently_fails(self, tmp_project: Path) -> None:
+    def test_max_attempts_falls_back_to_issue(self, tmp_project: Path) -> None:
         finding = _make_finding("retry-1", "low", "dead-code", "desc", {})
         finding["attempt_count"] = 2  # already at max
-        result = _process_finding(finding, tmp_project)
-        assert result["status"] == "permanently_failed"
-        assert result["suppressed_until"] is not None
+        with patch("dynoproactive._open_github_issue") as issue_mock:
+            issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project)
+        issue_mock.assert_called_once()
+        assert result["rollout_mode"] == "issue-only"
 
     def test_suppression_policy_skips_finding(self, tmp_project: Path) -> None:
         finding = _make_finding("sup-1", "low", "dead-code", "desc", {"file": "hooks/good.py"})
@@ -289,17 +291,16 @@ class TestProcessFindingRouting:
         result = _process_finding(finding, tmp_project, policy, existing)
         assert result["status"] == "rate-limited"
 
-    def test_review_only_opens_issue(self, tmp_project: Path) -> None:
-        """High-severity llm-review findings route to issue, not autofix."""
+    def test_high_severity_llm_review_goes_to_autofix(self, tmp_project: Path) -> None:
+        """High-severity llm-review findings route to autofix, not issue."""
         finding = _make_finding("llm-high-1", "high", "llm-review", "critical bug", {})
         with patch("dynoproactive._open_github_issue") as issue_mock, \
              patch("dynoproactive._autofix_finding") as autofix_mock:
-            issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
+            autofix_mock.side_effect = lambda f, root, policy=None, **kw: {**f, "status": "fixed"}
             result = _process_finding(finding, tmp_project, _load_autofix_policy(tmp_project))
-        issue_mock.assert_called_once()
-        autofix_mock.assert_not_called()
-        assert result["status"] == "issue-opened"
-        assert result["fixability"] == "review-only"
+        autofix_mock.assert_called_once()
+        issue_mock.assert_not_called()
+        assert result["fixability"] == "likely-safe"
 
     def test_dependency_vuln_opens_issue(self, tmp_project: Path) -> None:
         """Dependency vulns are review-only, route to issue."""
@@ -349,13 +350,13 @@ class TestClassifyFixability:
         finding = _make_finding("llm-2", "medium", "llm-review", "desc", {})
         assert _classify_fixability(finding) == "likely-safe"
 
-    def test_llm_review_high_is_review_only(self) -> None:
+    def test_llm_review_high_is_likely_safe(self) -> None:
         finding = _make_finding("llm-3", "high", "llm-review", "desc", {})
-        assert _classify_fixability(finding) == "review-only"
+        assert _classify_fixability(finding) == "likely-safe"
 
-    def test_llm_review_critical_is_review_only(self) -> None:
+    def test_llm_review_critical_is_likely_safe(self) -> None:
         finding = _make_finding("llm-4", "critical", "llm-review", "desc", {})
-        assert _classify_fixability(finding) == "review-only"
+        assert _classify_fixability(finding) == "likely-safe"
 
     def test_dependency_vuln_is_review_only(self) -> None:
         finding = _make_finding("dv-1", "medium", "dependency-vuln", "desc", {})
