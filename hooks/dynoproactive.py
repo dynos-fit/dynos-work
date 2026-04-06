@@ -2602,7 +2602,7 @@ def build_parser() -> argparse.ArgumentParser:
     # scan
     p_scan = sub.add_parser("scan", help="Run proactive scan")
     p_scan.add_argument("--root", default=".", help="Project root path")
-    p_scan.add_argument("--max-findings", default=3, type=int, help="Max findings to process per cycle")
+    p_scan.add_argument("--max-findings", default=100, type=int, help="Max findings to process per cycle")
     p_scan.set_defaults(func=cmd_scan)
 
     # list
