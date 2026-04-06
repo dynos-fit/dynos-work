@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dynoslib_core import load_json, now_iso, write_json, project_dir, is_pid_running
+from dynoslib_crawler import build_import_graph
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -386,20 +387,113 @@ def _run_maintenance_cycle(root: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Cross-project priority queue
+# ---------------------------------------------------------------------------
+
+_SEVERITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+_DONE_STATUSES = {"done", "fixed", "suppressed"}
+
+
+def build_cross_project_queue(registry: dict, sweep_count: int = 0) -> list[dict]:
+    """Collect pending findings from all active projects, scored by priority.
+
+    Priority for each finding is computed as:
+        severity_weight * centrality_score * freshness_weight
+
+    Returns findings sorted by priority descending.
+    """
+    queue: list[dict] = []
+    now = datetime.now(timezone.utc)
+
+    for entry in registry.get("projects", []):
+        if entry.get("status") != "active":
+            continue
+        if _should_skip_backoff(entry, sweep_count):
+            continue
+
+        proj_path = entry.get("path", "")
+        root = Path(proj_path)
+        findings_file = root / ".dynos" / "findings.json"
+
+        try:
+            raw = findings_file.read_text()
+            findings = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        if not isinstance(findings, list):
+            continue
+
+        # Build import graph once per project for PageRank lookup
+        try:
+            graph = build_import_graph(root)
+        except Exception:
+            graph = {"nodes": [], "edges": [], "pagerank": {}}
+
+        pagerank = graph.get("pagerank", {})
+
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            status = finding.get("status", "")
+            if status in _DONE_STATUSES:
+                continue
+
+            severity = finding.get("severity", "medium")
+            severity_weight = _SEVERITY_WEIGHT.get(severity, 2)
+
+            evidence = finding.get("evidence", {})
+            evidence_file = evidence.get("file", "") if isinstance(evidence, dict) else ""
+            centrality_score = pagerank.get(evidence_file, 0.5)
+
+            detected_at = finding.get("detected_at", "")
+            days_since = 0.0
+            if detected_at:
+                try:
+                    det_dt = datetime.fromisoformat(detected_at)
+                    if det_dt.tzinfo is None:
+                        det_dt = det_dt.replace(tzinfo=timezone.utc)
+                    delta = now - det_dt
+                    days_since = max(delta.total_seconds() / 86400.0, 0.0)
+                except (ValueError, TypeError):
+                    pass
+            freshness_weight = 1.0 / (1.0 + days_since)
+
+            priority = severity_weight * centrality_score * freshness_weight
+
+            queue.append({
+                "finding": finding,
+                "project_path": proj_path,
+                "priority": priority,
+                "severity_weight": severity_weight,
+                "centrality_score": centrality_score,
+                "freshness_weight": freshness_weight,
+            })
+
+    queue.sort(key=lambda item: item["priority"], reverse=True)
+    return queue
+
+
+# ---------------------------------------------------------------------------
 # Daemon commands
 # ---------------------------------------------------------------------------
 
 def cmd_run_once(args: argparse.Namespace) -> int:
-    """Run a single sweep over all active projects."""
+    """Run a single sweep over all active projects, ordered by priority queue."""
     reg = load_registry()
-    projects = [
-        e for e in reg.get("projects", []) if e.get("status") == "active"
-    ]
-    projects.sort(key=_last_active_sort_key, reverse=True)
+    queue = build_cross_project_queue(reg)
+
+    # Extract unique project paths ordered by highest-priority finding
+    seen: set[str] = set()
+    ordered_paths: list[str] = []
+    for item in queue:
+        pp = item["project_path"]
+        if pp not in seen:
+            seen.add(pp)
+            ordered_paths.append(pp)
 
     results: list[dict] = []
-    for entry in projects:
-        proj_path = entry.get("path", "")
+    for proj_path in ordered_paths:
         root = Path(proj_path)
         if not root.is_dir():
             log_global(f"skipping missing project directory: {proj_path}")
@@ -443,23 +537,27 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
         while not _SHOULD_STOP and not daemon_stop_path().exists():
             sweep_count += 1
             reg = load_registry()
+            queue = build_cross_project_queue(reg, sweep_count=sweep_count)
+
+            # Extract unique project paths ordered by highest-priority finding
+            seen: set[str] = set()
+            ordered_paths: list[str] = []
+            for item in queue:
+                pp = item["project_path"]
+                if pp not in seen:
+                    seen.add(pp)
+                    ordered_paths.append(pp)
+
+            # Count total active projects for logging
             projects = [
                 e for e in reg.get("projects", []) if e.get("status") == "active"
             ]
-            projects.sort(key=_last_active_sort_key, reverse=True)
 
             maintained = 0
             per_project: list[dict] = []
-            for entry in projects:
+            for proj_path in ordered_paths:
                 if _SHOULD_STOP or daemon_stop_path().exists():
                     break
-                if _should_skip_backoff(entry, sweep_count):
-                    log_global(
-                        f"backoff skip: {entry.get('path', '?')} "
-                        f"(sweep #{sweep_count})"
-                    )
-                    continue
-                proj_path = entry.get("path", "")
                 root = Path(proj_path)
                 if not root.is_dir():
                     log_global(f"skipping missing project directory: {proj_path}")
