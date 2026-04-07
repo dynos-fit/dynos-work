@@ -152,7 +152,8 @@ def _recompute_totals(data: dict) -> None:
     for info in by_agent.values():
         if not isinstance(info, dict):
             continue
-        model = info.get("model", "unknown")
+        model = _resolve_model(info.get("model", "unknown"))
+        info["model"] = model  # fix in-place for legacy data
         if model in ("none", "n/a", ""):
             continue
         if model not in by_model:
@@ -166,6 +167,24 @@ def _recompute_totals(data: dict) -> None:
     data["total"] = sum(v.get("tokens", 0) for v in by_agent.values() if isinstance(v, dict))
     data["total_input_tokens"] = sum(v.get("input_tokens", 0) for v in by_agent.values() if isinstance(v, dict))
     data["total_output_tokens"] = sum(v.get("output_tokens", 0) for v in by_agent.values() if isinstance(v, dict))
+
+
+_KNOWN_MODELS = {"opus", "sonnet", "haiku"}
+_DEFAULT_PARENT_MODEL = "opus"  # orchestrator always runs on opus
+
+
+def _resolve_model(model: str) -> str:
+    """Resolve 'default'/'null'/empty model names to the actual model.
+
+    When the executor router returns model=null it means 'inherit from parent'.
+    The parent (orchestrator) runs on opus, so 'default' → 'opus'.
+    """
+    if model in _KNOWN_MODELS:
+        return model
+    if model in ("none", "n/a"):
+        return model  # deterministic events legitimately have no model
+    # Everything else (default, null, empty, unknown) → parent model
+    return _DEFAULT_PARENT_MODEL
 
 
 def record_tokens(
@@ -183,6 +202,8 @@ def record_tokens(
     """Record a single event's token usage. Returns updated data."""
     task_dir = Path(task_dir)
     data = _load_usage(task_dir)
+
+    model = _resolve_model(model)
 
     total = input_tokens + output_tokens
     now = datetime.now(timezone.utc).isoformat()
@@ -229,10 +250,15 @@ def record_tokens(
 
 
 def get_summary(task_dir: Path) -> dict:
-    """Return validated token summary for a task."""
+    """Return validated token summary for a task.
+
+    Also writes back resolved model names so legacy 'default' entries
+    get fixed on disk.
+    """
     task_dir = Path(task_dir)
     data = _load_usage(task_dir)
     _recompute_totals(data)
+    write_json(task_dir / "token-usage.json", data)
     return data
 
 

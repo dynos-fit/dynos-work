@@ -16,6 +16,7 @@ from pathlib import Path
 from dynoslib_core import (
     _persistent_project_dir,
     _safe_float,
+    benchmark_history_path,
     collect_retrospectives,
     load_json,
     now_iso,
@@ -161,17 +162,101 @@ def _ucb_select_model(
     return best
 
 
+BENCHMARK_MODEL_MIN_SAMPLES = 2
+
+
+def _benchmark_model_for_agent(root: Path, role: str, task_type: str) -> dict | None:
+    """Find the best model for a role based on learned agent benchmark runs.
+
+    Looks up the active learned agent for (role, task_type), then filters
+    benchmark history runs for that agent. Groups by model, computes mean
+    composite score, and returns the best model with >= BENCHMARK_MODEL_MIN_SAMPLES.
+
+    Returns {"model": str, "mean_composite": float, "sample_count": int} or None.
+    """
+    registry = ensure_learned_registry(root)
+    # Find matching active learned agent
+    agent_name = None
+    for agent in registry.get("agents", []):
+        if (
+            agent.get("role") == role
+            and agent.get("task_type") == task_type
+            and agent.get("status") not in ("archived", "demoted_on_regression")
+            and agent.get("mode") in ("replace", "alongside")
+        ):
+            agent_name = agent.get("agent_name")
+            break
+    if not agent_name:
+        return None
+
+    # Load benchmark history and filter for this agent
+    try:
+        history = load_json(benchmark_history_path(root))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    runs = history.get("runs", [])
+
+    # Group composite scores by model for matching runs
+    model_scores: dict[str, list[float]] = {}
+    wq, wc, we = COMPOSITE_WEIGHTS
+    for run in runs:
+        if run.get("target_name") != agent_name:
+            continue
+        if run.get("role") != role or run.get("task_type") != task_type:
+            continue
+        model = run.get("model")
+        if not model:
+            continue
+        # Compute composite from run-level scores or evaluation candidate
+        q = _safe_float(run.get("quality_score"))
+        c = _safe_float(run.get("cost_score"))
+        e = _safe_float(run.get("efficiency_score"))
+        if q or c or e:
+            composite = wq * q + wc * c + we * e
+        else:
+            evaluation = run.get("evaluation", {})
+            candidate = evaluation.get("candidate", {})
+            composite = candidate.get("mean_composite")
+        if composite is None:
+            continue
+        model_scores.setdefault(model, []).append(float(composite))
+
+    # Pick the model with highest mean composite (min samples required)
+    best_model = None
+    best_composite = -1.0
+    best_count = 0
+    for model, scores in model_scores.items():
+        if len(scores) < BENCHMARK_MODEL_MIN_SAMPLES:
+            continue
+        mean = sum(scores) / len(scores)
+        if mean > best_composite:
+            best_composite = mean
+            best_model = model
+            best_count = len(scores)
+
+    if best_model is None:
+        return None
+    return {
+        "model": best_model,
+        "source": "benchmark_model",
+        "mean_composite": round(best_composite, 4),
+        "sample_count": best_count,
+    }
+
+
 def resolve_model(root: Path, role: str, task_type: str) -> dict:
     """Determine which model an agent should use.
 
     Priority order:
-      1. policy.json model_overrides  -> source: "explicit_policy"
-      2. UCB1 over effectiveness scores -> source: "ucb"
-      3. model-policy.json fallback   -> source: "learned_history"
-      4. no match                     -> source: "default"
-      5. security floor enforcement   -> source: "security_floor"
+      1.  policy.json model_overrides     -> source: "explicit_policy"
+      2.  UCB1 over effectiveness scores  -> source: "ucb"
+      2b. Benchmark model performance     -> source: "benchmark_model"
+      3.  model-policy.json fallback      -> source: "learned_history"
+      4.  Patterns markdown table         -> source: "learned_history"
+      5.  No match                        -> source: "default"
+      *   Security floor enforcement      -> source: "security_floor"
 
-    Returns {"model": str|None, "source": str, "ucb_score": float?, "exploration_bonus": float?}.
+    Returns {"model": str|None, "source": str, ...}.
     """
     policy = project_policy(root)
     key = f"{role}:{task_type}"
@@ -203,6 +288,20 @@ def resolve_model(root: Path, role: str, task_type: str) -> dict:
                     result["source"] = "security_floor"
                 log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
                 return result
+
+    # 2b. Benchmark model performance — learned agent benchmark runs grouped by model
+    benchmark_result = _benchmark_model_for_agent(root, role, task_type)
+    if benchmark_result:
+        model = benchmark_result["model"]
+        result = {"model": model, "source": "benchmark_model",
+                  "mean_composite": benchmark_result["mean_composite"],
+                  "sample_count": benchmark_result["sample_count"]}
+        # Security floor: security-auditor never below opus
+        if role == "security-auditor" and model in ("haiku", "sonnet"):
+            result["model"] = SECURITY_FLOOR_MODEL
+            result["source"] = "security_floor"
+        log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
+        return result
 
     # 3. model-policy.json fallback (backward compat for pre-UCB projects)
     entry = _read_policy_json(root, "model-policy.json", key)

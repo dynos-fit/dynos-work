@@ -145,6 +145,14 @@ export interface ProactiveFinding {
   pr_url?: string;
   merge_outcome?: string;
   merged_at?: string;
+  issue_url?: string;
+  suppression_reason?: string;
+  fixability?: string;
+  confidence_score?: number;
+  rollout_mode?: string;
+  verification?: Record<string, unknown>;
+  branch_name?: string;
+  pr_quality_score?: number;
 }
 
 export interface AutofixCategoryStats {
@@ -177,11 +185,24 @@ export interface AutofixTotals {
   issues_opened: number;
 }
 
+export interface RecentPR {
+  finding_id: string;
+  category: string;
+  number: number | null;
+  state: string;
+  merge_outcome: string;
+  title: string;
+  created_at: string | null;
+  url: string | null;
+  branch: string | null;
+}
+
 export interface AutofixMetrics {
   generated_at: string;
   totals: AutofixTotals;
   rate_limits: AutofixRateLimits;
   categories: Record<string, AutofixCategoryStats>;
+  recent_prs: RecentPR[];
 }
 
 // ---- Policy / Settings ----
@@ -270,6 +291,210 @@ export interface CostSummary {
     estimated_usd: number;
   }>;
   total_estimated_usd: number;
+}
+
+// ---- Repo Analytics ----
+
+export interface RepoState {
+  version: number;
+  target: string;
+  architecture_complexity_score: number;
+  dependency_flux: number;
+  finding_entropy: number;
+  file_count: number;
+  line_count: number;
+  import_count: number;
+  control_flow_count: number;
+  dominant_languages: string[];
+  recent_findings_by_category: Record<string, number>;
+}
+
+export interface RepoProjectStats {
+  total_tasks: number;
+  task_counts_by_type: Record<string, number>;
+  average_quality_score: number;
+  executor_reliability: Record<string, number>;
+  prevention_rule_frequencies: Record<string, number>;
+  prevention_rule_executors: Record<string, string>;
+}
+
+export interface RepoSummary {
+  learned_components: number;
+  active_routes: number;
+  shadow_components: number;
+  demoted_components: number;
+  queued_automation_jobs: number;
+  benchmark_runs: number;
+  tracked_fixtures: number;
+  coverage_gaps: number;
+}
+
+export interface RepoActiveRoute {
+  agent_name: string;
+  role: string;
+  task_type: string;
+  item_kind: string;
+  mode: string;
+  composite: number;
+}
+
+export interface RepoDemotion {
+  agent_name: string;
+  role: string;
+  task_type: string;
+  last_evaluation: Record<string, unknown>;
+}
+
+export interface RepoCoverageGap {
+  target_name: string;
+  role: string;
+  task_type: string;
+  item_kind: string;
+}
+
+export interface RepoBenchmarkRun {
+  [key: string]: unknown;
+}
+
+export interface RepoReport {
+  registry_updated_at: string | null;
+  summary: RepoSummary;
+  active_routes: RepoActiveRoute[];
+  demotions: RepoDemotion[];
+  automation_queue: Record<string, unknown>[];
+  coverage_gaps: RepoCoverageGap[];
+  recent_runs: RepoBenchmarkRun[];
+}
+
+// ---- Task Detail: Events ----
+
+export interface TaskEvent {
+  ts: string;
+  event: string;
+  [key: string]: unknown;
+}
+
+export interface TaskEventsResponse {
+  events: TaskEvent[];
+}
+
+// ---- Task Detail: Receipts ----
+
+export interface TaskReceipt {
+  filename: string;
+  data: Record<string, unknown>;
+}
+
+export interface TaskReceiptsResponse {
+  receipts: TaskReceipt[];
+}
+
+// ---- Task Detail: Evidence ----
+
+export interface TaskEvidenceFile {
+  name: string;
+  content: string;
+}
+
+export interface TaskEvidenceResponse {
+  files: TaskEvidenceFile[];
+}
+
+// ---- Task Detail: Completion ----
+
+export interface TaskCompletion {
+  files_changed?: string[];
+  tests_passed?: number;
+  tests_failed?: number;
+  audit_result?: string;
+  blocking_findings?: number;
+  non_blocking_findings?: number;
+  [key: string]: unknown;
+}
+
+// ---- Task Detail: Postmortem ----
+
+export interface TaskPostmortem {
+  json?: Record<string, unknown>;
+  markdown?: string;
+}
+
+// ---- Task Detail: Router Decisions ----
+
+export interface RouterDecision {
+  ts: string;
+  event: string;
+  role?: string;
+  task_type?: string;
+  model?: string;
+  mode?: string;
+  agent_name?: string;
+  composite_score?: number;
+  source?: string;
+  [key: string]: unknown;
+}
+
+export interface RouterDecisionsResponse {
+  decisions: RouterDecision[];
+}
+
+// ---- Task Detail: Markdown Content ----
+
+export interface MarkdownContent {
+  content: string;
+}
+
+// ---- Maintainer / Control Plane ----
+
+export interface MaintainerStatus {
+  updated_at: string;
+  running: boolean;
+  pid: number;
+  poll_seconds: number;
+  last_cycle: {
+    executed_at: string;
+    actions: Array<{ name: string; returncode: number; result?: unknown; stderr?: string }>;
+    ok: boolean;
+    failed_steps: string[];
+    duration_steps: number;
+  };
+  cycle_count: number;
+}
+
+export interface MaintenanceCycle {
+  executed_at: string;
+  ok: boolean;
+  failed_steps: string[];
+  duration_steps: number;
+  actions: Array<{ name: string; returncode: number; result?: unknown; stderr?: string }>;
+}
+
+export interface FreshnessBucket {
+  label: string;
+  count: number;
+  agents: string[];
+}
+
+export interface AttentionItem {
+  agent_name: string;
+  reason: string;
+  mode: string;
+  status: string;
+  recommendation: string | null;
+  delta_composite: number | null;
+}
+
+export interface ControlPlaneData {
+  maintainer: MaintainerStatus;
+  autofix_enabled: boolean;
+  queue: { version: number; updated_at: string; items: Array<Record<string, unknown>> };
+  automation_status: { updated_at: string; queued_before: number; executed: number; pending_after: number };
+  agents: LearnedAgent[];
+  freshness_buckets: FreshnessBucket[];
+  coverage_gaps: RepoCoverageGap[];
+  attention_items: AttentionItem[];
+  recent_runs: Array<Record<string, unknown>>;
+  agent_summary: { total: number; routeable: number; shadow: number; alongside: number; replace: number; demoted: number };
 }
 
 // ---- Generic API Response ----

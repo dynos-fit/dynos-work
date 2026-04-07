@@ -19,7 +19,7 @@
     "task-20260404-003"
   ],
   "synthesis": {
-    "synthesized_at": "2026-04-07T16:08:47Z",
+    "synthesized_at": "2026-04-07T22:19:07Z",
     "source_task": "task-20260404-001",
     "strategy": "task_retrospective_scores_vs_task_type_baseline",
     "candidate_limit": 5

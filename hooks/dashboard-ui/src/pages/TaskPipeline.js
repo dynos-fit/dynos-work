@@ -1,7 +1,8 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useState, useCallback, useEffect, useMemo } from "react";
+import { Link } from "react-router";
 import { motion } from "motion/react";
-import { Search, Terminal, ChevronDown, ChevronRight, ChevronUp, AlertCircle, FileText, GitBranch, Shield, DollarSign, ListChecks, Play, CheckCircle2, XCircle } from "lucide-react";
+import { Search, Terminal, ChevronDown, ChevronRight, ChevronUp, AlertCircle, FileText, GitBranch, Shield, DollarSign, ListChecks, Play, CheckCircle2, XCircle, ExternalLink } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { usePollingData } from "@/data/hooks";
@@ -424,7 +425,7 @@ function TaskRow({ task, qualityDisplay, isGlobal, index }) {
                                 e.preventDefault();
                                 setOpen(!open);
                             }
-                        }, children: [isGlobal && (_jsx("td", { className: "p-4 text-slate-400 font-mono text-xs", children: task.project_path ? basename(task.project_path) : "--" })), _jsx("td", { className: "p-4 text-[#BDF000] font-mono text-xs whitespace-nowrap", children: _jsxs("span", { className: "inline-flex items-center gap-1.5", children: [open ? (_jsx(ChevronDown, { className: "w-3 h-3 text-slate-500", "aria-hidden": "true" })) : (_jsx(ChevronRight, { className: "w-3 h-3 text-slate-500", "aria-hidden": "true" })), task.task_id] }) }), _jsx("td", { className: "p-4 text-slate-300 text-sm max-w-xs truncate", children: task.title }), _jsx("td", { className: "p-4", children: _jsx("span", { className: "font-mono text-[10px] font-medium rounded-full px-2.5 py-0.5", style: {
+                        }, children: [isGlobal && (_jsx("td", { className: "p-4 text-slate-400 font-mono text-xs", children: task.project_path ? basename(task.project_path) : "--" })), _jsx("td", { className: "p-4 text-[#BDF000] font-mono text-xs whitespace-nowrap", children: _jsxs("span", { className: "inline-flex items-center gap-1.5", children: [open ? (_jsx(ChevronDown, { className: "w-3 h-3 text-slate-500", "aria-hidden": "true" })) : (_jsx(ChevronRight, { className: "w-3 h-3 text-slate-500", "aria-hidden": "true" })), _jsxs(Link, { to: `/tasks/${task.task_id}`, className: "hover:underline hover:text-[#d4ff4d] transition-colors inline-flex items-center gap-1", onClick: (e) => e.stopPropagation(), title: "Open task detail page", children: [task.task_id, _jsx(ExternalLink, { className: "w-2.5 h-2.5 opacity-50", "aria-hidden": "true" })] })] }) }), _jsx("td", { className: "p-4 text-slate-300 text-sm max-w-xs truncate", children: task.title }), _jsx("td", { className: "p-4", children: _jsx("span", { className: "font-mono text-[10px] font-medium rounded-full px-2.5 py-0.5", style: {
                                         color: stageColor,
                                         backgroundColor: stageColor + "1A",
                                     }, children: task.stage }) }), _jsx("td", { className: "p-4 text-slate-400 text-xs", children: task.classification?.type ?? "\u2014" }), _jsx("td", { className: "p-4", children: _jsx("span", { className: "font-mono text-[10px] rounded-full px-2.5 py-0.5", style: {

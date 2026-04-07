@@ -22,10 +22,14 @@
     "task-20260406-002",
     "task-20260406-003",
     "task-20260407-002",
-    "task-20260407-005"
+    "task-20260407-005",
+    "task-20260407-006",
+    "task-20260407-007",
+    "task-20260407-008",
+    "task-20260407-009"
   ],
   "synthesis": {
-    "synthesized_at": "2026-04-07T16:08:47Z",
+    "synthesized_at": "2026-04-07T22:19:06Z",
     "source_task": "task-20260406-001",
     "strategy": "task_retrospective_scores_vs_task_type_baseline",
     "candidate_limit": 5
@@ -41,10 +45,10 @@
       "category": "backend",
       "source_task_id": "task-20260406-001",
       "baseline": {
-        "quality_score": 0.254791,
-        "cost_score": 0.706743,
-        "efficiency_score": 0.895455,
-        "composite_score": 0.48275
+        "quality_score": 0.306847,
+        "cost_score": 0.589132,
+        "efficiency_score": 0.923333,
+        "composite_score": 0.503311
       },
       "candidate": {
         "quality_score": 0.0,
@@ -58,10 +62,10 @@
       "category": "ui",
       "source_task_id": "task-20260403-005",
       "baseline": {
-        "quality_score": 0.254791,
-        "cost_score": 0.706743,
-        "efficiency_score": 0.895455,
-        "composite_score": 0.48275
+        "quality_score": 0.306847,
+        "cost_score": 0.589132,
+        "efficiency_score": 0.923333,
+        "composite_score": 0.503311
       },
       "candidate": {
         "quality_score": 0.9,
@@ -75,10 +79,10 @@
       "category": "backend",
       "source_task_id": "task-20260407-003",
       "baseline": {
-        "quality_score": 0.254791,
-        "cost_score": 0.706743,
-        "efficiency_score": 0.895455,
-        "composite_score": 0.48275
+        "quality_score": 0.306847,
+        "cost_score": 0.589132,
+        "efficiency_score": 0.923333,
+        "composite_score": 0.503311
       },
       "candidate": {
         "quality_score": 0.9,
@@ -92,10 +96,10 @@
       "category": "ui",
       "source_task_id": "task-20260407-004",
       "baseline": {
-        "quality_score": 0.254791,
-        "cost_score": 0.706743,
-        "efficiency_score": 0.895455,
-        "composite_score": 0.48275
+        "quality_score": 0.306847,
+        "cost_score": 0.589132,
+        "efficiency_score": 0.923333,
+        "composite_score": 0.503311
       },
       "candidate": {
         "quality_score": 0.9,
@@ -109,10 +113,10 @@
       "category": "ui",
       "source_task_id": "task-20260403-004",
       "baseline": {
-        "quality_score": 0.254791,
-        "cost_score": 0.706743,
-        "efficiency_score": 0.895455,
-        "composite_score": 0.48275
+        "quality_score": 0.306847,
+        "cost_score": 0.589132,
+        "efficiency_score": 0.923333,
+        "composite_score": 0.503311
       },
       "candidate": {
         "quality_score": 0.9,
