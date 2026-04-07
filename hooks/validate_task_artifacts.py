@@ -49,6 +49,29 @@ def main() -> int:
             print(f"- {error}")
         return 1
 
+    # Auto-emit plan-validated receipt when execution graph exists
+    try:
+        from dynoslib_receipts import receipt_plan_validated
+        from dynoslib_core import load_json as _load_json
+        graph_path = task_dir / "execution-graph.json"
+        spec_path = task_dir / "spec.md"
+        if graph_path.exists() and spec_path.exists():
+            graph = _load_json(graph_path)
+            segments = graph.get("segments", [])
+            # Collect all criteria_ids across segments
+            all_criteria: list[int] = []
+            for seg in segments:
+                for cid in seg.get("criteria_ids", []):
+                    if cid not in all_criteria:
+                        all_criteria.append(cid)
+            receipt_plan_validated(
+                task_dir,
+                segment_count=len(segments),
+                criteria_coverage=sorted(all_criteria),
+            )
+    except Exception:
+        pass  # Never let receipt writing break validation
+
     print(f"Artifact validation passed for {task_dir}")
     return 0
 

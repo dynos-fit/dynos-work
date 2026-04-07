@@ -36,7 +36,17 @@ Append to log:
 
 ### Step 3 — Execute segments (Optimized Scheduler)
 
-**Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. Read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
+**Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. However, you MUST still run the router and apply learned agent rules before executing:
+
+1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
+2. Write the executor-routing receipt (required for stage transitions).
+3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
+4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
+5. Log the routing decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
+
+Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
+
+Skipping the router in inline mode silently ignores learned agents and breaks the self-learning feedback loop.
 
 **Normal execution (fast_track is false or >1 segment):**
 

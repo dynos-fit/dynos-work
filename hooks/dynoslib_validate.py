@@ -406,6 +406,7 @@ def compute_reward(task_dir: Path) -> dict:
     findings_by_auditor: dict[str, int] = {}
     findings_by_category: dict[str, int] = {}
     total_findings = 0
+    total_blocking = 0
     reports_dir = task_dir / "audit-reports"
     if reports_dir.exists():
         for report_path in sorted(reports_dir.glob("*.json")):
@@ -414,10 +415,29 @@ def compute_reward(task_dir: Path) -> dict:
             except (json.JSONDecodeError, OSError):
                 continue
             findings = report.get("findings", [])
+            # Sanitize hallucinated findings: if recommendation/description
+            # says "no action required" or "confirmed" but blocking=True,
+            # downgrade to non-blocking minor.
+            _confirm_signals = ("no action required", "no action needed",
+                                "correctly implemented", "properly implemented",
+                                "no changes needed", "no fix needed")
+            for finding in findings:
+                if not finding.get("blocking"):
+                    continue
+                rec = str(finding.get("recommendation", "")).lower()
+                desc = str(finding.get("description", "")).lower()
+                title = str(finding.get("title", "")).lower()
+                if any(s in rec or s in desc for s in _confirm_signals):
+                    finding["blocking"] = False
+                    finding["severity"] = "minor"
+                elif "confirmed" in title and "not" not in title:
+                    finding["blocking"] = False
+                    finding["severity"] = "minor"
             auditor = report.get("auditor_name", report_path.stem)
             count = len(findings)
             findings_by_auditor[auditor] = findings_by_auditor.get(auditor, 0) + count
             total_findings += count
+            total_blocking += sum(1 for f in findings if f.get("blocking"))
             for finding in findings:
                 fid = finding.get("id", "")
                 category = fid.split("-")[0] if "-" in fid else fid
@@ -468,10 +488,14 @@ def compute_reward(task_dir: Path) -> dict:
     token_usage_by_model: dict[str, dict] = token_data.get("by_model", {})
     input_tokens_by_agent: dict[str, int] = {}
     output_tokens_by_agent: dict[str, int] = {}
+    model_used_by_agent: dict[str, str] = {}
     for agent, info in token_data.get("by_agent", {}).items():
         if isinstance(info, dict):
             input_tokens_by_agent[agent] = info.get("input_tokens", 0)
             output_tokens_by_agent[agent] = info.get("output_tokens", 0)
+            m = info.get("model")
+            if m and m not in ("none", "n/a", "", "unknown"):
+                model_used_by_agent[agent] = m
 
     # --- 6. Spawn/waste tracking ---
     subagent_spawn_count = 0
@@ -494,12 +518,13 @@ def compute_reward(task_dir: Path) -> dict:
                 continue
 
     # --- 7. Reward vector ---
-    # quality_score
-    if total_findings == 0:
-        quality_score = 0.9
+    # quality_score — only blocking findings affect quality.
+    # Non-blocking findings are informational and don't penalize.
+    if total_blocking == 0:
+        quality_score = 0.9 if total_findings > 0 else 0.9
     else:
-        surviving = sum(findings_by_auditor.values())
-        quality_score = 1.0 - (surviving / total_findings)
+        surviving_blocking = total_blocking - repair_cycle_count
+        quality_score = 1.0 - (max(0, surviving_blocking) / total_blocking)
 
     # cost_score
     budget = RISK_BUDGETS.get(task_risk_level, 12000)
@@ -537,6 +562,7 @@ def compute_reward(task_dir: Path) -> dict:
         "input_tokens_by_agent": input_tokens_by_agent,
         "output_tokens_by_agent": output_tokens_by_agent,
         "token_usage_by_model": token_usage_by_model,
+        "model_used_by_agent": model_used_by_agent,
         "quality_score": round(quality_score, 4),
         "cost_score": round(cost_score, 4),
         "efficiency_score": round(efficiency_score, 4),

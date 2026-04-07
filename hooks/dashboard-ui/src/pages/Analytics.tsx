@@ -7,14 +7,14 @@
  *
  * Charts tab (10 charts):
  *   1. Quality Trend (LineChart, full width)
- *   2. Cost Trend (LineChart, full width)
- *   3. Model Usage Distribution (PieChart, half width)
+ *   2. Cost Score Trend (LineChart, full width)
+ *   3. Agent-Model Assignment Mix (PieChart, half width)
  *   4. Executor Repair Frequency (BarChart, half width)
  *   5. Spawn Efficiency (LineChart, full width, dual lines)
  *   6. Token Cost Breakdown (stacked BarChart, full width)
  *   6b. Token I/O per Task (stacked BarChart, input vs output, full width)
  *   7. Findings Per Task (BarChart, full width)
- *   8. Repair Success Rate (LineChart, full width)
+ *   8. Repair Intensity vs Findings (LineChart, full width)
  *   9. Routing Distribution (PieChart, half width — paired with empty half)
  *
  * Costs tab:
@@ -32,8 +32,11 @@ import {
   BarChart3,
   DollarSign,
   Activity,
-  Coins,
-  Wrench,
+  GitBranch,
+  FileCode2,
+  ShieldCheck,
+  AlertTriangle,
+  FlaskConical,
 } from "lucide-react";
 import {
   LineChart,
@@ -51,7 +54,14 @@ import {
   Legend,
 } from "recharts";
 import { usePollingData } from "@/data/hooks";
-import type { TaskRetrospective, CostSummary } from "@/data/types";
+import type {
+  TaskManifest,
+  TaskRetrospective,
+  CostSummary,
+  RepoProjectStats,
+  RepoReport,
+  RepoState,
+} from "@/data/types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { MetricCard } from "@/components/MetricCard";
@@ -63,6 +73,7 @@ import { TimeRangeFilter, filterByTimeRange, type TimeRange } from "@/components
 // ---------------------------------------------------------------------------
 
 const CHART_HEIGHT = 300;
+const PIE_CHART_HEIGHT = 320;
 
 const COLORS = {
   quality: "#BDF000",
@@ -120,6 +131,22 @@ const TOOLTIP_STYLE = {
   color: "#ccc",
 } as const;
 
+const CHART_MARGIN = {
+  top: 8,
+  right: 16,
+  left: 0,
+  bottom: 8,
+} as const;
+
+const TASK_X_AXIS_PROPS = {
+  tick: AXIS_TICK_STYLE,
+  axisLine: { stroke: COLORS.grid },
+  tickLine: { stroke: COLORS.grid },
+  tickMargin: 8,
+  minTickGap: 24,
+  interval: "preserveStartEnd" as const,
+} as const;
+
 const NA_LABEL = "N/A";
 
 /** Default pricing per 1M tokens (USD) */
@@ -145,6 +172,10 @@ function shortenTaskId(taskId: string): string {
     return `${datePart.slice(-4)}-${seqPart}`;
   }
   return taskId;
+}
+
+function shortenLabel(label: string, max = 14): string {
+  return label.length > max ? `${label.slice(0, max - 3)}...` : label;
 }
 
 interface ModelSlice {
@@ -693,15 +724,332 @@ function CostsTabContent({
   );
 }
 
+function formatCompactNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return `${n}`;
+}
+
+function formatDecimal(n: number, digits = 3): string {
+  return n.toFixed(digits);
+}
+
+function sortEntriesDescending(record: Record<string, number>): Array<[string, number]> {
+  return Object.entries(record).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function DataTable({
+  headers,
+  rows,
+  empty,
+}: {
+  headers: string[];
+  rows: Array<Array<string | number>>;
+  empty: string;
+}) {
+  if (rows.length === 0) {
+    return <p className="text-slate-600 font-mono text-xs py-8 text-center">{empty}</p>;
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full font-mono text-xs">
+        <thead>
+          <tr className="border-b border-white/10">
+            {headers.map((header) => (
+              <th key={header} className="text-left text-slate-500 py-2 pr-4 uppercase tracking-wider">
+                {header}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={`${row.join("-")}-${rowIndex}`} className="border-b border-white/5">
+              {row.map((cell, cellIndex) => (
+                <td
+                  key={`${rowIndex}-${cellIndex}`}
+                  className={`py-2 pr-4 ${cellIndex === row.length - 1 ? "text-slate-300" : "text-slate-400"}`}
+                >
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RepoTabContent({
+  report,
+  state,
+  stateError,
+  projectStats,
+  totalTaskCount,
+}: {
+  report: RepoReport | null;
+  state: RepoState | null;
+  stateError: string | null;
+  projectStats: RepoProjectStats | null;
+  totalTaskCount: number;
+}) {
+  const taskTypeRows = useMemo(
+    () => sortEntriesDescending(projectStats?.task_counts_by_type ?? {}).map(([taskType, count]) => [taskType, formatCompactNumber(count)]),
+    [projectStats],
+  );
+  const executorRows = useMemo(
+    () => sortEntriesDescending(projectStats?.executor_reliability ?? {}).map(([executor, score]) => [executor, `${(score * 100).toFixed(1)}%`]),
+    [projectStats],
+  );
+  const preventionRows = useMemo(
+    () => sortEntriesDescending(projectStats?.prevention_rule_frequencies ?? {})
+      .slice(0, 8)
+      .map(([rule, count]) => [
+        rule.length > 80 ? `${rule.slice(0, 77)}...` : rule,
+        projectStats?.prevention_rule_executors?.[rule] ?? "unknown",
+        count,
+      ]),
+    [projectStats],
+  );
+  const routeRows = useMemo(
+    () => [...(report?.active_routes ?? [])]
+      .sort((a, b) => b.composite - a.composite)
+      .slice(0, 8)
+      .map((route) => [route.agent_name, route.role, route.task_type, route.composite.toFixed(3)]),
+    [report],
+  );
+  const demotionRows = useMemo(
+    () => (report?.demotions ?? [])
+      .slice(0, 8)
+      .map((demotion) => {
+        const delta = typeof demotion.last_evaluation?.delta_composite === "number"
+          ? demotion.last_evaluation.delta_composite.toFixed(3)
+          : "n/a";
+        return [demotion.agent_name, demotion.role, demotion.task_type, delta];
+      }),
+    [report],
+  );
+  const gapRows = useMemo(
+    () => (report?.coverage_gaps ?? []).slice(0, 8).map((gap) => [gap.target_name, gap.role, gap.task_type, gap.item_kind]),
+    [report],
+  );
+  const recentRunRows = useMemo(
+    () => (report?.recent_runs ?? []).slice().reverse().map((run, index) => [
+      typeof run.run_id === "string" ? run.run_id : `run-${index + 1}`,
+      typeof run.fixture_id === "string" ? run.fixture_id : "n/a",
+      typeof run.timestamp === "string"
+        ? run.timestamp
+        : typeof run.completed_at === "string"
+          ? run.completed_at
+          : "n/a",
+      typeof run.outcome === "string"
+        ? run.outcome
+        : typeof run.recommendation === "string"
+          ? run.recommendation
+          : "n/a",
+    ]),
+    [report],
+  );
+  const findingCategoryRows = useMemo(
+    () => sortEntriesDescending(state?.recent_findings_by_category ?? {}).map(([category, count]) => [category, count]),
+    [state],
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <MetricCard
+          label="Total Tasks"
+          value={formatCompactNumber(totalTaskCount)}
+          icon={<ShieldCheck className="w-3.5 h-3.5 text-[#BDF000]" aria-hidden="true" />}
+        />
+        <MetricCard
+          label="Active Routes"
+          value={formatCompactNumber(report?.summary.active_routes ?? 0)}
+          icon={<GitBranch className="w-3.5 h-3.5 text-[#2DD4A8]" aria-hidden="true" />}
+        />
+        <MetricCard
+          label="Tracked Fixtures"
+          value={formatCompactNumber(report?.summary.tracked_fixtures ?? 0)}
+          icon={<FlaskConical className="w-3.5 h-3.5 text-[#B47AFF]" aria-hidden="true" />}
+        />
+        <MetricCard
+          label="Code Files"
+          value={formatCompactNumber(state?.file_count ?? 0)}
+          icon={<FileCode2 className="w-3.5 h-3.5 text-[#FF9F43]" aria-hidden="true" />}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <ChartCard
+          title="Repo Runtime Summary"
+          subtitle="Learned routes, benchmark coverage, queue pressure, and registry freshness."
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+              <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Learned Components</div>
+              <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(report?.summary.learned_components ?? 0)}</div>
+            </div>
+            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+              <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Shadow Components</div>
+              <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(report?.summary.shadow_components ?? 0)}</div>
+            </div>
+            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+              <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Benchmark Runs</div>
+              <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(report?.summary.benchmark_runs ?? 0)}</div>
+            </div>
+            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+              <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Automation Queue</div>
+              <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(report?.summary.queued_automation_jobs ?? 0)}</div>
+            </div>
+            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+              <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Coverage Gaps</div>
+              <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(report?.summary.coverage_gaps ?? 0)}</div>
+            </div>
+            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+              <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Registry Updated</div>
+              <div className="text-xs font-mono text-slate-300 mt-2 break-all">
+                {report?.registry_updated_at ?? "n/a"}
+              </div>
+            </div>
+          </div>
+        </ChartCard>
+
+        <ChartCard
+          title="Codebase State"
+          subtitle="Structural complexity, dependency flux, code volume, and recent finding density."
+        >
+          {state ? (
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+                <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Architecture Complexity</div>
+                <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatDecimal(state.architecture_complexity_score, 2)}</div>
+              </div>
+              <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+                <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Dependency Flux</div>
+                <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatDecimal(state.dependency_flux, 2)}</div>
+              </div>
+              <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+                <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Finding Entropy</div>
+                <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatDecimal(state.finding_entropy, 2)}</div>
+              </div>
+              <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+                <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Line Count</div>
+                <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(state.line_count)}</div>
+              </div>
+              <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+                <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Import Count</div>
+                <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(state.import_count)}</div>
+              </div>
+              <div className="rounded-xl border border-white/6 bg-black/20 p-4">
+                <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em]">Control Flow Count</div>
+                <div className="text-xl font-bold text-[#F0F0E8] mt-2">{formatCompactNumber(state.control_flow_count)}</div>
+              </div>
+              <div className="col-span-full rounded-xl border border-white/6 bg-black/20 p-4">
+                <div className="text-[10px] text-[#7A776E] uppercase tracking-[0.12em] mb-3">Dominant Languages</div>
+                <div className="flex flex-wrap gap-2">
+                  {state.dominant_languages.length > 0 ? state.dominant_languages.map((language) => (
+                    <span key={language} className="rounded-full border border-[#BDF000]/20 bg-[#BDF000]/10 px-3 py-1 text-[11px] font-mono text-[#D8E7A0]">
+                      {language}
+                    </span>
+                  )) : (
+                    <span className="text-slate-600 font-mono text-xs">No code files indexed.</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-start gap-3 rounded-xl border border-[#FF9F43]/20 bg-[#FF9F43]/5 p-4">
+              <AlertTriangle className="w-4 h-4 text-[#FF9F43] mt-0.5" aria-hidden="true" />
+              <div>
+                <div className="text-xs font-mono text-slate-300">Repo state unavailable</div>
+                <div className="text-[11px] font-mono text-slate-500 mt-1">
+                  {stateError ?? "State metrics are unavailable for the current selection."}
+                </div>
+              </div>
+            </div>
+          )}
+        </ChartCard>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <ChartCard title="Task Mix" subtitle="Retrospective-backed mix of completed tasks, not all task manifests.">
+          <DataTable headers={["Task Type", "Count"]} rows={taskTypeRows} empty="No task type stats available." />
+        </ChartCard>
+
+        <ChartCard title="Executor Reliability" subtitle="Retrospective-derived signal based on repair frequency for completed tasks.">
+          <DataTable headers={["Executor", "Reliability"]} rows={executorRows} empty="No executor reliability stats available." />
+        </ChartCard>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <ChartCard title="Active Routes" subtitle="Highest-performing routeable learned components by composite benchmark score.">
+          <DataTable headers={["Agent", "Role", "Task Type", "Composite"]} rows={routeRows} empty="No active routes available." />
+        </ChartCard>
+
+        <ChartCard title="Coverage Gaps" subtitle="Shadow components that do not have benchmark fixtures yet.">
+          <DataTable headers={["Target", "Role", "Task Type", "Kind"]} rows={gapRows} empty="No coverage gaps detected." />
+        </ChartCard>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <ChartCard title="Demotions" subtitle="Recently demoted components and their last recorded composite delta.">
+          <DataTable headers={["Agent", "Role", "Task Type", "Delta"]} rows={demotionRows} empty="No demotions recorded." />
+        </ChartCard>
+
+        <ChartCard title="Recent Benchmark Runs" subtitle="Most recent benchmark activity visible to the runtime report.">
+          <DataTable headers={["Run", "Fixture", "Timestamp", "Outcome"]} rows={recentRunRows} empty="No benchmark runs recorded." />
+        </ChartCard>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <ChartCard title="Recent Findings by Category" subtitle="Aggregated from the last five retrospectives used by repo state encoding.">
+          <DataTable headers={["Category", "Findings"]} rows={findingCategoryRows} empty="No recent finding categories available." />
+        </ChartCard>
+
+        <ChartCard title="Prevention Rules" subtitle="Most frequent prevention rules extracted from completed-task retrospectives.">
+          <DataTable headers={["Rule", "Executor", "Count"]} rows={preventionRows} empty="No prevention rules recorded." />
+        </ChartCard>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 
 export default function Analytics() {
+  const {
+    data: tasks,
+    loading: tasksLoading,
+    error: tasksError,
+    refetch: refetchTasks,
+  } = usePollingData<TaskManifest[]>("/api/tasks", 10000);
   const { data, loading, error, refetch } = usePollingData<TaskRetrospective[]>(
     "/api/retrospectives",
     10000,
   );
+  const {
+    data: repoReport,
+    loading: reportLoading,
+    error: reportError,
+    refetch: refetchReport,
+  } = usePollingData<RepoReport>("/api/report", 15000);
+  const {
+    data: repoState,
+    loading: stateLoading,
+    error: stateError,
+    refetch: refetchState,
+  } = usePollingData<RepoState>("/api/state", 15000);
+  const {
+    data: projectStats,
+    loading: statsLoading,
+    error: statsError,
+    refetch: refetchStats,
+  } = usePollingData<RepoProjectStats>("/api/project-stats", 15000);
 
   // Time range filter state (AC-7)
   const [timeRange, setTimeRange] = useState<TimeRange>("All");
@@ -717,40 +1065,40 @@ export default function Analytics() {
 
   // ---- AC-5: Summary row metrics (computed from ALL data, not filtered) ----
   const summaryMetrics = useMemo(() => {
-    if (sorted.length === 0) return null;
-    const totalTokens = sorted.reduce((s, r) => s + (r.total_token_usage ?? 0), 0);
-    const estCost = (totalTokens / 1_000_000) * BLENDED_RATE_PER_MILLION;
-    const avgQuality = sorted.reduce((s, r) => s + (r.quality_score ?? 0), 0) / sorted.length;
-    const avgRepairs = sorted.reduce((s, r) => s + (r.repair_cycle_count ?? 0), 0) / sorted.length;
+    if (!tasks && !projectStats && !repoReport && !repoState && sorted.length === 0) return null;
 
-    // Trends: compare latest retro vs mean of all prior
+    const totalTasks = tasks?.length ?? projectStats?.total_tasks ?? sorted.length;
+    const avgQualityScore = projectStats?.average_quality_score
+      ?? (sorted.length > 0
+        ? sorted.reduce((sum, retro) => sum + (retro.quality_score ?? 0), 0) / sorted.length
+        : 0);
+    const activeRoutes = repoReport?.summary.active_routes ?? 0;
+    const queueDepth = repoReport?.summary.queued_automation_jobs ?? 0;
+    const fileCount = repoState?.file_count ?? 0;
+    const totalTokens = sorted.reduce((sum, retro) => sum + (retro.total_token_usage ?? 0), 0);
+    const estCost = (totalTokens / 1_000_000) * BLENDED_RATE_PER_MILLION;
+
     const latest = sorted[sorted.length - 1];
     const prior = sorted.slice(0, -1);
-    const priorMeanTokens = prior.length > 0
-      ? prior.reduce((s, r) => s + (r.total_token_usage ?? 0), 0) / prior.length
-      : 0;
     const priorMeanQuality = prior.length > 0
-      ? prior.reduce((s, r) => s + (r.quality_score ?? 0), 0) / prior.length
+      ? prior.reduce((sum, retro) => sum + (retro.quality_score ?? 0), 0) / prior.length
       : 0;
     const priorMeanRepairs = prior.length > 0
-      ? prior.reduce((s, r) => s + (r.repair_cycle_count ?? 0), 0) / prior.length
+      ? prior.reduce((sum, retro) => sum + (retro.repair_cycle_count ?? 0), 0) / prior.length
       : 0;
-
-    const latestTokens = latest.total_token_usage ?? 0;
-    const latestCost = (latestTokens / 1_000_000) * BLENDED_RATE_PER_MILLION;
-    const priorMeanCost = (priorMeanTokens / 1_000_000) * BLENDED_RATE_PER_MILLION;
+    const latestRepairs = latest?.repair_cycle_count ?? 0;
 
     return {
-      totalTokens: formatSummaryTokens(totalTokens),
+      totalTasks: formatCompactNumber(totalTasks),
+      avgQuality: formatPercentage(avgQualityScore),
+      activeRoutes: formatCompactNumber(activeRoutes),
+      fileCount: formatCompactNumber(fileCount),
+      queueDepth: formatCompactNumber(queueDepth),
       estCost: formatSummaryCost(estCost),
-      avgQuality: formatPercentage(avgQuality),
-      avgRepairs: avgRepairs.toFixed(1),
-      trendTokens: computeTrendPercent(latestTokens, priorMeanTokens),
-      trendCost: computeTrendPercent(latestCost, priorMeanCost),
-      trendQuality: computeTrendPercent(latest.quality_score ?? 0, priorMeanQuality),
-      trendRepairs: computeTrendPercent(latest.repair_cycle_count ?? 0, priorMeanRepairs),
+      trendQuality: latest ? computeTrendPercent(latest.quality_score ?? 0, priorMeanQuality) : null,
+      trendRepairs: latest ? computeTrendPercent(latestRepairs, priorMeanRepairs) : null,
     };
-  }, [sorted]);
+  }, [tasks, projectStats, repoReport, repoState, sorted]);
 
   // Derived chart data — uses filtered subset
   const qualityData = useMemo(
@@ -800,7 +1148,7 @@ export default function Analytics() {
     </div>
   );
 
-  if (loading) {
+  if (tasksLoading && loading && reportLoading && statsLoading && stateLoading) {
     return (
       <div className="p-4 sm:p-6 max-w-7xl mx-auto">
         {pageHeader}
@@ -809,20 +1157,20 @@ export default function Analytics() {
     );
   }
 
-  if (error && !data) {
+  if (tasksError && !tasks && error && !data && reportError && !repoReport && statsError && !projectStats) {
     return (
       <div className="p-4 sm:p-6 max-w-7xl mx-auto">
         {pageHeader}
-        <ErrorState message={error} onRetry={refetch} />
-      </div>
-    );
-  }
-
-  if (!data || data.length < 2) {
-    return (
-      <div className="p-4 sm:p-6 max-w-7xl mx-auto">
-        {pageHeader}
-        <InsufficientDataState count={data?.length ?? 0} />
+        <ErrorState
+          message={[tasksError, error, reportError, statsError].filter(Boolean).join(" | ")}
+          onRetry={() => {
+            refetchTasks();
+            refetch();
+            refetchReport();
+            refetchStats();
+            refetchState();
+          }}
+        />
       </div>
     );
   }
@@ -835,35 +1183,29 @@ export default function Analytics() {
       {summaryMetrics && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6" role="region" aria-label="Summary metrics">
           <MetricCard
-            label="Total Tokens"
-            value={summaryMetrics.totalTokens}
-            trend={summaryMetrics.trendTokens}
-            trendLabel="vs prior mean"
-            icon={<Coins className="w-3.5 h-3.5 text-[#BDF000]" aria-hidden="true" />}
+            label="Total Tasks"
+            value={summaryMetrics.totalTasks}
+            icon={<ShieldCheck className="w-3.5 h-3.5 text-[#BDF000]" aria-hidden="true" />}
             delay={0}
           />
           <MetricCard
-            label="Est. Cost"
-            value={summaryMetrics.estCost}
-            trend={summaryMetrics.trendCost}
-            trendLabel="vs prior mean"
-            icon={<DollarSign className="w-3.5 h-3.5 text-[#B47AFF]" aria-hidden="true" />}
+            label="Avg Quality (Completed)"
+            value={summaryMetrics.avgQuality}
+            trend={summaryMetrics.trendQuality}
+            trendLabel="latest vs prior mean"
+            icon={<TrendingUp className="w-3.5 h-3.5 text-[#2DD4A8]" aria-hidden="true" />}
             delay={0.05}
           />
           <MetricCard
-            label="Avg Quality"
-            value={summaryMetrics.avgQuality}
-            trend={summaryMetrics.trendQuality}
-            trendLabel="vs prior mean"
-            icon={<TrendingUp className="w-3.5 h-3.5 text-[#2DD4A8]" aria-hidden="true" />}
+            label="Active Routes"
+            value={summaryMetrics.activeRoutes}
+            icon={<GitBranch className="w-3.5 h-3.5 text-[#B47AFF]" aria-hidden="true" />}
             delay={0.1}
           />
           <MetricCard
-            label="Avg Repairs"
-            value={summaryMetrics.avgRepairs}
-            trend={summaryMetrics.trendRepairs}
-            trendLabel="vs prior mean"
-            icon={<Wrench className="w-3.5 h-3.5 text-[#FF9F43]" aria-hidden="true" />}
+            label="Code Files"
+            value={summaryMetrics.fileCount}
+            icon={<FileCode2 className="w-3.5 h-3.5 text-[#FF9F43]" aria-hidden="true" />}
             delay={0.15}
           />
         </div>
@@ -885,20 +1227,28 @@ export default function Analytics() {
           >
             Costs
           </TabsTrigger>
+          <TabsTrigger
+            value="repo"
+            className="font-mono text-xs tracking-wider uppercase data-[state=active]:text-[#BDF000] data-[state=active]:bg-[#BDF000]/10"
+            aria-label="View repo analytics"
+          >
+            Repo
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="charts">
+          {!data || data.length < 2 ? (
+            <InsufficientDataState count={data?.length ?? 0} />
+          ) : (
           <div className="space-y-6">
             {/* Chart 1: Quality Trend (full width) */}
             <ChartCard title="Quality Trend" action={timeRangeAction}>
               <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-                <LineChart data={qualityData} style={{ background: "transparent" }}>
+                <LineChart data={qualityData} style={{ background: "transparent" }} margin={CHART_MARGIN}>
                   <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                   <XAxis
                     dataKey="task_id"
-                    tick={AXIS_TICK_STYLE}
-                    axisLine={{ stroke: COLORS.grid }}
-                    tickLine={{ stroke: COLORS.grid }}
+                    {...TASK_X_AXIS_PROPS}
                   />
                   <YAxis
                     domain={[0, 1]}
@@ -920,16 +1270,18 @@ export default function Analytics() {
               </ResponsiveContainer>
             </ChartCard>
 
-            {/* Chart 2: Cost Trend (full width) */}
-            <ChartCard title="Cost Trend" action={timeRangeAction}>
+            {/* Chart 2: Cost Score Trend (full width) */}
+            <ChartCard
+              title="Cost Score Trend"
+              subtitle="Dynos retrospective cost score, not dollar spend."
+              action={timeRangeAction}
+            >
               <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-                <LineChart data={costData} style={{ background: "transparent" }}>
+                <LineChart data={costData} style={{ background: "transparent" }} margin={CHART_MARGIN}>
                   <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                   <XAxis
                     dataKey="task_id"
-                    tick={AXIS_TICK_STYLE}
-                    axisLine={{ stroke: COLORS.grid }}
-                    tickLine={{ stroke: COLORS.grid }}
+                    {...TASK_X_AXIS_PROPS}
                   />
                   <YAxis
                     domain={[0, 1]}
@@ -953,21 +1305,24 @@ export default function Analytics() {
 
             {/* Charts 3 + 4: side by side */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Chart 3: Model Usage Distribution (half width) */}
-              <ChartCard title="Model Usage Distribution" action={timeRangeAction}>
-                <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
+              {/* Chart 3: Agent-Model Assignment Mix (half width) */}
+              <ChartCard
+                title="Agent-Model Assignment Mix"
+                subtitle="Counts model assignments recorded per agent in retrospectives."
+                action={timeRangeAction}
+              >
+                <ResponsiveContainer width="100%" height={PIE_CHART_HEIGHT}>
                   <PieChart style={{ background: "transparent" }}>
                     <Pie
                       data={modelData}
                       dataKey="value"
                       nameKey="name"
                       cx="50%"
-                      cy="50%"
-                      outerRadius={100}
-                      label={({ name, percent }: { name: string; percent: number }) =>
-                        `${name} (${(percent * 100).toFixed(0)}%)`
-                      }
-                      labelLine={{ stroke: "#666" }}
+                      cy="44%"
+                      innerRadius="45%"
+                      outerRadius="70%"
+                      paddingAngle={2}
+                      label={false}
                     >
                       {modelData.map((entry, index) => (
                         <Cell key={`model-${index}`} fill={entry.color} />
@@ -988,7 +1343,7 @@ export default function Analytics() {
               {/* Chart 4: Executor Repair Frequency (half width) */}
               <ChartCard title="Executor Repair Frequency" action={timeRangeAction}>
                 <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-                  <BarChart data={repairData} style={{ background: "transparent" }}>
+                  <BarChart data={repairData} style={{ background: "transparent" }} margin={CHART_MARGIN}>
                     <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                     <XAxis
                       dataKey="executor"
@@ -996,9 +1351,11 @@ export default function Analytics() {
                       axisLine={{ stroke: COLORS.grid }}
                       tickLine={{ stroke: COLORS.grid }}
                       interval={0}
-                      angle={-30}
+                      angle={-35}
                       textAnchor="end"
-                      height={60}
+                      height={72}
+                      tickMargin={8}
+                      tickFormatter={(value: string) => shortenLabel(value, 18)}
                     />
                     <YAxis
                       tick={AXIS_TICK_STYLE}
@@ -1021,13 +1378,11 @@ export default function Analytics() {
             {/* Chart 5: Spawn Efficiency (full width) */}
             <ChartCard title="Spawn Efficiency" action={timeRangeAction}>
               <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-                <LineChart data={spawnData} style={{ background: "transparent" }}>
+                <LineChart data={spawnData} style={{ background: "transparent" }} margin={CHART_MARGIN}>
                   <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                   <XAxis
                     dataKey="task_id"
-                    tick={AXIS_TICK_STYLE}
-                    axisLine={{ stroke: COLORS.grid }}
-                    tickLine={{ stroke: COLORS.grid }}
+                    {...TASK_X_AXIS_PROPS}
                   />
                   <YAxis
                     tick={AXIS_TICK_STYLE}
@@ -1075,21 +1430,23 @@ export default function Analytics() {
                 </p>
               ) : (
                 <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-                  <BarChart data={tokenCostResult.data} style={{ background: "transparent" }}>
+                  <BarChart data={tokenCostResult.data} style={{ background: "transparent" }} margin={CHART_MARGIN}>
                     <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                     <XAxis
                       dataKey="task_id"
-                      tick={AXIS_TICK_STYLE}
-                      axisLine={{ stroke: COLORS.grid }}
-                      tickLine={{ stroke: COLORS.grid }}
+                      {...TASK_X_AXIS_PROPS}
                     />
                     <YAxis
                       tick={AXIS_TICK_STYLE}
                       axisLine={{ stroke: COLORS.grid }}
                       tickLine={{ stroke: COLORS.grid }}
                       allowDecimals={false}
+                      tickFormatter={(value: number) => formatTokens(value)}
                     />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} />
+                    <Tooltip
+                      contentStyle={TOOLTIP_STYLE}
+                      formatter={(value: number) => [formatTokens(value), undefined]}
+                    />
                     <Legend
                       wrapperStyle={{
                         fontFamily: "JetBrains Mono",
@@ -1120,13 +1477,11 @@ export default function Analytics() {
                 </p>
               ) : (
                 <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-                  <BarChart data={tokenIOData} style={{ background: "transparent" }}>
+                  <BarChart data={tokenIOData} style={{ background: "transparent" }} margin={CHART_MARGIN}>
                     <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                     <XAxis
                       dataKey="task_id"
-                      tick={AXIS_TICK_STYLE}
-                      axisLine={{ stroke: COLORS.grid }}
-                      tickLine={{ stroke: COLORS.grid }}
+                      {...TASK_X_AXIS_PROPS}
                     />
                     <YAxis
                       tick={AXIS_TICK_STYLE}
@@ -1175,13 +1530,12 @@ export default function Analytics() {
                     hasData: typeof d.findings === "number",
                   }))}
                   style={{ background: "transparent" }}
+                  margin={CHART_MARGIN}
                 >
                   <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                   <XAxis
                     dataKey="task_id"
-                    tick={AXIS_TICK_STYLE}
-                    axisLine={{ stroke: COLORS.grid }}
-                    tickLine={{ stroke: COLORS.grid }}
+                    {...TASK_X_AXIS_PROPS}
                   />
                   <YAxis
                     tick={AXIS_TICK_STYLE}
@@ -1206,16 +1560,18 @@ export default function Analytics() {
               </ResponsiveContainer>
             </ChartCard>
 
-            {/* Chart 8: Repair Success Rate (line, full width) */}
-            <ChartCard title="Repair Success Rate" action={timeRangeAction}>
+            {/* Chart 8: Repair Intensity vs Findings (line, full width) */}
+            <ChartCard
+              title="Repair Intensity vs Findings"
+              subtitle="Proxy metric: repair cycles divided by findings, capped at 100%."
+              action={timeRangeAction}
+            >
               <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
-                <LineChart data={repairRateData} style={{ background: "transparent" }}>
+                <LineChart data={repairRateData} style={{ background: "transparent" }} margin={CHART_MARGIN}>
                   <CartesianGrid stroke={COLORS.grid} strokeDasharray="3 3" />
                   <XAxis
                     dataKey="task_id"
-                    tick={AXIS_TICK_STYLE}
-                    axisLine={{ stroke: COLORS.grid }}
-                    tickLine={{ stroke: COLORS.grid }}
+                    {...TASK_X_AXIS_PROPS}
                   />
                   <YAxis
                     domain={[0, 100]}
@@ -1253,19 +1609,18 @@ export default function Analytics() {
                     {NA_LABEL} — No routing data available.
                   </p>
                 ) : (
-                  <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
+                  <ResponsiveContainer width="100%" height={PIE_CHART_HEIGHT}>
                     <PieChart style={{ background: "transparent" }}>
                       <Pie
                         data={routingData}
                         dataKey="value"
                         nameKey="name"
                         cx="50%"
-                        cy="50%"
-                        outerRadius={100}
-                        label={({ name, percent }: { name: string; percent: number }) =>
-                          `${name} (${(percent * 100).toFixed(0)}%)`
-                        }
-                        labelLine={{ stroke: "#666" }}
+                        cy="44%"
+                        innerRadius="45%"
+                        outerRadius="70%"
+                        paddingAngle={2}
+                        label={false}
                       >
                         {routingData.map((entry, index) => (
                           <Cell key={`routing-${index}`} fill={entry.color} />
@@ -1285,10 +1640,38 @@ export default function Analytics() {
               </ChartCard>
             </div>
           </div>
+          )}
         </TabsContent>
 
         <TabsContent value="costs">
-          <CostsTabContent retros={sorted} />
+          {!data || data.length === 0 ? (
+            <InsufficientDataState count={data?.length ?? 0} />
+          ) : (
+            <CostsTabContent retros={sorted} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="repo">
+          {reportLoading && !repoReport && statsLoading && !projectStats && stateLoading && !repoState ? (
+            <LoadingState />
+          ) : reportError && !repoReport && statsError && !projectStats ? (
+            <ErrorState
+              message={[reportError, statsError, stateError].filter(Boolean).join(" | ")}
+              onRetry={() => {
+                refetchReport();
+                refetchStats();
+                refetchState();
+              }}
+            />
+          ) : (
+            <RepoTabContent
+              report={repoReport}
+              state={repoState}
+              stateError={stateError}
+              projectStats={projectStats}
+              totalTaskCount={tasks?.length ?? projectStats?.total_tasks ?? 0}
+            />
+          )}
         </TabsContent>
       </Tabs>
     </div>

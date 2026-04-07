@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
+import { Link } from "react-router";
 import { motion } from "motion/react";
-import { Search, Terminal, ChevronDown, ChevronRight, ChevronUp, AlertCircle, FileText, GitBranch, Shield, DollarSign, ListChecks, Play, CheckCircle2, XCircle } from "lucide-react";
+import { Search, Terminal, ChevronDown, ChevronRight, ChevronUp, AlertCircle, FileText, GitBranch, Shield, DollarSign, ListChecks, Play, CheckCircle2, XCircle, ExternalLink } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { usePollingData } from "@/data/hooks";
@@ -895,7 +896,15 @@ function TaskRow({ task, qualityDisplay, isGlobal, index }: TaskRowProps) {
                 ) : (
                   <ChevronRight className="w-3 h-3 text-slate-500" aria-hidden="true" />
                 )}
-                {task.task_id}
+                <Link
+                  to={`/tasks/${task.task_id}`}
+                  className="hover:underline hover:text-[#d4ff4d] transition-colors inline-flex items-center gap-1"
+                  onClick={(e) => e.stopPropagation()}
+                  title="Open task detail page"
+                >
+                  {task.task_id}
+                  <ExternalLink className="w-2.5 h-2.5 opacity-50" aria-hidden="true" />
+                </Link>
               </span>
             </td>
             <td className="p-4 text-slate-300 text-sm max-w-xs truncate">

@@ -53,8 +53,8 @@ def ensure_benchmark_index(root: Path) -> dict:
     return data
 
 
-def compute_benchmark_summary(benchmarks: list[dict]) -> dict:
-    """Compute summary statistics from a list of benchmark results."""
+def _core_benchmark_summary(benchmarks: list[dict]) -> dict:
+    """Core summary stats without per_model (used by per-model grouping to avoid recursion)."""
     if not benchmarks:
         return {
             "sample_count": 0,
@@ -80,6 +80,39 @@ def compute_benchmark_summary(benchmarks: list[dict]) -> dict:
         "mean_efficiency": round(efficiency, 6),
         "mean_composite": round(composite, 6),
     }
+
+
+def compute_benchmark_summary(benchmarks: list[dict]) -> dict:
+    """Compute summary statistics from a list of benchmark results.
+
+    Returns aggregate stats plus per_model breakdown for runs that have a model field.
+    """
+    summary = _core_benchmark_summary(benchmarks)
+    # Per-model breakdown (uses _core to avoid recursion)
+    grouped: dict[str, list[dict]] = {}
+    for item in benchmarks:
+        model = item.get("model")
+        if model:
+            grouped.setdefault(model, []).append(item)
+    summary["per_model"] = {
+        model: _core_benchmark_summary(items)
+        for model, items in grouped.items()
+    }
+    return summary
+
+
+def compute_benchmark_summary_by_model(benchmarks: list[dict]) -> dict[str, dict]:
+    """Group benchmark results by model and compute summary stats per model.
+
+    Each benchmark item should have an optional 'model' field (str or None).
+    Returns {model: summary_dict} for models with at least one sample.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for item in benchmarks:
+        model = item.get("model")
+        if model:
+            grouped.setdefault(model, []).append(item)
+    return {model: _core_benchmark_summary(items) for model, items in grouped.items()}
 
 
 def _category_summaries(results: list[dict]) -> dict[str, dict]:
@@ -154,6 +187,47 @@ def evaluate_candidate(candidate_results: list[dict], baseline_results: list[dic
         "recommendation": recommendation,
         "target_mode": mode,
     }
+
+
+def resolve_model_for_benchmark_run(root: Path, fixture: dict, role: str) -> str | None:
+    """Resolve the dominant model used for *role* across benchmark cases' source tasks.
+
+    Args:
+        root: Project root path.
+        fixture: Fixture dict containing a 'cases' list with source_task_id entries.
+        role: The agent role to match in token-usage.json by_agent entries.
+
+    Returns the most common model string, or None if no model data is found.
+    """
+    from collections import Counter
+    cases = fixture.get("cases", [])
+    models: list[str] = []
+    for case in cases:
+        task_id = case.get("source_task_id") or case.get("case_id")
+        if not task_id:
+            continue
+        token_path = root / ".dynos" / task_id / "token-usage.json"
+        if not token_path.exists():
+            continue
+        try:
+            token_data = load_json(token_path)
+        except (json.JSONDecodeError, OSError):
+            continue
+        by_agent = token_data.get("by_agent", {})
+        # Try exact role match first, then prefix match (agent names can have segment suffixes)
+        for agent_name, info in by_agent.items():
+            if not isinstance(info, dict):
+                continue
+            m = info.get("model")
+            if not m or m in ("none", "n/a", "", "unknown", "default"):
+                continue
+            # Match: exact role, or agent_name starts with role
+            if agent_name == role or agent_name.startswith(role):
+                models.append(m)
+                break
+    if not models:
+        return None
+    return Counter(models).most_common(1)[0][0]
 
 
 def append_benchmark_run(root: Path, run: dict) -> dict:

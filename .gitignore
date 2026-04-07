@@ -4,3 +4,4 @@ node_modules/
 .dynos/
 __pycache__/
 *.pyc
+benchmarks/generated/

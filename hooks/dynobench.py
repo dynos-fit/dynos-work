@@ -18,6 +18,7 @@ from dynoslib_benchmark import (
     append_benchmark_run,
     benchmark_fixture_score,
     evaluate_candidate,
+    resolve_model_for_benchmark_run,
     upsert_fixture_trace,
 )
 ALLOWED_COMMAND_PREFIXES = (
@@ -303,10 +304,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     fixture = load_fixture(fixture_path)
     fixture["_repo_root"] = str(root)
     result = run_fixture(fixture)
+    model = resolve_model_for_benchmark_run(root, result, result.get("role", ""))
     run_record = {
         "run_id": f"{result['fixture_id']}:{now_iso()}",
         "executed_at": now_iso(),
         "fixture_path": str(fixture_path),
+        "model": model,
         **result,
     }
     append_benchmark_run(root, run_record)

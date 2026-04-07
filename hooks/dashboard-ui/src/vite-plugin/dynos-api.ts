@@ -26,6 +26,14 @@ function readJsonFile(filePath: string): unknown {
   return JSON.parse(raw);
 }
 
+function readJsonFileOrDefault<T>(filePath: string, fallback: T): T {
+  try {
+    return readJsonFile(filePath) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 function readTextFile(filePath: string): string {
   return fs.readFileSync(filePath, "utf-8");
 }
@@ -41,6 +49,10 @@ function persistentDir(slug: string): string {
 
 function localDynosDir(projectPath: string): string {
   return path.join(projectPath, ".dynos");
+}
+
+function persistentProjectDir(projectPath: string): string {
+  return persistentDir(computeSlug(projectPath));
 }
 
 function listTaskDirs(projectPath: string): string[] {
@@ -138,6 +150,273 @@ function isRegisteredProject(projectPath: string): boolean {
   } catch {
     return false;
   }
+}
+
+function listCodeFiles(target: string): string[] {
+  const TEXT_EXTENSIONS = new Set([
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".md",
+    ".json",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".rb",
+    ".php",
+    ".sh",
+    ".css",
+    ".scss",
+    ".html",
+  ]);
+
+  const results: string[] = [];
+  const root = path.resolve(target);
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(current);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isFile()) {
+      if (TEXT_EXTENSIONS.has(path.extname(current).toLowerCase())) {
+        results.push(current);
+      }
+      continue;
+    }
+    if (!stat.isDirectory()) continue;
+    const base = path.basename(current);
+    if (base === ".git" || base === ".dynos" || base === "node_modules") continue;
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(current);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      stack.push(path.join(current, entry));
+    }
+  }
+  return results;
+}
+
+function readTextSafe(filePath: string): string {
+  return fs.readFileSync(filePath, "utf-8");
+}
+
+function collectRetrospectivesForProject(projectPath: string): Array<Record<string, unknown>> {
+  return listTaskDirs(projectPath).map((taskDir) => {
+    try {
+      const data = readJsonFile(path.join(localDynosDir(projectPath), taskDir, "task-retrospective.json")) as Record<string, unknown>;
+      return { ...data, task_id: taskDir };
+    } catch {
+      return null;
+    }
+  }).filter(notNull);
+}
+
+function buildRepoReport(projectPath: string): Record<string, unknown> {
+  const registryPath = path.join(persistentProjectDir(projectPath), "learned-agents", "registry.json");
+  const queuePath = path.join(persistentProjectDir(projectPath), "automation-queue.json");
+  const historyPath = path.join(persistentProjectDir(projectPath), "benchmark-history.json");
+  const indexPath = path.join(persistentProjectDir(projectPath), "benchmark-index.json");
+
+  const registry = readJsonFileOrDefault<Record<string, unknown>>(registryPath, {});
+  const queue = readJsonFileOrDefault<Record<string, unknown>>(queuePath, {});
+  const history = readJsonFileOrDefault<Record<string, unknown>>(historyPath, {});
+  const index = readJsonFileOrDefault<Record<string, unknown>>(indexPath, {});
+
+  const agents = Array.isArray(registry.agents) ? registry.agents as Record<string, unknown>[] : [];
+  const active = agents.filter((item) => Boolean(item.route_allowed));
+  const shadow = agents.filter((item) => item.mode === "shadow");
+  const demoted = agents.filter((item) => item.status === "demoted_on_regression");
+  const queueItems = Array.isArray(queue.items) ? queue.items as Record<string, unknown>[] : [];
+  const runs = Array.isArray(history.runs) ? history.runs as Record<string, unknown>[] : [];
+  const fixtures = Array.isArray(index.fixtures) ? index.fixtures as Record<string, unknown>[] : [];
+  const fixtureIds = new Set(
+    fixtures
+      .map((item) => typeof item.fixture_id === "string" ? item.fixture_id : null)
+      .filter(notNull),
+  );
+
+  const uncovered = shadow
+    .filter((item) => {
+      const fixtureId = `${item.item_kind ?? "agent"}-${item.agent_name ?? "unknown"}-${item.task_type ?? "unknown"}`;
+      return !fixtureIds.has(fixtureId);
+    })
+    .map((item) => ({
+      target_name: String(item.agent_name ?? "unknown"),
+      role: String(item.role ?? "unknown"),
+      task_type: String(item.task_type ?? "unknown"),
+      item_kind: String(item.item_kind ?? "agent"),
+    }));
+
+  return {
+    registry_updated_at: registry.updated_at ?? null,
+    summary: {
+      learned_components: agents.length,
+      active_routes: active.length,
+      shadow_components: shadow.length,
+      demoted_components: demoted.length,
+      queued_automation_jobs: queueItems.length,
+      benchmark_runs: runs.length,
+      tracked_fixtures: fixtures.length,
+      coverage_gaps: uncovered.length,
+    },
+    active_routes: active.map((item) => ({
+      agent_name: String(item.agent_name ?? "unknown"),
+      role: String(item.role ?? "unknown"),
+      task_type: String(item.task_type ?? "unknown"),
+      item_kind: String(item.item_kind ?? "agent"),
+      mode: String(item.mode ?? "unknown"),
+      composite: typeof (item.benchmark_summary as Record<string, unknown> | undefined)?.mean_composite === "number"
+        ? ((item.benchmark_summary as Record<string, unknown>).mean_composite as number)
+        : 0,
+    })),
+    demotions: demoted.map((item) => ({
+      agent_name: String(item.agent_name ?? "unknown"),
+      role: String(item.role ?? "unknown"),
+      task_type: String(item.task_type ?? "unknown"),
+      last_evaluation: (item.last_evaluation as Record<string, unknown>) ?? {},
+    })),
+    automation_queue: queueItems,
+    coverage_gaps: uncovered,
+    recent_runs: runs.slice(-5),
+  };
+}
+
+function buildProjectStats(projectPath: string): Record<string, unknown> {
+  const retrospectives = collectRetrospectivesForProject(projectPath);
+  const taskCountsByType: Record<string, number> = {};
+  const qualityScores: number[] = [];
+  const executorRepairTotals: Record<string, number[]> = {};
+  const preventionRules: Record<string, number> = {};
+  const preventionRuleExecutors: Record<string, string> = {};
+
+  for (const retro of retrospectives) {
+    const taskType = typeof retro.task_type === "string" ? retro.task_type : "";
+    if (taskType) {
+      taskCountsByType[taskType] = (taskCountsByType[taskType] ?? 0) + 1;
+    }
+
+    if (typeof retro.quality_score === "number") {
+      qualityScores.push(retro.quality_score);
+    }
+
+    const repairFrequency = retro.executor_repair_frequency;
+    if (repairFrequency && typeof repairFrequency === "object") {
+      for (const [role, count] of Object.entries(repairFrequency as Record<string, unknown>)) {
+        if (typeof count === "number") {
+          executorRepairTotals[role] ??= [];
+          executorRepairTotals[role].push(count);
+        }
+      }
+    }
+
+    const rules = Array.isArray(retro.prevention_rules) ? retro.prevention_rules : [];
+    for (const rule of rules) {
+      if (typeof rule === "string" && rule) {
+        preventionRules[rule] = (preventionRules[rule] ?? 0) + 1;
+        preventionRuleExecutors[rule] ??= "unknown";
+      } else if (rule && typeof rule === "object") {
+        const candidate = typeof (rule as Record<string, unknown>).rule === "string"
+          ? (rule as Record<string, unknown>).rule as string
+          : typeof (rule as Record<string, unknown>).text === "string"
+            ? (rule as Record<string, unknown>).text as string
+            : "";
+        if (candidate) {
+          preventionRules[candidate] = (preventionRules[candidate] ?? 0) + 1;
+          preventionRuleExecutors[candidate] = typeof (rule as Record<string, unknown>).executor === "string"
+            ? (rule as Record<string, unknown>).executor as string
+            : "unknown";
+        }
+      }
+    }
+  }
+
+  const executorReliability = Object.fromEntries(
+    Object.entries(executorRepairTotals).map(([role, counts]) => {
+      const averageRepairs = counts.length > 0 ? counts.reduce((sum, count) => sum + count, 0) / counts.length : 0;
+      return [role, Number(Math.max(0, 1 - averageRepairs * 0.1).toFixed(3))];
+    }),
+  );
+
+  return {
+    total_tasks: Object.values(taskCountsByType).reduce((sum, value) => sum + value, 0),
+    task_counts_by_type: taskCountsByType,
+    average_quality_score: Number((qualityScores.length > 0 ? qualityScores.reduce((sum, score) => sum + score, 0) / qualityScores.length : 0).toFixed(3)),
+    executor_reliability: executorReliability,
+    prevention_rule_frequencies: preventionRules,
+    prevention_rule_executors: preventionRuleExecutors,
+  };
+}
+
+function buildRepoState(projectPath: string): Record<string, unknown> {
+  const files = listCodeFiles(projectPath);
+  let totalLines = 0;
+  let importCount = 0;
+  let controlFlowCount = 0;
+  let symbols = 0;
+  const languages: Record<string, number> = {};
+
+  for (const filePath of files) {
+    let text = "";
+    try {
+      text = readTextSafe(filePath);
+    } catch {
+      continue;
+    }
+    totalLines += text.split("\n").length;
+    importCount += (text.match(/^\s*(import|from|require\()/gm) ?? []).length;
+    controlFlowCount += (text.match(/\b(if|for|while|switch|case|catch|try)\b/g) ?? []).length;
+    symbols += (text.match(/\b(class|def|function|const|let|var)\b/g) ?? []).length;
+    const ext = path.extname(filePath).toLowerCase() || "<none>";
+    languages[ext] = (languages[ext] ?? 0) + 1;
+  }
+
+  const recentFindingsByCategory: Record<string, number> = {};
+  const retros = collectRetrospectivesForProject(projectPath);
+  for (const retro of retros.slice(-5)) {
+    const categories = retro.findings_by_category;
+    if (!categories || typeof categories !== "object") continue;
+    for (const [category, count] of Object.entries(categories as Record<string, unknown>)) {
+      if (typeof count === "number") {
+        recentFindingsByCategory[category] = (recentFindingsByCategory[category] ?? 0) + count;
+      }
+    }
+  }
+
+  const dominantLanguages = Object.entries(languages)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([language]) => language);
+
+  const totalFindings = Object.values(recentFindingsByCategory).reduce((sum, value) => sum + value, 0);
+
+  return {
+    version: 1,
+    target: projectPath,
+    architecture_complexity_score: Number(((controlFlowCount + symbols) / Math.max(1, files.length)).toFixed(4)),
+    dependency_flux: Number((importCount / Math.max(1, files.length)).toFixed(4)),
+    finding_entropy: Number((totalFindings / Math.max(1, retros.slice(-5).length)).toFixed(4)),
+    file_count: files.length,
+    line_count: totalLines,
+    import_count: importCount,
+    control_flow_count: controlFlowCount,
+    dominant_languages: dominantLanguages,
+    recent_findings_by_category: recentFindingsByCategory,
+  };
 }
 
 /**
@@ -505,6 +784,404 @@ export function dynosApi(): Plugin {
             return;
           }
 
+          // GET /api/report
+          if (pathname === "/api/report") {
+            try {
+              if (isGlobal) {
+                const reports = collectFromAllProjects<Record<string, unknown>>((pp) => {
+                  try {
+                    return [{ ...buildRepoReport(pp), project_path: pp }];
+                  } catch {
+                    return [];
+                  }
+                });
+                const merged = reports.reduce<{
+                  registry_updated_at: string | null;
+                  summary: Record<string, number>;
+                  active_routes: Record<string, unknown>[];
+                  demotions: Record<string, unknown>[];
+                  automation_queue: Record<string, unknown>[];
+                  coverage_gaps: Record<string, unknown>[];
+                  recent_runs: Record<string, unknown>[];
+                }>((acc, report) => {
+                  const summary = (report.summary as Record<string, number> | undefined) ?? {};
+                  const accSummary = acc.summary;
+                  for (const [key, value] of Object.entries(summary)) {
+                    accSummary[key] = (accSummary[key] ?? 0) + (typeof value === "number" ? value : 0);
+                  }
+                  acc.active_routes.push(...(((report.active_routes as Record<string, unknown>[] | undefined) ?? []).map((item) => ({ ...item, project_path: report.project_path }))));
+                  acc.demotions.push(...(((report.demotions as Record<string, unknown>[] | undefined) ?? []).map((item) => ({ ...item, project_path: report.project_path }))));
+                  acc.automation_queue.push(...(((report.automation_queue as Record<string, unknown>[] | undefined) ?? []).map((item) => ({ ...item, project_path: report.project_path }))));
+                  acc.coverage_gaps.push(...(((report.coverage_gaps as Record<string, unknown>[] | undefined) ?? []).map((item) => ({ ...item, project_path: report.project_path }))));
+                  acc.recent_runs.push(...(((report.recent_runs as Record<string, unknown>[] | undefined) ?? []).map((item) => ({ ...item, project_path: report.project_path }))));
+                  return acc;
+                }, {
+                  registry_updated_at: null,
+                  summary: {
+                    learned_components: 0,
+                    active_routes: 0,
+                    shadow_components: 0,
+                    demoted_components: 0,
+                    queued_automation_jobs: 0,
+                    benchmark_runs: 0,
+                    tracked_fixtures: 0,
+                    coverage_gaps: 0,
+                  },
+                  active_routes: [] as Record<string, unknown>[],
+                  demotions: [] as Record<string, unknown>[],
+                  automation_queue: [] as Record<string, unknown>[],
+                  coverage_gaps: [] as Record<string, unknown>[],
+                  recent_runs: [] as Record<string, unknown>[],
+                });
+                merged.recent_runs = merged.recent_runs.slice(-10);
+                jsonResponse(res, 200, merged);
+              } else {
+                jsonResponse(res, 200, buildRepoReport(projectPath));
+              }
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/project-stats
+          if (pathname === "/api/project-stats") {
+            try {
+              if (isGlobal) {
+                const statsList = collectFromAllProjects<Record<string, unknown>>((pp) => {
+                  try {
+                    return [buildProjectStats(pp)];
+                  } catch {
+                    return [];
+                  }
+                });
+                const taskCountsByType: Record<string, number> = {};
+                const executorReliabilityBuckets: Record<string, number[]> = {};
+                const preventionRuleFrequencies: Record<string, number> = {};
+                const preventionRuleExecutors: Record<string, string> = {};
+                let totalTasks = 0;
+                let qualityWeightedSum = 0;
+
+                for (const stats of statsList) {
+                  const statsTotalTasks = typeof stats.total_tasks === "number" ? stats.total_tasks : 0;
+                  totalTasks += statsTotalTasks;
+                  if (typeof stats.average_quality_score === "number") {
+                    qualityWeightedSum += stats.average_quality_score * statsTotalTasks;
+                  }
+                  for (const [taskType, count] of Object.entries((stats.task_counts_by_type as Record<string, number> | undefined) ?? {})) {
+                    taskCountsByType[taskType] = (taskCountsByType[taskType] ?? 0) + count;
+                  }
+                  for (const [role, reliability] of Object.entries((stats.executor_reliability as Record<string, number> | undefined) ?? {})) {
+                    executorReliabilityBuckets[role] ??= [];
+                    executorReliabilityBuckets[role].push(reliability);
+                  }
+                  for (const [rule, count] of Object.entries((stats.prevention_rule_frequencies as Record<string, number> | undefined) ?? {})) {
+                    preventionRuleFrequencies[rule] = (preventionRuleFrequencies[rule] ?? 0) + count;
+                  }
+                  for (const [rule, executor] of Object.entries((stats.prevention_rule_executors as Record<string, string> | undefined) ?? {})) {
+                    preventionRuleExecutors[rule] ??= executor;
+                  }
+                }
+
+                const executorReliability = Object.fromEntries(
+                  Object.entries(executorReliabilityBuckets).map(([role, values]) => [
+                    role,
+                    Number((values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length)).toFixed(3)),
+                  ]),
+                );
+
+                jsonResponse(res, 200, {
+                  total_tasks: totalTasks,
+                  task_counts_by_type: taskCountsByType,
+                  average_quality_score: Number((qualityWeightedSum / Math.max(1, totalTasks)).toFixed(3)),
+                  executor_reliability: executorReliability,
+                  prevention_rule_frequencies: preventionRuleFrequencies,
+                  prevention_rule_executors: preventionRuleExecutors,
+                });
+              } else {
+                jsonResponse(res, 200, buildProjectStats(projectPath));
+              }
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/state
+          if (pathname === "/api/state") {
+            try {
+              if (isGlobal) {
+                jsonResponse(res, 400, { error: "Repo state is only available for a single project" });
+              } else {
+                jsonResponse(res, 200, buildRepoState(projectPath));
+              }
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/manifest
+          const manifestMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/manifest$/);
+          if (manifestMatch) {
+            const taskId = manifestMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const data = readJsonFile(path.join(localDynosDir(projectPath), taskId, "manifest.json"));
+              jsonResponse(res, 200, data);
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/raw-input
+          const rawInputMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/raw-input$/);
+          if (rawInputMatch) {
+            const taskId = rawInputMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const content = readTextFile(path.join(localDynosDir(projectPath), taskId, "raw-input.md"));
+              jsonResponse(res, 200, { content });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/discovery-notes
+          const discoveryMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/discovery-notes$/);
+          if (discoveryMatch) {
+            const taskId = discoveryMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const content = readTextFile(path.join(localDynosDir(projectPath), taskId, "discovery-notes.md"));
+              jsonResponse(res, 200, { content });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/design-decisions
+          const designMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/design-decisions$/);
+          if (designMatch) {
+            const taskId = designMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const content = readTextFile(path.join(localDynosDir(projectPath), taskId, "design-decisions.md"));
+              jsonResponse(res, 200, { content });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/events
+          const eventsMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/events$/);
+          if (eventsMatch) {
+            const taskId = eventsMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const raw = readTextFile(path.join(localDynosDir(projectPath), taskId, "events.jsonl"));
+              const events = raw.split("\n").filter((l) => l.trim()).map((line) => {
+                try { return JSON.parse(line); } catch { return null; }
+              }).filter(notNull);
+              jsonResponse(res, 200, { events });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/receipts
+          const receiptsMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/receipts$/);
+          if (receiptsMatch) {
+            const taskId = receiptsMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const dirPath = path.join(localDynosDir(projectPath), taskId, "receipts");
+              let entries: string[];
+              try {
+                entries = fs.readdirSync(dirPath).filter((e: string) => e.endsWith(".json"));
+              } catch {
+                jsonResponse(res, 200, { receipts: [] });
+                return;
+              }
+              const receipts = entries.map((entry) => {
+                try {
+                  const data = readJsonFile(path.join(dirPath, entry));
+                  return { filename: entry, data };
+                } catch {
+                  return null;
+                }
+              }).filter(notNull);
+              jsonResponse(res, 200, { receipts });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/evidence
+          const evidenceMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/evidence$/);
+          if (evidenceMatch) {
+            const taskId = evidenceMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const dirPath = path.join(localDynosDir(projectPath), taskId, "evidence");
+              let entries: string[];
+              try {
+                entries = fs.readdirSync(dirPath).filter((e: string) => e.endsWith(".md"));
+              } catch {
+                jsonResponse(res, 200, { files: [] });
+                return;
+              }
+              const files = entries.map((entry) => {
+                try {
+                  const content = readTextFile(path.join(dirPath, entry));
+                  return { name: entry, content };
+                } catch {
+                  return null;
+                }
+              }).filter(notNull);
+              jsonResponse(res, 200, { files });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/completion
+          const completionMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/completion$/);
+          if (completionMatch) {
+            const taskId = completionMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const data = readJsonFile(path.join(localDynosDir(projectPath), taskId, "completion.json"));
+              jsonResponse(res, 200, data);
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/postmortem
+          const postmortemMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/postmortem$/);
+          if (postmortemMatch) {
+            const taskId = postmortemMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const pmDir = path.join(persistentDir(slug), "postmortems");
+              const result: { json?: unknown; markdown?: string } = {};
+              try {
+                result.json = readJsonFile(path.join(pmDir, `${taskId}.json`));
+              } catch { /* not found */ }
+              try {
+                result.markdown = readTextFile(path.join(pmDir, `${taskId}.md`));
+              } catch { /* not found */ }
+              if (result.json === undefined && result.markdown === undefined) {
+                jsonResponse(res, 404, { error: "Not found" });
+              } else {
+                jsonResponse(res, 200, result);
+              }
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/router-decisions
+          const routerMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/router-decisions$/);
+          if (routerMatch) {
+            const taskId = routerMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const decisions: unknown[] = [];
+              // Read task manifest for timestamp range
+              let taskCreatedAt = "";
+              let taskCompletedAt = "";
+              try {
+                const manifest = readJsonFile(path.join(localDynosDir(projectPath), taskId, "manifest.json")) as Record<string, unknown>;
+                taskCreatedAt = (manifest.created_at as string) ?? "";
+                taskCompletedAt = (manifest.completed_at as string) ?? "";
+              } catch { /* no manifest */ }
+
+              // Check per-task events first
+              try {
+                const raw = readTextFile(path.join(localDynosDir(projectPath), taskId, "events.jsonl"));
+                const lines = raw.split("\n").filter((l) => l.trim());
+                for (const line of lines) {
+                  try {
+                    const evt = JSON.parse(line) as Record<string, unknown>;
+                    if (typeof evt.event === "string" && evt.event.startsWith("router_")) {
+                      decisions.push(evt);
+                    }
+                  } catch { /* skip malformed lines */ }
+                }
+              } catch { /* no per-task events */ }
+              // Also check global events — filter by task field OR timestamp range
+              try {
+                const globalPath = path.join(localDynosDir(projectPath), "events.jsonl");
+                const raw = readTextFile(globalPath);
+                const lines = raw.split("\n").filter((l) => l.trim());
+                for (const line of lines) {
+                  try {
+                    const evt = JSON.parse(line) as Record<string, unknown>;
+                    if (typeof evt.event !== "string" || !evt.event.startsWith("router_")) continue;
+                    // Match by explicit task field
+                    if (evt.task === taskId) {
+                      decisions.push(evt);
+                      continue;
+                    }
+                    // Match by timestamp range (router events lack task field)
+                    if (taskCreatedAt && typeof evt.ts === "string") {
+                      const evtTime = evt.ts;
+                      const inRange = evtTime >= taskCreatedAt && (!taskCompletedAt || evtTime <= taskCompletedAt);
+                      if (inRange) {
+                        decisions.push(evt);
+                      }
+                    }
+                  } catch { /* skip malformed lines */ }
+                }
+              } catch { /* no global events */ }
+              jsonResponse(res, 200, { decisions });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
           // GET /api/tasks/:taskId/spec
           const specMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/spec$/);
           if (specMatch) {
@@ -657,6 +1334,223 @@ export function dynosApi(): Plugin {
                 total_input_tokens: totalInputTokens,
                 total_output_tokens: totalOutputTokens,
                 total_estimated_usd: Math.round(totalUsd * 100) / 100,
+              });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/maintainer-status
+          if (pathname === "/api/maintainer-status") {
+            const statusPath = path.join(localDynosDir(projectPath), "maintenance", "status.json");
+            const data = readJsonFileOrDefault(statusPath, { running: false });
+            jsonResponse(res, 200, data);
+            return;
+          }
+
+          // GET /api/maintenance-cycles
+          if (pathname === "/api/maintenance-cycles") {
+            const lastParam = parsed.searchParams.get("last");
+            const lastN = lastParam ? parseInt(lastParam, 10) : 20;
+            const cyclesPath = path.join(localDynosDir(projectPath), "maintenance", "cycles.jsonl");
+            try {
+              const raw = readTextFile(cyclesPath);
+              const lines = raw.split("\n").filter((l: string) => l.trim());
+              const allCycles: unknown[] = [];
+              for (const line of lines) {
+                try {
+                  allCycles.push(JSON.parse(line));
+                } catch {
+                  // skip malformed line
+                }
+              }
+              const sliced = allCycles.slice(-lastN);
+              jsonResponse(res, 200, { total_cycles: allCycles.length, cycles: sliced });
+            } catch {
+              jsonResponse(res, 200, { total_cycles: 0, cycles: [] });
+            }
+            return;
+          }
+
+          // GET /api/control-plane
+          if (pathname === "/api/control-plane") {
+            try {
+              const maintainer = readJsonFileOrDefault(
+                path.join(localDynosDir(projectPath), "maintenance", "status.json"),
+                { running: false } as Record<string, unknown>,
+              );
+
+              const autofixEnabled = fs.existsSync(
+                path.join(localDynosDir(projectPath), "maintenance", "autofix.enabled"),
+              );
+
+              const queue = readJsonFileOrDefault(
+                path.join(localDynosDir(projectPath), "automation", "queue.json"),
+                { version: 0, updated_at: "", items: [] } as Record<string, unknown>,
+              );
+
+              const automationStatus = readJsonFileOrDefault(
+                path.join(localDynosDir(projectPath), "automation", "status.json"),
+                { updated_at: "", queued_before: 0, executed: 0, pending_after: 0 } as Record<string, unknown>,
+              );
+
+              const pDir = persistentDir(slug);
+              const registry = readJsonFileOrDefault(
+                path.join(pDir, "learned-agents", "registry.json"),
+                { agents: [] } as Record<string, unknown>,
+              );
+              const agents = (Array.isArray((registry as Record<string, unknown>).agents)
+                ? (registry as Record<string, unknown>).agents
+                : []) as Array<Record<string, unknown>>;
+
+              const history = readJsonFileOrDefault(
+                path.join(pDir, "benchmarks", "history.json"),
+                { runs: [] } as Record<string, unknown>,
+              );
+              const allRuns = (Array.isArray((history as Record<string, unknown>).runs)
+                ? (history as Record<string, unknown>).runs
+                : []) as Array<Record<string, unknown>>;
+              const recentRuns = allRuns.slice(-10);
+
+              const benchIndex = readJsonFileOrDefault(
+                path.join(pDir, "benchmarks", "index.json"),
+                { fixtures: [] } as Record<string, unknown>,
+              );
+              const fixtures = (Array.isArray((benchIndex as Record<string, unknown>).fixtures)
+                ? (benchIndex as Record<string, unknown>).fixtures
+                : []) as Array<Record<string, unknown>>;
+
+              // Compute agent_summary
+              const agentSummary = {
+                total: agents.length,
+                routeable: agents.filter((a) => a.route_allowed).length,
+                shadow: agents.filter((a) => a.mode === "shadow").length,
+                alongside: agents.filter((a) => a.mode === "alongside").length,
+                replace: agents.filter((a) => a.mode === "replace").length,
+                demoted: agents.filter((a) => a.mode === "demoted").length,
+              };
+
+              // Compute freshness buckets
+              const bucketMap: Record<string, string[]> = {
+                Fresh: [],
+                Recent: [],
+                Aging: [],
+                Stale: [],
+                Unbenchmarked: [],
+              };
+              for (const agent of agents) {
+                const bs = agent.benchmark_summary as Record<string, unknown> | undefined;
+                if (!bs || (typeof bs.sample_count === "number" && bs.sample_count === 0)) {
+                  bucketMap.Unbenchmarked.push(agent.agent_name as string);
+                } else {
+                  const offset = typeof agent.last_benchmarked_task_offset === "number"
+                    ? agent.last_benchmarked_task_offset
+                    : 999;
+                  if (offset === 0) {
+                    bucketMap.Fresh.push(agent.agent_name as string);
+                  } else if (offset <= 2) {
+                    bucketMap.Recent.push(agent.agent_name as string);
+                  } else if (offset <= 5) {
+                    bucketMap.Aging.push(agent.agent_name as string);
+                  } else {
+                    bucketMap.Stale.push(agent.agent_name as string);
+                  }
+                }
+              }
+              const freshnessBuckets = Object.entries(bucketMap)
+                .filter(([, arr]) => arr.length > 0)
+                .map(([label, arr]) => ({ label, count: arr.length, agents: arr }));
+
+              // Compute coverage gaps
+              const agentNames = new Set(agents.map((a) => a.agent_name as string));
+              const coverageGaps = fixtures
+                .filter((f) => !agentNames.has(f.target_name as string))
+                .map((f) => ({
+                  target_name: f.target_name as string,
+                  role: f.role as string,
+                  task_type: f.task_type as string,
+                  item_kind: f.item_kind as string,
+                }));
+
+              // Compute attention items
+              const urgencyOrder = ["demoted on regression", "unbenchmarked", "stale benchmark", "coverage gap"];
+              const attentionItems: Array<Record<string, unknown>> = [];
+
+              for (const agent of agents) {
+                if (agent.mode === "demoted") {
+                  const lastEval = agent.last_evaluation as Record<string, unknown> | undefined;
+                  attentionItems.push({
+                    agent_name: agent.agent_name,
+                    reason: "demoted on regression",
+                    mode: agent.mode,
+                    status: agent.status,
+                    recommendation: lastEval?.recommendation ?? null,
+                    delta_composite: lastEval?.delta_composite ?? null,
+                  });
+                }
+              }
+
+              for (const agent of agents) {
+                const bs = agent.benchmark_summary as Record<string, unknown> | undefined;
+                if (!bs || (typeof bs.sample_count === "number" && bs.sample_count === 0)) {
+                  if (agent.mode !== "demoted") {
+                    attentionItems.push({
+                      agent_name: agent.agent_name,
+                      reason: "unbenchmarked",
+                      mode: agent.mode,
+                      status: agent.status,
+                      recommendation: null,
+                      delta_composite: null,
+                    });
+                  }
+                }
+              }
+
+              for (const agent of agents) {
+                const bs = agent.benchmark_summary as Record<string, unknown> | undefined;
+                const isBenchmarked = bs && typeof bs.sample_count === "number" && bs.sample_count > 0;
+                const offset = typeof agent.last_benchmarked_task_offset === "number"
+                  ? agent.last_benchmarked_task_offset
+                  : 0;
+                if (isBenchmarked && offset > 5 && agent.mode !== "demoted") {
+                  attentionItems.push({
+                    agent_name: agent.agent_name,
+                    reason: "stale benchmark",
+                    mode: agent.mode,
+                    status: agent.status,
+                    recommendation: null,
+                    delta_composite: null,
+                  });
+                }
+              }
+
+              for (const gap of coverageGaps) {
+                attentionItems.push({
+                  agent_name: gap.target_name,
+                  reason: "coverage gap",
+                  mode: "",
+                  status: "",
+                  recommendation: null,
+                  delta_composite: null,
+                });
+              }
+
+              attentionItems.sort(
+                (a, b) => urgencyOrder.indexOf(a.reason as string) - urgencyOrder.indexOf(b.reason as string),
+              );
+
+              jsonResponse(res, 200, {
+                maintainer,
+                autofix_enabled: autofixEnabled,
+                queue,
+                automation_status: automationStatus,
+                agents,
+                freshness_buckets: freshnessBuckets,
+                coverage_gaps: coverageGaps,
+                attention_items: attentionItems,
+                recent_runs: recentRuns,
+                agent_summary: agentSummary,
               });
             } catch (err) {
               handleFsError(res, err);
