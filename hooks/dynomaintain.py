@@ -131,6 +131,7 @@ def maintenance_cycle(root: Path) -> dict:
         for script_name, args in (
             ("dynostrajectory.py", ("rebuild", "--root", str(root))),
             ("dynopatterns.py", ("--root", str(root))),
+            ("dynoevolve.py", ("auto", "--root", str(root))),
             ("dynopostmortem.py", ("generate-all", "--root", str(root))),
             ("dynopostmortem.py", ("improve", "--root", str(root))),
             ("dynofixture.py", ("sync", "--root", str(root))),
