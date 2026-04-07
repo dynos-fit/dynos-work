@@ -63,7 +63,7 @@ function computeLayout(segments: ExecutionSegment[]): Map<string, { x: number; y
     const layer: string[] = [];
     for (const seg of segments) {
       if (assigned.has(seg.id)) continue;
-      const unmetDeps = seg.depends_on.filter((d) => idSet.has(d) && !assigned.has(d));
+      const unmetDeps = (seg.depends_on ?? []).filter((d) => idSet.has(d) && !assigned.has(d));
       if (unmetDeps.length === 0) {
         layer.push(seg.id);
       }
@@ -245,11 +245,11 @@ function DetailPanel({ segment, color, onClose }: DetailPanelProps) {
       {/* Dependencies */}
       <div className="mb-4">
         <span className="text-[10px] text-slate-500 font-mono tracking-[0.15em] block mb-1">DEPENDS ON</span>
-        {segment.depends_on.length === 0 ? (
+        {(segment.depends_on ?? []).length === 0 ? (
           <span className="text-xs text-slate-600 font-mono">None (root node)</span>
         ) : (
           <div className="flex flex-wrap gap-1.5">
-            {segment.depends_on.map((dep) => (
+            {(segment.depends_on ?? []).map((dep) => (
               <span
                 key={dep}
                 className="px-2 py-0.5 text-[10px] font-mono text-[#BDF000] border border-[#BDF000]/20 bg-[#BDF000]/5 rounded"
@@ -363,7 +363,7 @@ function buildNodesAndEdges(
 
   const edges: Edge[] = [];
   for (const seg of segments) {
-    for (const dep of seg.depends_on) {
+    for (const dep of seg.depends_on ?? []) {
       edges.push({
         id: `${dep}->${seg.id}`,
         source: dep,
