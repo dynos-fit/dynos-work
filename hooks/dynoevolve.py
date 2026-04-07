@@ -8,7 +8,7 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib_core import collect_retrospectives, now_iso, _persistent_project_dir
+from dynoslib_core import collect_retrospectives, load_json, now_iso, _persistent_project_dir
 from dynoslib_log import log_event
 from dynoslib_registry import ensure_learned_registry, register_learned_agent
 
@@ -152,12 +152,29 @@ def cmd_auto(args: argparse.Namespace) -> int:
     log_event(root, "evolve_step", step="gate_check", passed=True, retrospective_count=len(retrospectives))
 
     # Step 2: Discover uncovered (role, task_type) slots
+    # Scan execution graphs for ALL executors that ran, not just those with repairs.
+    # executor_repair_frequency only contains executors that failed — misses clean runs.
     role_type_counts: dict[tuple[str, str], int] = {}
-    for retro in retrospectives:
-        for role in retro.get("executor_repair_frequency", {}):
+    dynos_dir = root / ".dynos"
+    for task_dir in sorted(dynos_dir.iterdir()) if dynos_dir.exists() else []:
+        if not task_dir.name.startswith("task-"):
+            continue
+        graph_path = task_dir / "execution-graph.json"
+        retro_path = task_dir / "task-retrospective.json"
+        if not (graph_path.exists() and retro_path.exists()):
+            continue
+        try:
+            retro = load_json(retro_path)
+            graph = load_json(graph_path)
             task_type = retro.get("task_type", "")
-            if isinstance(role, str) and isinstance(task_type, str) and role and task_type:
-                role_type_counts[(role, task_type)] = role_type_counts.get((role, task_type), 0) + 1
+            if not task_type:
+                continue
+            for seg in graph.get("segments", []):
+                role = seg.get("executor", "")
+                if role and isinstance(role, str):
+                    role_type_counts[(role, task_type)] = role_type_counts.get((role, task_type), 0) + 1
+        except (json.JSONDecodeError, OSError):
+            continue
 
     existing = {
         (a.get("role"), a.get("task_type"))
