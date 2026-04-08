@@ -11,7 +11,8 @@
 
 set -euo pipefail
 HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
-export PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}:${HOOKS_DIR}:${PYTHONPATH:-}"
 
 usage() {
   cat <<EOF
@@ -127,7 +128,7 @@ for p in reg.get('projects', []):
         echo ""
         while IFS= read -r proj; do
           echo "━━━ $proj"
-          python3 "${HOOKS_DIR}/dynoproactive.py" scan --root "$proj" 2>/dev/null || true
+          python3 -m autofix scan --root "$proj" 2>/dev/null || true
           echo ""
         done <<< "$projects"
       else
@@ -148,10 +149,10 @@ print('no')
           echo "Error: $resolved is not a registered project. Run 'dynos init' there first." >&2
           exit 1
         fi
-        exec python3 "${HOOKS_DIR}/dynoproactive.py" scan --root "$resolved"
+        exec python3 -m autofix scan --root "$resolved"
       fi
     else
-      exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@"
+      exec python3 -m autofix "$@"
     fi
     ;;
 

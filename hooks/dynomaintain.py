@@ -7,6 +7,7 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 import argparse
 import fcntl
 import json
+import os
 import subprocess
 import sys
 import time
@@ -139,15 +140,14 @@ def _is_autofix_enabled(root: Path) -> bool:
 
 
 def _run_autofix(root: Path) -> dict:
-    """Run the autofix scan via the skill's Python entry point."""
-    hooks_dir = Path(__file__).resolve().parent
-    proactive_path = hooks_dir / "dynoproactive.py"
-    if not proactive_path.exists():
-        return {"autofix": "skipped", "reason": "dynoproactive.py not found (autofix not yet implemented)"}
+    """Run the autofix scan via the autofix package."""
+    # Ensure the repo root (where autofix/ lives) is on PYTHONPATH
+    repo_root = str(Path(__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": f"{repo_root}:{os.environ.get('PYTHONPATH', '')}"}
     try:
         result = subprocess.run(
-            [sys.executable, str(proactive_path), "scan", "--root", str(root)],
-            capture_output=True, text=True, timeout=1800,
+            [sys.executable, "-m", "autofix", "scan", "--root", str(root)],
+            capture_output=True, text=True, timeout=1800, env=env,
         )
         if result.returncode == 0 and result.stdout.strip():
             try:
