@@ -7,7 +7,12 @@
       "type": "object",
       "required": true,
       "source": "glob .dynos/task-*/manifest.json",
-      "note": "Each manifest is an object; the skill globs for multiple files"
+      "note": "Each manifest is an object; the skill globs for multiple files",
+      "required_fields": ["task_id", "stage"],
+      "field_types": {
+        "task_id": "str",
+        "stage": "str"
+      }
     }
   },
   "output_schema": {

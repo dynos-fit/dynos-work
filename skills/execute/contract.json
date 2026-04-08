@@ -6,7 +6,13 @@
     "manifest.json": {
       "type": "object",
       "required": true,
-      "source": ".dynos/task-{id}/manifest.json"
+      "source": ".dynos/task-{id}/manifest.json",
+      "required_fields": ["task_id", "stage", "classification"],
+      "field_types": {
+        "task_id": "str",
+        "stage": "str",
+        "classification": "object"
+      }
     },
     "spec.md": {
       "type": "string",
@@ -21,7 +27,12 @@
     "execution-graph.json": {
       "type": "object",
       "required": true,
-      "source": ".dynos/task-{id}/execution-graph.json"
+      "source": ".dynos/task-{id}/execution-graph.json",
+      "required_fields": ["task_id", "segments"],
+      "field_types": {
+        "task_id": "str",
+        "segments": "list"
+      }
     },
     "dynos_patterns.md": {
       "type": "string",
@@ -36,11 +47,22 @@
     },
     "snapshot": {
       "type": "object",
-      "description": "Git snapshot metadata in manifest.json: branch name, stash_ref, head_sha"
+      "description": "Git snapshot metadata in manifest.json: branch name, stash_ref, head_sha",
+      "required_fields": ["head_sha", "branch"],
+      "field_types": {
+        "head_sha": "str",
+        "branch": "str"
+      }
     },
     "test-results.json": {
       "type": "object",
-      "description": "Test execution results with run_at, command, passed, output_summary, failing_tests (written only on test failure)"
+      "optional": true,
+      "description": "Test execution results (written only on test failure)",
+      "required_fields": ["run_at", "passed"],
+      "field_types": {
+        "run_at": "str",
+        "passed": "bool"
+      }
     },
     "execution-log.md": {
       "type": "string",
@@ -48,7 +70,14 @@
     },
     "handoff-execute-audit.json": {
       "type": "object",
-      "description": "Handoff record confirming execute outputs are valid for audit consumption"
+      "description": "Handoff record confirming execute outputs are valid for audit consumption",
+      "required_fields": ["from_skill", "to_skill", "handoff_at"],
+      "field_types": {
+        "from_skill": "str",
+        "to_skill": "str",
+        "handoff_at": "str",
+        "manifest_stage": "str"
+      }
     }
   }
 }

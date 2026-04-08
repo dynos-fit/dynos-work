@@ -6,7 +6,6 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -20,42 +19,6 @@ from dynoglobal import (
     unregister_project,
 )
 from dynoslib_core import now_iso
-
-
-# ---------------------------------------------------------------------------
-# Daemon health helper
-# ---------------------------------------------------------------------------
-
-def _daemon_health(project_path: str) -> dict:
-    """Check daemon health for a project by inspecting its PID file."""
-    root = Path(project_path)
-    pid_file = root / ".dynos" / "maintenance" / "daemon.pid"
-    status_file = root / ".dynos" / "maintenance" / "status.json"
-
-    health: dict = {"daemon_running": False, "pid": None}
-
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-        except (ValueError, OSError):
-            return health
-        try:
-            os.kill(pid, 0)
-            health["daemon_running"] = True
-            health["pid"] = pid
-        except OSError:
-            pass
-
-    if status_file.exists():
-        try:
-            with open(status_file) as f:
-                status_data = json.load(f)
-            if isinstance(status_data, dict):
-                health["last_status"] = status_data
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    return health
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +93,7 @@ def cmd_list(_args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Print registry entry with daemon health per project."""
+    """Print registry entry per project."""
     try:
         projects = list_projects()
     except (OSError, ValueError) as exc:
@@ -149,12 +112,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(json.dumps({"error": f"project not registered: {root}"}, indent=2),
                   file=sys.stderr)
             return 1
-        entry["daemon_health"] = _daemon_health(entry["path"])
         print(json.dumps(entry, indent=2))
         return 0
 
-    for proj in projects:
-        proj["daemon_health"] = _daemon_health(proj["path"])
     print(json.dumps(projects, indent=2))
     return 0
 
@@ -248,7 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_p = subparsers.add_parser("list", help="List all registered projects")
     list_p.set_defaults(func=cmd_list)
 
-    status_p = subparsers.add_parser("status", help="Show status with daemon health")
+    status_p = subparsers.add_parser("status", help="Show project status")
     status_p.add_argument("path", nargs="?", default=None, help="Project path (optional, shows all if omitted)")
     status_p.set_defaults(func=cmd_status)
 

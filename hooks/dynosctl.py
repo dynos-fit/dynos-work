@@ -91,6 +91,16 @@ def cmd_repair_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check_eager_repair(args: argparse.Namespace) -> int:
+    import json as _json
+    import sys as _sys
+    from dynoslib_validate import check_eager_repair
+    report = _json.load(_sys.stdin)
+    result = check_eager_repair(report)
+    print(_json.dumps(result, indent=2))
+    return 0 if result["verdict"] == "CONTINUE_WAITING" else 2
+
+
 def cmd_compute_reward(args: argparse.Namespace) -> int:
     import json
     from dynoslib_validate import compute_reward
@@ -231,6 +241,9 @@ def build_parser() -> argparse.ArgumentParser:
     ru_parser.add_argument("--root", default=".")
     ru_parser.add_argument("--task-type", dest="task_type", required=True)
     ru_parser.set_defaults(func=cmd_repair_update)
+
+    eager_parser = subparsers.add_parser("check-eager-repair", help="Check audit report for blocking findings (reads from stdin, exit 2 = REPAIR_NOW)")
+    eager_parser.set_defaults(func=cmd_check_eager_repair)
 
     reward_parser = subparsers.add_parser("compute-reward", help="Deterministically compute reward scores from task artifacts")
     reward_parser.add_argument("task_dir")

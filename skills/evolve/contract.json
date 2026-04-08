@@ -11,7 +11,16 @@
     "task-retrospective.json": {
       "type": "object",
       "required": false,
-      "source": ".dynos/task-{id}/task-retrospective.json"
+      "source": ".dynos/task-{id}/task-retrospective.json",
+      "required_fields": ["task_id", "task_outcome", "quality_score"],
+      "field_types": {
+        "task_id": "str",
+        "task_outcome": "str",
+        "quality_score": "number",
+        "findings_by_auditor": "object",
+        "model_used_by_agent": "object",
+        "agent_source": "object"
+      }
     },
     "retrospectives": {
       "type": "array",
@@ -54,7 +63,11 @@
     },
     ".dynos/learned-agents/registry.json": {
       "type": "object",
-      "description": "Live learned-component registry with routing mode, benchmark history, promotion state, and route eligibility"
+      "description": "Live learned-component registry with routing mode, benchmark history, promotion state, and route eligibility",
+      "required_fields": ["agents"],
+      "field_types": {
+        "agents": "object"
+      }
     },
     "dynos_patterns.md": {
       "type": "string",
@@ -62,15 +75,28 @@
     },
     ".dynos/proactive-findings.json": {
       "type": "object",
-      "description": "Repository-wide proactive findings produced by the strategic scanner"
+      "optional": true,
+      "description": "Repository-wide proactive findings produced by the strategic scanner",
+      "required_fields": ["findings"],
+      "field_types": {
+        "findings": "list"
+      }
     },
     "benchmark_summary": {
       "type": "object",
-      "description": "Evaluation summary and recommendation for candidate learned components"
+      "description": "Evaluation summary and recommendation for candidate learned components",
+      "required_fields": ["recommendation"],
+      "field_types": {
+        "recommendation": "str"
+      }
     },
     "automation_status": {
       "type": "object",
-      "description": "Queue, freshness, and auto-benchmark status emitted by the automation runtime"
+      "description": "Queue, freshness, and auto-benchmark status emitted by the automation runtime",
+      "required_fields": ["status"],
+      "field_types": {
+        "status": "str"
+      }
     }
   }
 }

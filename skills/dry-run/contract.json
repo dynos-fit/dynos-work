@@ -12,7 +12,12 @@
   "output_schema": {
     "validation_report": {
       "type": "object",
-      "description": "Validation report with pass/fail status, mismatch details, missing fields, and per-contract results"
+      "description": "Validation report with pass/fail status, mismatch details, missing fields, and per-contract results",
+      "required_fields": ["valid", "errors"],
+      "field_types": {
+        "valid": "bool",
+        "errors": "list"
+      }
     }
   }
 }

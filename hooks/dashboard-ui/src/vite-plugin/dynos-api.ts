@@ -1236,7 +1236,22 @@ export function dynosApi(): Plugin {
               const reports: unknown[] = [];
               for (const entry of entries) {
                 try {
-                  const data = readJsonFile(path.join(dirPath, entry));
+                  const data = readJsonFile(path.join(dirPath, entry)) as Record<string, unknown>;
+                  // Normalize: ensure auditor_name exists (some auditors use report_id)
+                  if (!data.auditor_name && data.report_id) {
+                    const rid = String(data.report_id);
+                    data.auditor_name = rid.replace(/-checkpoint$/, "").replace(/-vote-.*$/, "");
+                  }
+                  // Normalize: scope must be a string (some auditors write an object)
+                  if (data.scope && typeof data.scope === "object") {
+                    const scopeObj = data.scope as Record<string, unknown>;
+                    data.scope = scopeObj.audit_start_sha
+                      ? `${scopeObj.audit_start_sha} (${Array.isArray(scopeObj.files_audited) ? (scopeObj.files_audited as string[]).length + " files" : "unknown"})`
+                      : "changed-files";
+                  }
+                  if (!data.scope) {
+                    data.scope = "changed-files";
+                  }
                   reports.push(data);
                 } catch {
                   // skip malformed files

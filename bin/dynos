@@ -4,9 +4,8 @@
 # Usage:
 #   dynos init                    # set up current project
 #   dynos init --autofix          # set up with autofix
-#   dynos local start             # start project daemon
-#   dynos local stop              # stop project daemon
-#   dynos local status            # show daemon status
+#   dynos local run-once          # run one maintenance cycle
+#   dynos local status            # show maintainer status
 #   dynos dashboard               # start global dashboard server
 #   dynos dashboard stop          # stop dashboard server
 
@@ -19,10 +18,10 @@ usage() {
 dynos — unified CLI for dynos-work
 
 Getting started:
-  init          Set up current project (register + start daemon)
+  init          Set up current project (register)
 
 Project commands:
-  local         Project daemon: start, stop, status, logs, run-once
+  local         Project maintainer: run-once, status, logs
   local dashboard  Per-project dashboard (generate or serve)
   autofix       Autofix scanner (status, scan, list, clear)
 
@@ -65,35 +64,11 @@ case "$cmd" in
       echo "Error: not a git repository" >&2
       exit 1
     fi
-    autofix=""
-    for arg in "$@"; do
-      case "$arg" in
-        --autofix) autofix="--autofix" ;;
-      esac
-    done
     echo "Registering project..."
     python3 "${HOOKS_DIR}/dynoregistry.py" register "$root" 2>/dev/null || true
     mkdir -p "$root/.dynos"
-    if python3 -c "
-import sys
-sys.path.insert(0, '${HOOKS_DIR}')
-from dynomaintain import current_pid
-from pathlib import Path
-pid = current_pid(Path('$root'))
-sys.exit(0 if pid else 1)
-" 2>/dev/null; then
-      echo "Daemon already running. Use 'dynos local stop' to stop it first."
-      exit 0
-    fi
-    echo "Starting local daemon..."
-    python3 "${HOOKS_DIR}/dynomaintain.py" start --root "$root" $autofix 2>/dev/null || true
     echo ""
     echo "Project ready: $root"
-    if [ -n "$autofix" ]; then
-      echo "Daemon running with autofix"
-    else
-      echo "Daemon running (use --autofix to enable autofix)"
-    fi
     echo ""
     echo "Next: use /dynos-work:start in Claude Code to begin a task"
     ;;
@@ -118,19 +93,7 @@ sys.exit(0 if pid else 1)
       resolved=$(cd "$target" 2>/dev/null && pwd) || { echo "Error: $target does not exist" >&2; exit 1; }
       enabled="OFF"
       [ -f "$resolved/.dynos/maintenance/autofix.enabled" ] && enabled="ON"
-      daemon="not running"
-      if python3 -c "
-import sys
-sys.path.insert(0, '${HOOKS_DIR}')
-from dynomaintain import current_pid
-from pathlib import Path
-pid = current_pid(Path('$resolved'))
-sys.exit(0 if pid else 1)
-" 2>/dev/null; then
-        daemon="running"
-      fi
       echo "Autofix: $enabled"
-      echo "Daemon:  $daemon"
       echo "Project: $resolved"
       if [ "$enabled" = "ON" ] && [ -f "$resolved/.dynos/proactive-findings.json" ]; then
         count=$(python3 -c "
@@ -207,9 +170,6 @@ print('no')
         *) target="$arg" ;;
       esac
     done
-    # Stop daemon first if running
-    echo "Stopping daemon for $target..."
-    PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/dynomaintain.py" stop --root "$target" 2>/dev/null || true
     # Unregister
     exec python3 "${HOOKS_DIR}/dynoregistry.py" unregister "$target"
     ;;

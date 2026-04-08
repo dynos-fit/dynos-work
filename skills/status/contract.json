@@ -6,7 +6,13 @@
     "manifest.json": {
       "type": "object",
       "required": true,
-      "source": ".dynos/task-{id}/manifest.json (most recent active task)"
+      "source": ".dynos/task-{id}/manifest.json (most recent active task)",
+      "required_fields": ["task_id", "stage"],
+      "field_types": {
+        "task_id": "str",
+        "stage": "str",
+        "classification": "object"
+      }
     },
     "spec.md": {
       "type": "string",
@@ -16,7 +22,12 @@
     "execution-graph.json": {
       "type": "object",
       "required": false,
-      "source": ".dynos/task-{id}/execution-graph.json"
+      "source": ".dynos/task-{id}/execution-graph.json",
+      "required_fields": ["task_id", "segments"],
+      "field_types": {
+        "task_id": "str",
+        "segments": "list"
+      }
     },
     "audit-reports": {
       "type": "array",
@@ -26,12 +37,22 @@
     "repair-log.json": {
       "type": "object",
       "required": false,
-      "source": ".dynos/task-{id}/repair-log.json"
+      "source": ".dynos/task-{id}/repair-log.json",
+      "required_fields": ["repair_cycle"],
+      "field_types": {
+        "repair_cycle": "int",
+        "batches": "list"
+      }
     },
     "test-results.json": {
       "type": "object",
       "required": false,
-      "source": ".dynos/task-{id}/test-results.json"
+      "source": ".dynos/task-{id}/test-results.json",
+      "required_fields": ["run_at", "passed"],
+      "field_types": {
+        "run_at": "str",
+        "passed": "bool"
+      }
     },
     "execution-log.md": {
       "type": "string",

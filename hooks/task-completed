@@ -17,11 +17,11 @@ PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynoslib_events.py" emit \
   --root "${PROJECT_ROOT}" \
   --type task-completed \
-  --source task || true
+  --source task 2>/dev/null || echo "[dynos] task-completed: event emit failed" >&2
 
 # --- Step 2: Drain all events (learn → evolve → benchmark → dashboard) ---
 PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynoeventbus.py" drain \
-  --root "${PROJECT_ROOT}" || true
+  --root "${PROJECT_ROOT}" 2>/dev/null || echo "[dynos] task-completed: event drain failed" >&2
 
 # --- Step 3: Conditional auto-commit ---
 PROJECT_DIR=$(echo "${PROJECT_ROOT}" | sed 's|/|-|g')

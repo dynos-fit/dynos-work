@@ -12,7 +12,18 @@
   "output_schema": {
     "manifest.json": {
       "type": "object",
-      "description": "Task manifest with task_id, created_at, title, raw_input, stage, classification, retry_counts, blocked_reason, completion_at"
+      "description": "Task manifest with task_id, created_at, title, raw_input, stage, classification, retry_counts, blocked_reason, completion_at",
+      "required_fields": ["task_id", "created_at", "title", "raw_input", "stage", "classification"],
+      "field_types": {
+        "task_id": "str",
+        "created_at": "str",
+        "title": "str",
+        "raw_input": "str",
+        "stage": "str",
+        "classification": "object",
+        "retry_counts": "object",
+        "fast_track": "bool"
+      }
     },
     "raw-input.md": {
       "type": "string",
@@ -36,15 +47,25 @@
     },
     "execution-graph.json": {
       "type": "object",
-      "description": "Execution graph with segments declaring id, executor, description, files_expected, depends_on, parallelizable, criteria_ids"
+      "description": "Execution graph with segments declaring id, executor, description, files_expected, depends_on, parallelizable, criteria_ids",
+      "required_fields": ["task_id", "segments"],
+      "field_types": {
+        "task_id": "str",
+        "segments": "list"
+      }
     },
     "execution-log.md": {
       "type": "string",
       "description": "Append-only execution log tracking stage transitions and decisions"
     },
-    "audit-reports/plan-audit-{timestamp}.json": {
+    "audit-reports/plan-audit-*.json": {
       "type": "object",
-      "description": "Spec coverage audit report verifying plan covers all acceptance criteria"
+      "description": "Spec coverage audit report verifying plan covers all acceptance criteria",
+      "required_fields": ["auditor_name", "findings"],
+      "field_types": {
+        "auditor_name": "str",
+        "findings": "list"
+      }
     }
   }
 }

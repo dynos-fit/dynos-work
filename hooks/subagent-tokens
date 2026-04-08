@@ -30,3 +30,9 @@ PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/dynoslib_tokens_
   --agent-type "$AGENT_TYPE" \
   --agent-desc "$AGENT_DESC" \
   --root "$CWD" 2>/dev/null || true
+
+# Schema validation for auditor reports
+PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/dynoslib_schema_hook.py" \
+  --root "$CWD" \
+  --agent-type "$AGENT_TYPE" \
+  --agent-desc "$AGENT_DESC" 2>/dev/null || true

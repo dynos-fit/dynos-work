@@ -12,7 +12,12 @@
   "output_schema": {
     "maintenance_result": {
       "type": "object",
-      "description": "Summary of findings discovered, fixes applied, and PRs opened"
+      "description": "Summary of findings discovered, fixes applied, and PRs opened",
+      "required_fields": ["findings_count", "fixes_applied"],
+      "field_types": {
+        "findings_count": "int",
+        "fixes_applied": "int"
+      }
     }
   }
 }

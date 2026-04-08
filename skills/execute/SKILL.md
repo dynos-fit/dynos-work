@@ -38,7 +38,7 @@ Append to log:
 
 **Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. However, you MUST still run the router and apply learned agent rules before executing:
 
-1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
+1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --task task-{id}`
 2. Write the executor-routing receipt (required for stage transitions).
 3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
 4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
@@ -101,7 +101,7 @@ After preflight validation, perform the following execution optimizations:
 **Deterministic routing (MANDATORY):** Before spawning any executor, run the router to get a structured spawn plan:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --task task-{id}
 ```
 
 This returns a JSON object with model, route mode, and agent path for each segment.
@@ -127,7 +127,7 @@ Do NOT read dynos_patterns.md tables manually. The router handles model policy, 
 **Learned Agent Injection (MANDATORY — NOT OPTIONAL):** For every segment, you MUST build the executor prompt using the deterministic prompt builder. This is not a suggestion. This is an enforcement gate. For each segment in the executor plan:
 
 ```bash
-echo "{your base prompt for this segment}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 hooks/dynorouter.py inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
+echo "{your base prompt for this segment}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 hooks/dynorouter.py inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id} --task task-{id}
 ```
 
 This command:

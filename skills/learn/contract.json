@@ -7,13 +7,29 @@
       "type": "object",
       "required": true,
       "source": "glob .dynos/task-*/task-retrospective.json",
-      "note": "Each retrospective is an object; the skill globs for multiple files"
+      "note": "Each retrospective is an object; the skill globs for multiple files",
+      "required_fields": ["task_id", "task_outcome", "quality_score", "findings_by_auditor"],
+      "field_types": {
+        "task_id": "str",
+        "task_outcome": "str",
+        "quality_score": "number",
+        "findings_by_auditor": "object",
+        "findings_by_category": "object",
+        "model_used_by_agent": "object",
+        "agent_source": "object",
+        "auditor_zero_finding_streaks": "object"
+      }
     },
     "audit-reports": {
       "type": "object",
       "required": false,
       "source": "glob .dynos/task-*/audit-reports/*.json",
-      "note": "Each audit report is an object; the skill globs for multiple files"
+      "note": "Each audit report is an object; the skill globs for multiple files",
+      "required_fields": ["auditor_name", "findings"],
+      "field_types": {
+        "auditor_name": "str",
+        "findings": "list"
+      }
     },
     "existing_dynos_patterns.md": {
       "type": "string",

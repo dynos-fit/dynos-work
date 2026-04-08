@@ -393,6 +393,28 @@ def validate_retrospective(task_dir: Path) -> list[str]:
 RISK_BUDGETS: dict[str, int] = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}
 
 
+def check_eager_repair(report: dict) -> dict:
+    """Check a single audit report for blocking findings.
+
+    Returns {"verdict": "REPAIR_NOW", "blocking_findings": [...]} if any
+    finding has blocking=True, or {"verdict": "CONTINUE_WAITING"} otherwise.
+    Also triggers on spec-completion-auditor with critical severity findings.
+    """
+    findings = report.get("findings", [])
+    auditor_name = report.get("auditor_name", "")
+    blocking = []
+    for f in findings:
+        is_blocking = f.get("blocking", False)
+        # spec-completion-auditor critical findings are implicitly blocking
+        if not is_blocking and auditor_name == "spec-completion-auditor" and f.get("severity") == "critical":
+            is_blocking = True
+        if is_blocking:
+            blocking.append(f)
+    if blocking:
+        return {"verdict": "REPAIR_NOW", "auditor": auditor_name, "blocking_findings": blocking}
+    return {"verdict": "CONTINUE_WAITING", "auditor": auditor_name}
+
+
 def compute_reward(task_dir: Path) -> dict:
     """Deterministically compute reward scores from task artifacts.
 

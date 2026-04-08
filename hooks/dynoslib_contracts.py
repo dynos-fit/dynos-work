@@ -8,7 +8,9 @@ after it completes. Depends only on dynoslib_core.
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import re
 from pathlib import Path
 
 from dynoslib_core import load_json
@@ -130,8 +132,19 @@ def _resolve_output(field_name: str, task_dir: Path) -> list[Path]:
 # Type checking
 # ---------------------------------------------------------------------------
 
-def _check_type(path: Path, expected_type: str) -> list[str]:
-    """Check that a file's content matches the expected type."""
+def _check_type(path: Path, expected_type: str, required_fields: list[str] | None = None,
+                 field_types: dict[str, str] | None = None) -> list[str]:
+    """Check that a file's content matches the expected type and schema.
+
+    Args:
+        path: File to validate.
+        expected_type: Top-level type ("object", "array", "string").
+        required_fields: If set, every key in this list must exist in each
+            top-level object (or in each element if type is array-of-objects).
+        field_types: Map of field_name -> expected python type name
+            ("str", "list", "bool", "int", "float"). Checked only for
+            fields that are present.
+    """
     if not path.exists() or str(path) == "/dev/null":
         return []
     try:
@@ -144,6 +157,7 @@ def _check_type(path: Path, expected_type: str) -> list[str]:
             data = json.loads(content)
             if not isinstance(data, dict):
                 return [f"expected JSON object, got {type(data).__name__}"]
+            return _check_fields(data, path.name, required_fields, field_types)
         except json.JSONDecodeError as e:
             return [f"invalid JSON: {e}"]
     elif expected_type == "array":
@@ -155,6 +169,34 @@ def _check_type(path: Path, expected_type: str) -> list[str]:
             return [f"invalid JSON: {e}"]
     # "string" and "directory" types: existence is sufficient
     return []
+
+
+_PY_TYPE_MAP: dict[str, type] = {
+    "str": str, "string": str,
+    "list": list, "array": list,
+    "bool": bool, "boolean": bool,
+    "int": int, "float": float, "number": (int, float),  # type: ignore[dict-item]
+}
+
+
+def _check_fields(data: dict, filename: str,
+                  required_fields: list[str] | None,
+                  field_types: dict[str, str] | None) -> list[str]:
+    """Validate required fields and field types on a single JSON object."""
+    errors: list[str] = []
+    if required_fields:
+        for field in required_fields:
+            if field not in data or data[field] is None:
+                errors.append(f"{filename}: missing required field '{field}'")
+    if field_types:
+        for field, expected in field_types.items():
+            if field not in data or data[field] is None:
+                continue  # only validate if present
+            expected_py = _PY_TYPE_MAP.get(expected)
+            if expected_py and not isinstance(data[field], expected_py):
+                actual = type(data[field]).__name__
+                errors.append(f"{filename}: field '{field}' expected {expected}, got {actual}")
+    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +229,8 @@ def validate_inputs(
         required = spec.get("required", False)
         source = spec.get("source", "")
         expected_type = spec.get("type", "string")
+        req_fields = spec.get("required_fields")
+        fld_types = spec.get("field_types")
 
         paths = _resolve_source(source, task_dir, project_root)
 
@@ -194,7 +238,7 @@ def validate_inputs(
             errors.append(f"missing required input: {field_name} (source: {source})")
         elif paths and (strict or required):
             for p in paths:
-                type_errors = _check_type(p, expected_type)
+                type_errors = _check_type(p, expected_type, req_fields, fld_types)
                 errors.extend(f"{field_name}: {e}" for e in type_errors)
 
     return errors
@@ -213,12 +257,16 @@ def validate_outputs(skill_name: str, task_dir: Path) -> list[str]:
     errors: list[str] = []
     for field_name, spec in contract.get("output_schema", {}).items():
         expected_type = spec.get("type", "string")
+        req_fields = spec.get("required_fields")
+        fld_types = spec.get("field_types")
+        optional = spec.get("optional", False)
         paths = _resolve_output(field_name, task_dir)
         if not paths:
-            errors.append(f"missing declared output: {field_name}")
+            if not optional:
+                errors.append(f"missing declared output: {field_name}")
         else:
             for p in paths:
-                type_errors = _check_type(p, expected_type)
+                type_errors = _check_type(p, expected_type, req_fields, fld_types)
                 errors.extend(f"{field_name}: {e}" for e in type_errors)
 
     return errors
@@ -231,11 +279,49 @@ def validate_outputs(skill_name: str, task_dir: Path) -> list[str]:
 PIPELINE_ORDER = ["start", "plan", "execute", "audit", "learn"]
 
 
+def _normalize_glob(field_name: str) -> str:
+    """Convert contract field name placeholders to fnmatch-compatible glob patterns.
+
+    Examples:
+        "audit-reports/{auditor}-checkpoint-{timestamp}.json"
+          -> "audit-reports/*-checkpoint-*.json"
+        "evidence/{segment-id}.md"
+          -> "evidence/*.md"
+        "audit-reports/*.json"
+          -> "audit-reports/*.json"  (unchanged)
+    """
+    return re.sub(r"\{[^}]+\}", "*", field_name)
+
+
+def _field_names_match(consumer_field: str, producer_field: str) -> bool:
+    """Check whether a consumer input field name matches a producer output field name.
+
+    Supports exact matches and glob-style matching where either side may
+    contain placeholders ({...}) or wildcards (*).
+    """
+    if consumer_field == producer_field:
+        return True
+    consumer_glob = _normalize_glob(consumer_field)
+    producer_glob = _normalize_glob(producer_field)
+    # Try matching in both directions: consumer pattern against producer
+    # name, and producer pattern against consumer name.
+    return (fnmatch.fnmatch(producer_field, consumer_glob)
+            or fnmatch.fnmatch(consumer_field, producer_glob)
+            or fnmatch.fnmatch(producer_glob, consumer_glob)
+            or fnmatch.fnmatch(consumer_glob, producer_glob))
+
+
 def validate_chain() -> list[str]:
     """Validate that output schemas cover required input schemas across the pipeline.
 
     This is the dry-run validator: it checks contract compatibility
-    without running any skills.
+    without running any skills.  It performs two passes:
+
+    1. **Name-level check** -- every required input artifact must be declared
+       as an output by some prior stage.
+    2. **Field-level check** -- when a consumer input declares
+       ``required_fields``, the matching producer output must also declare
+       (at least) those fields.
     """
     errors: list[str] = []
     contracts: dict[str, dict] = {}
@@ -246,15 +332,17 @@ def validate_chain() -> list[str]:
         except (FileNotFoundError, json.JSONDecodeError) as e:
             errors.append(f"cannot load contract for {skill_name}: {e}")
 
-    # Build cumulative output set: artifacts persist across stages
-    cumulative_outputs: set[str] = set()
+    # cumulative_outputs maps output field_name -> {skill, spec} for the
+    # producing contract so that the field-level pass can inspect the full
+    # output spec.
+    cumulative_outputs: dict[str, dict] = {}
 
     for i in range(len(PIPELINE_ORDER)):
         skill_name = PIPELINE_ORDER[i]
         if skill_name not in contracts:
             continue
 
-        # Check this stage's required inputs against all prior outputs
+        # --- Pass 1: name-level check (original logic) ---
         if i > 0:
             to_inputs = contracts[skill_name].get("input_schema", {})
             for field_name, spec in to_inputs.items():
@@ -270,12 +358,68 @@ def validate_chain() -> list[str]:
                 # Check by exact field name match in cumulative outputs
                 matched = field_name in cumulative_outputs
                 if not matched:
+                    # Try glob-aware matching
+                    matched = any(
+                        _field_names_match(field_name, out_name)
+                        for out_name in cumulative_outputs
+                    )
+                if not matched:
                     errors.append(
                         f"chain gap: {skill_name} requires '{field_name}' "
                         f"but no prior stage declares it in output_schema"
                     )
 
+        # --- Pass 2: field-level cross-check ---
+        if i > 0:
+            to_inputs = contracts[skill_name].get("input_schema", {})
+            for field_name, spec in to_inputs.items():
+                consumer_req_fields = spec.get("required_fields")
+                if not consumer_req_fields:
+                    continue
+                consumer_fields_set = set(consumer_req_fields)
+
+                # Find the producing output entry
+                producer_entry = cumulative_outputs.get(field_name)
+                if producer_entry is None:
+                    # Try glob-aware lookup
+                    for out_name, entry in cumulative_outputs.items():
+                        if _field_names_match(field_name, out_name):
+                            producer_entry = entry
+                            break
+
+                if producer_entry is None:
+                    # No producer found at all -- the name-level check
+                    # already reported this if the field is required,
+                    # so skip to avoid duplicate noise.
+                    continue
+
+                producer_skill = producer_entry["skill"]
+                producer_spec = producer_entry["spec"]
+                producer_req_fields = producer_spec.get("required_fields")
+
+                if producer_req_fields is None:
+                    errors.append(
+                        f"field-level gap: {skill_name} input '{field_name}' "
+                        f"requires fields {sorted(consumer_fields_set)} but "
+                        f"{producer_skill} output '{producer_entry['field_name']}' "
+                        f"declares no required_fields"
+                    )
+                else:
+                    producer_fields_set = set(producer_req_fields)
+                    missing = consumer_fields_set - producer_fields_set
+                    if missing:
+                        errors.append(
+                            f"field-level gap: {skill_name} input '{field_name}' "
+                            f"requires fields {sorted(missing)} not declared in "
+                            f"{producer_skill} output"
+                        )
+
         # Add this stage's outputs to the cumulative set
-        cumulative_outputs.update(contracts[skill_name].get("output_schema", {}).keys())
+        for out_name, out_spec in contracts[skill_name].get("output_schema", {}).items():
+            cumulative_outputs[out_name] = {
+                "skill": skill_name,
+                "field_name": out_name,
+                "spec": out_spec,
+            }
 
     return errors

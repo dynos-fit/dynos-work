@@ -6,7 +6,13 @@
     "manifest.json": {
       "type": "object",
       "required": true,
-      "source": ".dynos/task-{id}/manifest.json"
+      "source": ".dynos/task-{id}/manifest.json",
+      "required_fields": ["task_id", "stage", "classification"],
+      "field_types": {
+        "task_id": "str",
+        "stage": "str",
+        "classification": "object"
+      }
     },
     "spec.md": {
       "type": "string",
@@ -16,7 +22,12 @@
     "execution-graph.json": {
       "type": "object",
       "required": true,
-      "source": ".dynos/task-{id}/execution-graph.json"
+      "source": ".dynos/task-{id}/execution-graph.json",
+      "required_fields": ["task_id", "segments"],
+      "field_types": {
+        "task_id": "str",
+        "segments": "list"
+      }
     },
     "evidence/{segment-id}.md": {
       "type": "string",
@@ -36,29 +47,85 @@
     "prior_task-retrospective.json": {
       "type": "object",
       "required": false,
-      "source": ".dynos/task-*/task-retrospective.json (most recent prior task)"
+      "source": ".dynos/task-*/task-retrospective.json (most recent prior task)",
+      "required_fields": ["task_id", "quality_score"],
+      "field_types": {
+        "task_id": "str",
+        "quality_score": "number",
+        "findings_by_auditor": "object"
+      }
     }
   },
   "output_schema": {
-    "audit-reports/{auditor}-checkpoint-{timestamp}.json": {
+    "audit-reports/*.json": {
       "type": "object",
-      "description": "Audit report per auditor with findings array, auditor_name, severity levels"
+      "description": "Audit report per auditor with findings array, auditor_name, severity levels",
+      "required_fields": ["auditor_name", "findings"],
+      "field_types": {
+        "auditor_name": "str",
+        "findings": "list",
+        "scope": "str",
+        "task_id": "str"
+      }
     },
     "repair-log.json": {
       "type": "object",
-      "description": "Repair plan with batches, tasks, assigned_executor, files, parallel flag, repair_cycle"
+      "optional": true,
+      "description": "Repair plan with batches, tasks, assigned_executor, files, parallel flag, repair_cycle. Only produced when blocking findings exist.",
+      "required_fields": ["repair_cycle"],
+      "field_types": {
+        "repair_cycle": "int",
+        "batches": "list"
+      }
     },
     "audit-summary.json": {
       "type": "object",
-      "description": "Summary of all audit results"
+      "description": "Summary of all audit results",
+      "required_fields": ["task_id", "total_findings", "blocking_findings", "verdict"],
+      "field_types": {
+        "task_id": "str",
+        "audit_timestamp": "str",
+        "auditors_spawned": "list",
+        "total_findings": "int",
+        "blocking_findings": "int",
+        "non_blocking_findings": "int",
+        "verdict": "str"
+      }
     },
     "task-retrospective.json": {
       "type": "object",
-      "description": "Retrospective with findings_by_auditor, findings_by_category, executor_repair_frequency, repair_cycle_count, token_usage_by_agent, quality_score, cost_score, efficiency_score"
+      "description": "Retrospective with findings_by_auditor, findings_by_category, executor_repair_frequency, repair_cycle_count, token_usage_by_agent, quality_score, cost_score, efficiency_score",
+      "required_fields": ["task_id", "task_outcome", "quality_score", "cost_score", "efficiency_score", "findings_by_auditor"],
+      "field_types": {
+        "task_id": "str",
+        "task_outcome": "str",
+        "task_type": "str",
+        "task_domains": "str",
+        "task_risk_level": "str",
+        "findings_by_auditor": "object",
+        "findings_by_category": "object",
+        "executor_repair_frequency": "object",
+        "spec_review_iterations": "int",
+        "repair_cycle_count": "int",
+        "subagent_spawn_count": "int",
+        "quality_score": "number",
+        "cost_score": "number",
+        "efficiency_score": "number",
+        "total_token_usage": "int"
+      }
     },
     "completion.json": {
       "type": "object",
-      "description": "Task completion record"
+      "description": "Task completion record",
+      "required_fields": ["task_id", "completed_at", "audit_result"],
+      "field_types": {
+        "task_id": "str",
+        "completed_at": "str",
+        "stage": "str",
+        "audit_result": "str",
+        "blocking_findings": "int",
+        "quality_score": "number"
+      }
     },
     "execution-log.md": {
       "type": "string",

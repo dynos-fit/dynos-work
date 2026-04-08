@@ -187,7 +187,7 @@ def validate_chain(task_dir: Path) -> list[str]:
         "CHECKPOINT_AUDIT": ["plan-validated", "executor-routing"],
         "REPAIR_PLANNING": ["plan-validated", "executor-routing"],
         "REPAIR_EXECUTION": ["plan-validated", "executor-routing"],
-        "DONE": ["plan-validated", "executor-routing", "retrospective", "post-completion"],
+        "DONE": ["plan-validated", "executor-routing", "retrospective"],
     }
 
     required = stage_requires.get(stage, [])

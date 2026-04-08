@@ -6,7 +6,11 @@
   "output_schema": {
     "registration_result": {
       "type": "object",
-      "description": "Registration result from dynoregistry.py"
+      "description": "Registration result from dynoregistry.py",
+      "required_fields": ["registered"],
+      "field_types": {
+        "registered": "str"
+      }
     }
   }
 }

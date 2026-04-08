@@ -6,7 +6,17 @@
     "segment": {
       "type": "object",
       "required": true,
-      "source": "execution-graph.json segment object passed by the execute skill"
+      "source": "execution-graph.json segment object passed by the execute skill",
+      "required_fields": ["id", "executor", "files_expected", "criteria_ids"],
+      "field_types": {
+        "id": "str",
+        "executor": "str",
+        "description": "str",
+        "files_expected": "list",
+        "depends_on": "list",
+        "parallelizable": "bool",
+        "criteria_ids": "list"
+      }
     },
     "acceptance_criteria_text": {
       "type": "string",

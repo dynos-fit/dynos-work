@@ -40,7 +40,7 @@ Update `manifest.json` stage to `CHECKPOINT_AUDIT`.
 Read `manifest.json` for `classification` and `fast_track`. Then run the deterministic router:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" audit-plan --root . --task-type {task_type} --domains {comma-separated-domains} [--fast-track]
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" audit-plan --root . --task-type {task_type} --domains {comma-separated-domains} --task {task_id} [--fast-track]
 ```
 
 This returns a JSON plan with each auditor's action (spawn/skip), model, and route mode. **Use this plan directly.** Do not re-derive model, skip, or routing decisions from markdown tables.
@@ -119,18 +119,39 @@ Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.jso
 - Step 4: Re-audit spawns (type=spawn, phase=audit, detail="Re-audit after repair cycle N")
 - Step 5: compute_reward / validate_retrospective_scores (type=deterministic, phase=audit, detail="Computed retrospective scores")
 
-**Eager two-phase repair trigger:**
+**Post-write schema validation (DETERMINISTIC):**
 
-Do not wait for all auditors to complete before proceeding. Instead, monitor auditor results as they arrive:
+After EACH auditor writes its report, validate the report schema:
 
-1. When the first auditor returns with one or more blocking findings, immediately proceed to Step 4 phase 1 repair with those findings. Do not wait for remaining auditors.
-2. **Short-circuit on critical spec failure:** If `spec-completion-auditor` returns findings with severity `critical`, immediately proceed to Step 4 phase 1 repair with those critical findings, even if other auditors have not returned yet. This is a specific instance of the eager repair trigger.
-3. If no auditor returns blocking findings after all auditors complete, append to log and proceed to Step 5:
-   ```
-   {timestamp} [DONE] audit complete — no blocking findings
-   ```
+```bash
+python3 "${PLUGIN_HOOKS}/dynosctl.py" validate-contract --skill audit --task-dir .dynos/task-{id} --direction output
+```
 
-Record which auditors are still running at the time phase 1 repair begins. Their results are **late findings** and feed into phase 2 (see Step 4).
+If any audit report fails validation (missing `auditor_name`, wrong `scope` type, etc.), **fix the report in place** before proceeding. The contract enforces `required_fields: ["auditor_name", "findings"]` and `field_types: {scope: "str"}`. Common fixes:
+- Missing `auditor_name`: derive from the report filename (e.g. `code-quality-auditor-checkpoint.json` → `"code-quality-auditor"`)
+- `scope` is an object: stringify it (e.g. `{"files_audited": [...], "audit_start_sha": "HEAD"}` → `"HEAD (N files)"`)
+- Missing `scope`: set to `"changed-files"`
+
+**Eager two-phase repair trigger (DETERMINISTIC GATE):**
+
+After EACH auditor completes (and its report passes validation), run the deterministic eager-repair check. Pipe the auditor's report JSON into the gate:
+
+```bash
+cat .dynos/task-{id}/audit-reports/{report-file}.json | python3 "${PLUGIN_HOOKS}/dynosctl.py" check-eager-repair
+```
+
+The gate returns a JSON verdict:
+- `{"verdict": "REPAIR_NOW", "blocking_findings": [...]}` (exit code 2) — **immediately** proceed to Step 4 phase 1 repair with the returned findings. Do not wait for remaining auditors.
+- `{"verdict": "CONTINUE_WAITING"}` (exit code 0) — continue waiting for the next auditor.
+
+**This is not optional.** The gate handles both the general blocking-findings trigger and the spec-completion-auditor critical-severity short-circuit. You do not need to inspect findings yourself — the gate decides.
+
+If all auditors complete and every gate returned `CONTINUE_WAITING`, append to log and proceed to Step 5:
+```
+{timestamp} [DONE] audit complete — no blocking findings
+```
+
+Record which auditors are still running at the time a `REPAIR_NOW` verdict fires. Their results are **late findings** and feed into phase 2 (see Step 4).
 
 ### Step 4 — Two-phase repair loop
 

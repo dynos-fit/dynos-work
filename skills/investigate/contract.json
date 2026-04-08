@@ -12,7 +12,13 @@
   "output_schema": {
     "root_cause_analysis": {
       "type": "object",
-      "description": "Structured analysis with root cause, evidence, and fix recommendation returned by the investigator agent"
+      "description": "Structured analysis with root cause, evidence, and fix recommendation returned by the investigator agent",
+      "required_fields": ["root_cause", "evidence"],
+      "field_types": {
+        "root_cause": "str",
+        "evidence": "list",
+        "recommended_fix": "str"
+      }
     }
   }
 }

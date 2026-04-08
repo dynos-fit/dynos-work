@@ -11,7 +11,12 @@
     "manifest.json": {
       "type": "object",
       "required": false,
-      "source": ".dynos/task-{id}/manifest.json"
+      "source": ".dynos/task-{id}/manifest.json",
+      "required_fields": ["task_id", "classification"],
+      "field_types": {
+        "task_id": "str",
+        "classification": "object"
+      }
     },
     "spec.md": {
       "type": "string",
@@ -41,7 +46,13 @@
     },
     "design-certificates.json": {
       "type": "object",
-      "description": "Machine-readable design certificates for vetted options with result, metrics, security score, and recommendation"
+      "optional": true,
+      "description": "Machine-readable design certificates for vetted options with result, metrics, security score, and recommendation",
+      "required_fields": ["result", "recommendation"],
+      "field_types": {
+        "result": "str",
+        "recommendation": "str"
+      }
     },
     "design-decisions.md": {
       "type": "string",

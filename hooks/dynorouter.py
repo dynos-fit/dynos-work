@@ -30,8 +30,20 @@ from dynoslib_defaults import (
     UCB_COLD_START_MINIMUM,
     UCB_EXPLORATION_CONSTANT,
 )
-from dynoslib_log import log_event
+from dynoslib_log import log_event as _log_event_raw
 from dynoslib_registry import ensure_learned_registry
+
+# ---------------------------------------------------------------------------
+# Task-scoped event logging
+# ---------------------------------------------------------------------------
+# CLI commands set this so all log_event calls within a router invocation
+# automatically include the task ID, routing events to the task's events.jsonl.
+_CURRENT_TASK: str | None = None
+
+
+def log_event(root: Path, event_type: str, **payload: object) -> None:
+    """Wrapper that injects _CURRENT_TASK into every event."""
+    _log_event_raw(root, event_type, task=_CURRENT_TASK, **payload)
 
 
 # ---------------------------------------------------------------------------
@@ -811,7 +823,14 @@ def build_auditor_prompt(
 # ---------------------------------------------------------------------------
 
 
+def _set_task_context(args: argparse.Namespace) -> None:
+    """Set module-level task context from CLI --task arg."""
+    global _CURRENT_TASK
+    _CURRENT_TASK = getattr(args, "task", None) or None
+
+
 def cmd_audit_plan(args: argparse.Namespace) -> int:
+    _set_task_context(args)
     root = Path(args.root).resolve()
     domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else []
     plan = build_audit_plan(root, args.task_type, domains, fast_track=args.fast_track)
@@ -820,6 +839,7 @@ def cmd_audit_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_executor_plan(args: argparse.Namespace) -> int:
+    _set_task_context(args)
     root = Path(args.root).resolve()
     graph_path = Path(args.graph)
     if not graph_path.exists():
@@ -832,6 +852,7 @@ def cmd_executor_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:
+    _set_task_context(args)
     root = Path(args.root).resolve()
     result = {
         "model": resolve_model(root, args.role, args.task_type),
@@ -844,6 +865,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 def cmd_inject_prompt(args: argparse.Namespace) -> int:
     """Read base prompt from stdin, inject learned agent rules, print result."""
+    _set_task_context(args)
     root = Path(args.root).resolve()
     graph_path = Path(args.graph)
     if not graph_path.exists():
@@ -888,12 +910,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task-type", required=True)
     ap.add_argument("--domains", default="")
     ap.add_argument("--fast-track", action="store_true")
+    ap.add_argument("--task", default=None, help="Task ID for scoped event logging")
     ap.set_defaults(func=cmd_audit_plan)
 
     ep = subparsers.add_parser("executor-plan", help="Build deterministic executor spawn plan")
     ep.add_argument("--root", default=".")
     ep.add_argument("--task-type", required=True)
     ep.add_argument("--graph", required=True)
+    ep.add_argument("--task", default=None, help="Task ID for scoped event logging")
     ep.set_defaults(func=cmd_executor_plan)
 
     ip = subparsers.add_parser("inject-prompt", help="Inject learned agent rules into executor prompt")
@@ -901,12 +925,14 @@ def build_parser() -> argparse.ArgumentParser:
     ip.add_argument("--task-type", required=True)
     ip.add_argument("--graph", required=True)
     ip.add_argument("--segment-id", required=True)
+    ip.add_argument("--task", default=None, help="Task ID for scoped event logging")
     ip.set_defaults(func=cmd_inject_prompt)
 
     res = subparsers.add_parser("resolve", help="Resolve model/skip/route for one role")
     res.add_argument("role")
     res.add_argument("task_type")
     res.add_argument("--root", default=".")
+    res.add_argument("--task", default=None, help="Task ID for scoped event logging")
     res.set_defaults(func=cmd_resolve)
 
     return parser

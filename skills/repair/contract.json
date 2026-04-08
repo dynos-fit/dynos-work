@@ -16,7 +16,13 @@
     "manifest.json": {
       "type": "object",
       "required": true,
-      "source": ".dynos/task-{id}/manifest.json"
+      "source": ".dynos/task-{id}/manifest.json",
+      "required_fields": ["task_id", "stage", "classification"],
+      "field_types": {
+        "task_id": "str",
+        "stage": "str",
+        "classification": "object"
+      }
     },
     "audit-reports": {
       "type": "array",
@@ -32,11 +38,22 @@
   "output_schema": {
     "repair-log.json": {
       "type": "object",
-      "description": "Updated repair log with result of the repair"
+      "description": "Updated repair log with result of the repair",
+      "required_fields": ["repair_cycle"],
+      "field_types": {
+        "repair_cycle": "int",
+        "batches": "list"
+      }
     },
-    "audit-reports/{auditor}-checkpoint-{timestamp}.json": {
+    "audit-reports/*.json": {
       "type": "object",
-      "description": "Re-audit reports from auditors that reported the finding plus spec-completion and security"
+      "description": "Re-audit reports from auditors that reported the finding plus spec-completion and security",
+      "required_fields": ["auditor_name", "findings"],
+      "field_types": {
+        "auditor_name": "str",
+        "findings": "list",
+        "scope": "str"
+      }
     }
   }
 }

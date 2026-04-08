@@ -11,7 +11,14 @@
     "task-retrospective.json": {
       "type": "object",
       "required": false,
-      "source": "glob .dynos/task-*/task-retrospective.json"
+      "source": "glob .dynos/task-*/task-retrospective.json",
+      "required_fields": ["task_id", "quality_score"],
+      "field_types": {
+        "task_id": "str",
+        "quality_score": "number",
+        "findings_by_auditor": "object",
+        "executor_repair_frequency": "object"
+      }
     }
   },
   "output_schema": {

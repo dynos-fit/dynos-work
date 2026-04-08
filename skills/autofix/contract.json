@@ -13,7 +13,11 @@
   "output_schema": {
     "autofix_state": {
       "type": "object",
-      "description": "Current autofix state: enabled flag, last scan time, finding counts"
+      "description": "Current autofix state: enabled flag, last scan time, finding counts",
+      "required_fields": ["enabled"],
+      "field_types": {
+        "enabled": "bool"
+      }
     }
   }
 }

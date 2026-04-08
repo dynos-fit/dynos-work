@@ -291,7 +291,10 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
             if read_receipt(task_dir, "executor-routing") is None:
                 gate_errors.append("receipt: executor-routing (executor routing was never recorded)")
 
-        # DONE requires everything
+        # DONE requires all audit-phase artifacts (produced BEFORE transition)
+        # Note: post-completion receipt is NOT checked here because
+        # _fire_task_completed() runs AFTER the transition succeeds —
+        # checking it here would always fail.
         if next_stage == "DONE":
             if not (task_dir / "task-retrospective.json").exists():
                 gate_errors.append("task-retrospective.json (run /dynos-work:audit to generate)")
@@ -299,8 +302,10 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 gate_errors.append("audit-reports/ (no audit reports found — audit was never run)")
             if read_receipt(task_dir, "retrospective") is None:
                 gate_errors.append("receipt: retrospective (reward was never computed via receipts)")
-            if read_receipt(task_dir, "post-completion") is None:
-                gate_errors.append("receipt: post-completion (post-completion pipeline never ran)")
+            if not (task_dir / "completion.json").exists():
+                gate_errors.append("completion.json (audit skill must write this before DONE)")
+            if not (task_dir / "audit-summary.json").exists():
+                gate_errors.append("audit-summary.json (audit skill must write this before DONE)")
 
         if gate_errors:
             raise ValueError(
@@ -388,7 +393,11 @@ def _fire_task_completed(task_dir: Path) -> None:
     import subprocess
 
     root = task_dir.parent.parent  # .dynos/task-xxx -> repo root
-    hooks_dir = root / "hooks"
+    # Resolve hooks_dir to the PLUGIN's hooks directory (where this file lives),
+    # not the project's hooks directory. In external projects installed as a
+    # Claude Code plugin, {project_root}/hooks/ doesn't contain the pipeline
+    # scripts — they live in the plugin directory.
+    hooks_dir = Path(__file__).resolve().parent
     env_path = f"{hooks_dir}:{__import__('os').environ.get('PYTHONPATH', '')}"
 
     # Step 1: Emit task-completed event

@@ -6,7 +6,13 @@
     "manifest.json": {
       "type": "object",
       "required": true,
-      "source": ".dynos/task-{id}/manifest.json"
+      "source": ".dynos/task-{id}/manifest.json",
+      "required_fields": ["task_id", "stage", "classification"],
+      "field_types": {
+        "task_id": "str",
+        "stage": "str",
+        "classification": "object"
+      }
     },
     "spec.md": {
       "type": "string",
@@ -26,11 +32,21 @@
     },
     "execution-graph.json": {
       "type": "object",
-      "description": "Execution graph with segments declaring id, executor, description, files_expected, depends_on, parallelizable, criteria_ids"
+      "description": "Execution graph with segments declaring id, executor, description, files_expected, depends_on, parallelizable, criteria_ids",
+      "required_fields": ["task_id", "segments"],
+      "field_types": {
+        "task_id": "str",
+        "segments": "list"
+      }
     },
-    "audit-reports/plan-audit-{timestamp}.json": {
+    "audit-reports/plan-audit-*.json": {
       "type": "object",
-      "description": "Spec coverage audit report verifying plan covers all acceptance criteria"
+      "description": "Spec coverage audit report verifying plan covers all acceptance criteria",
+      "required_fields": ["auditor_name", "findings"],
+      "field_types": {
+        "auditor_name": "str",
+        "findings": "list"
+      }
     },
     "execution-log.md": {
       "type": "string",
