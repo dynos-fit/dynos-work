@@ -303,7 +303,7 @@ All receipts at `.dynos/task-{id}/receipts/{step-name}.json`.
 | **`executor-routing`** | `receipt_executor_routing()` | **→ CHECKPOINT_AUDIT** |
 | `executor-{seg-id}` | `receipt_executor_done()` | `validate_chain()` |
 | `audit-routing` | `receipt_audit_routing()` | `validate_chain()` |
-| `audit-{auditor}` | `receipt_audit_done()` | `validate_chain()` at DONE |
+| `audit-{auditor}` | *(removed)* | `validate_chain()` at DONE |
 | **`retrospective`** | `receipt_retrospective()` | **→ DONE** |
 | **`post-completion`** | `receipt_post_completion()` | **→ DONE** |
 
@@ -316,7 +316,7 @@ Bold = hard transition gate in `transition_task()`.
 Two paths, both write to `.dynos/task-{id}/token-usage.json`:
 
 1. **Direct:** `dynoslib_tokens.py record` called by skills after spawns
-2. **Receipt-piggyback:** `receipt_executor_done()` and `receipt_audit_done()` auto-call `_record_tokens()` when `tokens_used > 0`
+2. **Receipt-piggyback:** `receipt_executor_done()` auto-calls `_record_tokens()` when `tokens_used > 0`
 
 Token data feeds into: retrospective scores → effectiveness EMA → model policy → UCB selection.
 

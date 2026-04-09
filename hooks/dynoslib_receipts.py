@@ -337,32 +337,6 @@ def receipt_audit_routing(
     )
 
 
-def receipt_audit_done(
-    task_dir: Path,
-    auditor_name: str,
-    model_used: str | None,
-    finding_count: int,
-    blocking_count: int,
-    report_path: str | None,
-    tokens_used: int | None,
-) -> Path:
-    """Write receipt proving an auditor completed.
-
-    Also records token usage — same enforcement path as executor receipts.
-    """
-    if tokens_used and tokens_used > 0:
-        _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
-    return write_receipt(
-        task_dir,
-        f"audit-{auditor_name}",
-        auditor_name=auditor_name,
-        model_used=model_used,
-        finding_count=finding_count,
-        blocking_count=blocking_count,
-        report_path=report_path,
-        tokens_used=tokens_used,
-    )
-
 
 def receipt_retrospective(
     task_dir: Path,
