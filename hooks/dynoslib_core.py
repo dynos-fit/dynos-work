@@ -278,7 +278,7 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
         raise ValueError(f"Illegal stage transition: {current_stage} -> {next_stage}")
     # ---- Receipt-based transition gates (unmissable) ----
     if not force:
-        from dynoslib_receipts import read_receipt, validate_chain
+        from dynoslib_receipts import read_receipt
         gate_errors: list[str] = []
 
         # EXECUTION requires plan-validated receipt
