@@ -62,20 +62,6 @@ def estimate_token_usage(subagent_spawn_count: int, model_used_by_agent: dict) -
     return max(1, int(subagent_spawn_count or 0)) * TOKEN_ESTIMATES["default"]
 
 
-# Rough input/output ratio by model (input-heavy due to context loading)
-INPUT_OUTPUT_RATIOS: dict[str, float] = {"opus": 0.70, "sonnet": 0.65, "haiku": 0.60, "default": 0.65}
-
-
-def estimate_token_breakdown(total: int, model: str | None = None) -> tuple[int, int]:
-    """Estimate input/output split from a total token count.
-
-    Returns (input_tokens, output_tokens).
-    """
-    ratio = INPUT_OUTPUT_RATIOS.get(model or "default", INPUT_OUTPUT_RATIOS["default"])
-    input_tokens = int(total * ratio)
-    return input_tokens, total - input_tokens
-
-
 def load_token_usage(task_dir: Path) -> dict:
     """Read token-usage.json written by the audit/execute skills during subagent spawns.
 
