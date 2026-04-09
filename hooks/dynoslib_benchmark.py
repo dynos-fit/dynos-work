@@ -101,20 +101,6 @@ def compute_benchmark_summary(benchmarks: list[dict]) -> dict:
     return summary
 
 
-def compute_benchmark_summary_by_model(benchmarks: list[dict]) -> dict[str, dict]:
-    """Group benchmark results by model and compute summary stats per model.
-
-    Each benchmark item should have an optional 'model' field (str or None).
-    Returns {model: summary_dict} for models with at least one sample.
-    """
-    grouped: dict[str, list[dict]] = {}
-    for item in benchmarks:
-        model = item.get("model")
-        if model:
-            grouped.setdefault(model, []).append(item)
-    return {model: _core_benchmark_summary(items) for model, items in grouped.items()}
-
-
 def _category_summaries(results: list[dict]) -> dict[str, dict]:
     """Group results by category and compute summaries for each."""
     grouped: dict[str, list[dict]] = {}
