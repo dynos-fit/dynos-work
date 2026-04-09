@@ -73,15 +73,6 @@
       "type": "string",
       "description": "Updated agent routing table and last-generation marker"
     },
-    ".dynos/proactive-findings.json": {
-      "type": "object",
-      "optional": true,
-      "description": "Repository-wide proactive findings produced by the strategic scanner",
-      "required_fields": ["findings"],
-      "field_types": {
-        "findings": "list"
-      }
-    },
     "benchmark_summary": {
       "type": "object",
       "description": "Evaluation summary and recommendation for candidate learned components",

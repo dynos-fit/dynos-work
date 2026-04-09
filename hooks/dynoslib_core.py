@@ -161,9 +161,6 @@ def _persistent_project_dir(root: Path) -> Path:
     ensure_persistent_project_dir() instead.
     """
     resolved = str(root.resolve())
-    if os.environ.get("DYNOS_AUTOFIX_WORKTREE") == "1" and resolved.startswith("/tmp/"):
-        return root.resolve() / ".dynos" / "ephemeral-project"
-
     dynos_home = Path(os.environ.get("DYNOS_HOME", str(Path.home() / ".dynos")))
     slug = resolved.strip("/").replace("/", "-")
     return dynos_home / "projects" / slug

@@ -1,14 +1,13 @@
 import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
 import { useState, useEffect } from "react";
 import { Outlet, NavLink, useLocation } from "react-router";
-import { LayoutDashboard, ListChecks, Bot, Wrench, Cpu, BarChart3, Settings, Activity, Terminal, GitBranch, } from "lucide-react";
+import { LayoutDashboard, ListChecks, Bot, Cpu, BarChart3, Settings, Activity, Terminal, GitBranch, } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useProject } from "../data/ProjectContext";
 const NAV_ITEMS = [
     { path: "/", icon: LayoutDashboard, label: "DASHBOARD" },
     { path: "/tasks", icon: ListChecks, label: "TASK PIPELINE" },
     { path: "/agents", icon: Bot, label: "AGENTS" },
-    { path: "/autofix", icon: Wrench, label: "AUTOFIX" },
     { path: "/learning-ops", icon: Cpu, label: "LEARNING OPS" },
     { path: "/analytics", icon: BarChart3, label: "ANALYTICS" },
     { path: "/settings", icon: Settings, label: "SETTINGS" },

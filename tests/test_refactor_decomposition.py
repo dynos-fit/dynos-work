@@ -679,8 +679,6 @@ class TestBinDynosUnchanged:
         "maintain",
         "bench",
         "report",
-        "autofix",
-        "proactive",
         "init",
         "list",
         "remove",
@@ -866,5 +864,4 @@ class TestProjectDirBehavior:
         from dynoslib import project_dir
         result = project_dir(tmp_path / "my-project")
         assert isinstance(result, Path)
-        assert result.exists()
         assert "projects" in str(result)

@@ -12,7 +12,7 @@ Maintains the long-term health of the repository by proactively identifying and 
 ### Step 1 -- Autonomous Debt Polling (The Trigger)
 
 Every 24 hours (or when invoked), the system performs a **Background Meta-Audit**:
-1. Scan the codebase using the **Proactive Meta-Auditor**.
+1. Scan the codebase for technical debt and architectural drift.
 2. Focus on:
    - Dependency vulnerabilities.
    - Architectural drift (deviations from current "Gold Standards").
@@ -24,9 +24,9 @@ Every 24 hours (or when invoked), the system performs a **Background Meta-Audit*
 For each discovered finding, determine if it meets the **Autonomous Fix Threshold**:
 - **Critical (e.g. Auth/Infra):** Immediately proceed to Step 3.
 - **High (e.g. Security/Performance):** Proceed to Step 3.
-- **Medium/Low:** Append to `.dynos/proactive-findings.json` and wait for the next manual task.
+- **Medium/Low:** Log to maintenance findings and wait for the next manual task.
 
-### Step 3 -- The Autonomous Fix Pipeline
+### Step 3 -- The Autonomous Repair Pipeline
 
 If a finding meets the threshold, the system starts an **Auto-Task**:
 1. **Branching:** Create a branch `dynos/auto-fix-{finding-id}`.

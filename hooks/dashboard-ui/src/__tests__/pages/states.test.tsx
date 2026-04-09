@@ -54,11 +54,6 @@ describe("loading states (criterion 18)", () => {
     expect(getUIState(state)).toBe("skeleton");
   });
 
-  it("skeleton state applies to Autofix page", () => {
-    const state: DataState<null> = { loading: true, data: null, error: null };
-    expect(getUIState(state)).toBe("skeleton");
-  });
-
   it("skeleton state applies to Analytics page", () => {
     const state: DataState<null> = { loading: true, data: null, error: null };
     expect(getUIState(state)).toBe("skeleton");
@@ -131,12 +126,6 @@ describe("empty states (criterion 20)", () => {
     expect(emptyMessage).toBe("No learned agents registered");
   });
 
-  it("Autofix page shows 'No findings recorded' when findings array is empty", () => {
-    const state: DataState<unknown[]> = { loading: false, data: [], error: null };
-    expect(getUIState(state)).toBe("empty");
-    const emptyMessage = "No findings recorded";
-    expect(emptyMessage).toBe("No findings recorded");
-  });
 
   it("Analytics page shows 'Insufficient data for charts' when fewer than 2 retrospectives", () => {
     const retrospectives = [{ task_id: "task-001", quality_score: 0.8 }];

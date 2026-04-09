@@ -6,7 +6,7 @@
 
 # dynos-work
 
-A Claude Code plugin that checks its own work, learns from mistakes, and fixes your code while you sleep.
+A Claude Code plugin that checks its own work and learns from mistakes.
 
 ## Install
 
@@ -34,8 +34,6 @@ You approve twice (spec and plan), then it runs.
 /dynos-work:status             check where your task is
 /dynos-work:resume             continue after interruption
 /dynos-work:investigate [bug]  deep bug investigation
-/dynos-work:autofix on         enable background code scanning
-/dynos-work:autofix off        disable it
 ```
 
 ## What it does
@@ -44,13 +42,11 @@ You approve twice (spec and plan), then it runs.
 
 **Learns from itself.** After each task, it writes a retrospective. Over time, it learns what works, what fails, and what to watch for. Your 10th task is better than your 1st.
 
-**Fixes your code while you sleep.** Optional autofix scans your codebase for bugs, dead code, security issues, and dependency vulnerabilities. Opens PRs for safe fixes. Opens issues for risky ones.
-
 **Shows you everything.** A dashboard across all your projects: quality trends, findings, costs, what the system learned.
 
 ## Power users
 
-Want the CLI, daemons, dashboard server, and autofix scanner?
+Want the CLI, daemons, and dashboard server?
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/dynos-fit/dynos-work/main/install.sh | bash
@@ -59,9 +55,8 @@ curl -sSL https://raw.githubusercontent.com/dynos-fit/dynos-work/main/install.sh
 Then:
 
 ```bash
-dynos init --autofix    # set up a project with background scanning
+dynos init              # set up a project
 dynos dashboard         # start the dashboard server
-dynos autofix scan      # run a scan right now
 ```
 
 [Full CLI reference](INTERNALS.md#cli)
@@ -81,21 +76,9 @@ Repairs any findings    --> automatic
 Writes a retrospective  --> learns for next time
 ```
 
-The autofix runs separately in the background:
-
-```
-Scans your code (6 detectors including AI review)
-    |
-    v
-Safe to fix?  --> opens PR automatically
-Needs review? --> opens GitHub issue
-```
-
 ## Requirements
 
 Just Claude Code. That's the only requirement.
-
-For autofix PRs: `gh` (GitHub CLI). For autofix code fixes: `claude` CLI.
 
 ## Links
 

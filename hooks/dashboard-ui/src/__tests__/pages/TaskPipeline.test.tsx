@@ -20,7 +20,7 @@ const sampleTasks = [
   {
     task_id: "task-20260405-002",
     created_at: "2026-04-05T08:00:00Z",
-    title: "Fix autofix pipeline",
+    title: "Fix deployment pipeline",
     stage: "EXECUTING",
     classification: { type: "bugfix", domains: ["core"], risk_level: "medium", notes: "" },
     project_path: "/home/hassam/dynos-work",
@@ -98,9 +98,9 @@ describe("Task Pipeline page", () => {
     });
 
     it("filters by title substring (case-insensitive)", () => {
-      const results = filterTasks(sampleTasks, "autofix");
+      const results = filterTasks(sampleTasks, "deployment");
       expect(results.length).toBe(1);
-      expect(results[0].title).toBe("Fix autofix pipeline");
+      expect(results[0].title).toBe("Fix deployment pipeline");
     });
 
     it("returns all tasks when search query is empty", () => {

@@ -52,9 +52,7 @@ That's it. Everything else is either supporting this loop or ceremony around it.
 - `dynoauto.py` — Schedules and runs benchmark challengers.
 - `dynobench.py` — Benchmark runner (fixture rollouts).
 - `dynofixture.py` — Syncs benchmark fixtures to disk.
-- `dynoproactive.py` (3,592 lines!) — Autofix scanner: debt detection, PR generation.
 - `dynoslib_qlearn.py` (442 lines) — Tabular Q-learning for repair loop decisions.
-- `dynoslib_templates.py` — Fix template caching.
 
 **Tier 4 — Visualization/Reporting (read-only consumers):**
 - `dynodashboard.py` (807 lines) — HTML dashboard.
@@ -73,7 +71,7 @@ That's it. Everything else is either supporting this loop or ceremony around it.
 - Various one-off scripts, CLI wrappers, route helpers.
 
 ### Skills: 21 total
-start, execute, audit, plan, investigate, repair, resume, status, evolve, learn, trajectory, maintain, autofix, local, global, dashboard, init, register, list, dry-run, founder.
+start, execute, audit, plan, investigate, repair, resume, status, evolve, learn, trajectory, maintain, local, global, dashboard, init, register, list, dry-run, founder.
 
 ### Daemon Cycle: 9 steps (sequential, any failure recorded but swallowed)
 1. `dynostrajectory.py rebuild` — Rebuild similarity store
@@ -126,15 +124,11 @@ Both read the same input (retrospectives). Both can create/modify agents. Both m
 
 9 sequential steps, most of which duplicate work done by the event bus. When a task completes, the event bus fires learn → evolve → patterns → postmortem → improve → benchmark → dashboard. Then the daemon runs on a timer and does the same things again. The daemon is a cron-style catch-up mechanism for when events are missed, but it runs the full pipeline every time.
 
-### 6. `dynoproactive.py` is 3,592 lines
-
-The autofix scanner is larger than the entire core pipeline. It handles debt detection, finding classification, PR generation, fix verification, rollback tracking, suppression management, confidence scoring, and more. It's a product unto itself grafted onto the learning system.
-
-### 7. Prevention rules are text, not structure
+### 6. Prevention rules are text, not structure
 
 Prevention rules are just strings appended to executor prompts: "Category 'sec' has 35 findings across tasks. Add extra scrutiny for sec-class issues." There's no structured enforcement, no measurement of whether they help, no feedback loop. They're aspirational comments, not a control mechanism.
 
-### 8. Markdown as a data format
+### 7. Markdown as a data format
 
 `dynopatterns.py` generates a 200+ line markdown file (`dynos_patterns.md`) with effectiveness tables, model policy, skip policy, and baseline data. `dynorouter.py` then parses this markdown back into structured data. The markdown exists for human readability but creates a fragile parse-serialize roundtrip.
 
@@ -233,23 +227,16 @@ Two stages instead of four. No intermediate events.
 
 **Why:** Currently 35 modules import `dynoslib_core` for one or two functions. After the split, each module imports only what it needs. Easier to test, easier to understand dependency flow.
 
-### Phase 6: Extract `dynoproactive.py`
+### Phase 6: Kill Markdown as Data Format
 
-**Goal:** The autofix scanner (3,592 lines) should be a separate, optional subsystem.
-
-- Move to `hooks/autofix/` subdirectory with its own module structure
-- Clear interface: `scan(root) → findings[]`, `fix(finding) → result`
-- The main system should not import from it; it subscribes to events independently
-- This is the biggest single file. It's a product, not a utility.
-
-### Phase 7: Kill Markdown as Data Format
+> Note: `dynoproactive.py` (the autofix scanner) has been extracted to a separate repo: [dynos-fit/autofix](https://github.com/dynos-fit/autofix).
 
 **Replace `dynos_patterns.md` with `dynos_patterns.json`:**
 - Structured JSON with effectiveness scores, model policy, skip policy
 - `dynorouter.py` reads JSON directly (no markdown parsing)
 - Human readability via `dynoreport.py` or the dashboard, not the data file itself
 
-### Phase 8: Rationalize Shared State
+### Phase 7: Rationalize Shared State
 
 **Current problem:** Multiple modules write to the same files (registry.json, policy.json, prevention-rules.json) without coordination.
 
@@ -324,8 +311,7 @@ Do this in order. Each phase is independently shippable:
 4. **Phase 2** (kill fake benchmarks) — Delete 6 files, move evaluation into learn
 5. **Phase 3** (simplify daemon) — Shrink from 9 to 3 steps
 6. **Phase 4** (kill Q-learning) — Delete 1 file, add win-rate tracking
-7. **Phase 6** (extract autofix) — Move to subdirectory, clean interface
-8. **Phase 8** (rationalize state) — Enforce single-writer rule
+7. **Phase 7** (rationalize state) — Enforce single-writer rule
 
 ---
 

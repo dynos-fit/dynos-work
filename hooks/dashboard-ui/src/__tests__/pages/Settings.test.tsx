@@ -18,18 +18,6 @@ const samplePolicy = {
   token_budget_multiplier: 1.0,
 };
 
-const sampleAutofixPolicy = {
-  max_prs_per_day: 10,
-  max_open_prs: 5,
-  cooldown_after_failures: 100,
-  allow_dependency_file_changes: false,
-  suppressions: [],
-  categories: {
-    "dead-code": { enabled: true, mode: "autofix", min_confidence_autofix: 0.8, confidence: 0.9, stats: {} },
-    "security": { enabled: true, mode: "issue-only", min_confidence_autofix: 0.7, confidence: 0.7, stats: {} },
-  },
-};
-
 const sampleRegistry = {
   projects: [
     { path: "/home/hassam/dynos-work", registered_at: "2026-01-01", last_active_at: "2026-04-06", status: "active" },
@@ -42,24 +30,18 @@ const sampleRegistry = {
 // ============================================================
 describe("Settings page", () => {
   describe("section rendering", () => {
-    it("renders 4 sections", () => {
+    it("renders 3 sections", () => {
       const sections = [
         { title: "TASK POLICY", borderColor: "#00E5FF" },
-        { title: "AUTOFIX POLICY", borderColor: "#7C4DFF" },
         { title: "REGISTERED PROJECTS", borderColor: "#00BFA5" },
         { title: "DAEMON CONTROLS", borderColor: "#00E5FF" },
       ];
-      expect(sections.length).toBe(4);
+      expect(sections.length).toBe(3);
     });
 
     it("TASK POLICY section has border-[#00E5FF]", () => {
       const borderColor = "#00E5FF";
       expect(borderColor).toBe("#00E5FF");
-    });
-
-    it("AUTOFIX POLICY section has border-[#7C4DFF]", () => {
-      const borderColor = "#7C4DFF";
-      expect(borderColor).toBe("#7C4DFF");
     });
 
     it("REGISTERED PROJECTS section has border-[#00BFA5]", () => {
@@ -77,13 +59,6 @@ describe("Settings page", () => {
       expect(samplePolicy.maintainer_poll_seconds).toBe(300);
       expect(samplePolicy.fast_track_skip_plan_audit).toBe(false);
       expect(samplePolicy.token_budget_multiplier).toBe(1.0);
-    });
-
-    it("Autofix Policy fields are pre-populated with current values", () => {
-      expect(sampleAutofixPolicy.max_prs_per_day).toBe(10);
-      expect(sampleAutofixPolicy.max_open_prs).toBe(5);
-      expect(sampleAutofixPolicy.cooldown_after_failures).toBe(100);
-      expect(sampleAutofixPolicy.allow_dependency_file_changes).toBe(false);
     });
 
     it("Task Policy has 7 editable fields", () => {
@@ -124,23 +99,6 @@ describe("Settings page", () => {
       );
     });
 
-    it("save autofix policy calls POST /api/autofix-policy", async () => {
-      const mockFetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ ok: true }),
-      });
-
-      const project = "/home/hassam/dynos-work";
-      const url = `/api/autofix-policy?project=${encodeURIComponent(project)}`;
-      const body = JSON.stringify(sampleAutofixPolicy);
-
-      await mockFetch(url, { method: "POST", body, headers: { "Content-Type": "application/json" } });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining("/api/autofix-policy"),
-        expect.objectContaining({ method: "POST" })
-      );
-    });
   });
 
   describe("toast notifications", () => {
@@ -254,17 +212,4 @@ describe("Settings page", () => {
     });
   });
 
-  describe("autofix policy per-category controls", () => {
-    it("renders per-category enabled toggles", () => {
-      const categories = Object.entries(sampleAutofixPolicy.categories);
-      expect(categories.length).toBe(2);
-      expect(categories[0][1].enabled).toBe(true);
-    });
-
-    it("renders per-category mode dropdown (autofix/issue-only)", () => {
-      const modes = Object.values(sampleAutofixPolicy.categories).map((c) => c.mode);
-      expect(modes).toContain("autofix");
-      expect(modes).toContain("issue-only");
-    });
-  });
 });

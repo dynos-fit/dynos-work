@@ -11,7 +11,6 @@ Register the current project and start the local maintenance daemon.
 
 ```
 /dynos-work:init
-/dynos-work:init --autofix
 ```
 
 ## What you do
@@ -33,9 +32,9 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomainta
 
 If `running` is `true` in the JSON output, print "Daemon already running" and stop.
 
-4. Start the daemon. If the user passed `--autofix` in the arguments, include the flag:
+4. Start the daemon:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root . [--autofix]
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root .
 ```
 
 5. Print the result:

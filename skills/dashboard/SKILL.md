@@ -45,5 +45,4 @@ The dashboard shows:
 - Global daemon status and aggregate stats
 - Per-project cards (click to expand full detail)
 - Active routes, recent tasks, benchmark runs, findings
-- Autofix PRs per project
 - Maintenance cycle history

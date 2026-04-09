@@ -625,65 +625,6 @@ export function dynosApi(): Plugin {
             return;
           }
 
-          // GET /api/findings (G)
-          if (pathname === "/api/findings") {
-            try {
-              if (isGlobal) {
-                const findings = collectFromAllProjects((pp) => {
-                  try {
-                    const data = readJsonFile(path.join(localDynosDir(pp), "proactive-findings.json")) as { findings: unknown[] };
-                    return (data.findings ?? []).map((f: unknown) => ({ ...(f as Record<string, unknown>), project_path: pp }));
-                  } catch {
-                    return [];
-                  }
-                });
-                jsonResponse(res, 200, findings);
-              } else {
-                const data = readJsonFile(path.join(localDynosDir(projectPath), "proactive-findings.json")) as { findings: unknown[] };
-                jsonResponse(res, 200, data.findings ?? []);
-              }
-            } catch (err) {
-              handleFsError(res, err);
-            }
-            return;
-          }
-
-          // GET /api/autofix-metrics (G)
-          if (pathname === "/api/autofix-metrics") {
-            try {
-              if (isGlobal) {
-                const allMetrics = collectFromAllProjects<Record<string, unknown>>((_, s) => {
-                  try {
-                    const data = readJsonFile(path.join(persistentDir(s), "autofix-metrics.json")) as Record<string, unknown>;
-                    return [data];
-                  } catch {
-                    return [];
-                  }
-                });
-                if (allMetrics.length === 0) {
-                  jsonResponse(res, 200, { totals: {} });
-                } else {
-                  const merged: Record<string, number> = {};
-                  for (const m of allMetrics) {
-                    const totals = (m.totals ?? {}) as Record<string, number>;
-                    for (const [key, val] of Object.entries(totals)) {
-                      if (typeof val === "number") {
-                        merged[key] = (merged[key] ?? 0) + val;
-                      }
-                    }
-                  }
-                  jsonResponse(res, 200, { totals: merged });
-                }
-              } else {
-                const data = readJsonFile(path.join(persistentDir(slug), "autofix-metrics.json"));
-                jsonResponse(res, 200, data);
-              }
-            } catch (err) {
-              handleFsError(res, err);
-            }
-            return;
-          }
-
           // GET /api/policy
           if (pathname === "/api/policy") {
             try {
@@ -717,16 +658,6 @@ export function dynosApi(): Plugin {
             return;
           }
 
-          // GET /api/autofix-policy
-          if (pathname === "/api/autofix-policy") {
-            try {
-              const data = readJsonFile(path.join(persistentDir(slug), "autofix-policy.json"));
-              jsonResponse(res, 200, data);
-            } catch (err) {
-              handleFsError(res, err);
-            }
-            return;
-          }
 
           // GET /api/skip-policy
           if (pathname === "/api/skip-policy") {
@@ -1396,10 +1327,6 @@ export function dynosApi(): Plugin {
                 { running: false } as Record<string, unknown>,
               );
 
-              const autofixEnabled = fs.existsSync(
-                path.join(localDynosDir(projectPath), "maintenance", "autofix.enabled"),
-              );
-
               const queue = readJsonFileOrDefault(
                 path.join(localDynosDir(projectPath), "automation", "queue.json"),
                 { version: 0, updated_at: "", items: [] } as Record<string, unknown>,
@@ -1557,7 +1484,6 @@ export function dynosApi(): Plugin {
 
               jsonResponse(res, 200, {
                 maintainer,
-                autofix_enabled: autofixEnabled,
                 queue,
                 automation_status: automationStatus,
                 agents,
@@ -1587,21 +1513,6 @@ export function dynosApi(): Plugin {
             parseBody(req).then((body) => {
               try {
                 atomicWriteJson(path.join(persistentDir(slug), "policy.json"), body);
-                jsonResponse(res, 200, { ok: true });
-              } catch (err) {
-                handleFsError(res, err);
-              }
-            }).catch(() => {
-              jsonResponse(res, 400, { error: "Invalid JSON body" });
-            });
-            return;
-          }
-
-          // POST /api/autofix-policy
-          if (pathname === "/api/autofix-policy") {
-            parseBody(req).then((body) => {
-              try {
-                atomicWriteJson(path.join(persistentDir(slug), "autofix-policy.json"), body);
                 jsonResponse(res, 200, { ok: true });
               } catch (err) {
                 handleFsError(res, err);

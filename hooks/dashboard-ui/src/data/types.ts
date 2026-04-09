@@ -125,86 +125,6 @@ export interface LearnedAgent {
   project_path?: string;
 }
 
-// ---- Proactive / Autofix ----
-
-export interface ProactiveFinding {
-  finding_id: string;
-  severity: string;
-  category: string;
-  description: string;
-  evidence: Record<string, unknown>;
-  status: string;
-  found_at: string;
-  processed_at: string | null;
-  attempt_count: number;
-  pr_number?: number;
-  issue_number?: number;
-  suppressed_until?: string;
-  fail_reason?: string;
-  pr_state?: string;
-  pr_url?: string;
-  merge_outcome?: string;
-  merged_at?: string;
-  issue_url?: string;
-  suppression_reason?: string;
-  fixability?: string;
-  confidence_score?: number;
-  rollout_mode?: string;
-  verification?: Record<string, unknown>;
-  branch_name?: string;
-  pr_quality_score?: number;
-}
-
-export interface AutofixCategoryStats {
-  mode: string;
-  enabled: boolean;
-  confidence: number;
-  merged: number;
-  closed_unmerged: number;
-  reverted: number;
-  issues_opened: number;
-  verification_failed: number;
-}
-
-export interface AutofixRateLimits {
-  prs_today: number;
-  max_prs_per_day: number;
-  open_prs: number;
-  max_open_prs: number;
-}
-
-export interface AutofixTotals {
-  findings: number;
-  open_prs: number;
-  prs_today: number;
-  recent_failures: number;
-  suppression_count: number;
-  merged: number;
-  closed_unmerged: number;
-  reverted: number;
-  issues_opened: number;
-}
-
-export interface RecentPR {
-  finding_id: string;
-  category: string;
-  number: number | null;
-  state: string;
-  merge_outcome: string;
-  title: string;
-  created_at: string | null;
-  url: string | null;
-  branch: string | null;
-}
-
-export interface AutofixMetrics {
-  generated_at: string;
-  totals: AutofixTotals;
-  rate_limits: AutofixRateLimits;
-  categories: Record<string, AutofixCategoryStats>;
-  recent_prs: RecentPR[];
-}
-
 // ---- Policy / Settings ----
 
 export interface PolicyConfig {
@@ -215,23 +135,6 @@ export interface PolicyConfig {
   maintainer_poll_seconds: number;
   fast_track_skip_plan_audit: boolean;
   token_budget_multiplier: number;
-}
-
-export interface AutofixCategoryConfig {
-  enabled: boolean;
-  mode: string;
-  min_confidence_autofix?: number;
-  confidence?: number;
-  stats?: Record<string, unknown>;
-}
-
-export interface AutofixPolicyConfig {
-  max_prs_per_day: number;
-  max_open_prs: number;
-  cooldown_after_failures: number;
-  allow_dependency_file_changes: boolean;
-  suppressions?: Record<string, unknown>;
-  categories: Record<string, AutofixCategoryConfig>;
 }
 
 // ---- Project Registry ----
@@ -486,7 +389,6 @@ export interface AttentionItem {
 
 export interface ControlPlaneData {
   maintainer: MaintainerStatus;
-  autofix_enabled: boolean;
   queue: { version: number; updated_at: string; items: Array<Record<string, unknown>> };
   automation_status: { updated_at: string; queued_before: number; executed: number; pending_after: number };
   agents: LearnedAgent[];

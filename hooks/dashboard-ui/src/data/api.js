@@ -21,12 +21,6 @@ export async function savePolicy(project, data) {
     return postJson(apiUrl("policy", project), data);
 }
 /**
- * Save the autofix policy configuration for a project.
- */
-export async function saveAutofixPolicy(project, data) {
-    return postJson(apiUrl("autofix-policy", project), data);
-}
-/**
  * Trigger a daemon action (start, stop, run-once, etc.) for a project.
  */
 export async function daemonAction(project, action, taskDir) {

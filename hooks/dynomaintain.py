@@ -7,7 +7,6 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 import argparse
 import fcntl
 import json
-import os
 import subprocess
 import sys
 import time
@@ -131,56 +130,9 @@ def maintenance_cycle(root: Path) -> dict:
         lock_fd.close()
 
 
-def _autofix_flag_path(root: Path) -> Path:
-    return maintenance_dir(root) / "autofix.enabled"
-
-
-def _is_autofix_enabled(root: Path) -> bool:
-    return _autofix_flag_path(root).exists()
-
-
-def _run_autofix(root: Path) -> dict:
-    """Run the autofix scan via the autofix package."""
-    # Ensure the repo root (where autofix/ lives) is on PYTHONPATH
-    repo_root = str(Path(__file__).resolve().parent.parent)
-    env = {**os.environ, "PYTHONPATH": f"{repo_root}:{os.environ.get('PYTHONPATH', '')}"}
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "autofix", "scan", "--root", str(root)],
-            capture_output=True, text=True, timeout=1800, env=env,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            try:
-                return json.loads(result.stdout)
-            except json.JSONDecodeError:
-                return {
-                    "autofix": "completed",
-                    "returncode": result.returncode,
-                    "stdout_preview": result.stdout[:500],
-                    "parse_error": "stdout was not valid JSON",
-                }
-        return {
-            "autofix": "completed",
-            "returncode": result.returncode,
-            "stderr_preview": (result.stderr or "")[:500],
-            "stdout_preview": (result.stdout or "")[:500],
-        }
-    except subprocess.TimeoutExpired as exc:
-        return {
-            "autofix": "timeout",
-            "timeout_seconds": 1800,
-            "stderr_preview": (exc.stderr or "")[:500] if exc.stderr else "",
-        }
-    except OSError as exc:
-        return {"autofix": "error", "error": str(exc), "errno": getattr(exc, "errno", None)}
-
-
 def cmd_run_once(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     result = maintenance_cycle(root)
-    autofix = getattr(args, "autofix", False)
-    if autofix or _is_autofix_enabled(root):
-        result["autofix"] = _run_autofix(root)
     print(json.dumps(result, indent=2))
     return 0
 
@@ -199,7 +151,6 @@ def cmd_status(args: argparse.Namespace) -> int:
             payload = {"running": False, "pid": None}
     payload["running"] = False
     payload["pid"] = None
-    payload["autofix"] = _is_autofix_enabled(root)
     # Summarize recent cycle history
     lp = log_path(root)
     if lp.exists():
@@ -249,7 +200,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_once = subparsers.add_parser("run-once", help="Run one maintenance cycle")
     run_once.add_argument("--root", default=".")
-    run_once.add_argument("--autofix", action="store_true", help="Also run AI autofix scan after data pipeline (scans for debt, opens PRs)")
     run_once.set_defaults(func=cmd_run_once)
 
     invoke = subparsers.add_parser("invoke", help="Manual maintainer trigger for one maintenance cycle")

@@ -18,7 +18,6 @@ import {
 import { usePollingData } from "@/data/hooks";
 import { useProject } from "@/data/ProjectContext";
 import type {
-  AutofixMetrics,
   RepoProjectStats,
   RepoReport,
   RepoState,
@@ -42,8 +41,6 @@ interface HealthResult {
 const HEALTH_ENDPOINTS = [
   "/api/tasks",
   "/api/agents",
-  "/api/findings",
-  "/api/autofix-metrics",
   "/api/report",
   "/api/project-stats",
 ] as const;
@@ -317,7 +314,6 @@ export default function Dashboard() {
   const tasks = usePollingData<TaskManifest[]>("/api/tasks");
   const retros = usePollingData<TaskRetrospective[]>("/api/retrospectives");
   const agents = usePollingData<Array<{ route_allowed?: boolean; status?: string; last_benchmarked_task_offset?: number }>>("/api/agents");
-  const autofix = usePollingData<AutofixMetrics>("/api/autofix-metrics");
   const report = usePollingData<RepoReport>("/api/report");
   const stats = usePollingData<RepoProjectStats>("/api/project-stats");
   const state = usePollingData<RepoState>("/api/state");
@@ -347,8 +343,8 @@ export default function Dashboard() {
   const logUrl = mostRecentTask ? `/api/tasks/${mostRecentTask.task_id}/execution-log` : "";
   const execLog = usePollingData<ExecutionLogResponse>(logUrl || "/api/tasks/__none__/execution-log", logUrl ? 5000 : 999999);
 
-  const isLoading = tasks.loading || retros.loading || agents.loading || autofix.loading || report.loading || stats.loading;
-  const fatalError = tasks.error ?? retros.error ?? agents.error ?? autofix.error ?? report.error ?? stats.error;
+  const isLoading = tasks.loading || retros.loading || agents.loading || report.loading || stats.loading;
+  const fatalError = tasks.error ?? retros.error ?? agents.error ?? report.error ?? stats.error;
 
   const activeTaskCount = useMemo(() => (tasks.data ?? []).filter((task) => task.stage !== "DONE").length, [tasks.data]);
   const completedTaskCount = useMemo(() => (tasks.data ?? []).filter((task) => task.stage === "DONE").length, [tasks.data]);
@@ -358,7 +354,6 @@ export default function Dashboard() {
     [agents.data],
   );
   const daemonActive = isDaemonActive(execLog.data?.lines ?? []);
-  const autofixRateLimits = autofix.data?.rate_limits;
   const avgQuality = stats.data?.average_quality_score
     ?? ((retros.data?.length ?? 0) > 0
       ? (retros.data ?? []).reduce((sum, retro) => sum + retro.quality_score, 0) / (retros.data?.length ?? 1)
@@ -382,12 +377,6 @@ export default function Dashboard() {
       value: routeableAgentCount,
       icon: GitBranch,
       color: "#B47AFF",
-    },
-    {
-      label: "Autofix Findings",
-      value: autofix.data?.totals.findings ?? 0,
-      icon: Shield,
-      color: "#FF9F43",
     },
     {
       label: "Avg Quality",
@@ -460,7 +449,7 @@ export default function Dashboard() {
     [state.data],
   );
 
-  if (isLoading && !tasks.data && !retros.data && !agents.data && !autofix.data && !report.data) {
+  if (isLoading && !tasks.data && !retros.data && !agents.data && !report.data) {
     return (
       <div className="p-6 space-y-6">
         <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
@@ -494,7 +483,6 @@ export default function Dashboard() {
                 tasks.refetch();
                 retros.refetch();
                 agents.refetch();
-                autofix.refetch();
                 report.refetch();
                 stats.refetch();
                 state.refetch();
@@ -522,7 +510,7 @@ export default function Dashboard() {
               Command Center
             </h1>
             <p className="text-sm font-mono text-slate-400 mt-3 max-w-3xl leading-relaxed">
-              Current task throughput, learned-system posture, autofix pressure, and repo health in one place.
+              Current task throughput, learned-system posture, and repo health in one place.
             </p>
           </div>
           <div className="rounded-2xl border border-white/6 bg-black/20 px-4 py-3 min-w-[240px]">
@@ -567,10 +555,6 @@ export default function Dashboard() {
             <div className="flex items-center justify-between border-b border-white/5 pb-2">
               <span className="text-slate-500 uppercase tracking-wider">Daemon</span>
               <span className={daemonActive ? "text-[#2DD4A8]" : "text-[#FF9F43]"}>{daemonActive ? "ACTIVE" : "IDLE"}</span>
-            </div>
-            <div className="flex items-center justify-between border-b border-white/5 pb-2">
-              <span className="text-slate-500 uppercase tracking-wider">Last Autofix Scan</span>
-              <span className="text-slate-300">{formatTimestamp(autofix.data?.generated_at)}</span>
             </div>
             <div className="flex items-center justify-between border-b border-white/5 pb-2">
               <span className="text-slate-500 uppercase tracking-wider">Learned Components</span>
@@ -691,30 +675,6 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         <HealthCheckCard />
-        <ChartCard title="Autofix Pressure" subtitle="Current rate limits and live autofix pressure indicators.">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Open PRs</div>
-              <div className="text-xl font-mono text-slate-200 mt-2">
-                {autofixRateLimits ? `${autofixRateLimits.open_prs}/${autofixRateLimits.max_open_prs}` : "--"}
-              </div>
-            </div>
-            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider">PRs Today</div>
-              <div className="text-xl font-mono text-slate-200 mt-2">
-                {autofixRateLimits ? `${autofixRateLimits.prs_today}/${autofixRateLimits.max_prs_per_day}` : "--"}
-              </div>
-            </div>
-            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Recent Failures</div>
-              <div className="text-xl font-mono text-slate-200 mt-2">{autofix.data?.totals.recent_failures ?? "--"}</div>
-            </div>
-            <div className="rounded-xl border border-white/6 bg-black/20 p-4">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider">Suppressions</div>
-              <div className="text-xl font-mono text-slate-200 mt-2">{autofix.data?.totals.suppression_count ?? "--"}</div>
-            </div>
-          </div>
-        </ChartCard>
       </div>
     </div>
   );

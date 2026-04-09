@@ -4,7 +4,7 @@
  * appending ?project=<project> to the URL.
  */
 
-import type { PolicyConfig, AutofixPolicyConfig } from "./types";
+import type { PolicyConfig } from "./types";
 
 interface SaveResponse {
   ok: boolean;
@@ -37,16 +37,6 @@ export async function savePolicy(
   data: PolicyConfig,
 ): Promise<SaveResponse> {
   return postJson<SaveResponse>(apiUrl("policy", project), data);
-}
-
-/**
- * Save the autofix policy configuration for a project.
- */
-export async function saveAutofixPolicy(
-  project: string,
-  data: AutofixPolicyConfig,
-): Promise<SaveResponse> {
-  return postJson<SaveResponse>(apiUrl("autofix-policy", project), data);
 }
 
 /**

@@ -14,12 +14,10 @@ import { usePollingData } from "@/data/hooks";
 import { useProject } from "@/data/ProjectContext";
 import {
   savePolicy,
-  saveAutofixPolicy,
   daemonAction,
 } from "@/data/api";
 import type {
   PolicyConfig,
-  AutofixPolicyConfig,
   ProjectRegistry,
   TaskManifest,
 } from "@/data/types";
@@ -62,13 +60,6 @@ function validatePolicyField(key: keyof PolicyConfig, value: unknown): string | 
       if (value <= 0) return VALIDATION_MESSAGES.MUST_BE_GREATER_THAN_ZERO;
       return null;
     }
-    if (value < 0) return VALIDATION_MESSAGES.MUST_BE_POSITIVE;
-  }
-  return null;
-}
-
-function validateAutofixField(key: keyof AutofixPolicyConfig, value: unknown): string | null {
-  if (typeof value === "number") {
     if (value < 0) return VALIDATION_MESSAGES.MUST_BE_POSITIVE;
   }
   return null;
@@ -539,13 +530,6 @@ export default function Settings() {
   } = usePollingData<PolicyConfig>("/api/policy", 10000);
 
   const {
-    data: autofixData,
-    loading: autofixLoading,
-    error: autofixError,
-    refetch: refetchAutofix,
-  } = usePollingData<AutofixPolicyConfig>("/api/autofix-policy", 10000);
-
-  const {
     data: registryData,
     loading: registryLoading,
     error: registryError,
@@ -617,82 +601,6 @@ export default function Settings() {
   const policyDiffs = useMemo(
     () => computeDiff(policyData as Record<string, unknown> | null, policy as Record<string, unknown> | null),
     [policyData, policy],
-  );
-
-  // ---- Autofix Policy local state ----
-  const [autofix, setAutofix] = useState<AutofixPolicyConfig | null>(null);
-  const [autofixSaving, setAutofixSaving] = useState(false);
-  const [autofixErrors, setAutofixErrors] = useState<ValidationErrors>({});
-  const [showAutofixDiff, setShowAutofixDiff] = useState(false);
-
-  useEffect(() => {
-    if (autofixData) setAutofix({ ...autofixData });
-  }, [autofixData]);
-
-  const updateAutofix = useCallback(
-    <K extends keyof AutofixPolicyConfig>(
-      key: K,
-      value: AutofixPolicyConfig[K],
-    ) => {
-      setAutofix((prev) => (prev ? { ...prev, [key]: value } : prev));
-      const error = validateAutofixField(key, value);
-      setAutofixErrors((prev) => ({ ...prev, [key]: error }));
-    },
-    [],
-  );
-
-  const updateCategory = useCallback(
-    (cat: string, field: string, value: boolean | string) => {
-      setAutofix((prev) => {
-        if (!prev) return prev;
-        const existing = prev.categories[cat] ?? {
-          enabled: false,
-          mode: "issue-only",
-        };
-        return {
-          ...prev,
-          categories: {
-            ...prev.categories,
-            [cat]: { ...existing, [field]: value },
-          },
-        };
-      });
-    },
-    [],
-  );
-
-  const handleSaveAutofixClick = useCallback(() => {
-    if (!autofix || isGlobal) return;
-    if (hasValidationErrors(autofixErrors)) {
-      toast.error("Fix validation errors before saving.");
-      return;
-    }
-    setShowAutofixDiff(true);
-  }, [autofix, isGlobal, autofixErrors]);
-
-  const handleConfirmSaveAutofix = useCallback(async () => {
-    if (!autofix || isGlobal) return;
-    setAutofixSaving(true);
-    try {
-      const res = await saveAutofixPolicy(selectedProject, autofix);
-      if (res.ok) {
-        toast.success("Policy saved");
-        setShowAutofixDiff(false);
-      } else {
-        toast.error("Save failed: unexpected response");
-      }
-    } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : "Unknown error";
-      toast.error(`Save failed: ${message}`);
-    } finally {
-      setAutofixSaving(false);
-    }
-  }, [autofix, selectedProject, isGlobal]);
-
-  const autofixDiffs = useMemo(
-    () => computeDiff(autofixData as Record<string, unknown> | null, autofix as Record<string, unknown> | null),
-    [autofixData, autofix],
   );
 
   // ---- Daemon Controls state ----
@@ -823,110 +731,6 @@ export default function Settings() {
           ) : (
             <p className="text-slate-500 font-mono text-xs py-4">
               No policy data available. Ensure the daemon is running.
-            </p>
-          )}
-        </Section>
-
-        {/* ================================================================
-            Section 2: AUTOFIX POLICY
-           ================================================================ */}
-        <Section title="AUTOFIX POLICY" color="#B47AFF" delay={2} corner="right-0" side="r">
-          {autofixLoading ? (
-            <SectionSkeleton rows={5} />
-          ) : autofixError && !autofix ? (
-            <SectionError message={autofixError} onRetry={refetchAutofix} />
-          ) : autofix ? (
-            <div className="space-y-4">
-              <NumberField
-                label="MAX_PRS_PER_DAY"
-                value={autofix.max_prs_per_day}
-                onChange={(v) => updateAutofix("max_prs_per_day", v)}
-                min={0}
-                ariaLabel="Maximum PRs per day"
-                error={autofixErrors.max_prs_per_day}
-              />
-              <NumberField
-                label="MAX_OPEN_PRS"
-                value={autofix.max_open_prs}
-                onChange={(v) => updateAutofix("max_open_prs", v)}
-                min={0}
-                ariaLabel="Maximum open PRs"
-                error={autofixErrors.max_open_prs}
-              />
-              <NumberField
-                label="COOLDOWN_AFTER_FAILURES"
-                value={autofix.cooldown_after_failures}
-                onChange={(v) => updateAutofix("cooldown_after_failures", v)}
-                min={0}
-                ariaLabel="Cooldown after failures"
-                error={autofixErrors.cooldown_after_failures}
-              />
-              <ToggleField
-                label="ALLOW_DEPENDENCY_FILE_CHANGES"
-                checked={autofix.allow_dependency_file_changes}
-                onChange={(v) => updateAutofix("allow_dependency_file_changes", v)}
-                ariaLabel="Allow dependency file changes toggle"
-              />
-
-              {/* Per-category controls */}
-              {Object.keys(autofix.categories).length > 0 && (
-                <div className="mt-6">
-                  <h3 className="text-slate-500 font-mono text-xs tracking-wider mb-4 border-b border-white/5 pb-2">
-                    CATEGORY CONTROLS
-                  </h3>
-                  <div className="space-y-4">
-                    {Object.entries(autofix.categories).map(
-                      ([category, config]) => (
-                        <div
-                          key={category}
-                          className="flex items-center gap-4 py-2 border-b border-white/5 last:border-b-0"
-                        >
-                          <span
-                            className="text-slate-300 font-mono text-xs flex-1 min-w-0 truncate"
-                            title={category}
-                          >
-                            {category}
-                          </span>
-                          <Switch
-                            checked={config.enabled}
-                            onCheckedChange={(v) =>
-                              updateCategory(category, "enabled", v)
-                            }
-                            aria-label={`Enable ${category}`}
-                          />
-                          <select
-                            value={config.mode}
-                            onChange={(e) =>
-                              updateCategory(category, "mode", e.target.value)
-                            }
-                            className="bg-black/40 border border-white/10 text-slate-200 font-mono text-xs p-2 focus:outline-none focus:border-[#B47AFF] transition-colors"
-                            aria-label={`Mode for ${category}`}
-                          >
-                            <option value="autofix">autofix</option>
-                            <option value="issue-only">issue-only</option>
-                          </select>
-                        </div>
-                      ),
-                    )}
-                  </div>
-                </div>
-              )}
-
-              <div className="flex justify-end pt-4">
-                <button
-                  onClick={handleSaveAutofixClick}
-                  disabled={isGlobal || autofixSaving || hasValidationErrors(autofixErrors)}
-                  className={SAVE_BUTTON_CLASS}
-                  aria-label="Save autofix policy"
-                >
-                  <Save className="w-4 h-4" aria-hidden="true" />
-                  {autofixSaving ? "SAVING..." : "SAVE AUTOFIX POLICY"}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <p className="text-slate-500 font-mono text-xs py-4">
-              No autofix policy data available. Ensure the daemon is running.
             </p>
           )}
         </Section>
@@ -1070,15 +874,6 @@ export default function Settings() {
           onConfirm={handleConfirmSavePolicy}
           onCancel={() => setShowPolicyDiff(false)}
           saving={policySaving}
-        />
-      )}
-      {showAutofixDiff && (
-        <DiffPreviewPanel
-          title="AUTOFIX POLICY"
-          diffs={autofixDiffs}
-          onConfirm={handleConfirmSaveAutofix}
-          onCancel={() => setShowAutofixDiff(false)}
-          saving={autofixSaving}
         />
       )}
     </div>

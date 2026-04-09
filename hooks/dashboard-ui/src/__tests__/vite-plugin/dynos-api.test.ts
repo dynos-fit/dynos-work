@@ -75,18 +75,6 @@ const sampleAgents = {
   ],
 };
 
-const sampleFindings = {
-  findings: [
-    { finding_id: "f-001", severity: "medium", category: "bug", status: "pending" },
-  ],
-};
-
-const sampleMetrics = {
-  generated_at: "2026-04-06T00:00:00Z",
-  totals: { findings: 10, open_prs: 2, merged: 5, recent_failures: 1, prs_today: 1, suppression_count: 0, closed_unmerged: 1, reverted: 0, issues_opened: 3 },
-  categories: {},
-};
-
 const samplePolicy = {
   freshness_task_window: 5,
   maintainer_autostart: true,
@@ -312,46 +300,6 @@ describe("GET /api/agents", () => {
 });
 
 // ============================================================
-// Test Suite: GET /api/findings
-// ============================================================
-describe("GET /api/findings", () => {
-  it("returns findings array from proactive-findings.json", () => {
-    setupFilesystem({
-      [REGISTRY_PATH]: sampleRegistry,
-      [`${PROJECT_PATH}/.dynos/proactive-findings.json`]: sampleFindings,
-    });
-
-    const data = JSON.parse(
-      (fs.readFileSync as ReturnType<typeof vi.fn>)(
-        `${PROJECT_PATH}/.dynos/proactive-findings.json`
-      )
-    );
-    expect(data.findings).toBeInstanceOf(Array);
-    expect(data.findings[0]).toHaveProperty("finding_id", "f-001");
-  });
-});
-
-// ============================================================
-// Test Suite: GET /api/autofix-metrics
-// ============================================================
-describe("GET /api/autofix-metrics", () => {
-  it("returns metrics object with totals", () => {
-    setupFilesystem({
-      [REGISTRY_PATH]: sampleRegistry,
-      [`${PERSISTENT_DIR}/autofix-metrics.json`]: sampleMetrics,
-    });
-
-    const data = JSON.parse(
-      (fs.readFileSync as ReturnType<typeof vi.fn>)(`${PERSISTENT_DIR}/autofix-metrics.json`)
-    );
-    expect(data).toHaveProperty("totals");
-    expect(data.totals).toHaveProperty("findings", 10);
-    expect(data.totals).toHaveProperty("merged", 5);
-    expect(data).toHaveProperty("generated_at");
-  });
-});
-
-// ============================================================
 // Test Suite: GET /api/policy
 // ============================================================
 describe("GET /api/policy", () => {
@@ -432,18 +380,6 @@ describe("POST /api/policy", () => {
     // Expected: 400 status with error message
     const errorResp = { error: "Global mode not supported for this endpoint" };
     expect(errorResp).toHaveProperty("error");
-  });
-});
-
-// ============================================================
-// Test Suite: POST /api/autofix-policy
-// ============================================================
-describe("POST /api/autofix-policy", () => {
-  it("writes valid JSON body to autofix-policy.json", () => {
-    const body = JSON.stringify({ max_prs_per_day: 5 });
-    expect(() => JSON.parse(body)).not.toThrow();
-    const response = { ok: true };
-    expect(response).toEqual({ ok: true });
   });
 });
 

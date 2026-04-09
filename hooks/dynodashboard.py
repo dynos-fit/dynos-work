@@ -349,7 +349,6 @@ def build_control_plane(project_path: str, slug: str) -> dict:
     pdir = persistent_dir(slug)
 
     maintainer = read_json_or_default(ld / "maintenance" / "status.json", {"running": False})
-    autofix_enabled = (ld / "maintenance" / "autofix.enabled").exists()
     queue = read_json_or_default(ld / "automation" / "queue.json",
                                  {"version": 0, "updated_at": "", "items": []})
     automation_status = read_json_or_default(ld / "automation" / "status.json",
@@ -477,7 +476,6 @@ def build_control_plane(project_path: str, slug: str) -> dict:
 
     return {
         "maintainer": maintainer,
-        "autofix_enabled": autofix_enabled,
         "queue": queue,
         "automation_status": automation_status,
         "agents": agents,
@@ -674,14 +672,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._api_agents(project_path, slug, is_global)
                 return
 
-            if pathname == "/api/findings":
-                self._api_findings(project_path, is_global)
-                return
-
-            if pathname == "/api/autofix-metrics":
-                self._api_autofix_metrics(slug, is_global)
-                return
-
             if pathname == "/api/policy":
                 self._api_policy_file(slug, "policy.json")
                 return
@@ -696,10 +686,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
             if pathname == "/api/skip-policy":
                 self._api_policy_file(slug, "skip-policy.json")
-                return
-
-            if pathname == "/api/autofix-policy":
-                self._api_policy_file(slug, "autofix-policy.json")
                 return
 
             if pathname == "/api/registry":
@@ -1040,47 +1026,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return []
 
-    def _api_findings(self, project_path: str, is_global: bool) -> None:
-        if is_global:
-            findings = collect_from_all_projects(lambda pp, _s: self._collect_findings(pp))
-            self._json_response(200, findings)
-        else:
-            data = read_json_file(local_dynos_dir(project_path) / "proactive-findings.json")
-            self._json_response(200, data.get("findings", []) if isinstance(data, dict) else [])
-
-    def _collect_findings(self, project_path: str) -> list[dict]:
-        try:
-            data = read_json_file(local_dynos_dir(project_path) / "proactive-findings.json")
-            findings = data.get("findings", []) if isinstance(data, dict) else []
-            return [{**f, "project_path": project_path} for f in findings if isinstance(f, dict)]
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return []
-
-    def _api_autofix_metrics(self, slug: str, is_global: bool) -> None:
-        if is_global:
-            all_metrics = collect_from_all_projects(lambda _pp, s: self._collect_autofix_metrics(s))
-            if not all_metrics:
-                self._json_response(200, {"totals": {}})
-            else:
-                merged: dict[str, float] = {}
-                for m in all_metrics:
-                    totals = m.get("totals", {}) if isinstance(m, dict) else {}
-                    if isinstance(totals, dict):
-                        for key, val in totals.items():
-                            if isinstance(val, (int, float)):
-                                merged[key] = merged.get(key, 0) + val
-                self._json_response(200, {"totals": merged})
-        else:
-            data = read_json_file(persistent_dir(slug) / "autofix-metrics.json")
-            self._json_response(200, data)
-
-    def _collect_autofix_metrics(self, slug: str) -> list[dict]:
-        try:
-            data = read_json_file(persistent_dir(slug) / "autofix-metrics.json")
-            return [data] if isinstance(data, dict) else []
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return []
-
     def _api_policy_file(self, slug: str, filename: str) -> None:
         data = read_json_file(persistent_dir(slug) / filename)
         self._json_response(200, data)
@@ -1234,10 +1179,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         if pathname == "/api/policy":
             self._write_policy(slug, "policy.json", body)
-            return
-
-        if pathname == "/api/autofix-policy":
-            self._write_policy(slug, "autofix-policy.json", body)
             return
 
         self._json_response(404, {"error": "Unknown API endpoint"})

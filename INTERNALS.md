@@ -100,19 +100,10 @@ There are more advanced skills in the repo, but the system is supposed to use it
 │        │                                                        │
 │        ▼                                                        │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │              AUTOFIX (optional, --autofix)              │   │
-│   │                                                         │   │
-│   │   scan codebase ─→ detect debt ─→ route by severity     │   │
-│   │                                                         │   │
-│   │   low/medium: worktree ─→ claude fix ─→ open PR         │   │
-│   │   high/critical: open GitHub issue for human review     │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐   │
 │   │              DASHBOARD (dynos dashboard)                │   │
 │   │                                                         │   │
 │   │   All projects in one page. Quality trends, routes,     │   │
-│   │   benchmarks, findings, daemon health, autofix PRs.     │   │
+│   │   benchmarks, findings, daemon health.                  │   │
 │   │   Click any project card for full detail.               │   │
 │   └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
@@ -383,14 +374,12 @@ All commands go through `dynos`.
 
 ```bash
 dynos init                        # register project + start daemon
-dynos init --autofix              # with autofix enabled
 ```
 
 ### Project
 
 ```bash
 dynos local start                 # start project daemon
-dynos local start --autofix       # start with autofix
 dynos local stop                  # stop daemon
 dynos local status                # show daemon status
 dynos local logs                  # cycle history
@@ -415,27 +404,6 @@ dynos dashboard                   # start global dashboard server
 dynos dashboard stop              # stop server
 dynos dashboard restart           # restart server
 ```
-
-### Autofix
-
-```bash
-dynos autofix scan                # scan all registered projects
-dynos autofix scan /path          # scan one project (must be registered)
-dynos autofix list                # show findings
-dynos autofix clear               # reset findings
-```
-
-What it scans:
-- Recurring audit findings from retrospectives
-- Dependency vulnerabilities (pip-audit / npm audit)
-- Dead code (unused imports, unreferenced functions)
-- Architectural drift against learned patterns
-
-What it does with findings:
-- Low/medium: creates git worktree, invokes Claude to fix, opens PR
-- High/critical: opens GitHub issue for human review
-- Deduplicates against previous findings
-- Max 2 attempts per finding, then permanently suppressed
 
 ### Projects
 
@@ -482,14 +450,14 @@ That's it. You get the full task pipeline:
 
 No CLI, no daemons, no setup. Just slash commands in Claude Code.
 
-### Power users: CLI + daemons + dashboard + autofix
+### Power users: CLI + daemons + dashboard
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/dynos-fit/dynos-work/main/install.sh | bash
 source ~/.bashrc
 ```
 
-This gives you the `dynos` CLI with everything: project daemons, global dashboard, autofix scanner, and all internal tools. See the [CLI](#cli) section above.
+This gives you the `dynos` CLI with everything: project daemons, global dashboard, and all internal tools. See the [CLI](#cli) section above.
 
 Or clone and install:
 
@@ -513,7 +481,7 @@ Uses your local repo directly. Changes take effect immediately. Runs tests on se
 
 - **Plugin only:** Claude Code
 - **CLI install:** git, python3
-- **Recommended:** `gh` (GitHub CLI, for autofix PRs/issues), `claude` (Claude CLI, for autofix code changes)
+- **Recommended:** `gh` (GitHub CLI, for PR creation)
 - **Optional:** `pip-audit` (dependency vulnerability scanning), `npm` (JS dependency scanning)
 
 ## Philosophy

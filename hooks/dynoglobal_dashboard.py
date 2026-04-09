@@ -71,28 +71,7 @@ def gather_project_data(project_path: Path) -> dict:
         "payload": payload,
         "stats": stats,
         "quality_scores": quality_scores,
-        "autofix_state": _gather_autofix_state(project_path),
     }
-
-
-def _gather_autofix_state(project_root: Path) -> dict:
-    state = {
-        "metrics": {},
-        "benchmarks": {},
-    }
-    persistent = _persistent_project_dir(project_root)
-    metrics_path = persistent / "autofix-metrics.json"
-    benchmarks_path = persistent / "autofix-benchmarks.json"
-    for key, path in (("metrics", metrics_path), ("benchmarks", benchmarks_path)):
-        if not path.exists():
-            continue
-        try:
-            data = json.loads(path.read_text())
-            if isinstance(data, dict):
-                state[key] = data
-        except (json.JSONDecodeError, OSError):
-            continue
-    return state
 
 
 def _extract_quality_scores(project_path: Path) -> list[float]:
@@ -221,7 +200,6 @@ def gather_all_projects() -> dict:
         "last_cycle_at": "",
         "payload": {},
         "retrospectives": [],
-        "autofix_state": {"metrics": {}, "benchmarks": {}},
     }
 
     for entry in projects_list:
@@ -264,7 +242,6 @@ def gather_all_projects() -> dict:
             sparkline_svg = build_sparkline_svg(quality_scores, width=400, height=60)
             health = derive_health_tag(data)
             maintenance = _gather_maintenance_data(proj_path)
-            autofix_cost = _gather_autofix_cost(proj_path)
 
             active_projects.append({
                 "name": name,
@@ -280,10 +257,8 @@ def gather_all_projects() -> dict:
                 "last_cycle_at": payload.get("generated_at", ""),
                 "daemon_running": _check_project_daemon(proj_path),
                 "maintenance": maintenance,
-                "autofix_cost": autofix_cost,
                 "payload": payload,
                 "retrospectives": retrospectives,
-                "autofix_state": data.get("autofix_state", {"metrics": {}, "benchmarks": {}}),
             })
         except (OSError, json.JSONDecodeError) as exc:
             log_global(f"global dashboard: error extracting project {proj_path_str}: {exc}")
@@ -334,7 +309,6 @@ def _gather_maintenance_data(project_root: Path) -> dict:
         "daemon_running": False,
         "daemon_pid": None,
         "poll_seconds": None,
-        "autofix_enabled": False,
         "last_cycle_at": None,
         "last_cycle_actions": [],
         "cycle_history": [],
@@ -349,9 +323,6 @@ def _gather_maintenance_data(project_root: Path) -> dict:
             result["daemon_running"] = data.get("running", False)
             result["daemon_pid"] = data.get("pid")
             result["poll_seconds"] = data.get("poll_seconds")
-            # Check autofix flag
-            autofix_flag = maint_dir / "autofix.enabled"
-            result["autofix_enabled"] = autofix_flag.exists()
             last_cycle = data.get("last_cycle", {})
             result["last_cycle_at"] = last_cycle.get("executed_at")
             actions_raw = last_cycle.get("actions", [])
@@ -411,92 +382,6 @@ def _gather_maintenance_data(project_root: Path) -> dict:
     return result
 
 
-def _gather_autofix_cost(project_root: Path) -> dict:
-    """Read proactive-findings.json and scan-coverage.json for autofix cost data.
-
-    proactive-findings.json may be:
-      - a dict with a top-level ``cost`` key (newer format)
-      - a list of findings (older format, no cost data)
-
-    scan-coverage.json has ``last_scan_at`` at top level.
-
-    Returns a dict with haiku_invocations, fix_invocations, estimated_cost_usd,
-    and last_scan_at -- or an empty dict if no data is available.
-    """
-    result: dict = {}
-    dynos_dir = project_root / ".dynos"
-
-    # Read proactive-findings.json for cost data
-    findings_path = dynos_dir / "proactive-findings.json"
-    if findings_path.exists():
-        try:
-            data = json.loads(findings_path.read_text())
-            if isinstance(data, dict):
-                cost = data.get("cost", {})
-                if isinstance(cost, dict):
-                    result["haiku_invocations"] = cost.get("haiku_invocations", 0)
-                    result["fix_invocations"] = cost.get("fix_invocations", 0)
-                    result["estimated_cost_usd"] = cost.get("estimated_cost_usd", 0.0)
-            # list format has no cost data -- leave result empty for cost fields
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # Read scan-coverage.json for last_scan_at
-    coverage_path = dynos_dir / "scan-coverage.json"
-    if coverage_path.exists():
-        try:
-            cov_data = json.loads(coverage_path.read_text())
-            if isinstance(cov_data, dict):
-                last_scan = cov_data.get("last_scan_at", "")
-                if last_scan:
-                    result["last_scan_at"] = last_scan
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    return result
-
-
-def _gather_autofix_prs(project_path: str) -> list[dict]:
-    """Get autofix PRs for a specific project. Returns empty list if gh unavailable or none found."""
-    project_root = Path(project_path)
-    persistent = _persistent_project_dir(project_root)
-    metrics_path = persistent / "autofix-metrics.json"
-    if metrics_path.exists():
-        try:
-            data = json.loads(metrics_path.read_text())
-            recent = data.get("recent_prs", [])
-            if isinstance(recent, list) and recent:
-                return recent
-        except (json.JSONDecodeError, OSError):
-            pass
-    import subprocess
-    try:
-        proc = subprocess.run(
-            ["gh", "pr", "list", "--state", "all", "--limit", "10",
-             "--search", "dynos/auto-fix in:head",
-             "--json", "number,title,state,createdAt,url,headRefName"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if proc.returncode != 0:
-            return []
-        data = json.loads(proc.stdout)
-        if not isinstance(data, list):
-            return []
-        prs = []
-        for pr in data:
-            prs.append({
-                "number": pr.get("number", 0),
-                "title": pr.get("title", ""),
-                "state": pr.get("state", "UNKNOWN"),
-                "created_at": pr.get("createdAt", ""),
-                "url": pr.get("url", ""),
-                "branch": pr.get("headRefName", ""),
-            })
-        return prs
-    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-        return []
-
-
 def compute_aggregate_stats(projects: list[dict]) -> dict:
     """Total tasks, avg quality, total learned routes, active count, benchmark runs, findings, cross-project summary."""
     total_tasks = 0
@@ -505,25 +390,17 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
     active_count = 0
     total_benchmark_runs = 0
     total_findings = 0
-    total_autofix_cost_usd = 0.0
     total_learned_components = 0
     total_shadow_components = 0
     total_demoted_components = 0
     total_tracked_fixtures = 0
     total_coverage_gaps = 0
     total_automation_queue = 0
-    total_autofix_open_prs = 0
-    total_autofix_merged = 0
-    total_autofix_suppressions = 0
-
     for proj in projects:
         stats = proj.get("stats", {})
         payload = proj.get("payload", {})
         summary = payload.get("summary", {})
         retrospectives = proj.get("retrospectives", [])
-        autofix_metrics = proj.get("autofix_state", {}).get("metrics", {})
-        autofix_totals = autofix_metrics.get("totals", {})
-
         total_tasks += stats.get("total_tasks", 0)
         avg_q = stats.get("average_quality_score", 0.0)
         if isinstance(avg_q, (int, float)) and avg_q > 0:
@@ -533,19 +410,12 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
             active_count += 1
 
         total_benchmark_runs += summary.get("benchmark_runs", 0)
-        autofix_cost = proj.get("autofix_cost", {})
-        cost_val = autofix_cost.get("estimated_cost_usd", 0.0)
-        if isinstance(cost_val, (int, float)):
-            total_autofix_cost_usd += float(cost_val)
         total_learned_components += summary.get("learned_components", 0)
         total_shadow_components += summary.get("shadow_components", 0)
         total_demoted_components += summary.get("demoted_components", 0)
         total_tracked_fixtures += summary.get("tracked_fixtures", 0)
         total_coverage_gaps += summary.get("coverage_gaps", 0)
         total_automation_queue += summary.get("queued_automation_jobs", 0)
-        total_autofix_open_prs += int(autofix_totals.get("open_prs", 0) or 0)
-        total_autofix_merged += int(autofix_totals.get("merged", 0) or 0)
-        total_autofix_suppressions += int(autofix_totals.get("suppression_count", 0) or 0)
 
         for retro in retrospectives:
             fbc = retro.get("findings_by_category", {})
@@ -563,16 +433,12 @@ def compute_aggregate_stats(projects: list[dict]) -> dict:
         "active_count": active_count,
         "total_benchmark_runs": total_benchmark_runs,
         "total_findings": total_findings,
-        "total_autofix_cost_usd": round(total_autofix_cost_usd, 2),
         "total_learned_components": total_learned_components,
         "total_shadow_components": total_shadow_components,
         "total_demoted_components": total_demoted_components,
         "total_tracked_fixtures": total_tracked_fixtures,
         "total_coverage_gaps": total_coverage_gaps,
         "total_automation_queue": total_automation_queue,
-        "total_autofix_open_prs": total_autofix_open_prs,
-        "total_autofix_merged": total_autofix_merged,
-        "total_autofix_suppressions": total_autofix_suppressions,
     }
 
 
@@ -581,10 +447,6 @@ def build_global_payload() -> dict:
     daemon_status = gather_global_daemon_status()
     all_projects = gather_all_projects()
     aggregates = compute_aggregate_stats(all_projects["active"])
-
-    # Gather autofix PRs per active project
-    for proj in all_projects["active"]:
-        proj["autofix_prs"] = _gather_autofix_prs(proj.get("path", ""))
 
     return {
         "generated_at": now_iso(),
@@ -666,13 +528,6 @@ def _render_compact_card(proj: dict, index: int) -> str:
     last_cycle_at = maintenance.get("last_cycle_at", "")
     last_cycle_display = _esc(last_cycle_at[:16].replace("T", " ")) if last_cycle_at else "no cycles"
 
-    # Autofix cost line for compact card
-    autofix_cost = proj.get("autofix_cost", {})
-    af_cost_usd = autofix_cost.get("estimated_cost_usd", 0.0)
-    af_cost_line = ""
-    if isinstance(af_cost_usd, (int, float)) and af_cost_usd > 0:
-        af_cost_line = f'<span class="mini" style="margin-left:6px;">${af_cost_usd:.2f} autofix</span>'
-
     return (
         f'<div class="panel pcard" data-project-id="{index}" '
         f'role="button" tabindex="0" aria-label="Show details for {name}">'
@@ -693,8 +548,6 @@ def _render_compact_card(proj: dict, index: int) -> str:
         f'<span class="daemon-dot" style="background:{daemon_dot_color};" '
         f'aria-label="{daemon_dot_label}"></span>'
         f'<span class="mini">{daemon_dot_label}</span>'
-        f'{"<span class=\"tag\" style=\"font-size:9px;padding:1px 6px;margin-left:6px;\">autofix</span>" if maintenance.get("autofix_enabled") else ""}'
-        f'{af_cost_line}'
         f'<span class="mini" style="margin-left:auto;">{last_cycle_display}</span>'
         f'</div>'
         f'<div class="pcard-spark">{spark_html}</div>'
@@ -1004,38 +857,6 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'</div>'
     )
 
-    # Autofix cost line
-    autofix_cost = proj.get("autofix_cost", {})
-    af_haiku = autofix_cost.get("haiku_invocations", 0)
-    af_fix = autofix_cost.get("fix_invocations", 0)
-    af_usd = autofix_cost.get("estimated_cost_usd", 0.0)
-    af_scan_at = autofix_cost.get("last_scan_at", "")
-    if af_haiku or af_fix or af_usd:
-        af_scan_display = _esc(af_scan_at[:16].replace("T", " ")) if af_scan_at else "unknown"
-        autofix_cost_html = (
-            f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
-            f'<span class="mini" style="font-weight:700;">Autofix:</span>'
-            f'<span class="mini">{af_haiku} Haiku calls, {af_fix} fix calls, ~${af_usd:.2f} estimated cost</span>'
-            f'<span class="mini">Last scan: {af_scan_display}</span>'
-            f'</div>'
-        )
-    elif af_scan_at:
-        af_scan_display = _esc(af_scan_at[:16].replace("T", " "))
-        autofix_cost_html = (
-            f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
-            f'<span class="mini" style="font-weight:700;">Autofix:</span>'
-            f'<span class="mini">No cost data available</span>'
-            f'<span class="mini">Last scan: {af_scan_display}</span>'
-            f'</div>'
-        )
-    else:
-        autofix_cost_html = (
-            f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px;">'
-            f'<span class="mini" style="font-weight:700;">Autofix:</span>'
-            f'<span class="mini" style="font-style:italic;">No scan data available</span>'
-            f'</div>'
-        )
-
     # Last Cycle Actions table
     if maint_actions:
         action_rows = ""
@@ -1096,97 +917,10 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'<div class="detail-section">'
         f'<div class="section-title">Maintenance</div>'
         f'{maint_header_html}'
-        f'{autofix_cost_html}'
         f'{actions_html}'
         f'{history_html}'
         f'</div>'
     )
-
-    # --- Autofix PRs ---
-    autofix_prs = proj.get("autofix_prs", [])
-    autofix_state = proj.get("autofix_state", {})
-    autofix_metrics = autofix_state.get("metrics", {})
-    autofix_totals = autofix_metrics.get("totals", {})
-    autofix_categories = autofix_metrics.get("categories", {})
-    top_autofix = sorted(
-        (
-            {
-                "name": name,
-                "confidence": data.get("confidence", 0.0),
-                "mode": data.get("mode", "issue-only"),
-                "merged": data.get("merged", 0),
-                "issues_opened": data.get("issues_opened", 0),
-            }
-            for name, data in autofix_categories.items()
-            if isinstance(data, dict)
-        ),
-        key=lambda item: (item["merged"], item["confidence"]),
-        reverse=True,
-    )[:4]
-    if autofix_prs:
-        pr_rows = ""
-        for pr in autofix_prs:
-            pr_num = pr.get("number", 0)
-            pr_title = _esc(pr.get("title", ""))
-            if len(pr_title) > 70:
-                pr_title = pr_title[:67] + "..."
-            pr_state = pr.get("state", "UNKNOWN").upper()
-            pr_created = _esc(pr.get("created_at", "")[:10])
-            pr_branch = _esc(pr.get("branch", ""))
-            if pr_state == "MERGED":
-                st_style = 'style="font-size:10px;padding:2px 7px;"'
-            elif pr_state == "OPEN":
-                st_style = 'style="font-size:10px;padding:2px 7px;background:hsla(200 82% 60% / 0.14);color:hsl(200 76% 64%);border-color:hsla(200 82% 60% / 0.22);"'
-            else:
-                st_style = 'style="font-size:10px;padding:2px 7px;background:hsla(210 14% 64% / 0.14);color:var(--muted);border-color:hsla(210 14% 64% / 0.22);"'
-            pr_rows += (
-                f'<div class="pr-row">'
-                f'<span class="mono" style="flex-shrink:0;">#{pr_num}</span>'
-                f'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{pr_title}</span>'
-                f'<span class="tag" {st_style}>{pr_state}</span>'
-                f'<span class="mini" style="flex-shrink:0;">{pr_created}</span>'
-                f'</div>'
-            )
-        autofix_section = (
-            f'<div class="detail-section">'
-            f'<div class="section-title">Autofix Pull Requests</div>'
-            f'{pr_rows}'
-            f'</div>'
-        )
-    else:
-        autofix_section = (
-            f'<div class="detail-section">'
-            f'<div class="section-title">Autofix Pull Requests</div>'
-            f'<div class="mini" style="color:var(--muted);">No autofix PRs yet. Enable with <code>dynos local start --autofix</code></div>'
-            f'</div>'
-        )
-
-    if autofix_totals or top_autofix:
-        top_rows = ""
-        for item in top_autofix:
-            top_rows += (
-                f'<div class="maint-action-row">'
-                f'<span class="mono">{_esc(item["name"])}</span>'
-                f'<span class="tag" style="font-size:10px;padding:2px 7px;">{_esc(item["mode"])}</span>'
-                f'<span class="mini">conf {float(item["confidence"]):.2f}</span>'
-                f'<span class="mini">merged {int(item["merged"])}</span>'
-                f'<span class="mini">issues {int(item["issues_opened"])}</span>'
-                f'</div>'
-            )
-        autofix_metrics_section = (
-            f'<div class="detail-section">'
-            f'<div class="section-title">Autofix Metrics</div>'
-            f'<div class="cross-summary">'
-            f'<span>Open PRs: <strong>{int(autofix_totals.get("open_prs", 0) or 0)}</strong></span>'
-            f'<span>Merged: <strong>{int(autofix_totals.get("merged", 0) or 0)}</strong></span>'
-            f'<span>Closed: <strong>{int(autofix_totals.get("closed_unmerged", 0) or 0)}</strong></span>'
-            f'<span>Suppressions: <strong>{int(autofix_totals.get("suppression_count", 0) or 0)}</strong></span>'
-            f'</div>'
-            f'{top_rows}'
-            f'</div>'
-        )
-    else:
-        autofix_metrics_section = ""
 
     # --- Lineage ---
     lineage = payload.get("lineage", {})
@@ -1212,8 +946,6 @@ def _render_project_detail(proj: dict, index: int) -> str:
         f'{bench_section}'
         f'{findings_section}'
         f'{alerts_section}'
-        f'{autofix_section}'
-        f'{autofix_metrics_section}'
         f'{lineage_line}'
         f'</div>'
         f'</div>'
@@ -1291,16 +1023,6 @@ def _render_html(payload: dict) -> str:
     total_learned = aggregates.get("total_learned_routes", 0)
     total_benchmarks = aggregates.get("total_benchmark_runs", 0)
     total_findings = aggregates.get("total_findings", 0)
-    total_autofix_cost = aggregates.get("total_autofix_cost_usd", 0.0)
-
-    # Autofix cost color: mint if $0, amber if > $1, rose if > $10
-    if total_autofix_cost > 10:
-        autofix_cost_color = "var(--rose)"
-    elif total_autofix_cost > 1:
-        autofix_cost_color = "var(--amber)"
-    else:
-        autofix_cost_color = "var(--mint)"
-
     stat_cards = (
         f'<section class="agg-stats" id="stats">'
         f'<div class="stat"><div class="label">Total Tasks</div><div class="value">{total_tasks}</div></div>'
@@ -1310,8 +1032,6 @@ def _render_html(payload: dict) -> str:
         f'<div class="stat"><div class="label">Benchmark Runs</div><div class="value">{total_benchmarks}</div></div>'
         f'<div class="stat"><div class="label">Active Projects</div><div class="value">{active_count}</div></div>'
         f'<div class="stat"><div class="label">Total Findings</div><div class="value">{total_findings}</div></div>'
-        f'<div class="stat"><div class="label">Autofix Cost</div>'
-        f'<div class="value" style="color:{autofix_cost_color}">${total_autofix_cost:.2f}</div></div>'
         f'</section>'
     )
 
@@ -1322,10 +1042,6 @@ def _render_html(payload: dict) -> str:
     tf = aggregates.get("total_tracked_fixtures", 0)
     cg = aggregates.get("total_coverage_gaps", 0)
     aq = aggregates.get("total_automation_queue", 0)
-    ao = aggregates.get("total_autofix_open_prs", 0)
-    am = aggregates.get("total_autofix_merged", 0)
-    asp = aggregates.get("total_autofix_suppressions", 0)
-
     cross_panel = (
         f'<div class="panel" style="margin-bottom:24px;">'
         f'<div class="headline">Cross-Project Summary</div>'
@@ -1336,9 +1052,6 @@ def _render_html(payload: dict) -> str:
         f'<span>Tracked fixtures: <strong>{tf}</strong></span>'
         f'<span>Coverage gaps: <strong>{cg}</strong></span>'
         f'<span>Automation queue: <strong>{aq}</strong></span>'
-        f'<span>Autofix open PRs: <strong>{ao}</strong></span>'
-        f'<span>Autofix merged: <strong>{am}</strong></span>'
-        f'<span>Autofix suppressions: <strong>{asp}</strong></span>'
         f'</div>'
         f'</div>'
     )

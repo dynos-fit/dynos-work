@@ -400,7 +400,6 @@ Three questions for every agent:
   route-policy.json
   dynos_patterns.md
   trajectories.json
-  autofix-metrics.json
   postmortems/
   learned-agents/
     registry.json

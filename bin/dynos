@@ -3,7 +3,6 @@
 #
 # Usage:
 #   dynos init                    # set up current project
-#   dynos init --autofix          # set up with autofix
 #   dynos local run-once          # run one maintenance cycle
 #   dynos local status            # show maintainer status
 #   dynos dashboard               # start global dashboard server
@@ -11,8 +10,7 @@
 
 set -euo pipefail
 HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="${REPO_ROOT}:${HOOKS_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}"
 
 usage() {
   cat <<EOF
@@ -24,7 +22,6 @@ Getting started:
 Project commands:
   local         Project maintainer: run-once, status, logs
   local dashboard  Per-project dashboard (generate or serve)
-  autofix       Autofix scanner (status, scan, list, clear)
 
 Global commands:
   global        Cross-project sweeper: start, stop, status, logs, run-once
@@ -84,77 +81,6 @@ case "$cmd" in
     exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@"
     ;;
   maintain) exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@" ;;
-  autofix|proactive)
-    # dynos autofix scan [/path]  — scan one or all registered projects
-    # dynos autofix list [/path]  — list findings
-    # dynos autofix clear [/path] — clear findings
-    if [ $# -gt 0 ] && [ "$1" = "status" ]; then
-      shift
-      target="${1:-$(pwd)}"
-      resolved=$(cd "$target" 2>/dev/null && pwd) || { echo "Error: $target does not exist" >&2; exit 1; }
-      enabled="OFF"
-      [ -f "$resolved/.dynos/maintenance/autofix.enabled" ] && enabled="ON"
-      echo "Autofix: $enabled"
-      echo "Project: $resolved"
-      if [ "$enabled" = "ON" ] && [ -f "$resolved/.dynos/proactive-findings.json" ]; then
-        count=$(python3 -c "
-import json
-data = json.load(open('$resolved/.dynos/proactive-findings.json'))
-findings = data.get('findings', [])
-print(len([f for f in findings if f.get('status') != 'suppressed']))
-" 2>/dev/null || echo "0")
-        echo "Active findings: $count"
-      fi
-      exit 0
-    elif [ $# -gt 0 ] && [ "$1" = "scan" ]; then
-      shift
-      target="${1:-}"
-      if [ -z "$target" ]; then
-        # Scan ALL registered projects
-        projects=$(python3 -c "
-import sys, json
-sys.path.insert(0, '${HOOKS_DIR}')
-from dynoglobal import load_registry
-reg = load_registry()
-for p in reg.get('projects', []):
-    if p.get('status') == 'active':
-        print(p['path'])
-" 2>/dev/null)
-        if [ -z "$projects" ]; then
-          echo "No registered projects found. Run 'dynos init' in a project first." >&2
-          exit 1
-        fi
-        echo "Scanning all registered projects..."
-        echo ""
-        while IFS= read -r proj; do
-          echo "━━━ $proj"
-          python3 -m autofix scan --root "$proj" 2>/dev/null || true
-          echo ""
-        done <<< "$projects"
-      else
-        # Scan specific path — check if registered
-        resolved=$(cd "$target" 2>/dev/null && pwd) || { echo "Error: $target does not exist" >&2; exit 1; }
-        is_registered=$(python3 -c "
-import sys, json
-sys.path.insert(0, '${HOOKS_DIR}')
-from dynoglobal import load_registry
-reg = load_registry()
-for p in reg.get('projects', []):
-    if p['path'] == '$resolved':
-        print('yes')
-        sys.exit(0)
-print('no')
-" 2>/dev/null)
-        if [ "$is_registered" != "yes" ]; then
-          echo "Error: $resolved is not a registered project. Run 'dynos init' there first." >&2
-          exit 1
-        fi
-        exec python3 -m autofix scan --root "$resolved"
-      fi
-    else
-      exec python3 -m autofix "$@"
-    fi
-    ;;
 
   # --- Global commands ---
   global) exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@" ;;

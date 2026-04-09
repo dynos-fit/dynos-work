@@ -38,8 +38,8 @@ check_deps() {
         fail "Missing required tools: ${missing[*]}"
     fi
 
-    command -v gh     >/dev/null 2>&1 || warn "gh (GitHub CLI) not found. Autofix PRs and issues will be disabled."
-    command -v claude >/dev/null 2>&1 || warn "claude CLI not found. Autofix code changes will be disabled."
+    command -v gh     >/dev/null 2>&1 || warn "gh (GitHub CLI) not found. PR creation will be disabled."
+    command -v claude >/dev/null 2>&1 || warn "claude CLI not found."
 }
 
 parse_args() {
@@ -151,15 +151,9 @@ step_daemon() {
         return
     fi
 
-    local autofix_flag=""
-    if command -v claude >/dev/null 2>&1 && command -v gh >/dev/null 2>&1; then
-        autofix_flag="--autofix"
-        info "Starting local daemon with autofix (claude + gh detected)"
-    else
-        info "Starting local daemon (no autofix, missing claude or gh)"
-    fi
+    info "Starting local daemon"
 
-    PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynomaintain.py" start --root "$project_dir" $autofix_flag >/dev/null 2>&1 || true
+    PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynomaintain.py" start --root "$project_dir" >/dev/null 2>&1 || true
     ok "Local daemon started"
 }
 
@@ -241,7 +235,6 @@ main() {
     echo ""
     echo "    cd /path/to/your/project"
     echo "    dynos init              # register + start daemon"
-    echo "    dynos init --autofix    # with autofix"
 
     # Developer extras
     if [ "$DEV_MODE" = true ]; then
@@ -263,7 +256,7 @@ main() {
         echo ""
         echo "    PYTHONPATH=hooks pytest tests/      # run tests"
         echo "    dynos local status --root .         # check daemon"
-        echo "    dynos proactive scan --root .       # run autofix scan"
+
         echo "    dynos global dashboard serve        # start dashboard"
         echo ""
         echo "  Your local changes take effect immediately."

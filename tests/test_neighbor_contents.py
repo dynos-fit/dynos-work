@@ -1,8 +1,7 @@
 """Tests for get_neighbor_file_contents (Enhancement 1).
 
-Covers AC 1-3:
+Covers AC 1, AC 3:
   AC 1: get_neighbor_file_contents exists, uses import graph, returns list of dicts
-  AC 2: Enrichment block in _autofix_finding calls get_neighbor_file_contents
   AC 3: Graceful degradation when graph is empty or function raises
 """
 from __future__ import annotations
@@ -145,41 +144,6 @@ class TestGetNeighborFileContents:
         from dynoslib_crawler import get_neighbor_file_contents
         result = get_neighbor_file_contents(tmp_repo, "does_not_exist.py")
         assert result == []
-
-
-# ===========================================================================
-# AC 2: Integration with _autofix_finding enrichment block
-# ===========================================================================
-
-class TestNeighborContentEnrichment:
-    """AC 2: _autofix_finding calls get_neighbor_file_contents and includes content in prompt."""
-
-    def test_fix_prompt_contains_neighbor_content_blocks(self) -> None:
-        # AC 2: The fix prompt should include neighbor file contents as code blocks
-        # We test that get_neighbor_file_contents is called during prompt building
-        # by mocking it and verifying the prompt structure
-        from dynoslib_crawler import get_neighbor_file_contents
-
-        mock_neighbors = [
-            {"path": "utils.py", "content": "def helper(): pass"},
-            {"path": "core.py", "content": "def core_func(): pass"},
-        ]
-        # When production code is written, _autofix_finding will call
-        # get_neighbor_file_contents and include the results in the prompt.
-        # For now, verify the function can be called with expected args.
-        assert callable(get_neighbor_file_contents)
-        # The prompt section should be "## Import Context" with file contents
-        section_header = "## Import Context"
-        assert section_header  # placeholder for prompt structure test
-
-    def test_neighbor_content_replaces_path_only_listing(self) -> None:
-        # AC 2: The existing path-only listing is replaced by path + content
-        # This verifies the enrichment block structure expectation
-        neighbor = {"path": "core.py", "content": "def core_func(): pass\n"}
-        # The prompt should contain both the path and the content
-        prompt_fragment = f"### {neighbor['path']}\n```\n{neighbor['content']}\n```"
-        assert "core.py" in prompt_fragment
-        assert "def core_func" in prompt_fragment
 
 
 # ===========================================================================

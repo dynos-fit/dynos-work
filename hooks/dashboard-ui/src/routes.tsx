@@ -31,7 +31,6 @@ export const router = createBrowserRouter([
       { path: "tasks", element: lazyPage(() => import("./pages/TaskPipeline")) },
       { path: "tasks/:taskId", element: lazyPage(() => import("./pages/TaskDetail")) },
       { path: "agents", element: lazyPage(() => import("./pages/Agents")) },
-      { path: "autofix", element: lazyPage(() => import("./pages/Autofix")) },
       { path: "learning-ops", element: lazyPage(() => import("./pages/LearningOps")) },
       { path: "analytics", element: lazyPage(() => import("./pages/Analytics")) },
       { path: "settings", element: lazyPage(() => import("./pages/Settings")) },

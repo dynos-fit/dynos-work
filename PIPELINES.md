@@ -1,13 +1,14 @@
 # Pipelines
 
-`dynos-work` has four pipelines. Each one has a distinct trigger, lifecycle, and output.
+`dynos-work` has three pipelines. Each one has a distinct trigger, lifecycle, and output.
 
 ```
 Task Pipeline          the main workflow — build, verify, ship
 Learn Pipeline         extract knowledge from completed tasks
-Autofix Pipeline       background scanning and autonomous repair
 Observability Pipeline real-time visibility into everything above
 ```
+
+> Note: Autofix (background scanning and autonomous repair) is now a separate repo: [dynos-fit/autofix](https://github.com/dynos-fit/autofix).
 
 Each pipeline is standalone. They communicate through **events** and **validated contracts**, not inline calls or shared state.
 
@@ -27,7 +28,7 @@ evolve-completed → [postmortem, improve, benchmark]
 benchmark-completed → [dashboard, register]
 ```
 
-They connect through artifacts: the task pipeline produces retrospectives, the learn pipeline consumes them, autofix uses learned patterns for drift detection, and observability reads all state.
+They connect through artifacts: the task pipeline produces retrospectives, the learn pipeline consumes them, and observability reads all state.
 
 ```
                     ┌──────────────────────────────┐
@@ -38,16 +39,15 @@ They connect through artifacts: the task pipeline produces retrospectives, the l
                       task-retrospective.json
                                   │
               ┌───────────────────┼───────────────────┐
-              ▼                   ▼                    ▼
-   ┌──────────────────┐ ┌─────────────────┐ ┌─────────────────────┐
-   │  LEARN PIPELINE   │ │ AUTOFIX PIPELINE│ │OBSERVABILITY PIPELINE│
-   │  patterns, policy │ │ scan, fix, PR   │ │ status, dashboard    │
-   └────────┬─────────┘ └─────────────────┘ └──────────────────────┘
+              ▼                                        ▼
+   ┌──────────────────┐                      ┌─────────────────────┐
+   │  LEARN PIPELINE   │                      │OBSERVABILITY PIPELINE│
+   │  patterns, policy │                      │ status, dashboard    │
+   └────────┬─────────┘                      └──────────────────────┘
             │
     dynos_patterns.md
             │
-            ├──→ Task Pipeline (routing, skip policy, model selection)
-            └──→ Autofix Pipeline (drift detection against gold standards)
+            └──→ Task Pipeline (routing, skip policy, model selection)
 ```
 
 ---
@@ -204,7 +204,7 @@ learn
        │
 evolve
   in:  dynos_patterns.md, task-retrospective.json, registry.json, benchmark fixtures/results
-  out: learned-agents/{executors,auditors,skills}/*.md, registry.json, proactive-findings.json
+  out: learned-agents/{executors,auditors,skills}/*.md, registry.json
 ```
 
 ### Output: dynos_patterns.md
@@ -240,95 +240,7 @@ Active components can be auto-demoted.
 
 ---
 
-## 3. Autofix Pipeline
-
-Runs in the background. Scans for technical debt, security issues, and dead code. Opens PRs for safe fixes, issues for risky ones.
-
-### Trigger
-
-```
-/dynos-work:autofix on       enable background scanning
-/dynos-work:autofix off      disable
-/dynos-work:autofix status   check state
-dynos autofix scan           CLI: scan now
-```
-
-### Stages
-
-```
-AUTOFIX
-  enable
-    write .dynos/maintenance/autofix.enabled
-    start maintainer daemon with --autofix flag
-
-  scan loop (continuous or on-demand)
-    step 1   proactive meta-auditor scans for:
-               dependency vulnerabilities (pip-audit, npm audit)
-               dead code (unused imports, unreferenced functions)
-               architectural drift against gold standards
-               recurring finding categories from retrospectives
-               code-smell clusters
-    step 2   severity threshold gate
-               critical/high → auto-fix pipeline
-               medium/low → append to proactive-findings.json
-    step 3   auto-fix pipeline (critical/high only)
-               create git worktree
-               invoke claude to implement fix
-               run audits + tests in worktree
-               open PR if clean
-               open GitHub issue if risky or fix fails
-    step 4   deduplication
-               skip findings already addressed
-               max 2 attempts per finding, then suppress
-
-  disable
-    remove .dynos/maintenance/autofix.enabled
-    stop daemon
-```
-
-### Contract Chain
-
-```
-autofix (toggle)
-  in:  (none)
-  out: (none — starts/stops daemon)
-
-maintain (worker)
-  in:  repository root
-  out: maintenance_result (findings, fixes, PRs)
-```
-
-### Agents
-
-The autofix pipeline reuses the same executor and auditor agents from the task pipeline. The `maintain` skill coordinates them.
-
-### Artifacts
-
-```
-.dynos/maintenance/autofix.enabled    flag file
-.dynos/maintenance/status.json        daemon status, last scan time
-.dynos/maintenance/daemon.pid         daemon PID
-.dynos/proactive-findings.json        queued non-critical findings
-.dynos/automation/queue.json          challenger evaluation queue
-.dynos/automation/status.json         automation state
-```
-
-### Output
-
-- GitHub PRs for safe fixes (low/medium severity)
-- GitHub issues for risky findings (high/critical severity)
-
-### Runtime
-
-```
-hooks/dynomaintain.py     daemon lifecycle (start, stop, status)
-hooks/dynoproactive.py    meta-auditor + auto-fix coordinator
-hooks/dynoauto.py         automation queue management
-```
-
----
-
-## 4. Observability Pipeline
+## 3. Observability Pipeline
 
 Provides visibility into task state, learned policies, system health, and cross-project metrics. Non-blocking, read-only.
 
@@ -384,7 +296,7 @@ serves: http://127.0.0.1:8766/global-dashboard.html
 shows:  all registered projects unified
         quality trends, findings, costs
         learned component state
-        daemon health, autofix PRs
+        daemon health
 ```
 
 **Lineage Tracking**
@@ -447,7 +359,7 @@ hooks/dynoregistry.py            project registry management
 | Evolve | Benchmark | `evolve-completed` event via event bus | Event (async) |
 | Benchmark | Dashboard | `benchmark-completed` event via event bus | Event (async) |
 | Learn | Task | dynos_patterns.md read by dynorouter.py | Artifact (optional) |
-| Learn | Autofix | gold standards used for drift detection | Artifact (optional) |
+
 | Task | Observability | task artifacts readable by status/dashboard | Artifact (read-only) |
 
 All cross-pipeline communication is either event-driven (async, fail-tolerant) or artifact-based (optional, with graceful fallback to defaults).

@@ -140,9 +140,8 @@ Perform deterministic offline evaluation for agents in `shadow` mode:
 8. Prefer `python3 hooks/dynoauto.py run --root .` after learn/task completion so shadow challengers are benchmarked automatically when matching fixtures exist.
 9. If no benchmark fixture exists yet for a shadow challenger, prefer `python3 hooks/dynofixture.py sync --root .` to synthesize a task-derived fixture from completed retrospectives before falling back to manual authoring.
 
-### Step 6 -- Proactive Meta-Audit (The Strategic Scanner)
+### Step 6 -- Strategic Repo Scan
 
-Once every 5 tasks, spawn a **Proactive Meta-Auditor** (Opus) to scan the entire repository (not just task diffs).
-1. It identifies architectural drift, security anti-patterns, or technical debt—specifically looking for patterns that *differ* from the current "Gold Standard" Reference Library.
-2. It writes findings to `.dynos/proactive-findings.json`.
-3. If findings exist, it prompts the user: "I've discovered {N} repo-wide issues. Would you like to start a maintenance task to address them?"
+Once every 5 tasks, scan the entire repository (not just task diffs) for architectural drift, security anti-patterns, or technical debt that differs from the current "Gold Standard" Reference Library. If issues are found, prompt the user: "I've discovered {N} repo-wide issues. Would you like to start a maintenance task to address them?"
+
+> Note: Autofix (proactive scanning with automatic PR creation) is now a separate repo: [dynos-fit/autofix](https://github.com/dynos-fit/autofix).

@@ -11,7 +11,6 @@ Manage the local project daemon.
 
 ```
 /dynos-work:local start              # start daemon
-/dynos-work:local start --autofix    # start with autofix
 /dynos-work:local stop               # stop daemon
 /dynos-work:local status             # show daemon status
 /dynos-work:local logs               # show cycle history
@@ -25,7 +24,7 @@ Parse the user's arguments to determine the subcommand. Run the corresponding Py
 
 ### start
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root . [--autofix]
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root .
 ```
 
 ### stop
@@ -38,7 +37,7 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomainta
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" status --root .
 ```
 
-Print the JSON result in a human-readable format: running/stopped, autofix on/off, last cycle time, cycle count.
+Print the JSON result in a human-readable format: running/stopped, last cycle time, cycle count.
 
 ### logs
 ```bash

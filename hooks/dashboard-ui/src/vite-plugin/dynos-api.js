@@ -581,70 +581,6 @@ export function dynosApi() {
                         }
                         return;
                     }
-                    // GET /api/findings (G)
-                    if (pathname === "/api/findings") {
-                        try {
-                            if (isGlobal) {
-                                const findings = collectFromAllProjects((pp) => {
-                                    try {
-                                        const data = readJsonFile(path.join(localDynosDir(pp), "proactive-findings.json"));
-                                        return (data.findings ?? []).map((f) => ({ ...f, project_path: pp }));
-                                    }
-                                    catch {
-                                        return [];
-                                    }
-                                });
-                                jsonResponse(res, 200, findings);
-                            }
-                            else {
-                                const data = readJsonFile(path.join(localDynosDir(projectPath), "proactive-findings.json"));
-                                jsonResponse(res, 200, data.findings ?? []);
-                            }
-                        }
-                        catch (err) {
-                            handleFsError(res, err);
-                        }
-                        return;
-                    }
-                    // GET /api/autofix-metrics (G)
-                    if (pathname === "/api/autofix-metrics") {
-                        try {
-                            if (isGlobal) {
-                                const allMetrics = collectFromAllProjects((_, s) => {
-                                    try {
-                                        const data = readJsonFile(path.join(persistentDir(s), "autofix-metrics.json"));
-                                        return [data];
-                                    }
-                                    catch {
-                                        return [];
-                                    }
-                                });
-                                if (allMetrics.length === 0) {
-                                    jsonResponse(res, 200, { totals: {} });
-                                }
-                                else {
-                                    const merged = {};
-                                    for (const m of allMetrics) {
-                                        const totals = (m.totals ?? {});
-                                        for (const [key, val] of Object.entries(totals)) {
-                                            if (typeof val === "number") {
-                                                merged[key] = (merged[key] ?? 0) + val;
-                                            }
-                                        }
-                                    }
-                                    jsonResponse(res, 200, { totals: merged });
-                                }
-                            }
-                            else {
-                                const data = readJsonFile(path.join(persistentDir(slug), "autofix-metrics.json"));
-                                jsonResponse(res, 200, data);
-                            }
-                        }
-                        catch (err) {
-                            handleFsError(res, err);
-                        }
-                        return;
-                    }
                     // GET /api/policy
                     if (pathname === "/api/policy") {
                         try {
@@ -671,17 +607,6 @@ export function dynosApi() {
                     if (pathname === "/api/route-policy") {
                         try {
                             const data = readJsonFile(path.join(persistentDir(slug), "route-policy.json"));
-                            jsonResponse(res, 200, data);
-                        }
-                        catch (err) {
-                            handleFsError(res, err);
-                        }
-                        return;
-                    }
-                    // GET /api/autofix-policy
-                    if (pathname === "/api/autofix-policy") {
-                        try {
-                            const data = readJsonFile(path.join(persistentDir(slug), "autofix-policy.json"));
                             jsonResponse(res, 200, data);
                         }
                         catch (err) {
@@ -1349,7 +1274,6 @@ export function dynosApi() {
                     if (pathname === "/api/control-plane") {
                         try {
                             const maintainer = readJsonFileOrDefault(path.join(localDynosDir(projectPath), "maintenance", "status.json"), { running: false });
-                            const autofixEnabled = fs.existsSync(path.join(localDynosDir(projectPath), "maintenance", "autofix.enabled"));
                             const queue = readJsonFileOrDefault(path.join(localDynosDir(projectPath), "automation", "queue.json"), { version: 0, updated_at: "", items: [] });
                             const automationStatus = readJsonFileOrDefault(path.join(localDynosDir(projectPath), "automation", "status.json"), { updated_at: "", queued_before: 0, executed: 0, pending_after: 0 });
                             const pDir = persistentDir(slug);
@@ -1480,7 +1404,6 @@ export function dynosApi() {
                             attentionItems.sort((a, b) => urgencyOrder.indexOf(a.reason) - urgencyOrder.indexOf(b.reason));
                             jsonResponse(res, 200, {
                                 maintainer,
-                                autofix_enabled: autofixEnabled,
                                 queue,
                                 automation_status: automationStatus,
                                 agents,
@@ -1509,21 +1432,6 @@ export function dynosApi() {
                         parseBody(req).then((body) => {
                             try {
                                 atomicWriteJson(path.join(persistentDir(slug), "policy.json"), body);
-                                jsonResponse(res, 200, { ok: true });
-                            }
-                            catch (err) {
-                                handleFsError(res, err);
-                            }
-                        }).catch(() => {
-                            jsonResponse(res, 400, { error: "Invalid JSON body" });
-                        });
-                        return;
-                    }
-                    // POST /api/autofix-policy
-                    if (pathname === "/api/autofix-policy") {
-                        parseBody(req).then((body) => {
-                            try {
-                                atomicWriteJson(path.join(persistentDir(slug), "autofix-policy.json"), body);
                                 jsonResponse(res, 200, { ok: true });
                             }
                             catch (err) {

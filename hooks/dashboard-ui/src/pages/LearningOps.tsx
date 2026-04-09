@@ -247,7 +247,6 @@ function HealthBanner({ maintainer, controlPlane }: BannerProps) {
     { label: "Cycle Status", value: lastCycleOk ? "OK" : "Failed" },
     { label: "Total Cycles", value: maintainer.cycle_count ?? 0 },
     { label: "Poll Interval", value: `${maintainer.poll_seconds ?? 0}s` },
-    { label: "Autofix", value: controlPlane.autofix_enabled ? "Enabled" : "Disabled" },
     { label: "Total Agents", value: summary.total },
     { label: "Routeable", value: summary.routeable },
     { label: "Shadow", value: summary.shadow },

@@ -52,11 +52,6 @@ const sampleAgents = [
   { agent_name: "agent-2", role: "auditor", status: "active" },
 ];
 
-const sampleMetrics = {
-  generated_at: "2026-04-06T10:00:00Z",
-  totals: { findings: 15, merged: 8, open_prs: 3, recent_failures: 1 },
-};
-
 // ============================================================
 // Test Suite: Dashboard Page Structure
 // ============================================================
@@ -138,14 +133,6 @@ describe("Dashboard page", () => {
 
     it("shows correct agent count", () => {
       expect(sampleAgents.length).toBe(2);
-    });
-
-    it("shows autofix findings count from metrics", () => {
-      expect(sampleMetrics.totals.findings).toBe(15);
-    });
-
-    it("shows last scan timestamp from autofix metrics", () => {
-      expect(sampleMetrics.generated_at).toBe("2026-04-06T10:00:00Z");
     });
   });
 
