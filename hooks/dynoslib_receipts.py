@@ -445,25 +445,6 @@ def receipt_plan_audit(
     )
 
 
-def receipt_tdd_tests(
-    task_dir: Path,
-    tokens_used: int | None,
-    test_count: int = 0,
-    criteria_covered: list[int] | None = None,
-    model_used: str | None = None,
-) -> Path:
-    """Write receipt proving TDD test generation ran. Also records tokens."""
-    if tokens_used and tokens_used > 0:
-        _record_tokens(task_dir, "tdd-testing-executor", model_used or "default", tokens_used)
-    return write_receipt(
-        task_dir,
-        "tdd-tests",
-        tokens_used=tokens_used,
-        test_count=test_count,
-        criteria_covered=criteria_covered or [],
-        model_used=model_used,
-    )
-
 
 # ---------------------------------------------------------------------------
 # CLI

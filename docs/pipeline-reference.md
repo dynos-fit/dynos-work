@@ -299,7 +299,6 @@ All receipts at `.dynos/task-{id}/receipts/{step-name}.json`.
 | `planner-plan` | `receipt_planner_spawn("plan")` | Advisory |
 | **`plan-validated`** | `receipt_plan_validated()` | **→ EXECUTION** |
 | `plan-audit-check` | `receipt_plan_audit()` | Advisory |
-| `tdd-tests` | `receipt_tdd_tests()` | Advisory |
 | **`executor-routing`** | `receipt_executor_routing()` | **→ CHECKPOINT_AUDIT** |
 | `executor-{seg-id}` | `receipt_executor_done()` | `validate_chain()` |
 | `audit-routing` | `receipt_audit_routing()` | `validate_chain()` |

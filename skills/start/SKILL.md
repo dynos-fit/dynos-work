@@ -16,7 +16,7 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
 
 ```python
-from dynoslib_receipts import receipt_planner_spawn, receipt_plan_audit, receipt_tdd_tests
+from dynoslib_receipts import receipt_planner_spawn, receipt_plan_audit
 
 # After planner spawn (discovery/design/classification):
 receipt_planner_spawn(task_dir, "discovery", tokens_used=TOTAL_TOKENS)
@@ -30,8 +30,6 @@ receipt_planner_spawn(task_dir, "plan", tokens_used=TOTAL_TOKENS)
 # After spec-completion auditor (plan audit):
 receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS, finding_count=N)
 
-# After testing-executor (TDD):
-receipt_tdd_tests(task_dir, tokens_used=TOTAL_TOKENS, test_count=N, criteria_covered=[1,2,3...])
 ```
 
 Each receipt auto-records tokens to `token-usage.json`. If you skip this, the retrospective will show 0 tokens and the effectiveness scores will be wrong. This is the same enforcement pattern as the execute skill's receipts.
