@@ -172,7 +172,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
     return anomalies
 
 
-def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DETECTION_WINDOW) -> list[dict]:
+def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DETECTION_WINDOW, budget_multiplier: float = 1.0) -> list[dict]:
     """Detect recurring issues across recent tasks."""
     recent = all_retros[-window:]
     patterns = []
@@ -196,7 +196,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DET
         risk = r.get("task_risk_level", "medium")
         tt = r.get("task_type", "feature")
         tokens = _safe_float(r.get("total_token_usage"), 0)
-        if tokens > _expected_budget(risk, tt) * OVERRUN_RATIO_MEDIUM:
+        if tokens > _expected_budget(risk, tt, budget_multiplier) * OVERRUN_RATIO_MEDIUM:
             overrun_count += 1
     if overrun_count >= OVERRUN_PATTERN_THRESHOLD:
         patterns.append({
@@ -245,7 +245,7 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
     budget_multiplier = float(policy.get("token_budget_multiplier", 1.0))
     similar = _find_similar_tasks(retro, all_retros)
     anomalies = _detect_anomalies(retro, similar, budget_multiplier)
-    recurring = _detect_recurring_patterns(all_retros)
+    recurring = _detect_recurring_patterns(all_retros, budget_multiplier=budget_multiplier)
 
     risk = retro.get("task_risk_level", "medium")
     task_type = retro.get("task_type", "feature")
@@ -339,48 +339,52 @@ def write_postmortem(root: Path, task_id: str) -> dict:
 
 
 def _render_markdown(pm: dict) -> str:
+    cost = pm.get("cost_summary", {})
+    quality = pm.get("quality_summary", {})
+    policy = pm.get("policy_usage", {})
     lines = [
-        f"# Postmortem: {pm['task_id']}",
-        f"Generated: {pm['generated_at']}",
+        f"# Postmortem: {pm.get('task_id', 'unknown')}",
+        f"Generated: {pm.get('generated_at', 'unknown')}",
         "",
-        f"**Type:** {pm['task_type']} | **Risk:** {pm['task_risk_level']} | **Domains:** {pm['task_domains']} | **Outcome:** {pm['task_outcome']}",
+        f"**Type:** {pm.get('task_type', 'unknown')} | **Risk:** {pm.get('task_risk_level', 'unknown')} | **Domains:** {pm.get('task_domains', '')} | **Outcome:** {pm.get('task_outcome', 'UNKNOWN')}",
         "",
         "## Cost",
-        f"- Tokens: {pm['cost_summary']['total_tokens']:,} / {pm['cost_summary']['expected_budget']:,} budget ({pm['cost_summary']['budget_ratio']}x)",
-        f"- Spawns: {pm['cost_summary']['subagent_spawns']} total, {pm['cost_summary']['wasted_spawns']} wasted",
+        f"- Tokens: {cost.get('total_tokens', 0):,} / {cost.get('expected_budget', 0):,} budget ({cost.get('budget_ratio', 0)}x)",
+        f"- Spawns: {cost.get('subagent_spawns', 0)} total, {cost.get('wasted_spawns', 0)} wasted",
         "",
         "## Quality",
-        f"- Score: {pm['quality_summary']['quality_score']:.2f}",
-        f"- Findings: {pm['quality_summary']['total_findings']} total, {pm['quality_summary']['repair_cycles']} repair cycles",
+        f"- Score: {quality.get('quality_score', 0):.2f}",
+        f"- Findings: {quality.get('total_findings', 0)} total, {quality.get('repair_cycles', 0)} repair cycles",
     ]
 
-    if pm["quality_summary"]["findings_by_auditor"]:
-        for auditor, count in pm["quality_summary"]["findings_by_auditor"].items():
+    findings_by_auditor = quality.get("findings_by_auditor", {})
+    if findings_by_auditor:
+        for auditor, count in findings_by_auditor.items():
             lines.append(f"  - {auditor}: {count}")
 
     lines.extend([
         "",
         "## Policy Usage",
-        f"- All generic routing: {'yes' if pm['policy_usage']['all_generic'] else 'no'}",
-        f"- Fast-track: {'yes' if pm['policy_usage']['fast_track'] else 'no'}",
-        f"- Inline execution: {'yes' if pm['policy_usage']['inline_execution'] else 'no'}",
-        f"- Discovery skipped: {'yes' if pm['policy_usage']['discovery_skipped'] else 'no'}",
+        f"- All generic routing: {'yes' if policy.get('all_generic') else 'no'}",
+        f"- Fast-track: {'yes' if policy.get('fast_track') else 'no'}",
+        f"- Inline execution: {'yes' if policy.get('inline_execution') else 'no'}",
+        f"- Discovery skipped: {'yes' if policy.get('discovery_skipped') else 'no'}",
     ])
 
     if pm.get("anomalies"):
         lines.extend(["", "## Anomalies"])
         for a in pm["anomalies"]:
-            lines.append(f"- **[{a['severity']}] {a['type']}**: {a['detail']}")
+            lines.append(f"- **[{a.get('severity', 'unknown')}] {a.get('type', 'unknown')}**: {a.get('detail', '')}")
 
     if pm.get("similar_tasks"):
         lines.extend(["", "## Similar Past Tasks"])
         for s in pm["similar_tasks"]:
-            lines.append(f"- {s['task_id']}: quality={s['quality_score']:.2f}, tokens={s['total_tokens']:,}, repairs={s['repair_cycles']}")
+            lines.append(f"- {s.get('task_id', 'unknown')}: quality={s.get('quality_score', 0):.2f}, tokens={s.get('total_tokens', 0):,}, repairs={s.get('repair_cycles', 0)}")
 
     if pm.get("recurring_patterns"):
         lines.extend(["", "## Recurring Patterns (across recent tasks)"])
         for p in pm["recurring_patterns"]:
-            lines.append(f"- **{p['pattern']}** ({p['occurrences']}/{p['window']} tasks): {p['recommendation']}")
+            lines.append(f"- **{p.get('pattern', 'unknown')}** ({p.get('occurrences', 0)}/{p.get('window', 0)} tasks): {p.get('recommendation', '')}")
 
     lines.append("")
     return "\n".join(lines)
