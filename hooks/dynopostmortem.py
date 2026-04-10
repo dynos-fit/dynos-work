@@ -14,6 +14,7 @@ from dynoslib_core import (
     now_iso,
     write_json,
     _safe_float,
+    _safe_int,
     _persistent_project_dir,
     project_policy,
     project_dir,
@@ -131,7 +132,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
 
     # All-generic routing
     sources = retro.get("agent_source", {})
-    if sources and all(v == "generic" for v in sources.values()):
+    if isinstance(sources, dict) and sources and all(v == "generic" for v in sources.values()):
         anomalies.append({
             "type": "all_generic_routing",
             "severity": "low",
@@ -139,7 +140,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
         })
 
     # Repair cycles
-    repairs = int(retro.get("repair_cycle_count", 0) or 0)
+    repairs = _safe_int(retro.get("repair_cycle_count", 0) or 0)
     if repairs >= REPAIR_CYCLES_THRESHOLD:
         anomalies.append({
             "type": "high_repair_cycles",
@@ -148,8 +149,8 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
         })
 
     # Wasted spawns ratio
-    spawns = int(retro.get("subagent_spawn_count", 0) or 0)
-    wasted = int(retro.get("wasted_spawns", 0) or 0)
+    spawns = _safe_int(retro.get("subagent_spawn_count", 0) or 0)
+    wasted = _safe_int(retro.get("wasted_spawns", 0) or 0)
     if spawns > 0 and wasted / spawns > WASTED_SPAWN_RATIO_THRESHOLD:
         anomalies.append({
             "type": "high_waste_ratio",
@@ -207,7 +208,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DET
         })
 
     # Recurring repair cycles
-    repair_count = sum(1 for r in recent if int(r.get("repair_cycle_count", 0) or 0) > 0)
+    repair_count = sum(1 for r in recent if _safe_int(r.get("repair_cycle_count", 0) or 0) > 0)
     if repair_count >= REPAIR_PATTERN_THRESHOLD:
         patterns.append({
             "pattern": "recurring_repair_cycles",
@@ -257,8 +258,8 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
         "total_tokens": int(total_tokens),
         "expected_budget": budget,
         "budget_ratio": round(total_tokens / max(1, budget), 2),
-        "subagent_spawns": int(retro.get("subagent_spawn_count", 0) or 0),
-        "wasted_spawns": int(retro.get("wasted_spawns", 0) or 0),
+        "subagent_spawns": _safe_int(retro.get("subagent_spawn_count", 0) or 0),
+        "wasted_spawns": _safe_int(retro.get("wasted_spawns", 0) or 0),
     }
 
     # Quality summary
@@ -267,14 +268,14 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
     quality_summary = {
         "quality_score": _safe_float(retro.get("quality_score"), 0),
         "total_findings": int(total_findings),
-        "repair_cycles": int(retro.get("repair_cycle_count", 0) or 0),
+        "repair_cycles": _safe_int(retro.get("repair_cycle_count", 0) or 0),
         "findings_by_auditor": findings_by_auditor,
     }
 
     # Policy usage
     policy_usage = {
         "agent_sources": retro.get("agent_source", {}),
-        "all_generic": all(v == "generic" for v in retro.get("agent_source", {}).values()) if retro.get("agent_source") else True,
+        "all_generic": all(v == "generic" for v in retro.get("agent_source", {}).values()) if isinstance(retro.get("agent_source"), dict) and retro.get("agent_source") else False,
         "fast_track": "fast_track" in str(log_text),
         "inline_execution": "[INLINE]" in log_text,
         "discovery_skipped": "[SKIP] discovery" in log_text,
@@ -288,7 +289,7 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
             "similarity": s.get("similarity"),
             "quality_score": _safe_float(s.get("quality_score"), 0),
             "total_tokens": int(_safe_float(s.get("total_token_usage"), 0)),
-            "repair_cycles": int(s.get("repair_cycle_count", 0) or 0),
+            "repair_cycles": _safe_int(s.get("repair_cycle_count", 0) or 0),
         })
 
     postmortem = {
@@ -339,32 +340,35 @@ def write_postmortem(root: Path, task_id: str) -> dict:
 
 
 def _render_markdown(pm: dict) -> str:
+    cost = pm.get("cost_summary", {})
+    quality = pm.get("quality_summary", {})
+    policy = pm.get("policy_usage", {})
     lines = [
-        f"# Postmortem: {pm['task_id']}",
-        f"Generated: {pm['generated_at']}",
+        f"# Postmortem: {pm.get('task_id', 'unknown')}",
+        f"Generated: {pm.get('generated_at', 'unknown')}",
         "",
-        f"**Type:** {pm['task_type']} | **Risk:** {pm['task_risk_level']} | **Domains:** {pm['task_domains']} | **Outcome:** {pm['task_outcome']}",
+        f"**Type:** {pm.get('task_type', '')} | **Risk:** {pm.get('task_risk_level', '')} | **Domains:** {pm.get('task_domains', '')} | **Outcome:** {pm.get('task_outcome', '')}",
         "",
         "## Cost",
-        f"- Tokens: {pm['cost_summary']['total_tokens']:,} / {pm['cost_summary']['expected_budget']:,} budget ({pm['cost_summary']['budget_ratio']}x)",
-        f"- Spawns: {pm['cost_summary']['subagent_spawns']} total, {pm['cost_summary']['wasted_spawns']} wasted",
+        f"- Tokens: {cost.get('total_tokens', 0):,} / {cost.get('expected_budget', 0):,} budget ({cost.get('budget_ratio', 0)}x)",
+        f"- Spawns: {cost.get('subagent_spawns', 0)} total, {cost.get('wasted_spawns', 0)} wasted",
         "",
         "## Quality",
-        f"- Score: {pm['quality_summary']['quality_score']:.2f}",
-        f"- Findings: {pm['quality_summary']['total_findings']} total, {pm['quality_summary']['repair_cycles']} repair cycles",
+        f"- Score: {quality.get('quality_score', 0):.2f}",
+        f"- Findings: {quality.get('total_findings', 0)} total, {quality.get('repair_cycles', 0)} repair cycles",
     ]
 
-    if pm["quality_summary"]["findings_by_auditor"]:
-        for auditor, count in pm["quality_summary"]["findings_by_auditor"].items():
+    if quality.get("findings_by_auditor"):
+        for auditor, count in quality["findings_by_auditor"].items():
             lines.append(f"  - {auditor}: {count}")
 
     lines.extend([
         "",
         "## Policy Usage",
-        f"- All generic routing: {'yes' if pm['policy_usage']['all_generic'] else 'no'}",
-        f"- Fast-track: {'yes' if pm['policy_usage']['fast_track'] else 'no'}",
-        f"- Inline execution: {'yes' if pm['policy_usage']['inline_execution'] else 'no'}",
-        f"- Discovery skipped: {'yes' if pm['policy_usage']['discovery_skipped'] else 'no'}",
+        f"- All generic routing: {'yes' if policy.get('all_generic') else 'no'}",
+        f"- Fast-track: {'yes' if policy.get('fast_track') else 'no'}",
+        f"- Inline execution: {'yes' if policy.get('inline_execution') else 'no'}",
+        f"- Discovery skipped: {'yes' if policy.get('discovery_skipped') else 'no'}",
     ])
 
     if pm.get("anomalies"):
