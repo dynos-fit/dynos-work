@@ -23,6 +23,7 @@ from dynoslib_core import (
     VALID_RISK_LEVELS,
     _persistent_project_dir,
     _safe_float,
+    ensure_persistent_project_dir,
     automation_queue_path,
     benchmark_history_path,
     benchmark_index_path,

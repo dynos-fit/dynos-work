@@ -640,7 +640,12 @@ class TestCategoryHealth:
         assert status == "ok"
 
     def test_disabled_category_blocks_processing(self, tmp_project: Path) -> None:
-        """When a category is disabled, _process_finding marks finding as failed."""
+        """When a category is disabled, _process_finding marks the finding suppressed.
+
+        Behaviour was changed in commit facadb0 ("autofix cooldown blocks
+        marked as suppressed, not failed") — a cooldown is a block, not a
+        processing failure, so the status moved from "failed" to "suppressed".
+        """
         from datetime import datetime, timezone, timedelta
         # Create 3+ recent failures in the findings file
         now = datetime.now(timezone.utc)
@@ -655,8 +660,8 @@ class TestCategoryHealth:
 
         finding = _make_finding("new-dc", "low", "dead-code", "new dead code", {})
         result = _process_finding(finding, tmp_project)
-        assert result["status"] == "failed"
-        assert "category_disabled" in result.get("fail_reason", "")
+        assert result["status"] == "suppressed"
+        assert "category_cooldown" in result.get("fail_reason", "")
 
 
 # ---------------------------------------------------------------------------

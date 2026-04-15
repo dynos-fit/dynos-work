@@ -866,5 +866,7 @@ class TestProjectDirBehavior:
         from dynoslib import project_dir
         result = project_dir(tmp_path / "my-project")
         assert isinstance(result, Path)
-        assert result.exists()
+        # project_dir is pure path resolution (no mkdir side effect per
+        # dynoslib_core.py:156 docstring). Caller uses
+        # ensure_persistent_project_dir when it needs the dir to exist.
         assert "projects" in str(result)

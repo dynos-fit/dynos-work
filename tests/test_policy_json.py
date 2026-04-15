@@ -601,10 +601,10 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_resolve_model_falls_back_to_markdown_when_no_json(self) -> None:
         """Without model-policy.json, resolve_model() reads from markdown."""
-        from dynoslib import _persistent_project_dir, write_json
+        from dynoslib import ensure_persistent_project_dir, write_json
         from dynorouter import resolve_model
 
-        persistent = _persistent_project_dir(self.root)
+        persistent = ensure_persistent_project_dir(self.root)
         # No model-policy.json, only markdown
         (persistent / "dynos_patterns.md").write_text(
             "## Model Policy\n\n"
@@ -633,10 +633,10 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_skip_threshold_falls_back_to_markdown_when_no_json(self) -> None:
         """Without skip-policy.json, _get_skip_threshold() reads from markdown."""
-        from dynoslib import _persistent_project_dir
+        from dynoslib import ensure_persistent_project_dir
         from dynorouter import _get_skip_threshold
 
-        persistent = _persistent_project_dir(self.root)
+        persistent = ensure_persistent_project_dir(self.root)
         (persistent / "dynos_patterns.md").write_text(
             "## Skip Policy\n\n"
             "| Auditor | Skip Threshold | Confidence |\n"
@@ -660,10 +660,10 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_corrupt_json_falls_back_gracefully(self) -> None:
         """Corrupt JSON file does not crash; falls back to markdown or default."""
-        from dynoslib import _persistent_project_dir, write_json
+        from dynoslib import ensure_persistent_project_dir, write_json
         from dynorouter import resolve_model
 
-        persistent = _persistent_project_dir(self.root)
+        persistent = ensure_persistent_project_dir(self.root)
         # Write corrupt JSON
         (persistent / "model-policy.json").write_text("{not valid json!!!")
         (persistent / "dynos_patterns.md").write_text(
