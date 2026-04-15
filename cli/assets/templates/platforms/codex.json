@@ -7,6 +7,7 @@
     "skillPath": "skills/dynos-work",
     "filename": "SKILL.md"
   },
+  "defaultScope": "global",
   "frontmatter": {
     "name": "dynos-work",
     "description": "Task foundry for software engineering: discovery → spec → plan → execute → audit. Trigger with /dynos-work:start, /dynos-work:audit, /dynos-work:investigate, /dynos-work:execute, /dynos-work:status."

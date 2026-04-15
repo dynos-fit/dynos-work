@@ -88,6 +88,11 @@
     "skillOrWorkflow": {
       "type": "string",
       "enum": ["Skill", "Workflow"]
+    },
+    "defaultScope": {
+      "type": "string",
+      "enum": ["global", "project"],
+      "description": "Default install scope when --global/--project not specified. Codex only reads ~/.codex/skills/ → defaults to global."
     }
   }
 }

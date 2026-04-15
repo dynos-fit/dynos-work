@@ -59,9 +59,12 @@ describe('init --ai <harness> smoke', () => {
         throw new Error(`CLI not built: ${DIST_ENTRY}`);
       }
       const target = mkdtempSync(join(tmpdir(), `dw-smoke-${harness}-`));
+      // Force --project so the target dir gets the files even for harnesses
+      // that default to global scope (codex). This test asserts --target
+      // routing, not scope defaults.
       const result = spawnSync(
         'node',
-        [DIST_ENTRY, 'init', '--ai', harness, '--target', target],
+        [DIST_ENTRY, 'init', '--ai', harness, '--target', target, '--project'],
         { encoding: 'utf8' },
       );
       expect(result.status).toBe(0);

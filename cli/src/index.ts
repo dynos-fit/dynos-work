@@ -45,6 +45,7 @@ program
   .option('-a, --ai <type>', `AI assistant type (${AI_TYPES.join(', ')})`)
   .option('-t, --target <dir>', 'Target directory for installation')
   .option('-g, --global', 'Install globally to home directory (~/)')
+  .option('-p, --project', 'Install project-locally (override a harness default-scope of global)')
   .option('-f, --force', 'Overwrite existing files')
   .option('-o, --offline', 'Skip network, use bundled assets only')
   .action(async (options) => {
@@ -53,6 +54,7 @@ program
       ai: options.ai as AIType | undefined,
       target: options.target,
       global: options.global,
+      project: options.project,
       force: options.force,
       offline: options.offline,
     });

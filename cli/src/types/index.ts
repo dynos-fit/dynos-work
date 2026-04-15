@@ -53,6 +53,8 @@ export interface ExtraFile {
   target: string;
 }
 
+export type DefaultScope = 'global' | 'project';
+
 export interface PlatformConfig {
   platform: string;
   displayName: string;
@@ -64,4 +66,11 @@ export interface PlatformConfig {
   skillNamePrefix?: string;
   scriptPath?: string;
   skillOrWorkflow?: SkillOrWorkflow;
+  /**
+   * Install scope default when the user doesn't pass --global or --project.
+   * Codex reads skills from ~/.codex/skills/ (global only), so its default is
+   * "global". Most other harnesses scan project-local dirs (.cursor/, .claude/,
+   * etc.), so they default to "project" (absent field → "project").
+   */
+  defaultScope?: DefaultScope;
 }

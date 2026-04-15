@@ -15,6 +15,7 @@ export interface InitOptions {
   ai?: AIType;
   target?: string;
   global?: boolean;
+  project?: boolean;
   force?: boolean;
   offline?: boolean;
 }
@@ -30,7 +31,6 @@ export interface InitOptions {
 export async function initCommand(options: InitOptions): Promise<void> {
   logger.title('dynos-work-cli init');
 
-  const isGlobal = Boolean(options.global);
   const targetDir = resolve(options.target ?? process.cwd());
 
   let ai = options.ai;
@@ -56,6 +56,29 @@ export async function initCommand(options: InitOptions): Promise<void> {
       }
       process.exitCode = 1;
       return;
+    }
+  }
+
+  // Resolve install scope: explicit --global/--project wins; otherwise fall
+  // back to the platform's declared defaultScope (codex defaults to global
+  // since it only reads skills from ~/.codex/skills/).
+  let isGlobal: boolean;
+  if (options.global) {
+    isGlobal = true;
+  } else if (options.project) {
+    isGlobal = false;
+  } else {
+    isGlobal = false;
+    if (ai !== 'all') {
+      try {
+        const config = await loadPlatformConfig(ai);
+        if (config.defaultScope === 'global') {
+          isGlobal = true;
+          logger.info(`Harness ${ai} reads skills globally — installing to $HOME`);
+        }
+      } catch {
+        // capability probe below will surface config errors
+      }
     }
   }
 
