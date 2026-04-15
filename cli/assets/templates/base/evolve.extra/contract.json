@@ -1,0 +1,76 @@
+{
+  "version": "1.0.0",
+  "skill": "evolve",
+  "description": "Generate learned agents or skills, update routing state, evaluate challengers, and manage promotion, demotion, and maintenance outputs.",
+  "input_schema": {
+    "dynos_patterns.md": {
+      "type": "string",
+      "required": false,
+      "source": "project memory patterns file or .dynos routing notes"
+    },
+    "task-retrospective.json": {
+      "type": "object",
+      "required": false,
+      "source": ".dynos/task-{id}/task-retrospective.json"
+    },
+    "retrospectives": {
+      "type": "array",
+      "required": false,
+      "source": ".dynos/task-*/task-retrospective.json"
+    },
+    "registry.json": {
+      "type": "object",
+      "required": false,
+      "source": ".dynos/learned-agents/registry.json"
+    },
+    "trajectories.json": {
+      "type": "object",
+      "required": false,
+      "source": ".dynos/trajectories.json"
+    },
+    "benchmark fixtures": {
+      "type": "array",
+      "required": false,
+      "source": "benchmarks/fixtures/*.json and benchmarks/generated/*.json"
+    },
+    "benchmark results": {
+      "type": "array",
+      "required": false,
+      "source": ".dynos/benchmarks/*.json and rollout outputs"
+    }
+  },
+  "output_schema": {
+    ".dynos/learned-agents/executors/{agent-name}.md": {
+      "type": "string",
+      "description": "Generated learned executor instructions for a specialized task pattern"
+    },
+    ".dynos/learned-agents/auditors/{agent-name}.md": {
+      "type": "string",
+      "description": "Generated learned auditor instructions for a specialized finding pattern"
+    },
+    ".dynos/learned-agents/skills/{skill-name}.md": {
+      "type": "string",
+      "description": "Generated learned skill instructions derived from repeated successful patterns"
+    },
+    ".dynos/learned-agents/registry.json": {
+      "type": "object",
+      "description": "Live learned-component registry with routing mode, benchmark history, promotion state, and route eligibility"
+    },
+    "dynos_patterns.md": {
+      "type": "string",
+      "description": "Updated agent routing table and last-generation marker"
+    },
+    ".dynos/proactive-findings.json": {
+      "type": "object",
+      "description": "Repository-wide proactive findings produced by the strategic scanner"
+    },
+    "benchmark_summary": {
+      "type": "object",
+      "description": "Evaluation summary and recommendation for candidate learned components"
+    },
+    "automation_status": {
+      "type": "object",
+      "description": "Queue, freshness, and auto-benchmark status emitted by the automation runtime"
+    }
+  }
+}

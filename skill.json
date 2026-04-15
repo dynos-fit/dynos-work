@@ -1,0 +1,41 @@
+{
+  "name": "dynos-work",
+  "displayName": "dynos-work",
+  "description": "Task foundry for software engineering: discovery -> spec -> plan -> execute -> audit",
+  "version": "7.0.0",
+  "author": "dynos-fit",
+  "license": "MIT",
+  "homepage": "https://github.com/dynos-fit/dynos-work",
+  "repository": "https://github.com/dynos-fit/dynos-work",
+  "keywords": [
+    "dynos-work",
+    "task-foundry",
+    "ai-skill",
+    "discovery",
+    "planning",
+    "execution",
+    "audit",
+    "multi-platform"
+  ],
+  "platforms": [
+    { "platform": "claude",      "displayName": "Claude Code",        "install": "npx dynos-work-cli init --ai claude" },
+    { "platform": "cursor",      "displayName": "Cursor",             "install": "npx dynos-work-cli init --ai cursor" },
+    { "platform": "windsurf",    "displayName": "Windsurf",           "install": "npx dynos-work-cli init --ai windsurf" },
+    { "platform": "antigravity", "displayName": "Google Antigravity", "install": "npx dynos-work-cli init --ai antigravity" },
+    { "platform": "copilot",     "displayName": "GitHub Copilot",     "install": "npx dynos-work-cli init --ai copilot" },
+    { "platform": "kiro",        "displayName": "Kiro",               "install": "npx dynos-work-cli init --ai kiro" },
+    { "platform": "codex",       "displayName": "OpenAI Codex",       "install": "npx dynos-work-cli init --ai codex" },
+    { "platform": "roocode",     "displayName": "Roo Code",           "install": "npx dynos-work-cli init --ai roocode" },
+    { "platform": "qoder",       "displayName": "Qoder",              "install": "npx dynos-work-cli init --ai qoder" },
+    { "platform": "gemini",      "displayName": "Gemini CLI",         "install": "npx dynos-work-cli init --ai gemini" },
+    { "platform": "trae",        "displayName": "Trae",               "install": "npx dynos-work-cli init --ai trae" },
+    { "platform": "opencode",    "displayName": "OpenCode",           "install": "npx dynos-work-cli init --ai opencode" },
+    { "platform": "continue",    "displayName": "Continue",           "install": "npx dynos-work-cli init --ai continue" },
+    { "platform": "codebuddy",   "displayName": "CodeBuddy",          "install": "npx dynos-work-cli init --ai codebuddy" },
+    { "platform": "droid",       "displayName": "Factory Droid",      "install": "npx dynos-work-cli init --ai droid" },
+    { "platform": "kilocode",    "displayName": "Kilo Code",          "install": "npx dynos-work-cli init --ai kilocode" },
+    { "platform": "warp",        "displayName": "Warp",               "install": "npx dynos-work-cli init --ai warp" },
+    { "platform": "augment",     "displayName": "Augment Code",       "install": "npx dynos-work-cli init --ai augment" }
+  ],
+  "install": "npx dynos-work-cli init --ai {{platform}}"
+}

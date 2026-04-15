@@ -55,7 +55,11 @@ describe('placeholder residue lint', () => {
       const t = regenerate(harness);
       const files = walk(t).filter((f) => f.endsWith('.md') || f.endsWith('.json'));
       expect(files.length).toBeGreaterThan(0);
-      const placeholderRe = /\{\{[^}]*\}\}/;
+      // Only template-style placeholders count: `{{UPPERCASE_NAME}}` or `{{PREFIX:payload}}`.
+      // We specifically exclude matches that appear inside inline-code spans (single or
+      // triple backticks), because a legitimate skill body may contain prose like
+      // "no `{{` or `}}` sequences" as an instructional string.
+      const placeholderRe = /\{\{[A-Z][A-Z0-9_]*(?::[^}]*)?\}\}/;
       for (const rel of files) {
         const body = readFileSync(join(t, rel), 'utf8');
         const m = body.match(placeholderRe);

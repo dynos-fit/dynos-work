@@ -1,0 +1,62 @@
+name: Publish dynos-work-cli
+
+on:
+  push:
+    tags:
+      - 'v7.*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run npm pack only (skip publish)'
+        required: false
+        default: 'false'
+
+jobs:
+  publish:
+    name: Build and publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: cli
+        run: bun install --frozen-lockfile
+
+      - name: Build CLI
+        working-directory: cli
+        run: bun run build
+
+      - name: Verify dist
+        working-directory: cli
+        run: |
+          test -f dist/index.js || { echo "dist/index.js missing after build" >&2; exit 1; }
+          test -d assets/templates/base || { echo "assets/templates/base missing" >&2; exit 1; }
+          test -d assets/templates/platforms || { echo "assets/templates/platforms missing" >&2; exit 1; }
+
+      - name: npm pack (dry-run validation)
+        working-directory: cli
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.log
+          grep -q 'dynos-work-cli-7' /tmp/pack.log || { echo "tarball name check failed" >&2; exit 1; }
+
+      - name: Publish to npm
+        if: github.event_name == 'push' || github.event.inputs.dry_run != 'true'
+        working-directory: cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

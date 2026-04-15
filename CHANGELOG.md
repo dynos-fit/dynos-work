@@ -7,6 +7,42 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.0.0] - 2026-04-14
+### "Multi-Harness Foundry": CLI Renderer, 18 Harnesses, Breaking Repo Layout
+
+This release inverts the distribution model. The checked-in Claude-specific plugin tree is gone; a TypeScript CLI (`dynos-work-cli`) is now the single source of truth for emitting harness-specific installs. Claude remains a first-class target, but so do 17 other AI coding harnesses — each rendered from the same base templates through capability-flag-driven filters.
+
+### Added
+- `dynos-work-cli` — new TypeScript installer shipped to npm as `dynos-work-cli@7.0.0`.
+  - Command: `npx dynos-work-cli init --ai <platform> --target <dir>`.
+  - Supported platforms (18): `claude`, `cursor`, `windsurf`, `antigravity`, `copilot`, `kiro`, `codex`, `roocode`, `qoder`, `gemini`, `trae`, `opencode`, `continue`, `codebuddy`, `droid`, `kilocode`, `warp`, `augment`.
+- Capability-flag-driven renderer at `cli/src/renderer/` — one base template set, one flag matrix per platform, deterministic output.
+- Base templates at `cli/assets/templates/base/` — previously `skills/` and `agents/` at the repo root.
+- Platform manifests at `cli/assets/templates/platforms/*.json` — one JSON per harness, validated against `platform.schema.json`.
+- `skill.json` at repo root — multi-platform marketplace manifest mirroring the `ui-ux-pro-max-skill` shape.
+- Parity gate at `scripts/check-claude-parity.sh` + `.github/workflows/parity.yml` — Claude regeneration diffed against a frozen fixture.
+- Drift gate at `scripts/check-renderer-drift.sh` — wraps the parity gate for external consumers.
+- Publish workflow at `.github/workflows/publish.yml` — tag-triggered `npm publish` of `dynos-work-cli`.
+- Top-level `install.sh` rewrite — runtime materialisation into `~/.dynos-work/{bin,hooks}/` is idempotent; shell-rc PATH append is TTY-guarded and opt-in with an explicit marker + backup.
+
+### Changed
+- **BREAKING:** the repo-root `skills/`, `agents/`, `hooks.json`, and `.claude-plugin/` directories are removed from version control. They are now emitted artifacts produced by the CLI renderer. Clone + `./install.sh` (or `npx dynos-work-cli init --ai claude`) regenerates them locally.
+- `install.sh` no longer clones the repo or installs a Claude marketplace plugin — it delegates platform emission to the CLI.
+- CLI version bumped from 6.x to `7.0.0`; the emitted `.claude-plugin/plugin.json` version is bumped in lockstep.
+
+### Removed
+- Checked-in `skills/` (now emitted).
+- Checked-in `agents/` (now emitted).
+- Checked-in `hooks.json` (now emitted).
+- Checked-in `.claude-plugin/plugin.json` (now emitted).
+
+### Migration
+See `docs/migration-7.0.md`. Short version:
+- Existing 6.0.0 Claude users: re-run `./install.sh` (or `npx dynos-work-cli init --ai claude`) once. The regenerated tree is byte-identical to the 6.0.0 Claude tree except for a tokenised `${PLUGIN_HOOKS}` -> `${CLAUDE_PLUGIN_ROOT}/hooks` rewrite and a `7.0.0` version bump.
+- First-time install for non-Claude harnesses: `npx dynos-work-cli init --ai <platform>`.
+
+---
+
 ## [6.0.0] - 2026-04-03
 ### "Runtime Control Plane": Deterministic Foundry, Live Dashboard, Maintainer Daemon
 

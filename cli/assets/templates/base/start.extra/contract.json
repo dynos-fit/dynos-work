@@ -1,0 +1,50 @@
+{
+  "version": "1.0.0",
+  "skill": "start",
+  "description": "Primary entry point. Runs discovery, design, classification, spec normalization, spec review, planning, plan review, and spec coverage audit.",
+  "input_schema": {
+    "task_description": {
+      "type": "string",
+      "required": true,
+      "source": "user prompt"
+    }
+  },
+  "output_schema": {
+    "manifest.json": {
+      "type": "object",
+      "description": "Task manifest with task_id, created_at, title, raw_input, stage, classification, retry_counts, blocked_reason, completion_at"
+    },
+    "raw-input.md": {
+      "type": "string",
+      "description": "Full task description exactly as given by the user"
+    },
+    "discovery-notes.md": {
+      "type": "string",
+      "description": "Discovery Q&A between planner and user"
+    },
+    "design-decisions.md": {
+      "type": "string",
+      "description": "Design decisions for hard/critical subtasks"
+    },
+    "spec.md": {
+      "type": "string",
+      "description": "Normalized spec with numbered acceptance criteria"
+    },
+    "plan.md": {
+      "type": "string",
+      "description": "Implementation plan with technical approach, module breakdown, data flow, error handling, test strategy"
+    },
+    "execution-graph.json": {
+      "type": "object",
+      "description": "Execution graph with segments declaring id, executor, description, files_expected, depends_on, parallelizable, criteria_ids"
+    },
+    "execution-log.md": {
+      "type": "string",
+      "description": "Append-only execution log tracking stage transitions and decisions"
+    },
+    "audit-reports/plan-audit-{timestamp}.json": {
+      "type": "object",
+      "description": "Spec coverage audit report verifying plan covers all acceptance criteria"
+    }
+  }
+}

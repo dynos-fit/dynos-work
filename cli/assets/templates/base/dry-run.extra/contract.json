@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "skill": "dry-run",
+  "description": "Validate all skill contracts for schema consistency, type mismatches, and missing fields.",
+  "input_schema": {
+    "contract.json": {
+      "type": "object",
+      "required": true,
+      "source": "skills/*/contract.json (all skill contracts)"
+    }
+  },
+  "output_schema": {
+    "validation_report": {
+      "type": "object",
+      "description": "Validation report with pass/fail status, mismatch details, missing fields, and per-contract results"
+    }
+  }
+}

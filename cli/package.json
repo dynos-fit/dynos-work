@@ -1,0 +1,46 @@
+{
+  "name": "dynos-work-cli",
+  "version": "7.0.0",
+  "description": "CLI to install dynos-work across AI coding assistants",
+  "type": "module",
+  "bin": {
+    "dynos-work-cli": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node && bun run build.ts",
+    "dev": "bun run src/index.ts",
+    "test": "bun test --path-ignore-patterns='**/assets/**'",
+    "validate:platforms": "bun run scripts/validate-platforms.ts",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "dynos-work",
+    "cli",
+    "ai",
+    "skill",
+    "claude",
+    "cursor",
+    "windsurf",
+    "copilot"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "chalk": "^5.3.0",
+    "ora": "^8.1.1",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "@types/node": "^22.10.1",
+    "@types/prompts": "^2.4.9",
+    "typescript": "^5.7.2",
+    "ajv": "^8.17.1",
+    "ajv-cli": "^5.0.0"
+  }
+}

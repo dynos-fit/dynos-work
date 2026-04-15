@@ -1,0 +1,48 @@
+{
+  "version": "1.0.0",
+  "skill": "status",
+  "description": "Show current task state, lifecycle stage, audit results, and open gaps.",
+  "input_schema": {
+    "manifest.json": {
+      "type": "object",
+      "required": true,
+      "source": ".dynos/task-{id}/manifest.json (most recent active task)"
+    },
+    "spec.md": {
+      "type": "string",
+      "required": false,
+      "source": ".dynos/task-{id}/spec.md"
+    },
+    "execution-graph.json": {
+      "type": "object",
+      "required": false,
+      "source": ".dynos/task-{id}/execution-graph.json"
+    },
+    "audit-reports": {
+      "type": "array",
+      "required": false,
+      "source": ".dynos/task-{id}/audit-reports/*.json"
+    },
+    "repair-log.json": {
+      "type": "object",
+      "required": false,
+      "source": ".dynos/task-{id}/repair-log.json"
+    },
+    "test-results.json": {
+      "type": "object",
+      "required": false,
+      "source": ".dynos/task-{id}/test-results.json"
+    },
+    "execution-log.md": {
+      "type": "string",
+      "required": false,
+      "source": ".dynos/task-{id}/execution-log.md"
+    }
+  },
+  "output_schema": {
+    "status_report": {
+      "type": "string",
+      "description": "Human-readable status report with task ID, title, stage, lifecycle progress, execution progress, acceptance criteria coverage, audit results, open findings, test results, repair cycle, and next command"
+    }
+  }
+}

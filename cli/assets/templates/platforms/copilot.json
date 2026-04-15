@@ -1,0 +1,24 @@
+{
+  "platform": "copilot",
+  "displayName": "GitHub Copilot",
+  "installType": "full",
+  "folderStructure": {
+    "root": ".github",
+    "skillPath": "prompts",
+    "filename": "PROMPT.md"
+  },
+  "frontmatter": {
+    "name": "dynos-work",
+    "description": "Task foundry for software engineering: discovery → spec → plan → execute → audit. Trigger with /dynos-work:start, /dynos-work:audit, /dynos-work:investigate, /dynos-work:execute, /dynos-work:status."
+  },
+  "capabilities": {
+    "parallel_subagents": false,
+    "lifecycle_hooks": false,
+    "transcript_parsing": false,
+    "per_agent_model": false,
+    "structured_questions": false,
+    "env_injection": false
+  },
+  "skillNamePrefix": "dynos-work-",
+  "skillOrWorkflow": "Workflow"
+}

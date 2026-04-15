@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://dynos-work.dev/schemas/platform.schema.json",
+  "title": "PlatformConfig",
+  "description": "Schema for dynos-work platform configuration JSON files (one per harness).",
+  "type": "object",
+  "required": [
+    "platform",
+    "displayName",
+    "installType",
+    "folderStructure",
+    "frontmatter",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "platform": {
+      "type": "string",
+      "minLength": 1
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "installType": {
+      "type": "string",
+      "enum": ["full", "reference"]
+    },
+    "folderStructure": {
+      "type": "object",
+      "required": ["root", "skillPath", "filename"],
+      "additionalProperties": false,
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "skillPath": { "type": "string", "minLength": 1 },
+        "filename": { "type": "string", "minLength": 1 }
+      }
+    },
+    "frontmatter": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      ]
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "parallel_subagents",
+        "lifecycle_hooks",
+        "transcript_parsing",
+        "per_agent_model",
+        "structured_questions",
+        "env_injection"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "parallel_subagents": { "type": "boolean" },
+        "lifecycle_hooks": { "type": "boolean" },
+        "transcript_parsing": { "type": "boolean" },
+        "per_agent_model": { "type": "boolean" },
+        "structured_questions": { "type": "boolean" },
+        "env_injection": { "type": "boolean" }
+      }
+    },
+    "extraFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "target"],
+        "additionalProperties": false,
+        "properties": {
+          "source": { "type": "string", "minLength": 1 },
+          "target": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "skillNamePrefix": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scriptPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "skillOrWorkflow": {
+      "type": "string",
+      "enum": ["Skill", "Workflow"]
+    }
+  }
+}

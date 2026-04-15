@@ -198,12 +198,34 @@ def record_tokens(
     event_type: str = "spawn",
     segment: str | None = None,
     detail: str | None = None,
+    spawn_id: str | None = None,
 ) -> dict:
-    """Record a single event's token usage. Returns updated data."""
+    """Record a single event's token usage. Returns updated data.
+
+    Idempotency: when ``spawn_id`` is a non-empty string, a second call with
+    the same ``(agent, spawn_id)`` pair is a no-op — no event is appended,
+    no aggregates are incremented, and the file is not rewritten. This lets
+    skill templates safely retry ``record`` invocations without double-counting.
+    When ``spawn_id`` is ``None`` or empty the legacy unconditional-append
+    behavior is preserved for backwards compatibility.
+    """
     task_dir = Path(task_dir)
     data = _load_usage(task_dir)
 
     model = _resolve_model(model)
+
+    # Idempotency guard: skip if (agent, spawn_id) already recorded.
+    if isinstance(spawn_id, str) and spawn_id:
+        for entry in data.get("events", []):
+            if not isinstance(entry, dict):
+                continue
+            entry_spawn = entry.get("spawn_id")
+            if not isinstance(entry_spawn, str):
+                continue
+            if entry.get("agent") == agent and entry_spawn == spawn_id:
+                # Duplicate — return loaded data untouched; skip disk write
+                # so we don't bump mtime on repeated no-op calls.
+                return data
 
     total = input_tokens + output_tokens
     now = datetime.now(timezone.utc).isoformat()
@@ -219,6 +241,7 @@ def record_tokens(
         "phase": phase,
         "stage": stage,
         "type": event_type,
+        "spawn_id": spawn_id,
     }
     if segment:
         event["segment"] = segment
@@ -281,6 +304,8 @@ def main() -> None:
     rec.add_argument("--type", default="spawn", dest="event_type", help="Event type: spawn, deterministic, inline")
     rec.add_argument("--segment", default=None, help="Execution graph segment ID (e.g. seg-1)")
     rec.add_argument("--detail", default=None, help="Human-readable detail of what happened")
+    rec.add_argument("--spawn-id", default=None, dest="spawn_id",
+                     help="Unique per-spawn identifier; when set, a second record call with the same (agent, spawn-id) is a no-op")
 
     summ = sub.add_parser("summary", help="Print token usage summary as JSON")
     summ.add_argument("--task-dir", required=True, help="Path to .dynos/task-{id}")
@@ -299,6 +324,7 @@ def main() -> None:
             event_type=args.event_type,
             segment=args.segment,
             detail=args.detail,
+            spawn_id=args.spawn_id,
         )
         print(json.dumps({
             "ok": True,

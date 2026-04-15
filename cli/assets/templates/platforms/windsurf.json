@@ -1,0 +1,23 @@
+{
+  "platform": "windsurf",
+  "displayName": "Windsurf",
+  "installType": "full",
+  "folderStructure": {
+    "root": ".windsurf",
+    "skillPath": "skills/dynos-work",
+    "filename": "SKILL.md"
+  },
+  "frontmatter": {
+    "name": "dynos-work",
+    "description": "Task foundry for software engineering: discovery → spec → plan → execute → audit. Trigger with /dynos-work:start, /dynos-work:audit, /dynos-work:investigate, /dynos-work:execute, /dynos-work:status."
+  },
+  "capabilities": {
+    "parallel_subagents": false,
+    "lifecycle_hooks": false,
+    "transcript_parsing": false,
+    "per_agent_model": false,
+    "structured_questions": false,
+    "env_injection": false
+  },
+  "skillOrWorkflow": "Skill"
+}

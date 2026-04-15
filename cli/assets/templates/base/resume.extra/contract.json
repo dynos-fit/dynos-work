@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "skill": "resume",
+  "description": "Resume an interrupted task from .dynos/ state. Use after session restart or context compression.",
+  "input_schema": {
+    "manifest.json": {
+      "type": "object",
+      "required": true,
+      "source": "glob .dynos/task-*/manifest.json",
+      "note": "Each manifest is an object; the skill globs for multiple files"
+    }
+  },
+  "output_schema": {
+    "resume_directive": {
+      "type": "string",
+      "description": "The command to run next based on the task's current stage (e.g. /dynos-work:plan, /dynos-work:execute, /dynos-work:audit)"
+    },
+    "task_id": {
+      "type": "string",
+      "description": "The ID of the resumed task"
+    },
+    "current_stage": {
+      "type": "string",
+      "description": "The stage the task was at when interrupted"
+    }
+  }
+}

@@ -1,0 +1,53 @@
+name: parity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Install CLI deps
+        working-directory: cli
+        run: bun install --frozen-lockfile || bun install
+
+      - name: Build CLI
+        working-directory: cli
+        run: bun run build
+
+      - name: Claude parity shell gate
+        run: bash scripts/check-claude-parity.sh
+
+      - name: Renderer drift check
+        run: bash scripts/check-renderer-drift.sh
+
+      - name: Bun parity tests
+        working-directory: cli
+        run: bun test tests/parity/
+
+      - name: Python hooks tests
+        run: pytest tests/

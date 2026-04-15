@@ -1,0 +1,54 @@
+{
+  "version": "1.0.0",
+  "skill": "execute",
+  "description": "Snapshot, run all executor segments in dependency order, then run the test suite.",
+  "input_schema": {
+    "manifest.json": {
+      "type": "object",
+      "required": true,
+      "source": ".dynos/task-{id}/manifest.json"
+    },
+    "spec.md": {
+      "type": "string",
+      "required": true,
+      "source": ".dynos/task-{id}/spec.md"
+    },
+    "plan.md": {
+      "type": "string",
+      "required": true,
+      "source": ".dynos/task-{id}/plan.md"
+    },
+    "execution-graph.json": {
+      "type": "object",
+      "required": true,
+      "source": ".dynos/task-{id}/execution-graph.json"
+    },
+    "dynos_patterns.md": {
+      "type": "string",
+      "required": false,
+      "source": "~/.claude/projects/<project>/memory/dynos_patterns.md"
+    }
+  },
+  "output_schema": {
+    "evidence/{segment-id}.md": {
+      "type": "string",
+      "description": "Evidence file per executor segment documenting files modified, integration points, and acceptance criteria satisfied"
+    },
+    "snapshot": {
+      "type": "object",
+      "description": "Git snapshot metadata in manifest.json: branch name, stash_ref, head_sha"
+    },
+    "test-results.json": {
+      "type": "object",
+      "description": "Test execution results with run_at, command, passed, output_summary, failing_tests (written only on test failure)"
+    },
+    "execution-log.md": {
+      "type": "string",
+      "description": "Appended log entries for PRE_EXECUTION_SNAPSHOT, EXECUTION, TEST_EXECUTION stages"
+    },
+    "handoff-execute-audit.json": {
+      "type": "object",
+      "description": "Handoff record confirming execute outputs are valid for audit consumption"
+    }
+  }
+}

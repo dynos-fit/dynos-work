@@ -1,0 +1,48 @@
+# dynos-work-cli .npmignore
+#
+# The "files" field in package.json pins "dist" and "assets". This file is a
+# defense-in-depth exclude list that prevents test, fixture, and dev tooling
+# from leaking into the published tarball.
+
+# Sources (only the built dist/ is published)
+src/
+build.ts
+tsconfig.json
+
+# Tests
+tests/
+**/__tests__/
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+
+# Fixtures (large, not needed at runtime)
+cli/tests/fixtures/
+tests/fixtures/
+
+# Dev tooling
+scripts/validate-platforms.ts
+scripts/
+
+# Bun / Node caches
+node_modules/
+bun.lock
+bun.lockb
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Coverage
+coverage/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Task state that may live in the tree during dev
+.dynos/

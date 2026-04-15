@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "name": "global",
+  "description": "Manage the global cross-project sweeper daemon.",
+  "input_schema": {},
+  "output_schema": {}
+}

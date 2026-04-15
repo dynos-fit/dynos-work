@@ -1,0 +1,27 @@
+{
+  "platform": "claude",
+  "displayName": "Claude Code",
+  "installType": "full",
+  "folderStructure": {
+    "root": ".claude",
+    "skillPath": "skills/dynos-work",
+    "filename": "SKILL.md"
+  },
+  "frontmatter": {
+    "name": "dynos-work",
+    "description": "Task foundry for software engineering: discovery → spec → plan → execute → audit. Trigger with /dynos-work:start, /dynos-work:audit, /dynos-work:investigate, /dynos-work:execute, /dynos-work:status."
+  },
+  "capabilities": {
+    "parallel_subagents": true,
+    "lifecycle_hooks": true,
+    "transcript_parsing": true,
+    "per_agent_model": true,
+    "structured_questions": true,
+    "env_injection": true
+  },
+  "extraFiles": [
+    { "source": "extras/hooks.json", "target": "hooks.json" },
+    { "source": "extras/plugin.json", "target": ".claude-plugin/plugin.json" }
+  ],
+  "skillOrWorkflow": "Skill"
+}

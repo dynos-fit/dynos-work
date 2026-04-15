@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "skill": "investigate",
+  "description": "Deep bug investigation. Returns structured root cause analysis with evidence and fix recommendation.",
+  "input_schema": {
+    "problem_description": {
+      "type": "string",
+      "required": true,
+      "source": "user prompt (error message, unexpected behavior, or failing test description)"
+    }
+  },
+  "output_schema": {
+    "root_cause_analysis": {
+      "type": "object",
+      "description": "Structured analysis with root cause, evidence, and fix recommendation returned by the investigator agent"
+    }
+  }
+}

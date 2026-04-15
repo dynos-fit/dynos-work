@@ -1,0 +1,20 @@
+{
+  "platform": "warp",
+  "displayName": "Warp",
+  "installType": "full",
+  "folderStructure": {
+    "root": ".warp",
+    "skillPath": "skills/dynos-work",
+    "filename": "SKILL.md"
+  },
+  "frontmatter": null,
+  "capabilities": {
+    "parallel_subagents": false,
+    "lifecycle_hooks": false,
+    "transcript_parsing": false,
+    "per_agent_model": false,
+    "structured_questions": false,
+    "env_injection": false
+  },
+  "skillOrWorkflow": "Skill"
+}
