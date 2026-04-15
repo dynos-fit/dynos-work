@@ -120,6 +120,11 @@ def _safe_float(value: object, default: float = 0.0) -> float:
     return float(value) if isinstance(value, (int, float)) else default
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    """Safely convert a value to int, returning default if not numeric."""
+    return int(value) if isinstance(value, (int, float)) else default
+
+
 def load_json(path: Path) -> dict:
     """Read and parse a JSON file."""
     return json.loads(path.read_text())

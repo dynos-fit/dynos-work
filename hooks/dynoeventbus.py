@@ -173,16 +173,20 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     Returns a summary dict of what ran.
     """
     summary: dict[str, list[str]] = {}
-    emitted_follow_ons: set[str] = set()
     iteration = 0
 
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
+        emitted_this_iteration: set[str] = set()
 
         for event_type, handlers in HANDLERS.items():
             for consumer_name, handler_fn in handlers:
-                events = consume_events(root, event_type, consumer_name)
+                try:
+                    events = consume_events(root, event_type, consumer_name)
+                except Exception as e:
+                    print(f"  [warn] consume_events({event_type}, {consumer_name}): {e}", file=sys.stderr)
+                    continue
                 for event_path, event_data in events:
                     processed_any = True
                     payload = event_data.get("payload", {})
@@ -218,9 +222,9 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
             # (only if events were processed and follow-on not already emitted)
             if event_type in summary and event_type in FOLLOW_ON:
                 follow_on = FOLLOW_ON[event_type]
-                if follow_on not in emitted_follow_ons:
+                if follow_on not in emitted_this_iteration:
                     emit_event(root, follow_on, "eventbus")
-                    emitted_follow_ons.add(follow_on)
+                    emitted_this_iteration.add(follow_on)
 
         if not processed_any:
             break
