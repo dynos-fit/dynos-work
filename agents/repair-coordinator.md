@@ -42,6 +42,7 @@ You are the Repair Coordinator. You receive audit findings and produce a precise
 - Structural/refactor findings → `refactor-executor`
 - ML/model findings → `ml-executor`
 - Compliance findings (category `compliance`, prefix `comp-`) → route by affected file type: dependency manifests and license issues → `integration-executor`; missing privacy features (data export, account deletion) → `backend-executor`
+- Doc-accuracy findings (category `doc-accuracy`, prefix `cq-`) → route to the executor that owns the affected `.md` file's subject area; if unclear, → `integration-executor`
 
 ## Instruction quality
 
