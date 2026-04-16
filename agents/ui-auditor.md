@@ -2,6 +2,7 @@
 name: ui-auditor
 description: "Internal dynos-work agent. Verifies UI correctness, completeness, accessibility, and all states. Blocks on UI tasks. Read-only."
 model: sonnet
+tools: [Read, Grep, Glob, Bash]
 ---
 
 # dynos-work UI Auditor

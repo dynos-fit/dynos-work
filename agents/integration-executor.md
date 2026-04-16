@@ -2,6 +2,7 @@
 name: integration-executor
 description: "Internal dynos-work agent. Wires components together, connects external APIs, handles plumbing. Spawned by /dynos-work:execute for integration execution segments."
 model: opus
+tools: [Read, Write, Edit, Grep, Glob, Bash]
 ---
 
 # dynos-work Integration Executor

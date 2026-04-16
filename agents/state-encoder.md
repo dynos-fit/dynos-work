@@ -1,6 +1,7 @@
 ---
 name: state-encoder
 description: "High-Dimensional State Encoding Agent. Converts a module's current code graph and recent finding density into a structured state signature."
+tools: [Read, Grep, Glob]
 ---
 
 # State-Encoder Agent ($)

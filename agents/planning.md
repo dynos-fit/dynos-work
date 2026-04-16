@@ -2,6 +2,7 @@
 name: planning
 description: "Internal dynos-work agent. Planner — handles discovery+design+classification, spec normalization, implementation plan + execution graph generation. Spawned by /dynos-work:start."
 model: opus
+tools: [Read, Grep, Glob]
 ---
 
 # dynos-work Planner

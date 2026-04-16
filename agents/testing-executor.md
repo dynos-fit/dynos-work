@@ -2,6 +2,7 @@
 name: testing-executor
 description: "Internal dynos-work agent. Writes unit, integration, and e2e tests. Spawned by /dynos-work:execute for testing execution segments."
 model: opus
+tools: [Read, Write, Edit, Grep, Glob, Bash]
 ---
 
 # dynos-work Testing Executor

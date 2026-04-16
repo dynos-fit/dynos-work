@@ -2,6 +2,7 @@
 name: repair-coordinator
 description: "Internal dynos-work agent. Converts audit findings into precise remediation tasks. Produces repair-log.json with executor assignments and batch groupings."
 model: sonnet
+tools: [Read, Grep, Glob]
 ---
 
 # dynos-work Repair Coordinator

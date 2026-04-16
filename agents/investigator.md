@@ -2,6 +2,7 @@
 name: investigator
 description: "Internal dynos-work agent. Deep bug investigation — runtime errors, logic bugs, test failures. Reads relevant files autonomously. Returns structured root cause analysis with evidence and fix recommendation. Read-only."
 model: opus
+tools: [Read, Grep, Glob, Bash]
 ---
 
 # dynos-work Investigator
