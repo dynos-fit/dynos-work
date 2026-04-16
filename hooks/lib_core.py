@@ -185,6 +185,22 @@ def ensure_persistent_project_dir(root: Path) -> Path:
     return d
 
 
+def is_learning_enabled(root: Path) -> bool:
+    """Check whether the learning layer is enabled for this project.
+
+    Reads ``learning_enabled`` from ``~/.dynos/projects/{slug}/policy.json``.
+    Defaults to ``True`` when the file or key is missing — learning is opt-out.
+    """
+    try:
+        policy_path = _persistent_project_dir(root) / "policy.json"
+        data = json.loads(policy_path.read_text())
+        if isinstance(data, dict):
+            return bool(data.get("learning_enabled", True))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return True
+
+
 def project_dir(root: Path) -> Path:
     """Returns ~/.dynos/projects/{slug}/ for persistent project-specific state.
 

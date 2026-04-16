@@ -193,6 +193,52 @@ def cmd_crawl_targets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    """Get or set project policy values."""
+    import json as _json
+    from lib_core import _persistent_project_dir, ensure_persistent_project_dir, load_json, write_json
+
+    root = Path(args.root).resolve()
+
+    if args.action == "get":
+        policy_path = _persistent_project_dir(root) / "policy.json"
+        try:
+            data = load_json(policy_path)
+        except (FileNotFoundError, _json.JSONDecodeError):
+            data = {}
+        if args.key:
+            val = data.get(args.key)
+            if val is None:
+                print(f"{args.key}: <not set>")
+            else:
+                print(f"{args.key}: {_json.dumps(val)}")
+        else:
+            print(_json.dumps(data, indent=2))
+        return 0
+
+    elif args.action == "set":
+        if not args.key or args.value is None:
+            print("Usage: config set <key> <value>", file=sys.stderr)
+            return 1
+        policy_dir = ensure_persistent_project_dir(root)
+        policy_path = policy_dir / "policy.json"
+        try:
+            data = load_json(policy_path)
+        except (FileNotFoundError, _json.JSONDecodeError):
+            data = {}
+        # Parse value: try JSON first (for booleans, numbers), fall back to string
+        try:
+            parsed = _json.loads(args.value)
+        except _json.JSONDecodeError:
+            parsed = args.value
+        data[args.key] = parsed
+        write_json(policy_path, data)
+        print(f"{args.key}: {_json.dumps(parsed)}")
+        return 0
+
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -272,6 +318,13 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_targets_parser.add_argument("--root", required=True, help="Project root directory")
     crawl_targets_parser.add_argument("--max", default="10", help="Maximum number of targets (default: 10)")
     crawl_targets_parser.set_defaults(func=cmd_crawl_targets)
+
+    config_parser = subparsers.add_parser("config", help="Get or set project policy values")
+    config_parser.add_argument("action", choices=["get", "set"], help="Action: get or set")
+    config_parser.add_argument("key", nargs="?", default=None, help="Policy key (e.g. learning_enabled)")
+    config_parser.add_argument("value", nargs="?", default=None, help="Value to set (JSON: true, false, 123, \"string\")")
+    config_parser.add_argument("--root", default=".", help="Project root")
+    config_parser.set_defaults(func=cmd_config)
 
     return parser
 

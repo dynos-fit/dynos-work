@@ -18,6 +18,7 @@ from lib_core import (
     _safe_float,
     benchmark_history_path,
     collect_retrospectives,
+    is_learning_enabled,
     load_json,
     now_iso,
     project_policy,
@@ -269,6 +270,12 @@ def resolve_model(root: Path, role: str, task_type: str) -> dict:
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
 
+    # Steps 2-4 use learned data — skip when learning is disabled.
+    if not is_learning_enabled(root):
+        result = {"model": DEFAULT_MODEL, "source": "default"}
+        log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source="default (learning_enabled=false)")
+        return result
+
     # 2. UCB1 over effectiveness scores
     patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
     if patterns_path.exists():
@@ -377,6 +384,9 @@ def resolve_skip(root: Path, auditor: str, task_type: str) -> dict:
     if auditor in SKIP_EXEMPT:
         return {"skip": False, "reason": "skip-exempt", "streak": 0, "threshold": 0}
 
+    if not is_learning_enabled(root):
+        return {"skip": False, "reason": "learning_enabled=false (no skip)", "streak": 0, "threshold": 0}
+
     # Get streak from most recent prior task
     retros = collect_retrospectives(root)
     streak = 0
@@ -443,6 +453,17 @@ def resolve_route(root: Path, role: str, task_type: str) -> dict:
         "source": str
     }.
     """
+    if not is_learning_enabled(root):
+        result = {
+            "mode": "generic",
+            "agent_path": None,
+            "agent_name": None,
+            "composite_score": 0.0,
+            "source": "learning_enabled=false",
+        }
+        log_event(root, "router_route_decision", role=role, task_type=task_type, mode="generic", agent_name=None, composite_score=0.0, source="learning_enabled=false")
+        return result
+
     registry = ensure_learned_registry(root)
     agents = registry.get("agents", [])
 

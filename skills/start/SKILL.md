@@ -133,8 +133,8 @@ This writes to `.dynos/task-{id}/token-usage.json` with a chronological event lo
 1. Build discovery context from:
    - `raw-input.md`
    - relevant existing code in the repo
-   - optional trajectory memory from `.dynos/trajectories.json` if available
-2. If trajectory memory exists, use it only to surface likely ambiguity or failure patterns. Do not treat it as ground truth and do not copy prior solutions blindly.
+   - optional trajectory memory from `.dynos/trajectories.json` if available (**skip when `learning_enabled=false` in project policy.json**)
+2. If trajectory memory exists and learning is enabled, use it only to surface likely ambiguity or failure patterns. Do not treat it as ground truth and do not copy prior solutions blindly.
 3. Generate up to 5 targeted questions that materially reduce implementation risk.
 4. Present the questions to the user using `AskUserQuestion`.
 5. Write `discovery-notes.md` with the Q&A.
@@ -152,7 +152,7 @@ When well-scoped: skip the planner spawn entirely. Instead, write `discovery-not
 
 When NOT well-scoped: spawn the planner as normal below.
 
-**Learned Planning Skill Injection (MANDATORY):** Before spawning the planner, check if a learned planning skill exists for this task type:
+**Learned Planning Skill Injection (skip when `learning_enabled=false`):** Before spawning the planner, check if a learned planning skill exists for this task type:
 
 ```bash
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 -c "from pathlib import Path; from router import resolve_route; r = resolve_route(Path('.'), 'plan-skill', '{task_type}'); print(r['agent_path'] or '')" 
