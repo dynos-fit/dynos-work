@@ -72,9 +72,9 @@ def cmd_register(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    # Reject temporary directories (autofix worktrees, test fixtures)
+    # Reject temporary directories (test fixtures)
     str_root = str(root)
-    if str_root.startswith("/tmp/") or str_root.startswith("/var/tmp/") or "/dynos-autofix-" in str_root:
+    if str_root.startswith("/tmp/") or str_root.startswith("/var/tmp/"):
         print(json.dumps({"error": f"refusing to register temporary directory: {root}"}, indent=2),
               file=sys.stderr)
         return 1

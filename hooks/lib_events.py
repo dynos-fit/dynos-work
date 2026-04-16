@@ -27,7 +27,7 @@ EVENT_TYPES: set[str] = {
     "benchmark-completed",
 }
 
-VALID_PIPELINES: set[str] = {"task", "learn", "autofix", "observability", "eventbus"}
+VALID_PIPELINES: set[str] = {"task", "learn", "observability", "eventbus"}
 
 # Retention: processed events older than this (seconds) are deleted on cleanup
 RETENTION_SECONDS: int = 7 * 24 * 3600  # 7 days

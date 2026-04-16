@@ -93,21 +93,6 @@ EFFICIENCY_CLAMP: float = 0.2
 ESCALATION_RETRY_THRESHOLD: int = 2   # use opus after N retries
 
 # ---------------------------------------------------------------------------
-# Autofix Q-learning rewards (proactive.py)
-# ---------------------------------------------------------------------------
-
-AUTOFIX_REWARD_PR_MERGED: float = 1.0
-AUTOFIX_REWARD_PR_OPENED: float = 0.5
-AUTOFIX_REWARD_NO_CHANGES: float = -0.3
-AUTOFIX_REWARD_VERIFICATION_FAILED: float = -0.5
-AUTOFIX_REWARD_GIT_COMMIT_FAILED: float = -0.2
-AUTOFIX_REWARD_ISSUE_OPENED: float = 0.3
-AUTOFIX_REWARD_SKIP: float = 0.0
-
-# PR feedback loop rewards
-PR_FEEDBACK_REWARD_MERGED: float = 0.8
-PR_FEEDBACK_REWARD_CLOSED: float = -0.5
-
 # ---------------------------------------------------------------------------
 # Fix templates (lib_templates.py)
 # ---------------------------------------------------------------------------
@@ -115,52 +100,8 @@ PR_FEEDBACK_REWARD_CLOSED: float = -0.5
 MAX_FIX_TEMPLATES: int = 50
 MAX_TEMPLATE_DIFF_LINES: int = 100
 
-# ---------------------------------------------------------------------------
-# Batch fixes (proactive.py)
-# ---------------------------------------------------------------------------
-
-BATCH_MIN_GROUP_SIZE: int = 3   # minimum findings to form a batch
-
-# ---------------------------------------------------------------------------
-# Confidence & category thresholds (proactive.py)
-# ---------------------------------------------------------------------------
-
-CONF_AUTOFIX_BASE: float = 0.75
-CONF_SYNTAX_ERROR: float = 0.95
-CONF_DEAD_CODE: float = 0.88
-CONF_LLM_REVIEW: float = 0.70
-CONF_ISSUE_ONLY: float = 0.35      # dependency-vuln, architectural-drift
-MIN_CONF_AUTOFIX: float = 0.65
 MIN_FINDING_CONFIDENCE: float = 0.7
 HIGH_CONFIDENCE_THRESHOLD: float = 0.9   # degeneration warning
-
-# ---------------------------------------------------------------------------
-# LLM review file scoring (proactive.py — _compute_file_scores)
-# ---------------------------------------------------------------------------
-
-FILE_SCORE_CHURN_MAX: int = 10
-FILE_SCORE_CHURN_WEIGHT: int = 3
-FILE_SCORE_COMPLEXITY_DIVISOR: int = 50
-FILE_SCORE_COMPLEXITY_MAX: int = 10
-FILE_SCORE_COMPLEXITY_WEIGHT: int = 2
-FILE_SCORE_NO_TEST_BOOST: int = 5
-FILE_SCORE_PENALTY_SCANNED_TODAY: int = 100
-FILE_SCORE_PENALTY_SCANNED_3DAYS: int = 30
-FILE_SCORE_PENALTY_SCANNED_7DAYS: int = 10
-FILE_SCORE_PENALTY_CLEAN_SCAN: int = 5
-
-LLM_REVIEW_MAX_FILES: int = 10
-LLM_REVIEW_FILE_TRUNCATION: int = 200   # max lines sent to Haiku
-
-# ---------------------------------------------------------------------------
-# Verification scoring (proactive.py — _verify_fix)
-# ---------------------------------------------------------------------------
-
-VERIFY_DIFF_PENALTY_DIVISOR: float = 1000.0
-VERIFY_DIFF_PENALTY_CAP: float = 0.25
-VERIFY_FILE_PENALTY: float = 0.03
-VERIFY_FILE_PENALTY_CAP: float = 0.15
-VERIFY_LARGE_DIFF_PENALTY: float = 0.15
 
 # ---------------------------------------------------------------------------
 # PR throttling & limits (proactive.py)
