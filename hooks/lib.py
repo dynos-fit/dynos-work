@@ -29,6 +29,7 @@ from lib_core import (
     benchmark_policy_config,
     collect_retrospectives,
     find_active_tasks,
+    is_learning_enabled,
     is_pid_running,
     learned_agents_root,
     learned_registry_path,

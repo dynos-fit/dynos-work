@@ -88,6 +88,7 @@ class TestDynoslibFacadeReExports:
         "benchmark_history_path",
         "benchmark_index_path",
         "automation_queue_path",
+        "is_learning_enabled",
         # From lib_validate (AC 3)
         "REQUIRED_SPEC_HEADINGS",
         "REQUIRED_PLAN_HEADINGS",

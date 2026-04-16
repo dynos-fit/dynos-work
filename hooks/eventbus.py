@@ -175,6 +175,11 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     summary: dict[str, list[str]] = {}
     iteration = 0
 
+    from lib_core import is_learning_enabled
+    learning = is_learning_enabled(root)
+    # Handlers that are part of the learning layer — skipped when learning is disabled.
+    _LEARNING_HANDLERS = {"learn", "trajectory", "evolve", "patterns", "improve", "benchmark"}
+
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
@@ -182,6 +187,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
 
         for event_type, handlers in HANDLERS.items():
             for consumer_name, handler_fn in handlers:
+                if not learning and consumer_name in _LEARNING_HANDLERS:
+                    continue
                 try:
                     events = consume_events(root, event_type, consumer_name)
                 except Exception as e:
