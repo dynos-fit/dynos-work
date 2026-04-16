@@ -14,7 +14,7 @@ Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 After finding the active task, validate that all required inputs from the execute skill are present:
 
 ```text
-python3 hooks/dynosctl.py validate-contract --skill audit --task-dir .dynos/task-{id}
+python3 hooks/ctl.py validate-contract --skill audit --task-dir .dynos/task-{id}
 ```
 
 If validation fails with missing required inputs (evidence files, snapshot SHA), print the errors and stop.
@@ -40,7 +40,7 @@ Update `manifest.json` stage to `CHECKPOINT_AUDIT`.
 Read `manifest.json` for `classification` and `fast_track`. Then run the deterministic router:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" audit-plan --root . --task-type {task_type} --domains {comma-separated-domains} [--fast-track]
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/router.py" audit-plan --root . --task-type {task_type} --domains {comma-separated-domains} [--fast-track]
 ```
 
 This returns a JSON plan with each auditor's action (spawn/skip), model, and route mode. **Use this plan directly.** Do not re-derive model, skip, or routing decisions from markdown tables.
@@ -80,7 +80,7 @@ Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{
 
 **For LLM subagent spawns** (auditors, repair-coordinator, repair executors):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "{agent_name}" \
   --model "{model_name}" \
@@ -94,7 +94,7 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_t
 
 **For deterministic steps** (router decisions, retrospective computation, repair-log validation):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "{tool_name}" \
   --model "none" \
@@ -111,11 +111,11 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_t
 Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.json` with a chronological event log plus aggregated totals. The retrospective's token fields are populated from this file.
 
 **Specific events to record in this skill:**
-- Step 3: dynorouter audit-plan (type=deterministic, detail="Router decided: spawn X, skip Y")
+- Step 3: router audit-plan (type=deterministic, detail="Router decided: spawn X, skip Y")
 - Step 3: Each auditor spawn (type=spawn, phase=audit)
 - Step 4: repair-coordinator spawn (type=spawn, phase=repair)
 - Step 4: Each repair executor spawn (type=spawn, phase=repair, include --segment)
-- Step 4: dynosctl check-ownership after repair (type=deterministic, phase=repair)
+- Step 4: ctl check-ownership after repair (type=deterministic, phase=repair)
 - Step 4: Re-audit spawns (type=spawn, phase=audit, detail="Re-audit after repair cycle N")
 - Step 5: compute_reward / validate_retrospective_scores (type=deterministic, phase=audit, detail="Computed retrospective scores")
 
@@ -151,7 +151,7 @@ Update stage to `REPAIR_PLANNING`. Append to log:
 **Q-learning repair plan (deterministic):** Before spawning the repair coordinator, get executor and model assignments from the Q-learning planner:
 
 ```bash
-echo '{"findings": [{finding objects}]}' | python3 "${PLUGIN_HOOKS}/dynosctl.py" repair-plan --root . --task-type {task_type}
+echo '{"findings": [{finding objects}]}' | python3 "${PLUGIN_HOOKS}/ctl.py" repair-plan --root . --task-type {task_type}
 ```
 
 If the response has `"source": "q-learning"`, pass the assignments to the repair coordinator as constraints: "Use these executor and model assignments for the listed findings." The coordinator still decides batch ordering, instructions, and file lists — but executor and model choices come from the Q-table.
@@ -194,7 +194,7 @@ After all batches complete, append to log:
 **Q-learning update (after phase 1 repair):** After executors complete but before re-audit, build outcomes from the repair results and update Q-tables:
 
 ```bash
-echo '{"outcomes": [{outcome objects}]}' | python3 "${PLUGIN_HOOKS}/dynosctl.py" repair-update --root . --task-type {task_type}
+echo '{"outcomes": [{outcome objects}]}' | python3 "${PLUGIN_HOOKS}/ctl.py" repair-update --root . --task-type {task_type}
 ```
 
 Each outcome includes: finding_id, state (from repair-plan), executor, model, resolved (from re-audit), new_findings count, tokens_used. Set `next_state` to the encoded state for the next retry cycle if unresolved, or `null` if resolved/terminal.
@@ -234,7 +234,7 @@ Read all audit reports. Write `audit-summary.json`.
 Before writing `completion.json`, generate `task-retrospective.json` using the deterministic reward calculator:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/dynosctl.py" compute-reward .dynos/task-{id} --write
+python3 "${PLUGIN_HOOKS}/ctl.py" compute-reward .dynos/task-{id} --write
 ```
 
 This reads audit reports, repair-log, token-usage, execution-log, and manifest, then computes quality_score, cost_score, and efficiency_score deterministically. The model does NOT compute these scores — the Python runtime does.
@@ -285,7 +285,7 @@ Append to log:
 
 **Post-completion processing:** Learn, trajectory rebuild, evolve, postmortems, and dashboard refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
 
-Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `dynoslib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
+Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `lib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
 ```
 {timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE
 ```

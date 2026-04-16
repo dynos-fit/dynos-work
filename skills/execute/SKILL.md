@@ -14,7 +14,7 @@ Manages the parallel execution of the implementation plan via the execution grap
 Validate that all required inputs from the start skill are present:
 
 ```text
-python3 hooks/dynosctl.py validate-contract --skill execute --task-dir .dynos/task-{id}
+python3 hooks/ctl.py validate-contract --skill execute --task-dir .dynos/task-{id}
 ```
 
 If validation fails with missing required inputs, print the errors and stop. Do not proceed with execution.
@@ -38,7 +38,7 @@ Append to log:
 
 **Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. However, you MUST still run the router and apply learned agent rules before executing:
 
-1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
+1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/router.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
 2. Write the executor-routing receipt (required for stage transitions).
 3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
 4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
@@ -53,7 +53,7 @@ Skipping the router in inline mode silently ignores learned agents and breaks th
 Update `manifest.json` stage to `EXECUTION`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} EXECUTION
+python3 hooks/ctl.py transition .dynos/task-{id} EXECUTION
 ```
 
 Append to log:
@@ -101,7 +101,7 @@ After preflight validation, perform the following execution optimizations:
 **Deterministic routing (MANDATORY):** Before spawning any executor, run the router to get a structured spawn plan:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/router.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
 ```
 
 This returns a JSON object with model, route mode, and agent path for each segment.
@@ -113,7 +113,7 @@ Log each decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mo
 ```bash
 python3 -c "
 from pathlib import Path
-from dynoslib_receipts import receipt_executor_routing
+from lib_receipts import receipt_executor_routing
 import json
 plan = json.loads('''${EXECUTOR_PLAN_JSON}''')
 receipt_executor_routing(Path('.dynos/task-{id}'), plan['segments'])
@@ -127,7 +127,7 @@ Do NOT read dynos_patterns.md tables manually. The router handles model policy, 
 **Learned Agent Injection (MANDATORY — NOT OPTIONAL):** For every segment, you MUST build the executor prompt using the deterministic prompt builder. This is not a suggestion. This is an enforcement gate. For each segment in the executor plan:
 
 ```bash
-echo "{your base prompt for this segment}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 hooks/dynorouter.py inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
+echo "{your base prompt for this segment}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 hooks/router.py inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
 ```
 
 This command:
@@ -162,7 +162,7 @@ Do NOT pass the full `spec.md` or `plan.md` to executors.
 **Receipt: executor-{seg-id} (MANDATORY):** After each executor completes, write its receipt:
 
 ```python
-from dynoslib_receipts import receipt_executor_done
+from lib_receipts import receipt_executor_done
 receipt_executor_done(
     task_dir=Path(".dynos/task-{id}"),
     segment_id="{seg-id}",
@@ -181,7 +181,7 @@ After each batch (or cached resolution) completes, record events and verify:
 
 - **Token capture (executor spawn):** After each executor returns:
   ```bash
-  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
     --task-dir .dynos/task-{id} \
     --agent "{executor_name}-{segment-id}" \
     --model "{model_name}" \
@@ -195,9 +195,9 @@ After each batch (or cached resolution) completes, record events and verify:
   ```
 - **Token capture (deterministic checks):** After file ownership and evidence verification:
   ```bash
-  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
     --task-dir .dynos/task-{id} \
-    --agent "dynosctl-check-ownership" \
+    --agent "ctl-check-ownership" \
     --model "none" \
     --input-tokens 0 \
     --output-tokens 0 \
@@ -209,9 +209,9 @@ After each batch (or cached resolution) completes, record events and verify:
   ```
 - Also record the **router decision** before each batch:
   ```bash
-  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
     --task-dir .dynos/task-{id} \
-    --agent "dynorouter-executor-plan" \
+    --agent "router-executor-plan" \
     --model "none" \
     --input-tokens 0 \
     --output-tokens 0 \
@@ -220,7 +220,7 @@ After each batch (or cached resolution) completes, record events and verify:
     --type deterministic \
     --detail "Router: {executor}={model} route={route_mode}"
   ```
-- Deterministically verify that only files from the segment's `files_expected` were modified. If available in this repo, use `python3 hooks/dynosctl.py check-ownership .dynos/task-{id} {segment-id} {files...}`. If extra files changed, fail the segment and route it to repair instead of accepting the evidence.
+- Deterministically verify that only files from the segment's `files_expected` were modified. If available in this repo, use `python3 hooks/ctl.py check-ownership .dynos/task-{id} {segment-id} {files...}`. If extra files changed, fail the segment and route it to repair instead of accepting the evidence.
 - Deterministically verify that the segment wrote its evidence file.
 - Update `manifest.json` execution_progress.
 - Append to log: `{timestamp} [DONE] {segment-id} — complete`.
@@ -228,7 +228,7 @@ After each batch (or cached resolution) completes, record events and verify:
 
 **For inline fast-track execution** (no subagent spawn), record with `--type inline`:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "inline-executor" \
   --model "none" \
@@ -255,7 +255,7 @@ Append to log:
 Update `manifest.json` stage to `TEST_EXECUTION`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} TEST_EXECUTION
+python3 hooks/ctl.py transition .dynos/task-{id} TEST_EXECUTION
 ```
 
 Append to log:

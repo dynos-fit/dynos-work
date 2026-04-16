@@ -97,7 +97,7 @@ class LearningRuntimeTests(unittest.TestCase):
         )
 
     def test_rebuild_trajectory_store_and_search(self) -> None:
-        rebuild = self.run_py("dynostrajectory.py", "rebuild", "--root", str(self.root))
+        rebuild = self.run_py("trajectory.py", "rebuild", "--root", str(self.root))
         self.assertEqual(rebuild.returncode, 0, rebuild.stdout + rebuild.stderr)
         query_path = self.root / "query.json"
         query_path.write_text(
@@ -113,16 +113,16 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        search = self.run_py("dynostrajectory.py", "search", str(query_path), "--root", str(self.root), "--limit", "1")
+        search = self.run_py("trajectory.py", "search", str(query_path), "--root", str(self.root), "--limit", "1")
         self.assertEqual(search.returncode, 0, search.stdout + search.stderr)
         results = json.loads(search.stdout)
         self.assertEqual(results[0]["trajectory"]["source_task_id"], "task-20260401-001")
 
     def test_register_and_promote_learned_agent(self) -> None:
-        init = self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        init = self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         self.assertEqual(init.returncode, 0)
         register = self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-sharp",
             "backend-executor",
@@ -156,7 +156,7 @@ class LearningRuntimeTests(unittest.TestCase):
         )
 
         promote = self.run_py(
-            "dynoeval.py",
+            "eval.py",
             "promote",
             "backend-sharp",
             "backend-executor",
@@ -176,9 +176,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(agent["last_evaluation"]["recommendation"], "promote_replace")
 
     def test_skill_shadow_mode_and_benchmark_runner(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "plan-tightener",
             "plan-skill",
@@ -262,7 +262,7 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("dynobench.py", "run", str(fixture_path), "--root", str(self.root), "--update-registry")
+        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root), "--update-registry")
         self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
         payload = json.loads(bench.stdout)
         self.assertEqual(payload["item_kind"], "skill")
@@ -309,7 +309,7 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("dynobench.py", "run", str(fixture_path), "--root", str(self.root))
+        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root))
         self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
         payload = json.loads(bench.stdout)
         self.assertEqual(payload["cases"][0]["execution_mode"], "sandbox")
@@ -369,7 +369,7 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("dynobench.py", "run", str(fixture_path), "--root", str(self.root))
+        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root))
         self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
         payload = json.loads(bench.stdout)
         self.assertEqual(payload["cases"][0]["candidate_observed"]["tests_passed"], 3)
@@ -432,17 +432,17 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        rollout = self.run_py("dynorollout.py", str(fixture_path), "--root", str(self.root))
+        rollout = self.run_py("rollout.py", str(fixture_path), "--root", str(self.root))
         self.assertEqual(rollout.returncode, 0, rollout.stdout + rollout.stderr)
         payload = json.loads(rollout.stdout)
-        self.assertEqual(payload["execution_harness"], "dynorollout")
+        self.assertEqual(payload["execution_harness"], "rollout")
         self.assertEqual(payload["cases"][0]["candidate_observed"]["tests_passed"], 2)
         self.assertEqual(payload["cases"][0]["baseline_observed"]["tests_passed"], 1)
 
     def test_must_pass_category_blocks_promotion_and_demotes_active_component(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "security-hardener",
             "security-auditor",
@@ -476,7 +476,7 @@ class LearningRuntimeTests(unittest.TestCase):
         )
 
         promote = self.run_py(
-            "dynoeval.py",
+            "eval.py",
             "promote",
             "security-hardener",
             "security-auditor",
@@ -542,7 +542,7 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("dynobench.py", "run", str(fixture_path), "--root", str(self.root), "--update-registry")
+        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root), "--update-registry")
         self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
         payload = json.loads(bench.stdout)
         self.assertTrue(payload["evaluation"]["blocked_by_category"])
@@ -553,9 +553,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertFalse(agent["route_allowed"])
 
     def test_route_resolution_prefers_allowed_highest_composite(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-sharp",
             "backend-executor",
@@ -566,7 +566,7 @@ class LearningRuntimeTests(unittest.TestCase):
             str(self.root),
         )
         self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-steady",
             "backend-executor",
@@ -607,7 +607,7 @@ class LearningRuntimeTests(unittest.TestCase):
             )
         )
         self.run_py(
-            "dynoeval.py",
+            "eval.py",
             "promote",
             "backend-steady",
             "backend-executor",
@@ -618,7 +618,7 @@ class LearningRuntimeTests(unittest.TestCase):
             str(self.root),
         )
         self.run_py(
-            "dynoeval.py",
+            "eval.py",
             "promote",
             "backend-sharp",
             "backend-executor",
@@ -629,7 +629,7 @@ class LearningRuntimeTests(unittest.TestCase):
             str(self.root),
         )
         route = self.run_py(
-            "dynoroute.py",
+            "route.py",
             "backend-executor",
             "feature",
             "--root",
@@ -641,9 +641,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(payload["route_allowed"])
 
     def test_auto_runner_executes_matching_shadow_fixture_and_promotes(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-shadow",
             "backend-executor",
@@ -727,7 +727,7 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        auto = self.run_py("dynoauto.py", "run", "--root", str(self.root))
+        auto = self.run_py("auto.py", "run", "--root", str(self.root))
         self.assertEqual(auto.returncode, 0, auto.stdout + auto.stderr)
         payload = json.loads(auto.stdout)
         self.assertEqual(payload["executed"], 1)
@@ -739,9 +739,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(queue["items"], [])
 
     def test_fixture_synthesis_and_auto_sync_create_generated_fixture(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-synth",
             "backend-executor",
@@ -753,7 +753,7 @@ class LearningRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(register.returncode, 0, register.stdout + register.stderr)
         synth = self.run_py(
-            "dynofixture.py",
+            "fixture.py",
             "synthesize",
             "backend-synth",
             "backend-executor",
@@ -766,7 +766,7 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["target_name"], "backend-synth")
         generated = self.root / "benchmarks" / "generated" / "agent-backend-synth-feature.json"
         self.assertTrue(generated.exists())
-        auto = self.run_py("dynoauto.py", "sync", "--root", str(self.root))
+        auto = self.run_py("auto.py", "sync", "--root", str(self.root))
         self.assertEqual(auto.returncode, 0, auto.stdout + auto.stderr)
         queue = json.loads((self.root / ".dynos" / "automation" / "queue.json").read_text())
         self.assertEqual(len(queue["items"]), 1)
@@ -775,7 +775,7 @@ class LearningRuntimeTests(unittest.TestCase):
     def test_structured_generation_registers_component_and_report_surfaces_it(self) -> None:
         output_path = self.root / ".dynos" / "learned-agents" / "executors" / "backend-crafted.md"
         generated = self.run_py(
-            "dynogenerate.py",
+            "generate.py",
             "backend-crafted",
             "backend-executor",
             "feature",
@@ -790,7 +790,7 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(output_path.exists())
         content = output_path.read_text()
         self.assertIn("## Operating Focus", content)
-        report = self.run_py("dynoreport.py", "--root", str(self.root))
+        report = self.run_py("report.py", "--root", str(self.root))
         self.assertEqual(report.returncode, 0, report.stdout + report.stderr)
         payload = json.loads(report.stdout)
         self.assertEqual(payload["summary"]["learned_components"], 1)
@@ -822,9 +822,9 @@ class LearningRuntimeTests(unittest.TestCase):
                 },
             )
         (self.root / ".dynos" / "policy.json").write_text(json.dumps({"freshness_task_window": 1}, indent=2) + "\n")
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-stale",
             "backend-executor",
@@ -839,7 +839,7 @@ class LearningRuntimeTests(unittest.TestCase):
         candidate.write_text(json.dumps([{"quality_score": 0.95, "cost_score": 0.82, "efficiency_score": 0.9}] * 3))
         baseline.write_text(json.dumps([{"quality_score": 0.82, "cost_score": 0.8, "efficiency_score": 0.81}] * 3))
         self.run_py(
-            "dynoeval.py",
+            "eval.py",
             "promote",
             "backend-stale",
             "backend-executor",
@@ -849,16 +849,16 @@ class LearningRuntimeTests(unittest.TestCase):
             "--root",
             str(self.root),
         )
-        route = self.run_py("dynoroute.py", "backend-executor", "feature", "--root", str(self.root))
+        route = self.run_py("route.py", "backend-executor", "feature", "--root", str(self.root))
         self.assertEqual(route.returncode, 0, route.stdout + route.stderr)
         payload = json.loads(route.stdout)
         self.assertEqual(payload["source"], "generic")
         self.assertTrue(payload["freshness_blocked"])
 
     def test_dashboard_and_lineage_generation(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-lineage",
             "backend-executor",
@@ -868,22 +868,22 @@ class LearningRuntimeTests(unittest.TestCase):
             "--root",
             str(self.root),
         )
-        self.run_py("dynofixture.py", "sync", "--root", str(self.root))
-        dashboard = self.run_py("dynodashboard.py", "generate", "--root", str(self.root))
+        self.run_py("fixture.py", "sync", "--root", str(self.root))
+        dashboard = self.run_py("dashboard.py", "generate", "--root", str(self.root))
         self.assertEqual(dashboard.returncode, 0, dashboard.stdout + dashboard.stderr)
         payload = json.loads(dashboard.stdout)
         self.assertTrue((self.root / ".dynos" / "dashboard.html").exists())
         self.assertTrue((self.root / ".dynos" / "dashboard-data.json").exists())
         self.assertIn("summary", payload)
-        lineage = self.run_py("dynolineage.py", "--root", str(self.root))
+        lineage = self.run_py("lineage.py", "--root", str(self.root))
         self.assertEqual(lineage.returncode, 0, lineage.stdout + lineage.stderr)
         graph = json.loads(lineage.stdout)
         self.assertTrue(any(node["kind"] == "component" for node in graph["nodes"]))
 
     def test_patterns_generation_writes_policy_tables(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-patterned",
             "backend-executor",
@@ -893,7 +893,7 @@ class LearningRuntimeTests(unittest.TestCase):
             "--root",
             str(self.root),
         )
-        patterns = self.run_py("dynopatterns.py", "--root", str(self.root))
+        patterns = self.run_py("patterns.py", "--root", str(self.root))
         self.assertEqual(patterns.returncode, 0, patterns.stdout + patterns.stderr)
         payload = json.loads(patterns.stdout)
         self.assertIn(str(self.persistent_dir / "dynos_patterns.md"), payload["written_paths"])
@@ -904,9 +904,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertIn("| backend-executor | feature |", content)
 
     def test_task_artifact_challenge_rollout_runs(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-runner",
             "backend-executor",
@@ -937,7 +937,7 @@ class LearningRuntimeTests(unittest.TestCase):
             + "\n"
         )
         rollout = self.run_py(
-            "dynochallenge.py",
+            "challenge.py",
             "task-20260409-001",
             "backend-runner",
             "backend-executor",
@@ -951,13 +951,13 @@ class LearningRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(rollout.returncode, 0, rollout.stdout + rollout.stderr)
         payload = json.loads(rollout.stdout)
-        self.assertEqual(payload["execution_harness"], "dynorollout")
+        self.assertEqual(payload["execution_harness"], "rollout")
         self.assertEqual(payload["cases"][0]["winner"], "candidate")
 
     def test_maintainer_run_once_executes_cycle_and_writes_status(self) -> None:
-        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "dynoevolve.py",
+            "evolve.py",
             "register-agent",
             "backend-maintainer",
             "backend-executor",
@@ -1039,7 +1039,7 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        maintain = self.run_py("dynomaintain.py", "run-once", "--root", str(self.root))
+        maintain = self.run_py("maintain.py", "run-once", "--root", str(self.root))
         self.assertEqual(maintain.returncode, 0, maintain.stdout + maintain.stderr)
         payload = json.loads(maintain.stdout)
         self.assertTrue(payload["ok"])
@@ -1053,7 +1053,7 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue((self.persistent_dir / "dynos_patterns.md").exists())
 
     def test_maintainer_invoke_alias_runs(self) -> None:
-        invoke = self.run_py("dynomaintain.py", "invoke", "--root", str(self.root))
+        invoke = self.run_py("maintain.py", "invoke", "--root", str(self.root))
         self.assertEqual(invoke.returncode, 0, invoke.stdout + invoke.stderr)
         payload = json.loads(invoke.stdout)
         self.assertIn("actions", payload)

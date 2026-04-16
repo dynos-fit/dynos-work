@@ -120,12 +120,12 @@ class TestGroupSimilarFindings:
 
     def test_function_exists(self) -> None:
         # AC 8
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         assert callable(_group_similar_findings)
 
     def test_single_finding_returns_single_item_list(self) -> None:
         # AC 8: 1 finding -> [[finding]]
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [_make_finding(finding_id="f-001")]
         groups = _group_similar_findings(findings)
         assert len(groups) == 1
@@ -133,7 +133,7 @@ class TestGroupSimilarFindings:
 
     def test_two_same_category_returns_two_singles(self) -> None:
         # AC 8: 2 findings same (category, detail) -> two single-item lists (below 3 threshold)
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [
             _make_finding(finding_id="f-001", category="llm-review", category_detail="null-check"),
             _make_finding(finding_id="f-002", category="llm-review", category_detail="null-check"),
@@ -145,7 +145,7 @@ class TestGroupSimilarFindings:
 
     def test_three_same_category_returns_one_batch(self) -> None:
         # AC 8: 3 findings same (category, detail) -> one batch list of 3
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [
             _make_finding(finding_id=f"f-{i:03d}", category="llm-review", category_detail="null-check")
             for i in range(3)
@@ -157,7 +157,7 @@ class TestGroupSimilarFindings:
 
     def test_five_same_category_returns_one_batch_of_five(self) -> None:
         # AC 8: 5 findings same key -> one batch of 5
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [
             _make_finding(finding_id=f"f-{i:03d}", category="security", category_detail="injection")
             for i in range(5)
@@ -169,7 +169,7 @@ class TestGroupSimilarFindings:
 
     def test_mixed_categories_grouped_correctly(self) -> None:
         # AC 8: different (category, detail) keys produce separate groups
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [
             _make_finding(finding_id="f-001", category="llm-review", category_detail="null-check"),
             _make_finding(finding_id="f-002", category="llm-review", category_detail="null-check"),
@@ -185,7 +185,7 @@ class TestGroupSimilarFindings:
 
     def test_grouping_key_uses_category_detail(self) -> None:
         # AC 8: (category, category_detail) is the key, not just category
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [
             _make_finding(finding_id="f-001", category="llm-review", category_detail="null-check"),
             _make_finding(finding_id="f-002", category="llm-review", category_detail="null-check"),
@@ -200,7 +200,7 @@ class TestGroupSimilarFindings:
 
     def test_missing_category_detail_uses_empty_string(self) -> None:
         # AC 8: findings without category_detail use empty string as key component
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [
             _make_finding(finding_id=f"f-{i:03d}", category="llm-review")
             for i in range(3)
@@ -214,13 +214,13 @@ class TestGroupSimilarFindings:
 
     def test_empty_findings_returns_empty(self) -> None:
         # AC 8: empty input -> empty output
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         groups = _group_similar_findings([])
         assert groups == []
 
     def test_all_findings_accounted_for(self) -> None:
         # AC 8: total findings across all groups equals input count
-        from dynoproactive import _group_similar_findings
+        from proactive import _group_similar_findings
         findings = [
             _make_finding(finding_id=f"f-{i:03d}", category="cat-a", category_detail="d1")
             for i in range(4)
@@ -467,12 +467,12 @@ class TestCheckPrOutcomes:
 
     def test_function_exists(self) -> None:
         # AC 19
-        from dynoproactive import _check_pr_outcomes
+        from proactive import _check_pr_outcomes
         assert callable(_check_pr_outcomes)
 
     def test_merged_pr_positive_reward(self, tmp_project: Path) -> None:
         # AC 19: merged PR -> update Q-table with +0.8 reward
-        from dynoproactive import _check_pr_outcomes
+        from proactive import _check_pr_outcomes
 
         finding = _make_finding(
             finding_id="f-001",
@@ -487,16 +487,16 @@ class TestCheckPrOutcomes:
             "mergedAt": "2026-04-05T12:00:00Z",
             "title": "dynos-autofix: fix null check in main.py",
         }])
-        with patch("dynoproactive.subprocess.run") as mock_run:
+        with patch("proactive.subprocess.run") as mock_run:
             # Mock gh pr list
             mock_run.return_value = MagicMock(
                 returncode=0,
                 stdout=gh_output,
             )
-            with patch("dynoproactive.update_q_value") as mock_update_q:
-                with patch("dynoproactive.save_fix_template") as mock_save_template:
-                    with patch("dynoproactive.load_autofix_q_table", return_value={"entries": {}}):
-                        with patch("dynoproactive.save_autofix_q_table"):
+            with patch("proactive.update_q_value") as mock_update_q:
+                with patch("proactive.save_fix_template") as mock_save_template:
+                    with patch("proactive.load_autofix_q_table", return_value={"entries": {}}):
+                        with patch("proactive.save_autofix_q_table"):
                             result = _check_pr_outcomes(tmp_project, [finding])
 
         # Verify positive reward
@@ -507,7 +507,7 @@ class TestCheckPrOutcomes:
 
     def test_closed_unmerged_pr_negative_reward(self, tmp_project: Path) -> None:
         # AC 19: closed-unmerged PR -> update Q-table with -0.5 reward
-        from dynoproactive import _check_pr_outcomes
+        from proactive import _check_pr_outcomes
 
         finding = _make_finding(
             finding_id="f-002",
@@ -522,12 +522,12 @@ class TestCheckPrOutcomes:
             "mergedAt": None,
             "title": "dynos-autofix: fix issue in utils.py",
         }])
-        with patch("dynoproactive.subprocess.run") as mock_run:
+        with patch("proactive.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
-            with patch("dynoproactive.update_q_value") as mock_update_q:
-                with patch("dynoproactive.save_fix_template") as mock_save_template:
-                    with patch("dynoproactive.load_autofix_q_table", return_value={"entries": {}}):
-                        with patch("dynoproactive.save_autofix_q_table"):
+            with patch("proactive.update_q_value") as mock_update_q:
+                with patch("proactive.save_fix_template") as mock_save_template:
+                    with patch("proactive.load_autofix_q_table", return_value={"entries": {}}):
+                        with patch("proactive.save_autofix_q_table"):
                             result = _check_pr_outcomes(tmp_project, [finding])
 
         if mock_update_q.called:
@@ -537,7 +537,7 @@ class TestCheckPrOutcomes:
 
     def test_merged_pr_saves_template(self, tmp_project: Path) -> None:
         # AC 19: merged PR -> save_fix_template called
-        from dynoproactive import _check_pr_outcomes
+        from proactive import _check_pr_outcomes
 
         finding = _make_finding(
             finding_id="f-001",
@@ -554,7 +554,7 @@ class TestCheckPrOutcomes:
         }])
         gh_diff_output = "--- a/main.py\n+++ b/main.py\n-bad\n+good\n"
 
-        with patch("dynoproactive.subprocess.run") as mock_run:
+        with patch("proactive.subprocess.run") as mock_run:
             def side_effect(*args, **kwargs):
                 cmd = args[0] if args else kwargs.get("args", [])
                 if isinstance(cmd, list) and "diff" in cmd:
@@ -562,10 +562,10 @@ class TestCheckPrOutcomes:
                 return MagicMock(returncode=0, stdout=gh_pr_list_output)
 
             mock_run.side_effect = side_effect
-            with patch("dynoproactive.save_fix_template") as mock_save_template:
-                with patch("dynoproactive.update_q_value"):
-                    with patch("dynoproactive.load_autofix_q_table", return_value={"entries": {}}):
-                        with patch("dynoproactive.save_autofix_q_table"):
+            with patch("proactive.save_fix_template") as mock_save_template:
+                with patch("proactive.update_q_value"):
+                    with patch("proactive.load_autofix_q_table", return_value={"entries": {}}):
+                        with patch("proactive.save_autofix_q_table"):
                             _check_pr_outcomes(tmp_project, [finding])
 
         # save_fix_template should have been called for the merged PR
@@ -574,7 +574,7 @@ class TestCheckPrOutcomes:
 
     def test_idempotency_q_reward_applied_flag(self, tmp_project: Path) -> None:
         # AC 20: findings with q_reward_applied=True are not re-processed
-        from dynoproactive import _check_pr_outcomes
+        from proactive import _check_pr_outcomes
 
         finding = _make_finding(
             finding_id="f-001",
@@ -589,11 +589,11 @@ class TestCheckPrOutcomes:
             "mergedAt": "2026-04-05T12:00:00Z",
             "title": "dynos-autofix: fix null check",
         }])
-        with patch("dynoproactive.subprocess.run") as mock_run:
+        with patch("proactive.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
-            with patch("dynoproactive.update_q_value") as mock_update_q:
-                with patch("dynoproactive.load_autofix_q_table", return_value={"entries": {}}):
-                    with patch("dynoproactive.save_autofix_q_table"):
+            with patch("proactive.update_q_value") as mock_update_q:
+                with patch("proactive.load_autofix_q_table", return_value={"entries": {}}):
+                    with patch("proactive.save_autofix_q_table"):
                         result = _check_pr_outcomes(tmp_project, [finding])
 
         # Q-table should NOT be updated since q_reward_applied is already True
@@ -601,17 +601,17 @@ class TestCheckPrOutcomes:
 
     def test_gh_cli_missing_returns_unchanged(self, tmp_project: Path) -> None:
         # AC 19 implicit: if gh CLI missing, return findings unchanged
-        from dynoproactive import _check_pr_outcomes
+        from proactive import _check_pr_outcomes
 
         findings = [_make_finding(finding_id="f-001", pr_number=42)]
-        with patch("dynoproactive.subprocess.run", side_effect=FileNotFoundError("gh not found")):
+        with patch("proactive.subprocess.run", side_effect=FileNotFoundError("gh not found")):
             result = _check_pr_outcomes(tmp_project, findings)
         # Should return findings unchanged
         assert len(result) == len(findings)
 
     def test_open_pr_ignored(self, tmp_project: Path) -> None:
         # AC 19: open PRs are not processed for Q-table updates
-        from dynoproactive import _check_pr_outcomes
+        from proactive import _check_pr_outcomes
 
         finding = _make_finding(
             finding_id="f-001",
@@ -626,11 +626,11 @@ class TestCheckPrOutcomes:
             "mergedAt": None,
             "title": "dynos-autofix: fix issue",
         }])
-        with patch("dynoproactive.subprocess.run") as mock_run:
+        with patch("proactive.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
-            with patch("dynoproactive.update_q_value") as mock_update_q:
-                with patch("dynoproactive.load_autofix_q_table", return_value={"entries": {}}):
-                    with patch("dynoproactive.save_autofix_q_table"):
+            with patch("proactive.update_q_value") as mock_update_q:
+                with patch("proactive.load_autofix_q_table", return_value={"entries": {}}):
+                    with patch("proactive.save_autofix_q_table"):
                         result = _check_pr_outcomes(tmp_project, [finding])
 
         mock_update_q.assert_not_called()
@@ -706,20 +706,20 @@ class TestExistingTestsUnbroken:
 
     def test_existing_imports_still_work(self) -> None:
         # AC 22: existing modules still importable
-        import dynoslib_crawler
-        import dynoproactive
-        import dynoslib_qlearn
-        import dynoglobal
+        import lib_crawler
+        import proactive
+        import lib_qlearn
+        import sweeper
         assert True
 
     def test_build_import_graph_still_exists(self) -> None:
         # AC 22
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
         assert callable(build_import_graph)
 
     def test_update_q_value_still_works(self) -> None:
         # AC 22
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
         table = {"entries": {}}
         val = update_q_value(table, "s1", "a1", reward=1.0, next_state=None)
         assert val > 0

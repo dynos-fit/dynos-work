@@ -20,7 +20,7 @@ Start the global dashboard server. Shows all registered projects in a unified we
 ### serve (default)
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoglobal.py" dashboard serve
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/sweeper.py" dashboard serve
 ```
 
 Print the URL: `http://127.0.0.1:8766/global-dashboard.html`
@@ -28,13 +28,13 @@ Print the URL: `http://127.0.0.1:8766/global-dashboard.html`
 ### stop
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoglobal.py" dashboard kill
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/sweeper.py" dashboard kill
 ```
 
 ### restart
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoglobal.py" dashboard restart
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/sweeper.py" dashboard restart
 ```
 
 ## Notes

@@ -360,13 +360,13 @@ describe("POST /api/autofix-policy", () => {
 // Test Suite: POST /api/daemon/status
 // ============================================================
 describe("POST /api/daemon/:action", () => {
-    it("executes dynosctl command for status action", () => {
+    it("executes ctl command for status action", () => {
         const exec = childProcess.exec;
         exec.mockImplementation((_cmd, _opts, cb) => {
             cb(null, { stdout: "daemon running", stderr: "" });
         });
         // The expected command for "status" action
-        const expectedCmd = "python3 hooks/dynosctl.py active-task --root .";
+        const expectedCmd = "python3 hooks/ctl.py active-task --root .";
         expect(expectedCmd).toContain("active-task");
         // Execute the mock
         exec(expectedCmd, { cwd: PROJECT_PATH }, (err, result) => {

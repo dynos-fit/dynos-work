@@ -90,8 +90,8 @@ class TestModelPolicyJsonGeneration(unittest.TestCase):
 
     def test_model_policy_json_created_on_write_patterns(self) -> None:
         """model-policy.json is written to persistent dir by write_patterns()."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir
+        from patterns import write_patterns
+        from lib import _persistent_project_dir
 
         retros = [
             _make_retrospective(
@@ -127,8 +127,8 @@ class TestModelPolicyJsonGeneration(unittest.TestCase):
 
     def test_model_policy_json_has_entry_for_observed_role_task_type(self) -> None:
         """Every (role, task_type) pair from retrospectives appears in model-policy.json."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir
+        from patterns import write_patterns
+        from lib import _persistent_project_dir
 
         retros = [
             _make_retrospective(
@@ -172,8 +172,8 @@ class TestSkipPolicyJsonGeneration(unittest.TestCase):
 
     def test_skip_policy_json_created_on_write_patterns(self) -> None:
         """skip-policy.json is written to persistent dir by write_patterns()."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir
+        from patterns import write_patterns
+        from lib import _persistent_project_dir
 
         retros = [
             _make_retrospective(
@@ -200,8 +200,8 @@ class TestSkipPolicyJsonGeneration(unittest.TestCase):
 
     def test_skip_policy_excludes_exempt_auditors(self) -> None:
         """Skip-exempt auditors (security, spec-completion, code-quality) are not in skip-policy.json."""
-        from dynopatterns import write_patterns, SKIP_EXEMPT_AUDITORS
-        from dynoslib import _persistent_project_dir
+        from patterns import write_patterns, SKIP_EXEMPT_AUDITORS
+        from lib import _persistent_project_dir
 
         retros = [
             _make_retrospective(
@@ -238,8 +238,8 @@ class TestRoutePolicyJsonGeneration(unittest.TestCase):
 
     def test_route_policy_json_created_on_write_patterns(self) -> None:
         """route-policy.json is written to persistent dir by write_patterns()."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir
+        from patterns import write_patterns
+        from lib import _persistent_project_dir
 
         registry = {
             "version": 1,
@@ -293,8 +293,8 @@ class TestJsonMatchesMarkdown(unittest.TestCase):
 
     def test_model_policy_json_keys_match_markdown_rows(self) -> None:
         """Every role:task_type in model-policy.json has a matching markdown table row."""
-        from dynopatterns import write_patterns, local_patterns_path
-        from dynoslib import _persistent_project_dir
+        from patterns import write_patterns, local_patterns_path
+        from lib import _persistent_project_dir
 
         retros = [
             _make_retrospective(
@@ -355,8 +355,8 @@ class TestResolveModelJsonFirst(unittest.TestCase):
 
     def test_resolve_model_prefers_json_over_markdown(self) -> None:
         """When model-policy.json exists with a matching key, it is used over markdown."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import resolve_model
+        from lib import _persistent_project_dir, write_json
+        from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
 
@@ -386,8 +386,8 @@ class TestResolveModelJsonFirst(unittest.TestCase):
 
     def test_resolve_model_json_source_is_learned_history(self) -> None:
         """When model comes from JSON, source field is 'learned_history'."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import resolve_model
+        from lib import _persistent_project_dir, write_json
+        from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "model-policy.json", {
@@ -405,8 +405,8 @@ class TestResolveModelJsonFirst(unittest.TestCase):
 
     def test_resolve_model_explicit_policy_overrides_json(self) -> None:
         """policy.json explicit overrides take priority over model-policy.json."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import resolve_model
+        from lib import _persistent_project_dir, write_json
+        from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "model-policy.json", {
@@ -427,8 +427,8 @@ class TestResolveModelJsonFirst(unittest.TestCase):
 
     def test_security_floor_overrides_json(self) -> None:
         """Security floor for security-auditor overrides model-policy.json haiku selection."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import resolve_model
+        from lib import _persistent_project_dir, write_json
+        from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "model-policy.json", {
@@ -463,8 +463,8 @@ class TestResolveSkipJsonFirst(unittest.TestCase):
 
     def test_skip_threshold_from_json_preferred_over_markdown(self) -> None:
         """When skip-policy.json has threshold for an auditor, use it over markdown."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import _get_skip_threshold
+        from lib import _persistent_project_dir, write_json
+        from router import _get_skip_threshold
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "skip-policy.json", {
@@ -483,8 +483,8 @@ class TestResolveSkipJsonFirst(unittest.TestCase):
 
     def test_skip_threshold_falls_back_to_markdown_when_no_json_key(self) -> None:
         """When skip-policy.json exists but has no matching key, fall back to markdown."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import _get_skip_threshold
+        from lib import _persistent_project_dir, write_json
+        from router import _get_skip_threshold
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "skip-policy.json", {
@@ -520,8 +520,8 @@ class TestPostmortemWritesToModelPolicyJson(unittest.TestCase):
 
     def test_adjust_model_policy_writes_model_policy_json(self) -> None:
         """adjust_model_policy action writes entries to model-policy.json with source postmortem_recommendation."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynopostmortem import apply_improvement
+        from lib import _persistent_project_dir, write_json
+        from postmortem import apply_improvement
 
         persistent = _persistent_project_dir(self.root)
         # Initialize empty policy.json
@@ -551,8 +551,8 @@ class TestPostmortemWritesToModelPolicyJson(unittest.TestCase):
 
     def test_adjust_model_policy_preserves_explicit_policy_entries(self) -> None:
         """Postmortem recommendations do not overwrite existing explicit_policy entries."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynopostmortem import apply_improvement
+        from lib import _persistent_project_dir, write_json
+        from postmortem import apply_improvement
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "policy.json", {})
@@ -601,8 +601,8 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_resolve_model_falls_back_to_markdown_when_no_json(self) -> None:
         """Without model-policy.json, resolve_model() reads from markdown."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import resolve_model
+        from lib import _persistent_project_dir, write_json
+        from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
         # No model-policy.json, only markdown
@@ -621,8 +621,8 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_resolve_model_returns_default_when_no_json_no_markdown(self) -> None:
         """Without both JSON and markdown, resolve_model() returns default."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import resolve_model
+        from lib import _persistent_project_dir, write_json
+        from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "policy.json", {})
@@ -633,8 +633,8 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_skip_threshold_falls_back_to_markdown_when_no_json(self) -> None:
         """Without skip-policy.json, _get_skip_threshold() reads from markdown."""
-        from dynoslib import _persistent_project_dir
-        from dynorouter import _get_skip_threshold
+        from lib import _persistent_project_dir
+        from router import _get_skip_threshold
 
         persistent = _persistent_project_dir(self.root)
         (persistent / "dynos_patterns.md").write_text(
@@ -649,8 +649,8 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_skip_threshold_returns_default_when_no_json_no_markdown(self) -> None:
         """Without both JSON and markdown, _get_skip_threshold() returns DEFAULT_SKIP_THRESHOLD."""
-        from dynoslib import _persistent_project_dir
-        from dynorouter import _get_skip_threshold, DEFAULT_SKIP_THRESHOLD
+        from lib import _persistent_project_dir
+        from router import _get_skip_threshold, DEFAULT_SKIP_THRESHOLD
 
         _persistent_project_dir(self.root)
         # No skip-policy.json, no dynos_patterns.md
@@ -660,8 +660,8 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
     def test_corrupt_json_falls_back_gracefully(self) -> None:
         """Corrupt JSON file does not crash; falls back to markdown or default."""
-        from dynoslib import _persistent_project_dir, write_json
-        from dynorouter import resolve_model
+        from lib import _persistent_project_dir, write_json
+        from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
         # Write corrupt JSON
@@ -697,8 +697,8 @@ class TestModelOverridesMigration(unittest.TestCase):
 
     def test_model_overrides_migrated_to_model_policy_json(self) -> None:
         """write_patterns() migrates model_overrides from policy.json to model-policy.json."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir, write_json
+        from patterns import write_patterns
+        from lib import _persistent_project_dir, write_json
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "policy.json", {
@@ -730,8 +730,8 @@ class TestModelOverridesMigration(unittest.TestCase):
 
     def test_model_overrides_removed_from_policy_json_after_migration(self) -> None:
         """After migration, model_overrides key is removed from policy.json."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir, write_json
+        from patterns import write_patterns
+        from lib import _persistent_project_dir, write_json
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "policy.json", {
@@ -747,8 +747,8 @@ class TestModelOverridesMigration(unittest.TestCase):
 
     def test_migration_preserves_existing_explicit_policy(self) -> None:
         """Migration does not overwrite existing explicit_policy entries in model-policy.json."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir, write_json
+        from patterns import write_patterns
+        from lib import _persistent_project_dir, write_json
 
         persistent = _persistent_project_dir(self.root)
 
@@ -779,8 +779,8 @@ class TestModelOverridesMigration(unittest.TestCase):
 
     def test_migration_is_idempotent(self) -> None:
         """Running write_patterns() twice produces the same model-policy.json."""
-        from dynopatterns import write_patterns
-        from dynoslib import _persistent_project_dir, write_json
+        from patterns import write_patterns
+        from lib import _persistent_project_dir, write_json
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "policy.json", {

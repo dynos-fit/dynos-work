@@ -23,7 +23,7 @@ class TestEncodeAutofixState:
 
     def test_basic_encoding(self) -> None:
         # AC 12
-        from dynoslib_qlearn import encode_autofix_state
+        from lib_qlearn import encode_autofix_state
 
         result = encode_autofix_state(
             finding_category="llm-review",
@@ -35,7 +35,7 @@ class TestEncodeAutofixState:
 
     def test_python_file_low_centrality(self) -> None:
         # AC 12
-        from dynoslib_qlearn import encode_autofix_state
+        from lib_qlearn import encode_autofix_state
 
         result = encode_autofix_state(
             finding_category="dead-code",
@@ -47,7 +47,7 @@ class TestEncodeAutofixState:
 
     def test_all_centrality_tiers(self) -> None:
         # AC 12: centrality_tier must be one of high, medium, low
-        from dynoslib_qlearn import encode_autofix_state
+        from lib_qlearn import encode_autofix_state
 
         for tier in ("high", "medium", "low"):
             result = encode_autofix_state("llm-review", ".py", tier, "medium")
@@ -56,7 +56,7 @@ class TestEncodeAutofixState:
 
     def test_output_has_four_colon_separated_parts(self) -> None:
         # AC 12
-        from dynoslib_qlearn import encode_autofix_state
+        from lib_qlearn import encode_autofix_state
 
         result = encode_autofix_state("security", ".ts", "high", "critical")
         parts = result.split(":")
@@ -64,14 +64,14 @@ class TestEncodeAutofixState:
 
     def test_extension_includes_dot(self) -> None:
         # AC 12: file_extension preserves the dot prefix
-        from dynoslib_qlearn import encode_autofix_state
+        from lib_qlearn import encode_autofix_state
 
         result = encode_autofix_state("llm-review", ".go", "medium", "high")
         assert ":.go:" in result
 
     def test_various_categories(self) -> None:
         # AC 12: works with any finding category
-        from dynoslib_qlearn import encode_autofix_state
+        from lib_qlearn import encode_autofix_state
 
         for cat in ("llm-review", "dead-code", "syntax-error", "dependency-vuln", "recurring-audit"):
             result = encode_autofix_state(cat, ".py", "high", "medium")
@@ -79,7 +79,7 @@ class TestEncodeAutofixState:
 
     def test_various_severities(self) -> None:
         # AC 12
-        from dynoslib_qlearn import encode_autofix_state
+        from lib_qlearn import encode_autofix_state
 
         for sev in ("low", "medium", "high", "critical"):
             result = encode_autofix_state("llm-review", ".py", "high", sev)
@@ -95,7 +95,7 @@ class TestAutofixQTable:
 
     def test_autofix_table_path_is_q_autofix_json(self, tmp_path: Path) -> None:
         # AC 13: file must be named q-autofix.json, NOT q-repair-autofix.json
-        from dynoslib_qlearn import _q_autofix_table_path
+        from lib_qlearn import _q_autofix_table_path
 
         path = _q_autofix_table_path(tmp_path)
         assert path.name == "q-autofix.json"
@@ -103,9 +103,9 @@ class TestAutofixQTable:
 
     def test_load_autofix_q_table_returns_empty_on_missing(self, tmp_path: Path) -> None:
         # AC 13
-        from dynoslib_qlearn import load_autofix_q_table
+        from lib_qlearn import load_autofix_q_table
 
-        with patch("dynoslib_qlearn._persistent_project_dir", return_value=tmp_path):
+        with patch("lib_qlearn._persistent_project_dir", return_value=tmp_path):
             table = load_autofix_q_table(tmp_path)
         assert isinstance(table, dict)
         assert "entries" in table
@@ -113,9 +113,9 @@ class TestAutofixQTable:
 
     def test_save_and_load_autofix_q_table_roundtrip(self, tmp_path: Path) -> None:
         # AC 13
-        from dynoslib_qlearn import load_autofix_q_table, save_autofix_q_table
+        from lib_qlearn import load_autofix_q_table, save_autofix_q_table
 
-        with patch("dynoslib_qlearn._persistent_project_dir", return_value=tmp_path):
+        with patch("lib_qlearn._persistent_project_dir", return_value=tmp_path):
             table = {"version": 1, "updated_at": "", "entries": {
                 "llm-review:.py:high:medium": {
                     "attempt_fix": 0.5,
@@ -129,7 +129,7 @@ class TestAutofixQTable:
 
     def test_autofix_table_separate_from_repair_tables(self, tmp_path: Path) -> None:
         # AC 13: autofix table is separate from q-repair-executor.json and q-repair-model.json
-        from dynoslib_qlearn import _q_autofix_table_path, _q_table_path
+        from lib_qlearn import _q_autofix_table_path, _q_table_path
 
         autofix_path = _q_autofix_table_path(tmp_path)
         repair_exec_path = _q_table_path(tmp_path, "executor")
@@ -141,7 +141,7 @@ class TestAutofixQTable:
     def test_autofix_actions_are_attempt_fix_open_issue_skip(self) -> None:
         # AC 13: the three actions for the autofix Q-table
         # This tests that select_action works with these action names
-        from dynoslib_qlearn import select_action
+        from lib_qlearn import select_action
 
         table = {"version": 1, "entries": {
             "test_state": {"attempt_fix": 1.0, "open_issue": 0.0, "skip": -1.0}
@@ -154,7 +154,7 @@ class TestAutofixQTable:
 
     def test_select_action_picks_open_issue_when_highest(self) -> None:
         # AC 13
-        from dynoslib_qlearn import select_action
+        from lib_qlearn import select_action
 
         table = {"version": 1, "entries": {
             "test_state": {"attempt_fix": -0.5, "open_issue": 0.8, "skip": 0.0}
@@ -164,7 +164,7 @@ class TestAutofixQTable:
 
     def test_select_action_picks_skip_when_highest(self) -> None:
         # AC 13
-        from dynoslib_qlearn import select_action
+        from lib_qlearn import select_action
 
         table = {"version": 1, "entries": {
             "test_state": {"attempt_fix": -1.0, "open_issue": -0.5, "skip": 0.5}
@@ -174,7 +174,7 @@ class TestAutofixQTable:
 
     def test_unseen_state_explores_randomly(self) -> None:
         # AC 13: unseen state should explore (random selection)
-        from dynoslib_qlearn import select_action
+        from lib_qlearn import select_action
 
         table = {"version": 1, "entries": {}}
         actions = ["attempt_fix", "open_issue", "skip"]

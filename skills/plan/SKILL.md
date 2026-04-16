@@ -27,7 +27,7 @@ Verify `spec.md` exists. If not, print "No spec found. Run /dynos-work:start to 
 Update `manifest.json` stage to `PLANNING`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLANNING
+python3 hooks/ctl.py transition .dynos/task-{id} PLANNING
 ```
 
 Append to execution log:
@@ -41,7 +41,7 @@ Spawn the `planning` agent with instruction: "Generate the implementation plan a
 Wait for completion. Run deterministic artifact validation before human review. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py validate-task .dynos/task-{id} --strict
+python3 hooks/ctl.py validate-task .dynos/task-{id} --strict
 ```
 
 Append to log:
@@ -53,7 +53,7 @@ Append to log:
 Update `manifest.json` stage to `PLAN_REVIEW`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_REVIEW
+python3 hooks/ctl.py transition .dynos/task-{id} PLAN_REVIEW
 ```
 
 ### Step 3 — Human review (PLAN_REVIEW)
@@ -78,7 +78,7 @@ Approve this plan? (yes / no + what to change)
 Update `manifest.json` stage to `PLAN_AUDIT`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_AUDIT
+python3 hooks/ctl.py transition .dynos/task-{id} PLAN_AUDIT
 ```
 
 Append to log:
@@ -99,7 +99,7 @@ Wait for completion. Read the report.
 Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+python3 hooks/ctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
 Append to log:

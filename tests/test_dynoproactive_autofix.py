@@ -1,4 +1,4 @@
-"""Tests for autofix scanner enhancements in dynoproactive.py.
+"""Tests for autofix scanner enhancements in proactive.py.
 
 Covers AC 6-11, 14-15, 17-18:
   AC 6: Haiku prompt exclusions/inclusions
@@ -73,7 +73,7 @@ class TestHaikuPromptUpdates:
 
     def test_prompt_excludes_style_preferences(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         # The prompt should tell the model NOT to flag style preferences
@@ -86,14 +86,14 @@ class TestHaikuPromptUpdates:
 
     def test_prompt_excludes_naming_conventions(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "naming" in prompt_lower, "Prompt should mention naming conventions"
 
     def test_prompt_excludes_missing_documentation(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "documentation" in prompt_lower or "docstring" in prompt_lower, \
@@ -101,14 +101,14 @@ class TestHaikuPromptUpdates:
 
     def test_prompt_excludes_generated_files(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "generated" in prompt_lower, "Prompt should mention generated files"
 
     def test_prompt_includes_runtime_crashes(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "crash" in prompt_lower or "exception" in prompt_lower, \
@@ -116,14 +116,14 @@ class TestHaikuPromptUpdates:
 
     def test_prompt_includes_security_vulnerabilities(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "security" in prompt_lower, "Prompt should include security vulnerabilities"
 
     def test_prompt_includes_data_corruption(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "data" in prompt_lower and ("corrupt" in prompt_lower or "loss" in prompt_lower), \
@@ -131,14 +131,14 @@ class TestHaikuPromptUpdates:
 
     def test_prompt_includes_logic_errors(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "logic" in prompt_lower, "Prompt should include logic errors"
 
     def test_prompt_includes_resource_leaks(self) -> None:
         # AC 6
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "resource" in prompt_lower and "leak" in prompt_lower, \
@@ -154,7 +154,7 @@ class TestConfidenceField:
 
     def test_prompt_requests_confidence_field(self) -> None:
         # AC 7
-        from dynoproactive import _HAIKU_REVIEW_PROMPT
+        from proactive import _HAIKU_REVIEW_PROMPT
 
         prompt_lower = _HAIKU_REVIEW_PROMPT.lower()
         assert "confidence" in prompt_lower, \
@@ -263,7 +263,7 @@ class TestDetectTestCommand:
 
     def test_detects_npm_test_from_package_json(self, tmp_path: Path) -> None:
         # AC 10
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         (tmp_path / "package.json").write_text('{"name": "test"}')
@@ -272,7 +272,7 @@ class TestDetectTestCommand:
 
     def test_detects_dart_test_from_pubspec(self, tmp_path: Path) -> None:
         # AC 10
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         (tmp_path / "pubspec.yaml").write_text("name: myapp\n")
@@ -281,7 +281,7 @@ class TestDetectTestCommand:
 
     def test_detects_pytest_from_pyproject(self, tmp_path: Path) -> None:
         # AC 10
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
@@ -290,7 +290,7 @@ class TestDetectTestCommand:
 
     def test_detects_pytest_from_setup_py(self, tmp_path: Path) -> None:
         # AC 10
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         (tmp_path / "setup.py").write_text("from setuptools import setup\nsetup()\n")
@@ -299,7 +299,7 @@ class TestDetectTestCommand:
 
     def test_detects_cargo_test(self, tmp_path: Path) -> None:
         # AC 10
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "x"\n')
@@ -308,7 +308,7 @@ class TestDetectTestCommand:
 
     def test_detects_make_test_from_makefile(self, tmp_path: Path) -> None:
         # AC 10
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
@@ -317,7 +317,7 @@ class TestDetectTestCommand:
 
     def test_returns_none_when_no_build_file(self, tmp_path: Path) -> None:
         # AC 10 implicit: no build file -> None
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         result = _detect_test_command(tmp_path)
@@ -325,7 +325,7 @@ class TestDetectTestCommand:
 
     def test_caches_result_in_test_command_json(self, tmp_path: Path) -> None:
         # AC 10: result cached in .dynos/test-command.json
-        from dynoproactive import _detect_test_command
+        from proactive import _detect_test_command
 
         (tmp_path / ".dynos").mkdir(exist_ok=True)
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
@@ -404,7 +404,7 @@ class TestQLearningRouting:
 
     def test_attempt_fix_routes_to_autofix_pipeline(self) -> None:
         # AC 14: action=attempt_fix -> proceeds to existing autofix pipeline
-        from dynoslib_qlearn import select_action
+        from lib_qlearn import select_action
 
         table = {"entries": {
             "llm-review:.py:high:medium": {"attempt_fix": 1.0, "open_issue": 0.0, "skip": -1.0}
@@ -417,7 +417,7 @@ class TestQLearningRouting:
 
     def test_open_issue_routes_directly_to_github_issue(self) -> None:
         # AC 14: action=open_issue -> routes to _open_github_issue
-        from dynoslib_qlearn import select_action
+        from lib_qlearn import select_action
 
         table = {"entries": {
             "llm-review:.py:low:low": {"attempt_fix": -0.5, "open_issue": 0.8, "skip": 0.0}
@@ -467,7 +467,7 @@ class TestQValueRewardMapping:
 
     def test_fix_succeeded_pr_merged_reward_10(self) -> None:
         # AC 15: PR merged -> +1.0
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         new_val = update_q_value(table, "s1", "attempt_fix", reward=1.0, next_state=None)
@@ -475,7 +475,7 @@ class TestQValueRewardMapping:
 
     def test_fix_succeeded_pr_opened_reward_05(self) -> None:
         # AC 15: PR opened -> +0.5
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         new_val = update_q_value(table, "s1", "attempt_fix", reward=0.5, next_state=None)
@@ -483,7 +483,7 @@ class TestQValueRewardMapping:
 
     def test_fix_failed_no_changes_reward_neg03(self) -> None:
         # AC 15: claude_no_changes -> -0.3
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         new_val = update_q_value(table, "s1", "attempt_fix", reward=-0.3, next_state=None)
@@ -491,7 +491,7 @@ class TestQValueRewardMapping:
 
     def test_fix_failed_verification_reward_neg05(self) -> None:
         # AC 15: verification_failed -> -0.5
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         new_val = update_q_value(table, "s1", "attempt_fix", reward=-0.5, next_state=None)
@@ -499,7 +499,7 @@ class TestQValueRewardMapping:
 
     def test_fix_failed_git_commit_reward_neg02(self) -> None:
         # AC 15: git_commit_failed -> -0.2
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         new_val = update_q_value(table, "s1", "attempt_fix", reward=-0.2, next_state=None)
@@ -507,7 +507,7 @@ class TestQValueRewardMapping:
 
     def test_issue_opened_successfully_reward_03(self) -> None:
         # AC 15: issue opened -> +0.3
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         new_val = update_q_value(table, "s1", "open_issue", reward=0.3, next_state=None)
@@ -515,7 +515,7 @@ class TestQValueRewardMapping:
 
     def test_skip_reward_00(self) -> None:
         # AC 15: skip -> 0.0
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         new_val = update_q_value(table, "s1", "skip", reward=0.0, next_state=None)
@@ -523,7 +523,7 @@ class TestQValueRewardMapping:
 
     def test_next_state_is_none_terminal(self) -> None:
         # AC 15: next_state is None (terminal) - no future value term
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         # With next_state=None, future value is 0
@@ -548,7 +548,7 @@ class TestQValueRewardMapping:
 
     def test_q_value_converges_with_repeated_positive_updates(self) -> None:
         # AC 15: repeated positive rewards increase Q-value
-        from dynoslib_qlearn import update_q_value
+        from lib_qlearn import update_q_value
 
         table = {"entries": {}}
         for _ in range(10):

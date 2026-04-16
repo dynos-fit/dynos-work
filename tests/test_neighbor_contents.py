@@ -53,12 +53,12 @@ class TestGetNeighborFileContents:
 
     def test_function_exists(self) -> None:
         # AC 1
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         assert callable(get_neighbor_file_contents)
 
     def test_returns_list_of_dicts(self, tmp_repo: Path) -> None:
         # AC 1
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         result = get_neighbor_file_contents(tmp_repo, "core.py")
         assert isinstance(result, list)
         for item in result:
@@ -68,7 +68,7 @@ class TestGetNeighborFileContents:
 
     def test_returns_importers_and_imports(self, tmp_repo: Path) -> None:
         # AC 1: neighbors include both files that import the target AND files the target imports
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         # api.py imports core.py and utils.py; api.py is not imported by anyone
         result = get_neighbor_file_contents(tmp_repo, "api.py")
         neighbor_paths = {item["path"] for item in result}
@@ -78,7 +78,7 @@ class TestGetNeighborFileContents:
 
     def test_returns_files_that_import_target(self, tmp_repo: Path) -> None:
         # AC 1: core.py is imported by utils.py, api.py, cli.py
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         result = get_neighbor_file_contents(tmp_repo, "core.py")
         neighbor_paths = {item["path"] for item in result}
         # At least some of the importers should be included
@@ -87,27 +87,27 @@ class TestGetNeighborFileContents:
 
     def test_deduplicates_neighbors(self, tmp_repo: Path) -> None:
         # AC 1: if file A imports B and B imports A, B appears once
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         result = get_neighbor_file_contents(tmp_repo, "api.py")
         paths = [item["path"] for item in result]
         assert len(paths) == len(set(paths)), "Neighbor paths should be deduplicated"
 
     def test_respects_max_files_limit(self, tmp_repo: Path) -> None:
         # AC 1: max_files parameter caps the number of neighbors returned
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         result = get_neighbor_file_contents(tmp_repo, "core.py", max_files=2)
         assert len(result) <= 2
 
     def test_default_max_files_is_5(self, tmp_repo: Path) -> None:
         # AC 1: default max_files=5
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         # core.py has 3 importers, so all should fit within default 5
         result = get_neighbor_file_contents(tmp_repo, "core.py")
         assert len(result) <= 5
 
     def test_truncates_content_to_max_lines(self, tmp_repo: Path) -> None:
         # AC 1: each file content truncated to max_lines
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         # Create a file with many lines
         long_content = "\n".join(f"line_{i}" for i in range(200))
         (tmp_repo / "core.py").write_text(long_content)
@@ -122,7 +122,7 @@ class TestGetNeighborFileContents:
 
     def test_default_max_lines_is_100(self, tmp_repo: Path) -> None:
         # AC 1: default max_lines=100
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         long_content = "\n".join(f"line_{i}" for i in range(200))
         (tmp_repo / "core.py").write_text(long_content)
         subprocess.run(["git", "add", "."], cwd=tmp_repo, capture_output=True)
@@ -136,13 +136,13 @@ class TestGetNeighborFileContents:
 
     def test_file_not_in_graph_returns_empty(self, tmp_repo: Path) -> None:
         # AC 1: file with no edges returns empty list
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         result = get_neighbor_file_contents(tmp_repo, "standalone.py")
         assert result == []
 
     def test_nonexistent_file_returns_empty(self, tmp_repo: Path) -> None:
         # AC 1: file not in the repo returns empty list
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         result = get_neighbor_file_contents(tmp_repo, "does_not_exist.py")
         assert result == []
 
@@ -158,7 +158,7 @@ class TestNeighborContentEnrichment:
         # AC 2: The fix prompt should include neighbor file contents as code blocks
         # We test that get_neighbor_file_contents is called during prompt building
         # by mocking it and verifying the prompt structure
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
 
         mock_neighbors = [
             {"path": "utils.py", "content": "def helper(): pass"},
@@ -191,21 +191,21 @@ class TestGracefulDegradation:
 
     def test_empty_graph_returns_empty_list(self, tmp_repo: Path) -> None:
         # AC 3: If build_import_graph returns empty graph, return []
-        from dynoslib_crawler import get_neighbor_file_contents
-        with patch("dynoslib_crawler.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+        from lib_crawler import get_neighbor_file_contents
+        with patch("lib_crawler.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
             result = get_neighbor_file_contents(tmp_repo, "core.py")
             assert result == []
 
     def test_build_import_graph_raises_returns_empty(self, tmp_repo: Path) -> None:
         # AC 3: If build_import_graph raises, return [] (no crash)
-        from dynoslib_crawler import get_neighbor_file_contents
-        with patch("dynoslib_crawler.build_import_graph", side_effect=RuntimeError("graph failure")):
+        from lib_crawler import get_neighbor_file_contents
+        with patch("lib_crawler.build_import_graph", side_effect=RuntimeError("graph failure")):
             result = get_neighbor_file_contents(tmp_repo, "core.py")
             assert result == []
 
     def test_unreadable_neighbor_file_skipped(self, tmp_repo: Path) -> None:
         # AC 3: If a neighbor file cannot be read, it is skipped (not the whole function)
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         # Remove a neighbor file after graph is built
         (tmp_repo / "utils.py").unlink()
         result = get_neighbor_file_contents(tmp_repo, "core.py")
@@ -216,16 +216,16 @@ class TestGracefulDegradation:
 
     def test_no_stack_trace_on_failure(self, tmp_repo: Path) -> None:
         # AC 3: No stack trace in logs on failure
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         import logging
-        with patch("dynoslib_crawler.build_import_graph", side_effect=OSError("disk error")):
+        with patch("lib_crawler.build_import_graph", side_effect=OSError("disk error")):
             # Should return empty list without raising
             result = get_neighbor_file_contents(tmp_repo, "anything.py")
             assert result == []
 
     def test_file_read_ioerror_does_not_crash(self, tmp_repo: Path) -> None:
         # AC 3: Individual file read failures are caught gracefully
-        from dynoslib_crawler import get_neighbor_file_contents
+        from lib_crawler import get_neighbor_file_contents
         # Mock open to raise for one specific file
         original_open = open
 

@@ -16,7 +16,7 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
 
 ```python
-from dynoslib_receipts import receipt_planner_spawn, receipt_plan_audit
+from lib_receipts import receipt_planner_spawn, receipt_plan_audit
 
 # After planner spawn (discovery/design/classification):
 receipt_planner_spawn(task_dir, "discovery", tokens_used=TOTAL_TOKENS)
@@ -38,7 +38,7 @@ Each receipt auto-records tokens to `token-usage.json`. If you skip this, the re
 
 ## Step 0 — Metadata & Initialization
 
-1. Ensure `.dynos/` exists: `mkdir -p .dynos`. Then auto-register this project with the global registry (silent, idempotent): run `python3 "${PLUGIN_HOOKS}/dynoregistry.py" register "$(pwd)" 2>/dev/null || true`. This creates `~/.dynos/projects/{slug}/` and adds the project to `~/.dynos/registry.json` if not already registered. No user action needed. Then ensure the local maintenance daemon is running (silent, idempotent): run `PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root "$(pwd)" 2>/dev/null || true`. This starts the daemon without autofix. Autofix must be explicitly enabled by the user via `dynos init --autofix` or `dynos local start --autofix`. If already running, it is a no-op.
+1. Ensure `.dynos/` exists: `mkdir -p .dynos`. Then auto-register this project with the global registry (silent, idempotent): run `python3 "${PLUGIN_HOOKS}/registry.py" register "$(pwd)" 2>/dev/null || true`. This creates `~/.dynos/projects/{slug}/` and adds the project to `~/.dynos/registry.json` if not already registered. No user action needed. Then ensure the local maintenance daemon is running (silent, idempotent): run `PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" start --root "$(pwd)" 2>/dev/null || true`. This starts the daemon without autofix. Autofix must be explicitly enabled by the user via `dynos init --autofix` or `dynos local start --autofix`. If already running, it is a no-op.
 2. Generate a task ID in the format `task-YYYYMMDD-NNN`.
 3. Create the task directory: `.dynos/task-{id}/`.
 3. Write `raw-input.md` with the full task description exactly as given.
@@ -67,7 +67,7 @@ Each receipt auto-records tokens to `token-usage.json`. If you skip this, the re
 7. Deterministically verify that `manifest.json` parses as valid JSON and that `task_id`, `created_at`, `raw_input`, and `stage` are present before continuing. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py validate-task .dynos/task-{id}
+python3 hooks/ctl.py validate-task .dynos/task-{id}
 ```
 8. Print: `dynos-work: Foundry Task Initialized: task-YYYYMMDD-NNN`
 
@@ -79,7 +79,7 @@ After every subagent spawn AND every deterministic validation, record the event:
 
 **For LLM subagent spawns** (planner, founder, testing-executor, spec-completion-auditor):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "{agent_name}" \
   --model "{model_name}" \
@@ -91,9 +91,9 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_t
   --detail "{what the agent did}"
 ```
 
-**For deterministic Python validations** (validate_task_artifacts, dynosctl validate-task, spec heading check, etc.):
+**For deterministic Python validations** (validate_task_artifacts, ctl validate-task, spec heading check, etc.):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "{validation_tool_name}" \
   --model "none" \
@@ -155,7 +155,7 @@ When NOT well-scoped: spawn the planner as normal below.
 **Learned Planning Skill Injection (MANDATORY):** Before spawning the planner, check if a learned planning skill exists for this task type:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 -c "from pathlib import Path; from dynorouter import resolve_route; r = resolve_route(Path('.'), 'plan-skill', '{task_type}'); print(r['agent_path'] or '')" 
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 -c "from pathlib import Path; from router import resolve_route; r = resolve_route(Path('.'), 'plan-skill', '{task_type}'); print(r['agent_path'] or '')" 
 ```
 
 If a non-empty path is returned AND the file exists, read it, strip frontmatter, and append its contents to the planner's instruction below under a `## Learned Planning Rules` heading. This injects project-specific planning patterns (e.g., tighter acceptance criteria, better segment sizing) derived from past task retrospectives. Log: `{timestamp} [ROUTE] plan-skill route={mode} agent={agent_name}`.
@@ -197,7 +197,7 @@ Deterministic validation before proceeding:
 Update `manifest.json` stage to `SPEC_NORMALIZATION`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
+python3 hooks/ctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
 ```
 
 ---
@@ -207,7 +207,7 @@ python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
 After classification, determine fast-track eligibility **deterministically** by running:
 
 ```text
-python3 -c "from dynoslib import apply_fast_track; from pathlib import Path; print(apply_fast_track(Path('.dynos/task-{id}')))"
+python3 -c "from lib import apply_fast_track; from pathlib import Path; print(apply_fast_track(Path('.dynos/task-{id}')))"
 ```
 
 This checks: `risk_level == "low"` AND exactly 1 domain. It writes `"fast_track": true` or `"fast_track": false` to `manifest.json`. If the command is not available, manually check the conditions and write the field.
@@ -243,7 +243,7 @@ If any rule fails, send the Planner back to fix `spec.md` before presenting it.
 Update `manifest.json` stage to `SPEC_REVIEW`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_REVIEW
+python3 hooks/ctl.py transition .dynos/task-{id} SPEC_REVIEW
 ```
 
 ---
@@ -261,7 +261,7 @@ Present `spec.md` to the user and ask for approval.
 When approved, update `manifest.json` stage to `PLANNING`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLANNING
+python3 hooks/ctl.py transition .dynos/task-{id} PLANNING
 ```
 
 ---
@@ -321,7 +321,7 @@ Append to the execution log:
 Update `manifest.json` stage to `PLAN_REVIEW`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_REVIEW
+python3 hooks/ctl.py transition .dynos/task-{id} PLAN_REVIEW
 ```
 
 ---
@@ -380,7 +380,7 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+python3 hooks/ctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
 Append to the execution log:

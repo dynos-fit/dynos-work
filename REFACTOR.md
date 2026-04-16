@@ -23,68 +23,68 @@ That's it. Everything else is either supporting this loop or ceremony around it.
 ### Module Inventory: 64 Python files across 5 tiers
 
 **Tier 0 — Foundation (cannot remove):**
-- `dynoslib_core.py` (477 lines) — Stage machine, path helpers, task transitions, retrospective collection. Imported by 35/64 modules.
-- `dynoslib_defaults.py` — Constants, token budgets, model policies.
-- `dynoslib_log.py` — Event logging to `.dynos/events.jsonl`.
+- `lib_core.py` (477 lines) — Stage machine, path helpers, task transitions, retrospective collection. Imported by 35/64 modules.
+- `lib_defaults.py` — Constants, token budgets, model policies.
+- `lib_log.py` — Event logging to `.dynos/events.jsonl`.
 
 **Tier 1 — State Management (essential but bloated):**
-- `dynoslib_registry.py` — Learned agent registry. Reads/writes `~/.dynos/projects/{slug}/learned-agents/registry.json`. The single source of truth for agent state (mode, status, scores, evaluations).
-- `dynoslib_benchmark.py` (421 lines) — Fixture synthesis, evaluation, benchmark history. Writes to `~/.dynos/projects/{slug}/benchmarks/`.
-- `dynoslib_trajectory.py` (308 lines) — Task similarity search. Rebuilds `trajectories.json` from retrospectives.
-- `dynoslib_queue.py` — Automation queue for scheduled re-benchmarking.
-- `dynoslib_events.py` — File-based event emission/consumption.
-- `dynoslib_receipts.py` (490 lines) — Receipt chain validation for execution evidence.
-- `dynoslib_tokens.py` (321 lines) — Token usage tracking per phase.
-- `dynoslib_contracts.py` — Runtime contract validation at pipeline boundaries.
-- `dynoslib_validate.py` (579 lines) — Artifact validation: task contracts, segment ownership.
+- `lib_registry.py` — Learned agent registry. Reads/writes `~/.dynos/projects/{slug}/learned-agents/registry.json`. The single source of truth for agent state (mode, status, scores, evaluations).
+- `lib_benchmark.py` (421 lines) — Fixture synthesis, evaluation, benchmark history. Writes to `~/.dynos/projects/{slug}/benchmarks/`.
+- `lib_trajectory.py` (308 lines) — Task similarity search. Rebuilds `trajectories.json` from retrospectives.
+- `lib_queue.py` — Automation queue for scheduled re-benchmarking.
+- `lib_events.py` — File-based event emission/consumption.
+- `lib_receipts.py` (490 lines) — Receipt chain validation for execution evidence.
+- `lib_tokens.py` (321 lines) — Token usage tracking per phase.
+- `lib_contracts.py` — Runtime contract validation at pipeline boundaries.
+- `lib_validate.py` (579 lines) — Artifact validation: task contracts, segment ownership.
 
 **Tier 2 — Learning/Evolution (the actual RL system):**
-- `dynoevolve.py` — Generates learned agent markdown from retrospective patterns. Registers in shadow mode.
-- `dynopatterns.py` (845 lines) — Computes EMA effectiveness scores per (role, task_type, model). Generates `dynos_patterns.md` with model policy, skip policy, baseline tables.
-- `dynorouter.py` (917 lines) — Deterministic routing: UCB1 model selection, skip decisions, learned agent injection, ensemble voting. The brain of the system.
-- `dynoeval.py` — Offline evaluator: decides promotions from benchmark scores.
-- `dynopostmortem.py` (468 lines) — Analyzes completed tasks for anomalies.
-- `dynopostmortem_improve.py` (429 lines) — Applies improvements to policy.json, prevention-rules.json, registry.
+- `evolve.py` — Generates learned agent markdown from retrospective patterns. Registers in shadow mode.
+- `patterns.py` (845 lines) — Computes EMA effectiveness scores per (role, task_type, model). Generates `dynos_patterns.md` with model policy, skip policy, baseline tables.
+- `router.py` (917 lines) — Deterministic routing: UCB1 model selection, skip decisions, learned agent injection, ensemble voting. The brain of the system.
+- `eval.py` — Offline evaluator: decides promotions from benchmark scores.
+- `postmortem.py` (468 lines) — Analyzes completed tasks for anomalies.
+- `postmortem_improve.py` (429 lines) — Applies improvements to policy.json, prevention-rules.json, registry.
 
 **Tier 3 — Automation/Orchestration (ceremony):**
-- `dynomaintain.py` (493 lines) — Persistent daemon running 9-step cycle every 3600s.
-- `dynoeventbus.py` — Drains event queue, fires follow-on handlers in 4-stage waterfall.
-- `dynoauto.py` — Schedules and runs benchmark challengers.
-- `dynobench.py` — Benchmark runner (fixture rollouts).
-- `dynofixture.py` — Syncs benchmark fixtures to disk.
-- `dynoproactive.py` (3,592 lines!) — Autofix scanner: debt detection, PR generation.
-- `dynoslib_qlearn.py` (442 lines) — Tabular Q-learning for repair loop decisions.
-- `dynoslib_templates.py` — Fix template caching.
+- `maintain.py` (493 lines) — Persistent daemon running 9-step cycle every 3600s.
+- `eventbus.py` — Drains event queue, fires follow-on handlers in 4-stage waterfall.
+- `auto.py` — Schedules and runs benchmark challengers.
+- `bench.py` — Benchmark runner (fixture rollouts).
+- `fixture.py` — Syncs benchmark fixtures to disk.
+- `proactive.py` (3,592 lines!) — Autofix scanner: debt detection, PR generation.
+- `lib_qlearn.py` (442 lines) — Tabular Q-learning for repair loop decisions.
+- `lib_templates.py` — Fix template caching.
 
 **Tier 4 — Visualization/Reporting (read-only consumers):**
-- `dynodashboard.py` (807 lines) — HTML dashboard.
-- `dynoglobal_dashboard.py` (2,215 lines) — Global multi-project HTML dashboard.
-- `dynoreport.py` — Runtime observability report.
-- `dynolineage.py` — Lineage graph for agents/fixtures/tasks.
+- `dashboard.py` (807 lines) — HTML dashboard.
+- `global_dashboard.py` (2,215 lines) — Global multi-project HTML dashboard.
+- `report.py` — Runtime observability report.
+- `lineage.py` — Lineage graph for agents/fixtures/tasks.
 
 **Tier 5 — Global/Multi-Project (not core):**
-- `dynoglobal.py` (881 lines) — Cross-project sweep daemon.
-- `dynoregistry.py` — Global project registry CLI.
-- `dynoglobal_stats.py` — Anonymous cross-project statistics.
+- `sweeper.py` (881 lines) — Cross-project sweep daemon.
+- `registry.py` — Global project registry CLI.
+- `global_stats.py` — Anonymous cross-project statistics.
 
 **Other utilities:**
-- `dynoslib_crawler.py` (665 lines) — Import graph builder (Python/JS/TS/Dart/Rust/Go), PageRank scoring.
-- `dynoslib_tokens_hook.py` — Token tracking hook.
+- `lib_crawler.py` (665 lines) — Import graph builder (Python/JS/TS/Dart/Rust/Go), PageRank scoring.
+- `lib_tokens_hook.py` — Token tracking hook.
 - Various one-off scripts, CLI wrappers, route helpers.
 
 ### Skills: 21 total
 start, execute, audit, plan, investigate, repair, resume, status, evolve, learn, trajectory, maintain, autofix, local, global, dashboard, init, register, list, dry-run, founder.
 
 ### Daemon Cycle: 9 steps (sequential, any failure recorded but swallowed)
-1. `dynostrajectory.py rebuild` — Rebuild similarity store
-2. `dynopatterns.py` — Compute EMA effectiveness scores
-3. `dynoevolve.py auto` — Generate learned agents
-4. `dynopostmortem.py generate-all` — Detect anomalies
-5. `dynopostmortem.py improve` — Apply policy improvements
-6. `dynofixture.py sync` — Sync benchmark fixtures
-7. `dynoauto.py run` — Run benchmark challengers
-8. `dynodashboard.py generate` — Render HTML dashboard
-9. `dynoreport.py` — Aggregate statistics
+1. `trajectory.py rebuild` — Rebuild similarity store
+2. `patterns.py` — Compute EMA effectiveness scores
+3. `evolve.py auto` — Generate learned agents
+4. `postmortem.py generate-all` — Detect anomalies
+5. `postmortem.py improve` — Apply policy improvements
+6. `fixture.py sync` — Sync benchmark fixtures
+7. `auto.py run` — Run benchmark challengers
+8. `dashboard.py generate` — Render HTML dashboard
+9. `report.py` — Aggregate statistics
 
 ### Event Waterfall: 4 stages (each emits the next)
 ```
@@ -104,21 +104,21 @@ task-completed → [learn, trajectory]
 
 ### 2. Two overlapping learning loops
 
-**Loop 1 (dynoevolve):** Reads retrospectives → generates agent markdown → registers in shadow.
-**Loop 2 (dynopostmortem + improve):** Reads retrospectives → detects anomalies → tunes policy.json, prevention-rules.json, and can also seed agents.
+**Loop 1 (evolve):** Reads retrospectives → generates agent markdown → registers in shadow.
+**Loop 2 (postmortem + improve):** Reads retrospectives → detects anomalies → tunes policy.json, prevention-rules.json, and can also seed agents.
 
 Both read the same input (retrospectives). Both can create/modify agents. Both modify the same shared state (registry, prevention rules). The distinction between "generate an agent" and "propose an improvement that seeds an agent" is artificial.
 
 ### 3. Q-learning that doesn't learn
 
-`dynoslib_qlearn.py` (442 lines) implements tabular Q-learning for repair loop decisions. But:
+`lib_qlearn.py` (442 lines) implements tabular Q-learning for repair loop decisions. But:
 - Rewards are binary (+1/-1), not contextual
 - No exploration bonus
 - The Q-table is loaded but rarely updated during the maintenance cycle
 - It's a persisted heuristic cache, not a learning system
 - The router's UCB1 already makes better model selection decisions
 
-### 4. `dynoslib_core` is a god object
+### 4. `lib_core` is a god object
 
 477 lines, imported by 35 of 64 modules. Contains: stage machine, path helpers, task transitions, receipt gates, retrospective collection, post-completion triggers, JSON I/O, token estimates. Everything depends on it because everything is in it.
 
@@ -126,7 +126,7 @@ Both read the same input (retrospectives). Both can create/modify agents. Both m
 
 9 sequential steps, most of which duplicate work done by the event bus. When a task completes, the event bus fires learn → evolve → patterns → postmortem → improve → benchmark → dashboard. Then the daemon runs on a timer and does the same things again. The daemon is a cron-style catch-up mechanism for when events are missed, but it runs the full pipeline every time.
 
-### 6. `dynoproactive.py` is 3,592 lines
+### 6. `proactive.py` is 3,592 lines
 
 The autofix scanner is larger than the entire core pipeline. It handles debt detection, finding classification, PR generation, fix verification, rollback tracking, suppression management, confidence scoring, and more. It's a product unto itself grafted onto the learning system.
 
@@ -136,7 +136,7 @@ Prevention rules are just strings appended to executor prompts: "Category 'sec' 
 
 ### 8. Markdown as a data format
 
-`dynopatterns.py` generates a 200+ line markdown file (`dynos_patterns.md`) with effectiveness tables, model policy, skip policy, and baseline data. `dynorouter.py` then parses this markdown back into structured data. The markdown exists for human readability but creates a fragile parse-serialize roundtrip.
+`patterns.py` generates a 200+ line markdown file (`dynos_patterns.md`) with effectiveness tables, model policy, skip policy, and baseline data. `router.py` then parses this markdown back into structured data. The markdown exists for human readability but creates a fragile parse-serialize roundtrip.
 
 ---
 
@@ -147,19 +147,19 @@ Prevention rules are just strings appended to executor prompts: "Category 'sec' 
 **Goal:** One loop, not two. One place that reads retrospectives and updates agent/policy state.
 
 **Merge:**
-- `dynoevolve.py` + `dynopostmortem.py` + `dynopostmortem_improve.py` → **`dynolearn.py`**
+- `evolve.py` + `postmortem.py` + `postmortem_improve.py` → **`dynolearn.py`**
 
 **What `dynolearn.py` does:**
 1. Collect all retrospectives
-2. Compute effectiveness scores (currently in `dynopatterns.py`)
-3. Generate/update learned agents (currently in `dynoevolve.py`)
-4. Detect anomalies and tune policy (currently in `dynopostmortem_improve.py`)
+2. Compute effectiveness scores (currently in `patterns.py`)
+3. Generate/update learned agents (currently in `evolve.py`)
+4. Detect anomalies and tune policy (currently in `postmortem_improve.py`)
 5. Write all state: registry.json, policy.json, prevention-rules.json, effectiveness scores
 
 **Delete:**
-- `dynopostmortem.py` (analysis absorbed into learn)
-- `dynopostmortem_improve.py` (actions absorbed into learn)
-- `dynopatterns.py` (score computation absorbed into learn)
+- `postmortem.py` (analysis absorbed into learn)
+- `postmortem_improve.py` (actions absorbed into learn)
+- `patterns.py` (score computation absorbed into learn)
 
 **Lines saved:** ~1,742 lines across 3 files, replaced by ~600 lines in one file.
 
@@ -172,12 +172,12 @@ Prevention rules are just strings appended to executor prompts: "Category 'sec' 
 - Compute directly from retrospectives. No fixtures, no history.json, no index.json, no challengers.
 
 **Delete:**
-- `dynoslib_benchmark.py` (fixture synthesis, evaluation)
-- `dynobench.py` (benchmark runner)
-- `dynofixture.py` (fixture sync)
-- `dynoauto.py` (challenger scheduling)
-- `dynoeval.py` (offline evaluator)
-- `dynobench_backfill_model.py` (one-time migration)
+- `lib_benchmark.py` (fixture synthesis, evaluation)
+- `bench.py` (benchmark runner)
+- `fixture.py` (fixture sync)
+- `auto.py` (challenger scheduling)
+- `eval.py` (offline evaluator)
+- `bench_backfill_model.py` (one-time migration)
 - `benchmarks/generated/*.json` (generated fixtures)
 - `~/.dynos/projects/{slug}/benchmarks/` (history, index)
 
@@ -193,16 +193,16 @@ Prevention rules are just strings appended to executor prompts: "Category 'sec' 
 
 **New daemon cycle:**
 1. `dynolearn.py` — The unified learning step (scores + agents + policy)
-2. `dynodashboard.py generate` — Refresh visibility
-3. `dynoreport.py` — Observability
+2. `dashboard.py generate` — Refresh visibility
+3. `report.py` — Observability
 
 **Remove from daemon:**
-- `dynostrajectory.py rebuild` — Move to event bus only (runs on task-completed, not on timer)
-- `dynoevolve.py auto` — Absorbed into `dynolearn.py`
-- `dynopostmortem.py generate-all` — Absorbed into `dynolearn.py`
-- `dynopostmortem.py improve` — Absorbed into `dynolearn.py`
-- `dynofixture.py sync` — Deleted (Phase 2)
-- `dynoauto.py run` — Deleted (Phase 2)
+- `trajectory.py rebuild` — Move to event bus only (runs on task-completed, not on timer)
+- `evolve.py auto` — Absorbed into `dynolearn.py`
+- `postmortem.py generate-all` — Absorbed into `dynolearn.py`
+- `postmortem.py improve` — Absorbed into `dynolearn.py`
+- `fixture.py sync` — Deleted (Phase 2)
+- `auto.py run` — Deleted (Phase 2)
 
 **Simplify the event waterfall:**
 ```
@@ -215,7 +215,7 @@ Two stages instead of four. No intermediate events.
 ### Phase 4: Kill Q-Learning, Simplify Prevention Rules
 
 **Q-learning:**
-- Delete `dynoslib_qlearn.py` (442 lines)
+- Delete `lib_qlearn.py` (442 lines)
 - Replace with simple win-rate tracking in `dynolearn.py`: per (model, role, finding_type) → success_count / total_count
 - The router's UCB1 already handles exploration/exploitation
 
@@ -224,16 +224,16 @@ Two stages instead of four. No intermediate events.
 - If no measurable effect after 10 tasks, auto-prune the rule
 - This is a future phase, not blocking
 
-### Phase 5: Break Up `dynoslib_core`
+### Phase 5: Break Up `lib_core`
 
 **Split into:**
 - `dynoslib_paths.py` — Path helpers, slug computation, directory resolution
 - `dynoslib_state.py` — Stage machine, transitions, receipt gates
 - `dynoslib_io.py` — JSON I/O, atomic writes, retrospective collection
 
-**Why:** Currently 35 modules import `dynoslib_core` for one or two functions. After the split, each module imports only what it needs. Easier to test, easier to understand dependency flow.
+**Why:** Currently 35 modules import `lib_core` for one or two functions. After the split, each module imports only what it needs. Easier to test, easier to understand dependency flow.
 
-### Phase 6: Extract `dynoproactive.py`
+### Phase 6: Extract `proactive.py`
 
 **Goal:** The autofix scanner (3,592 lines) should be a separate, optional subsystem.
 
@@ -246,8 +246,8 @@ Two stages instead of four. No intermediate events.
 
 **Replace `dynos_patterns.md` with `dynos_patterns.json`:**
 - Structured JSON with effectiveness scores, model policy, skip policy
-- `dynorouter.py` reads JSON directly (no markdown parsing)
-- Human readability via `dynoreport.py` or the dashboard, not the data file itself
+- `router.py` reads JSON directly (no markdown parsing)
+- Human readability via `report.py` or the dashboard, not the data file itself
 
 ### Phase 8: Rationalize Shared State
 
@@ -258,8 +258,8 @@ Two stages instead of four. No intermediate events.
 - `policy.json` → written only by `dynolearn.py`
 - `prevention-rules.json` → written only by `dynolearn.py`
 - `dynos_patterns.json` → written only by `dynolearn.py`
-- `queue.json` → written only by `dynoslib_queue.py` (if queue survives Phase 2; otherwise delete)
-- `events.jsonl` → written only by `dynoslib_events.py`
+- `queue.json` → written only by `lib_queue.py` (if queue survives Phase 2; otherwise delete)
+- `events.jsonl` → written only by `lib_events.py`
 
 Other modules read these files but never write them.
 
@@ -286,16 +286,16 @@ Other modules read these files but never write them.
 - JSON data throughout
 
 ### Files Deleted (estimated)
-- `dynopostmortem.py` (468 lines)
-- `dynopostmortem_improve.py` (429 lines)
-- `dynopatterns.py` (845 lines)
-- `dynoslib_benchmark.py` (421 lines)
-- `dynobench.py` (~300 lines)
-- `dynofixture.py` (~200 lines)
-- `dynoauto.py` (~300 lines)
-- `dynoeval.py` (~200 lines)
-- `dynoslib_qlearn.py` (442 lines)
-- `dynobench_backfill_model.py` (~100 lines)
+- `postmortem.py` (468 lines)
+- `postmortem_improve.py` (429 lines)
+- `patterns.py` (845 lines)
+- `lib_benchmark.py` (421 lines)
+- `bench.py` (~300 lines)
+- `fixture.py` (~200 lines)
+- `auto.py` (~300 lines)
+- `eval.py` (~200 lines)
+- `lib_qlearn.py` (442 lines)
+- `bench_backfill_model.py` (~100 lines)
 
 **Total deleted:** ~3,705 lines across 10 files
 
@@ -306,11 +306,11 @@ Other modules read these files but never write them.
 - `dynoslib_io.py` (~100 lines) — JSON I/O
 
 ### Files Modified
-- `dynomaintain.py` — Reduced to 3-step cycle
-- `dynoeventbus.py` — Simplified to 2-stage waterfall
-- `dynorouter.py` — Read JSON instead of parsing markdown
-- `dynoslib_core.py` — Gutted, replaced by split modules
-- All importers of `dynoslib_core` — Update imports
+- `maintain.py` — Reduced to 3-step cycle
+- `eventbus.py` — Simplified to 2-stage waterfall
+- `router.py` — Read JSON instead of parsing markdown
+- `lib_core.py` — Gutted, replaced by split modules
+- All importers of `lib_core` — Update imports
 
 ---
 
@@ -331,10 +331,10 @@ Do this in order. Each phase is independently shippable:
 
 ## What NOT to Touch
 
-- **`dynorouter.py`** — The routing logic is well-designed. UCB1 model selection, skip decisions, ensemble voting. Keep it.
+- **`router.py`** — The routing logic is well-designed. UCB1 model selection, skip decisions, ensemble voting. Keep it.
 - **Skills** — The skill definitions are thin wrappers. They reference the Python modules. As modules are renamed/merged, update skill references, but don't restructure the skill system itself.
 - **Dashboard UI** (`hooks/dashboard-ui/`) — Read-only consumer. Update API endpoints if data shapes change, but don't refactor the React code.
-- **`dynoslib_core.py` stage machine** — The stage transitions and receipt gates are correct. Move them to `dynoslib_state.py` but don't simplify the state machine itself.
+- **`lib_core.py` stage machine** — The stage transitions and receipt gates are correct. Move them to `dynoslib_state.py` but don't simplify the state machine itself.
 - **Event bus architecture** — Keep the file-based event queue. Just reduce the number of event types and handlers.
 
 ---
@@ -345,7 +345,7 @@ After each phase:
 1. Run existing tests: `cd hooks/dashboard-ui && npx vitest run`
 2. Run a task end-to-end: `/dynos-work:start` → `/dynos-work:execute` → `/dynos-work:audit`
 3. Verify the maintenance daemon completes a cycle without errors
-4. Verify `dynorouter.py` still routes correctly (check a few routing decisions)
+4. Verify `router.py` still routes correctly (check a few routing decisions)
 5. Verify learned agents are still generated and registered after task completion
 
 The system should produce identical routing decisions and agent promotions before and after refactoring.

@@ -1,4 +1,4 @@
-"""Tests for the dependency graph builder (dynoslib_crawler.py).
+"""Tests for the dependency graph builder (lib_crawler.py).
 
 Covers AC 1-5: import graph, PageRank, caching, generated file exclusion, scan targets.
 """
@@ -81,7 +81,7 @@ class TestBuildImportGraph:
 
     def test_returns_dict_with_required_keys(self, tmp_repo: Path) -> None:
         # AC 1
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo)
         assert isinstance(graph, dict)
@@ -91,7 +91,7 @@ class TestBuildImportGraph:
 
     def test_nodes_are_repo_relative_paths(self, tmp_repo: Path) -> None:
         # AC 1
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo)
         nodes = graph["nodes"]
@@ -102,7 +102,7 @@ class TestBuildImportGraph:
 
     def test_edges_have_from_and_to(self, tmp_repo: Path) -> None:
         # AC 1
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo)
         edges = graph["edges"]
@@ -113,7 +113,7 @@ class TestBuildImportGraph:
 
     def test_python_imports_produce_edges(self, tmp_repo: Path) -> None:
         # AC 1: Python imports via ast.parse
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo)
         edges = graph["edges"]
@@ -123,7 +123,7 @@ class TestBuildImportGraph:
 
     def test_pagerank_maps_paths_to_floats(self, tmp_repo: Path) -> None:
         # AC 1
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo)
         pr = graph["pagerank"]
@@ -133,7 +133,7 @@ class TestBuildImportGraph:
 
     def test_js_import_from_detected(self, tmp_repo_multilang: Path) -> None:
         # AC 1: JS import...from regex
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo_multilang)
         from_to = {(e["from"], e["to"]) for e in graph["edges"]}
@@ -142,7 +142,7 @@ class TestBuildImportGraph:
 
     def test_js_require_detected(self, tmp_repo_multilang: Path) -> None:
         # AC 1: JS require() regex
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo_multilang)
         from_to = {(e["from"], e["to"]) for e in graph["edges"]}
@@ -151,7 +151,7 @@ class TestBuildImportGraph:
 
     def test_dart_import_detected(self, tmp_repo_multilang: Path) -> None:
         # AC 1: Dart import regex
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo_multilang)
         from_to = {(e["from"], e["to"]) for e in graph["edges"]}
@@ -159,7 +159,7 @@ class TestBuildImportGraph:
 
     def test_malformed_python_file_skipped_silently(self, tmp_repo: Path) -> None:
         # AC 1 implicit: ast.parse failure skips file, no crash
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         (tmp_repo / "bad.py").write_text("def foo(\n")  # syntax error
         subprocess.run(["git", "add", "bad.py"], cwd=tmp_repo, capture_output=True)
@@ -180,7 +180,7 @@ class TestPageRank:
 
     def test_highly_imported_file_scores_higher(self, tmp_repo: Path) -> None:
         # AC 2: core.py is imported by 3 files, should score highest
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph = build_import_graph(tmp_repo)
         pr = graph["pagerank"]
@@ -190,7 +190,7 @@ class TestPageRank:
 
     def test_known_graph_centrality_ordering(self) -> None:
         # AC 2: Test PageRank with a known graph topology directly
-        from dynoslib_crawler import _compute_pagerank
+        from lib_crawler import _compute_pagerank
 
         # Adjacency: who imports whom (reverse direction for PageRank)
         # A is imported by B, C, D (3 importers)
@@ -209,7 +209,7 @@ class TestPageRank:
 
     def test_pagerank_uses_damping_085(self) -> None:
         # AC 2: Verify damping factor is 0.85
-        from dynoslib_crawler import _compute_pagerank
+        from lib_crawler import _compute_pagerank
 
         adjacency = {"A": {"B"}, "B": set()}
         scores = _compute_pagerank(adjacency, damping=0.85, iterations=20)
@@ -218,7 +218,7 @@ class TestPageRank:
 
     def test_ten_importers_vs_one_importer(self) -> None:
         # AC 2: A file imported by 10 others scores higher than one imported by 1
-        from dynoslib_crawler import _compute_pagerank
+        from lib_crawler import _compute_pagerank
 
         nodes = {}
         # hub.py is imported by 10 files
@@ -241,7 +241,7 @@ class TestGraphCaching:
 
     def test_cache_file_created_on_build(self, tmp_repo: Path) -> None:
         # AC 3
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         cache_path = tmp_repo / ".dynos" / "dependency-graph.json"
         assert not cache_path.exists()
@@ -251,7 +251,7 @@ class TestGraphCaching:
 
     def test_cache_contains_origin_main_sha(self, tmp_repo: Path) -> None:
         # AC 3
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         build_import_graph(tmp_repo)
         cache_path = tmp_repo / ".dynos" / "dependency-graph.json"
@@ -260,11 +260,11 @@ class TestGraphCaching:
 
     def test_cache_hit_avoids_rebuild(self, tmp_repo: Path) -> None:
         # AC 3: second call uses cache, not full rebuild
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         graph1 = build_import_graph(tmp_repo)
         # Patch git ls-files to detect if it is called again
-        with patch("dynoslib_crawler.subprocess.run") as mock_run:
+        with patch("lib_crawler.subprocess.run") as mock_run:
             # Make rev-parse return the same SHA as cached
             cache_path = tmp_repo / ".dynos" / "dependency-graph.json"
             cache = json.loads(cache_path.read_text())
@@ -277,7 +277,7 @@ class TestGraphCaching:
 
     def test_cache_invalidated_on_sha_change(self, tmp_repo: Path) -> None:
         # AC 3: when origin/main SHA changes, graph is rebuilt
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         build_import_graph(tmp_repo)
         cache_path = tmp_repo / ".dynos" / "dependency-graph.json"
@@ -313,14 +313,14 @@ class TestGeneratedFileExclusion:
     ])
     def test_is_generated_file(self, filename: str, expected: bool) -> None:
         # AC 4
-        from dynoslib_crawler import _is_generated_file
+        from lib_crawler import _is_generated_file
 
         assert _is_generated_file(filename) == expected, \
             f"_is_generated_file('{filename}') should be {expected}"
 
     def test_generated_files_excluded_from_graph_nodes(self, tmp_path: Path) -> None:
         # AC 4: generated files should not appear in graph nodes
-        from dynoslib_crawler import build_import_graph
+        from lib_crawler import build_import_graph
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
         subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True)
@@ -341,7 +341,7 @@ class TestGeneratedFileExclusion:
 
     def test_generated_files_excluded_from_scan_targets(self, tmp_path: Path) -> None:
         # AC 4: generated files should not appear in scan targets
-        from dynoslib_crawler import compute_scan_targets
+        from lib_crawler import compute_scan_targets
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
         subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True)
@@ -368,7 +368,7 @@ class TestComputeScanTargets:
 
     def test_returns_list_of_path_float_tuples(self, tmp_repo: Path) -> None:
         # AC 5
-        from dynoslib_crawler import compute_scan_targets
+        from lib_crawler import compute_scan_targets
 
         targets = compute_scan_targets(tmp_repo, max_files=10)
         assert isinstance(targets, list)
@@ -379,21 +379,21 @@ class TestComputeScanTargets:
 
     def test_max_files_limits_output(self, tmp_repo: Path) -> None:
         # AC 5: max_files parameter respected
-        from dynoslib_crawler import compute_scan_targets
+        from lib_crawler import compute_scan_targets
 
         targets = compute_scan_targets(tmp_repo, max_files=2)
         assert len(targets) <= 2
 
     def test_default_max_files_is_10(self, tmp_repo: Path) -> None:
         # AC 5: default max_files is 10 (increased from 5)
-        from dynoslib_crawler import compute_scan_targets
+        from lib_crawler import compute_scan_targets
 
         targets = compute_scan_targets(tmp_repo)
         assert len(targets) <= 10
 
     def test_scores_are_sorted_descending(self, tmp_repo: Path) -> None:
         # AC 5: targets should be sorted by score, highest first
-        from dynoslib_crawler import compute_scan_targets
+        from lib_crawler import compute_scan_targets
 
         targets = compute_scan_targets(tmp_repo, max_files=10)
         if len(targets) >= 2:
@@ -402,7 +402,7 @@ class TestComputeScanTargets:
 
     def test_high_centrality_file_ranks_higher(self, tmp_repo: Path) -> None:
         # AC 5: PageRank contributes 30% weight, so highly imported files should rank higher
-        from dynoslib_crawler import compute_scan_targets
+        from lib_crawler import compute_scan_targets
 
         targets = compute_scan_targets(tmp_repo, max_files=10)
         target_paths = [str(t[0]) for t in targets]

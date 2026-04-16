@@ -433,7 +433,7 @@ function findRepoRoot(startDir) {
 export function dynosApi() {
     // Walk up from cwd to find the repo root (directory containing .dynos/)
     const repoRoot = findRepoRoot(process.cwd());
-    const dynosctlPath = path.resolve(repoRoot, "hooks", "dynosctl.py");
+    const ctlPath = path.resolve(repoRoot, "hooks", "ctl.py");
     return {
         name: "dynos-api",
         configureServer(server) {
@@ -1540,7 +1540,7 @@ export function dynosApi() {
                         const action = daemonMatch[1];
                         let command;
                         if (action === "status") {
-                            command = `python3 "${dynosctlPath}" active-task --root .`;
+                            command = `python3 "${ctlPath}" active-task --root .`;
                         }
                         else if (action === "validate") {
                             parseBody(req).then((body) => {
@@ -1549,7 +1549,7 @@ export function dynosApi() {
                                     jsonResponse(res, 400, { error: "Invalid or missing taskDir" });
                                     return;
                                 }
-                                const cmd = `python3 "${dynosctlPath}" validate-task ${taskDir}`;
+                                const cmd = `python3 "${ctlPath}" validate-task ${taskDir}`;
                                 exec(cmd, { cwd: projectPath, timeout: 30000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
                                     if (err) {
                                         jsonResponse(res, 500, { ok: false, error: err.message, stdout: stdout ?? "", stderr: stderr ?? "" });

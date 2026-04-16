@@ -13,7 +13,7 @@ Registers the current working directory as a dynos-work project in the global re
 
 2. Run the registration command:
 ```bash
-python3 "${PLUGIN_HOOKS}/dynoregistry.py" register "$(pwd)"
+python3 "${PLUGIN_HOOKS}/registry.py" register "$(pwd)"
 ```
 
 3. Print the result.

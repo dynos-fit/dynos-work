@@ -97,7 +97,7 @@ class DynosCtlTests(unittest.TestCase):
 
     def run_ctl(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(ROOT / "hooks" / "dynosctl.py"), *args],
+            ["python3", str(ROOT / "hooks" / "ctl.py"), *args],
             cwd=ROOT,
             text=True,
             capture_output=True,

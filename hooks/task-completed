@@ -2,7 +2,7 @@
 # Hook: TaskCompleted
 # Runs after every task completion.
 #
-# Pipeline: event-driven via dynoeventbus.py
+# Pipeline: event-driven via eventbus.py
 # The drain runner processes: learn → trajectory → evolve → patterns →
 # postmortem → improve → auto-benchmark → dashboard → register
 #
@@ -14,13 +14,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 # --- Step 1: Emit the triggering event ---
-PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynoslib_events.py" emit \
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/lib_events.py" emit \
   --root "${PROJECT_ROOT}" \
   --type task-completed \
   --source task || true
 
 # --- Step 2: Drain all events (learn → evolve → benchmark → dashboard) ---
-PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynoeventbus.py" drain \
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/eventbus.py" drain \
   --root "${PROJECT_ROOT}" || true
 
 # --- Step 3: Conditional auto-commit ---

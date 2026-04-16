@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
-"""TDD tests for dynoslib decomposition refactor (task-20260404-003).
+"""TDD tests for lib decomposition refactor (task-20260404-003).
 
 These tests verify the 20 acceptance criteria from the spec. They are written
 TDD-first: they will fail until the refactor is implemented. After the refactor,
 all tests must pass without modification.
 
 Acceptance criteria mapping:
-  AC 1  -- dynoslib facade re-exports all names
-  AC 2  -- dynoslib_core exports
-  AC 3  -- dynoslib_validate exports
-  AC 4  -- dynoslib_trajectory exports
-  AC 5  -- dynoslib_registry exports
-  AC 6  -- dynoslib_benchmark exports
-  AC 7  -- dynoslib_queue exports
+  AC 1  -- lib facade re-exports all names
+  AC 2  -- lib_core exports
+  AC 3  -- lib_validate exports
+  AC 4  -- lib_trajectory exports
+  AC 5  -- lib_registry exports
+  AC 6  -- lib_benchmark exports
+  AC 7  -- lib_queue exports
   AC 8  -- sub-module imports from core, no circular imports
-  AC 9  -- dynoglobal subprocess invocation (no direct maintenance_cycle import)
+  AC 9  -- sweeper subprocess invocation (no direct maintenance_cycle import)
   AC 10 -- maintenance_cycle file lock
-  AC 11 -- project_dir and is_pid_running in dynoslib_core
-  AC 12 -- dynoglobal_stats.py exports
-  AC 13 -- dynopostmortem_improve.py exports
-  AC 14 -- dyno_cli_base.py with cli_main
+  AC 11 -- project_dir and is_pid_running in lib_core
+  AC 12 -- global_stats.py exports
+  AC 13 -- postmortem_improve.py exports
+  AC 14 -- cli_base.py with cli_main
   AC 15 -- bin/dynos unchanged
   AC 18 -- no new subcommands
-  AC 19 -- dynoslib.py has no __main__ block
-  AC 20 -- dynomaintain run-once outputs JSON, returns 0
+  AC 19 -- lib.py has no __main__ block
+  AC 20 -- maintain run-once outputs JSON, returns 0
 """
 
 from __future__ import annotations
@@ -49,15 +49,15 @@ if str(HOOKS_DIR) not in sys.path:
 
 
 # ===================================================================
-# AC 1: dynoslib facade re-exports every name from sub-modules
+# AC 1: lib facade re-exports every name from sub-modules
 # ===================================================================
 
 class TestDynoslibFacadeReExports:
-    """AC 1: Every existing `from dynoslib import X` continues to resolve."""
+    """AC 1: Every existing `from lib import X` continues to resolve."""
 
     # Complete list of names currently imported by consumer modules
     CONSUMER_IMPORTS = [
-        # From dynoslib_core (AC 2)
+        # From lib_core (AC 2)
         "now_iso",
         "_persistent_project_dir",
         "load_json",
@@ -88,7 +88,7 @@ class TestDynoslibFacadeReExports:
         "benchmark_history_path",
         "benchmark_index_path",
         "automation_queue_path",
-        # From dynoslib_validate (AC 3)
+        # From lib_validate (AC 3)
         "REQUIRED_SPEC_HEADINGS",
         "REQUIRED_PLAN_HEADINGS",
         "validate_generated_html",
@@ -102,7 +102,7 @@ class TestDynoslibFacadeReExports:
         "validate_repair_log",
         "validate_retrospective",
         "check_segment_ownership",
-        # From dynoslib_trajectory (AC 4)
+        # From lib_trajectory (AC 4)
         "ensure_trajectory_store",
         "compute_quality_score",
         "estimate_token_usage",
@@ -115,14 +115,14 @@ class TestDynoslibFacadeReExports:
         "search_trajectories",
         "collect_task_summaries",
         "retrospective_benchmark_score",
-        # From dynoslib_registry (AC 5)
+        # From lib_registry (AC 5)
         "ensure_learned_registry",
         "register_learned_agent",
         "apply_evaluation_to_registry",
         "MAX_REGISTRY_BENCHMARKS",
         "resolve_registry_route",
         "entry_is_stale",
-        # From dynoslib_benchmark (AC 6)
+        # From lib_benchmark (AC 6)
         "ensure_benchmark_history",
         "ensure_benchmark_index",
         "compute_benchmark_summary",
@@ -136,33 +136,33 @@ class TestDynoslibFacadeReExports:
         "benchmark_fixture_score",
         "synthesize_fixture_for_entry",
         "MAX_BENCHMARK_HISTORY_RUNS",
-        # From dynoslib_queue (AC 7)
+        # From lib_queue (AC 7)
         "ensure_automation_queue",
         "enqueue_automation_item",
         "replace_automation_queue",
         "queue_identity",
-        # AC 11 -- relocated from dynoglobal
+        # AC 11 -- relocated from sweeper
         "project_dir",
         "is_pid_running",
     ]
 
     @pytest.mark.parametrize("name", CONSUMER_IMPORTS)
     def test_import_resolves(self, name: str) -> None:
-        """Every public name is importable from dynoslib."""
-        import dynoslib
-        assert hasattr(dynoslib, name), f"dynoslib.{name} not found"
+        """Every public name is importable from lib."""
+        import lib
+        assert hasattr(lib, name), f"lib.{name} not found"
 
     def test_facade_module_is_importable(self) -> None:
-        """dynoslib can be imported without error."""
-        import dynoslib  # noqa: F401
+        """lib can be imported without error."""
+        import lib  # noqa: F401
 
 
 # ===================================================================
-# AC 2: dynoslib_core.py exports
+# AC 2: lib_core.py exports
 # ===================================================================
 
 class TestDynoslibCoreExports:
-    """AC 2: dynoslib_core contains the expected names."""
+    """AC 2: lib_core contains the expected names."""
 
     EXPECTED_NAMES = [
         "now_iso",
@@ -199,16 +199,16 @@ class TestDynoslibCoreExports:
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
     def test_core_exports(self, name: str) -> None:
-        import dynoslib_core
-        assert hasattr(dynoslib_core, name), f"dynoslib_core.{name} not found"
+        import lib_core
+        assert hasattr(lib_core, name), f"lib_core.{name} not found"
 
 
 # ===================================================================
-# AC 3: dynoslib_validate.py exports
+# AC 3: lib_validate.py exports
 # ===================================================================
 
 class TestDynoslibValidateExports:
-    """AC 3: dynoslib_validate contains the expected names."""
+    """AC 3: lib_validate contains the expected names."""
 
     EXPECTED_NAMES = [
         "REQUIRED_SPEC_HEADINGS",
@@ -228,16 +228,16 @@ class TestDynoslibValidateExports:
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
     def test_validate_exports(self, name: str) -> None:
-        import dynoslib_validate
-        assert hasattr(dynoslib_validate, name), f"dynoslib_validate.{name} not found"
+        import lib_validate
+        assert hasattr(lib_validate, name), f"lib_validate.{name} not found"
 
 
 # ===================================================================
-# AC 4: dynoslib_trajectory.py exports
+# AC 4: lib_trajectory.py exports
 # ===================================================================
 
 class TestDynoslibTrajectoryExports:
-    """AC 4: dynoslib_trajectory contains the expected names."""
+    """AC 4: lib_trajectory contains the expected names."""
 
     EXPECTED_NAMES = [
         "ensure_trajectory_store",
@@ -256,16 +256,16 @@ class TestDynoslibTrajectoryExports:
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
     def test_trajectory_exports(self, name: str) -> None:
-        import dynoslib_trajectory
-        assert hasattr(dynoslib_trajectory, name), f"dynoslib_trajectory.{name} not found"
+        import lib_trajectory
+        assert hasattr(lib_trajectory, name), f"lib_trajectory.{name} not found"
 
 
 # ===================================================================
-# AC 5: dynoslib_registry.py exports
+# AC 5: lib_registry.py exports
 # ===================================================================
 
 class TestDynoslibRegistryExports:
-    """AC 5: dynoslib_registry contains the expected names."""
+    """AC 5: lib_registry contains the expected names."""
 
     EXPECTED_NAMES = [
         "ensure_learned_registry",
@@ -278,16 +278,16 @@ class TestDynoslibRegistryExports:
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
     def test_registry_exports(self, name: str) -> None:
-        import dynoslib_registry
-        assert hasattr(dynoslib_registry, name), f"dynoslib_registry.{name} not found"
+        import lib_registry
+        assert hasattr(lib_registry, name), f"lib_registry.{name} not found"
 
 
 # ===================================================================
-# AC 6: dynoslib_benchmark.py exports
+# AC 6: lib_benchmark.py exports
 # ===================================================================
 
 class TestDynoslibBenchmarkExports:
-    """AC 6: dynoslib_benchmark contains the expected names."""
+    """AC 6: lib_benchmark contains the expected names."""
 
     EXPECTED_NAMES = [
         "ensure_benchmark_history",
@@ -307,16 +307,16 @@ class TestDynoslibBenchmarkExports:
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
     def test_benchmark_exports(self, name: str) -> None:
-        import dynoslib_benchmark
-        assert hasattr(dynoslib_benchmark, name), f"dynoslib_benchmark.{name} not found"
+        import lib_benchmark
+        assert hasattr(lib_benchmark, name), f"lib_benchmark.{name} not found"
 
 
 # ===================================================================
-# AC 7: dynoslib_queue.py exports
+# AC 7: lib_queue.py exports
 # ===================================================================
 
 class TestDynoslibQueueExports:
-    """AC 7: dynoslib_queue contains the expected names."""
+    """AC 7: lib_queue contains the expected names."""
 
     EXPECTED_NAMES = [
         "ensure_automation_queue",
@@ -327,8 +327,8 @@ class TestDynoslibQueueExports:
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
     def test_queue_exports(self, name: str) -> None:
-        import dynoslib_queue
-        assert hasattr(dynoslib_queue, name), f"dynoslib_queue.{name} not found"
+        import lib_queue
+        assert hasattr(lib_queue, name), f"lib_queue.{name} not found"
 
 
 # ===================================================================
@@ -336,31 +336,31 @@ class TestDynoslibQueueExports:
 # ===================================================================
 
 class TestNoCircularImports:
-    """AC 8: Sub-modules import from dynoslib_core, not from the facade.
+    """AC 8: Sub-modules import from lib_core, not from the facade.
     No circular imports exist between any pair of sub-modules."""
 
     SUB_MODULES = [
-        "dynoslib_core",
-        "dynoslib_validate",
-        "dynoslib_trajectory",
-        "dynoslib_registry",
-        "dynoslib_benchmark",
-        "dynoslib_queue",
+        "lib_core",
+        "lib_validate",
+        "lib_trajectory",
+        "lib_registry",
+        "lib_benchmark",
+        "lib_queue",
     ]
 
     def test_sub_modules_do_not_import_from_facade(self) -> None:
-        """No sub-module imports from dynoslib (the facade)."""
+        """No sub-module imports from lib (the facade)."""
         for mod_name in self.SUB_MODULES:
             mod_path = HOOKS_DIR / f"{mod_name}.py"
             assert mod_path.exists(), f"{mod_name}.py does not exist"
             source = mod_path.read_text()
             tree = ast.parse(source, filename=str(mod_path))
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == "dynoslib":
+                if isinstance(node, ast.ImportFrom) and node.module == "lib":
                     pytest.fail(
-                        f"{mod_name}.py imports from 'dynoslib' facade "
+                        f"{mod_name}.py imports from 'lib' facade "
                         f"(line {node.lineno}). Sub-modules must import "
-                        f"from dynoslib_core or peer sub-modules."
+                        f"from lib_core or peer sub-modules."
                     )
 
     @pytest.mark.parametrize("mod_name", SUB_MODULES)
@@ -379,53 +379,53 @@ class TestNoCircularImports:
 
 
 # ===================================================================
-# AC 9: dynoglobal no longer imports maintenance_cycle directly
+# AC 9: sweeper no longer imports maintenance_cycle directly
 # ===================================================================
 
 class TestDaemonSubprocessSeparation:
-    """AC 9: dynoglobal uses subprocess.run to invoke dynomaintain
+    """AC 9: sweeper uses subprocess.run to invoke maintain
     instead of importing maintenance_cycle directly."""
 
     def test_no_direct_maintenance_cycle_import(self) -> None:
-        """dynoglobal.py does not contain 'from dynomaintain import maintenance_cycle'."""
-        source = (HOOKS_DIR / "dynoglobal.py").read_text()
-        tree = ast.parse(source, filename="dynoglobal.py")
+        """sweeper.py does not contain 'from maintain import maintenance_cycle'."""
+        source = (HOOKS_DIR / "sweeper.py").read_text()
+        tree = ast.parse(source, filename="sweeper.py")
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "dynomaintain":
+            if isinstance(node, ast.ImportFrom) and node.module == "maintain":
                 imported_names = [alias.name for alias in node.names]
                 assert "maintenance_cycle" not in imported_names, (
-                    "dynoglobal.py still imports maintenance_cycle from dynomaintain"
+                    "sweeper.py still imports maintenance_cycle from maintain"
                 )
 
     def test_subprocess_invocation_pattern_exists(self) -> None:
-        """dynoglobal.py contains subprocess.run invocation for dynomaintain."""
-        source = (HOOKS_DIR / "dynoglobal.py").read_text()
+        """sweeper.py contains subprocess.run invocation for maintain."""
+        source = (HOOKS_DIR / "sweeper.py").read_text()
         assert "subprocess.run" in source, (
-            "dynoglobal.py does not contain subprocess.run invocation"
+            "sweeper.py does not contain subprocess.run invocation"
         )
-        assert "dynomaintain" in source, (
-            "dynoglobal.py does not reference dynomaintain in subprocess call"
+        assert "maintain" in source, (
+            "sweeper.py does not reference maintain in subprocess call"
         )
 
     def test_subprocess_uses_run_once_subcommand(self) -> None:
         """The subprocess invocation uses the 'run-once' subcommand."""
-        source = (HOOKS_DIR / "dynoglobal.py").read_text()
+        source = (HOOKS_DIR / "sweeper.py").read_text()
         assert "run-once" in source, (
-            "dynoglobal.py subprocess call does not use 'run-once' subcommand"
+            "sweeper.py subprocess call does not use 'run-once' subcommand"
         )
 
     def test_subprocess_captures_output(self) -> None:
         """The subprocess invocation captures stdout for JSON parsing."""
-        source = (HOOKS_DIR / "dynoglobal.py").read_text()
+        source = (HOOKS_DIR / "sweeper.py").read_text()
         assert "capture_output=True" in source or "stdout=" in source, (
-            "dynoglobal.py subprocess call does not capture output"
+            "sweeper.py subprocess call does not capture output"
         )
 
     def test_subprocess_has_timeout(self) -> None:
         """The subprocess invocation has a timeout parameter."""
-        source = (HOOKS_DIR / "dynoglobal.py").read_text()
+        source = (HOOKS_DIR / "sweeper.py").read_text()
         assert "timeout=" in source, (
-            "dynoglobal.py subprocess call does not have a timeout"
+            "sweeper.py subprocess call does not have a timeout"
         )
 
 
@@ -437,20 +437,20 @@ class TestCycleLock:
     """AC 10: maintenance_cycle acquires exclusive file lock on cycle.lock."""
 
     def test_maintenance_cycle_uses_flock(self) -> None:
-        """maintenance_cycle in dynomaintain.py uses fcntl.flock for cycle.lock."""
-        source = (HOOKS_DIR / "dynomaintain.py").read_text()
+        """maintenance_cycle in maintain.py uses fcntl.flock for cycle.lock."""
+        source = (HOOKS_DIR / "maintain.py").read_text()
         assert "cycle.lock" in source, (
-            "dynomaintain.py does not reference cycle.lock"
+            "maintain.py does not reference cycle.lock"
         )
         assert "fcntl.flock" in source or "fcntl.LOCK_EX" in source, (
-            "dynomaintain.py does not use fcntl.flock"
+            "maintain.py does not use fcntl.flock"
         )
 
     def test_lock_has_finally_block(self) -> None:
         """The lock is released in a finally block."""
-        source = (HOOKS_DIR / "dynomaintain.py").read_text()
+        source = (HOOKS_DIR / "maintain.py").read_text()
         # Parse the AST and find try/finally around the lock
-        tree = ast.parse(source, filename="dynomaintain.py")
+        tree = ast.parse(source, filename="maintain.py")
         found_try_finally = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Try) and node.finalbody:
@@ -460,81 +460,81 @@ class TestCycleLock:
                     found_try_finally = True
                     break
         assert found_try_finally, (
-            "dynomaintain.py does not have a try/finally block around flock"
+            "maintain.py does not have a try/finally block around flock"
         )
 
     def test_lock_skip_returns_correct_dict(self) -> None:
         """When lock is held, maintenance_cycle returns skip dict."""
-        source = (HOOKS_DIR / "dynomaintain.py").read_text()
+        source = (HOOKS_DIR / "maintain.py").read_text()
         assert "skipped" in source, (
-            "dynomaintain.py does not return a skip indicator when lock is held"
+            "maintain.py does not return a skip indicator when lock is held"
         )
         assert "cycle lock held" in source or "cycle lock" in source.lower(), (
-            "dynomaintain.py does not mention cycle lock in skip reason"
+            "maintain.py does not mention cycle lock in skip reason"
         )
 
 
 # ===================================================================
-# AC 11: project_dir and is_pid_running relocated to dynoslib_core
+# AC 11: project_dir and is_pid_running relocated to lib_core
 # ===================================================================
 
 class TestFunctionRelocation:
-    """AC 11: project_dir and is_pid_running are in dynoslib_core,
-    importable via dynoslib facade."""
+    """AC 11: project_dir and is_pid_running are in lib_core,
+    importable via lib facade."""
 
-    def test_project_dir_in_dynoslib_core(self) -> None:
-        import dynoslib_core
-        assert hasattr(dynoslib_core, "project_dir")
-        assert callable(dynoslib_core.project_dir)
+    def test_project_dir_in_lib_core(self) -> None:
+        import lib_core
+        assert hasattr(lib_core, "project_dir")
+        assert callable(lib_core.project_dir)
 
-    def test_is_pid_running_in_dynoslib_core(self) -> None:
-        import dynoslib_core
-        assert hasattr(dynoslib_core, "is_pid_running")
-        assert callable(dynoslib_core.is_pid_running)
+    def test_is_pid_running_in_lib_core(self) -> None:
+        import lib_core
+        assert hasattr(lib_core, "is_pid_running")
+        assert callable(lib_core.is_pid_running)
 
     def test_project_dir_importable_via_facade(self) -> None:
-        from dynoslib import project_dir
+        from lib import project_dir
         assert callable(project_dir)
 
     def test_is_pid_running_importable_via_facade(self) -> None:
-        from dynoslib import is_pid_running
+        from lib import is_pid_running
         assert callable(is_pid_running)
 
-    def test_dynoglobal_imports_from_dynoslib_core(self) -> None:
-        """dynoglobal.py imports project_dir from dynoslib_core (or dynoslib)."""
-        source = (HOOKS_DIR / "dynoglobal.py").read_text()
-        tree = ast.parse(source, filename="dynoglobal.py")
-        # project_dir should NOT be defined as a function in dynoglobal.py anymore
+    def test_sweeper_imports_from_lib_core(self) -> None:
+        """sweeper.py imports project_dir from lib_core (or lib)."""
+        source = (HOOKS_DIR / "sweeper.py").read_text()
+        tree = ast.parse(source, filename="sweeper.py")
+        # project_dir should NOT be defined as a function in sweeper.py anymore
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "project_dir":
                 pytest.fail(
-                    "dynoglobal.py still defines project_dir as a local function. "
-                    "It should import it from dynoslib_core."
+                    "sweeper.py still defines project_dir as a local function. "
+                    "It should import it from lib_core."
                 )
 
-    def test_dynopostmortem_imports_project_dir_from_dynoslib(self) -> None:
-        """dynopostmortem.py imports project_dir from dynoslib, not dynoglobal."""
-        source = (HOOKS_DIR / "dynopostmortem.py").read_text()
-        tree = ast.parse(source, filename="dynopostmortem.py")
+    def test_postmortem_imports_project_dir_from_lib(self) -> None:
+        """postmortem.py imports project_dir from lib, not sweeper."""
+        source = (HOOKS_DIR / "postmortem.py").read_text()
+        tree = ast.parse(source, filename="postmortem.py")
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "dynoglobal":
+            if isinstance(node, ast.ImportFrom) and node.module == "sweeper":
                 imported_names = [alias.name for alias in node.names]
                 assert "project_dir" not in imported_names, (
-                    "dynopostmortem.py still imports project_dir from dynoglobal"
+                    "postmortem.py still imports project_dir from sweeper"
                 )
 
 
 # ===================================================================
-# AC 12: dynoglobal_stats.py exports
+# AC 12: global_stats.py exports
 # ===================================================================
 
 class TestDynoglobalStatsExtraction:
-    """AC 12: dynoglobal_stats.py exports extract_project_stats,
+    """AC 12: global_stats.py exports extract_project_stats,
     aggregate_cross_project_stats, and promote_prevention_rules."""
 
     def test_module_exists(self) -> None:
-        assert (HOOKS_DIR / "dynoglobal_stats.py").exists(), (
-            "dynoglobal_stats.py does not exist in hooks/"
+        assert (HOOKS_DIR / "global_stats.py").exists(), (
+            "global_stats.py does not exist in hooks/"
         )
 
     EXPECTED_NAMES = [
@@ -544,31 +544,31 @@ class TestDynoglobalStatsExtraction:
     ]
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
-    def test_dynoglobal_stats_exports(self, name: str) -> None:
-        import dynoglobal_stats
-        assert hasattr(dynoglobal_stats, name), (
-            f"dynoglobal_stats.{name} not found"
+    def test_global_stats_exports(self, name: str) -> None:
+        import global_stats
+        assert hasattr(global_stats, name), (
+            f"global_stats.{name} not found"
         )
 
-    def test_dynoglobal_still_exposes_stats_functions(self) -> None:
-        """dynoglobal.py re-imports and exposes the stats functions."""
-        import dynoglobal
+    def test_sweeper_still_exposes_stats_functions(self) -> None:
+        """sweeper.py re-imports and exposes the stats functions."""
+        import sweeper
         for name in self.EXPECTED_NAMES:
-            assert hasattr(dynoglobal, name), (
-                f"dynoglobal.{name} no longer accessible after extraction"
+            assert hasattr(sweeper, name), (
+                f"sweeper.{name} no longer accessible after extraction"
             )
 
 
 # ===================================================================
-# AC 13: dynopostmortem_improve.py exports
+# AC 13: postmortem_improve.py exports
 # ===================================================================
 
 class TestDynopostmortemImproveExtraction:
-    """AC 13: dynopostmortem_improve.py exports the improvement engine."""
+    """AC 13: postmortem_improve.py exports the improvement engine."""
 
     def test_module_exists(self) -> None:
-        assert (HOOKS_DIR / "dynopostmortem_improve.py").exists(), (
-            "dynopostmortem_improve.py does not exist in hooks/"
+        assert (HOOKS_DIR / "postmortem_improve.py").exists(), (
+            "postmortem_improve.py does not exist in hooks/"
         )
 
     EXPECTED_NAMES = [
@@ -586,52 +586,52 @@ class TestDynopostmortemImproveExtraction:
 
     @pytest.mark.parametrize("name", EXPECTED_NAMES)
     def test_improve_exports(self, name: str) -> None:
-        import dynopostmortem_improve
-        assert hasattr(dynopostmortem_improve, name), (
-            f"dynopostmortem_improve.{name} not found"
+        import postmortem_improve
+        assert hasattr(postmortem_improve, name), (
+            f"postmortem_improve.{name} not found"
         )
 
-    def test_dynopostmortem_still_wires_improve_subcommand(self) -> None:
-        """dynopostmortem.py still has 'improve' in its CLI parser."""
-        source = (HOOKS_DIR / "dynopostmortem.py").read_text()
+    def test_postmortem_still_wires_improve_subcommand(self) -> None:
+        """postmortem.py still has 'improve' in its CLI parser."""
+        source = (HOOKS_DIR / "postmortem.py").read_text()
         assert "improve" in source, (
-            "dynopostmortem.py no longer wires the 'improve' subcommand"
+            "postmortem.py no longer wires the 'improve' subcommand"
         )
 
 
 # ===================================================================
-# AC 14: dyno_cli_base.py with cli_main
+# AC 14: cli_base.py with cli_main
 # ===================================================================
 
 class TestCliBase:
-    """AC 14: dyno_cli_base.py exists with cli_main function."""
+    """AC 14: cli_base.py exists with cli_main function."""
 
     def test_module_exists(self) -> None:
-        assert (HOOKS_DIR / "dyno_cli_base.py").exists(), (
-            "dyno_cli_base.py does not exist in hooks/"
+        assert (HOOKS_DIR / "cli_base.py").exists(), (
+            "cli_base.py does not exist in hooks/"
         )
 
     def test_cli_main_is_callable(self) -> None:
-        import dyno_cli_base
-        assert hasattr(dyno_cli_base, "cli_main")
-        assert callable(dyno_cli_base.cli_main)
+        import cli_base
+        assert hasattr(cli_base, "cli_main")
+        assert callable(cli_base.cli_main)
 
     def test_cli_main_accepts_build_parser_fn(self) -> None:
         """cli_main accepts a build_parser_fn callable."""
         import inspect
-        import dyno_cli_base
-        sig = inspect.signature(dyno_cli_base.cli_main)
+        import cli_base
+        sig = inspect.signature(cli_base.cli_main)
         params = list(sig.parameters)
         assert len(params) >= 1, "cli_main must accept at least one parameter"
 
     def test_hook_modules_use_cli_main(self) -> None:
-        """At least some hook modules use cli_main from dyno_cli_base."""
+        """At least some hook modules use cli_main from cli_base."""
         # Check a representative set of hook modules
         sample_modules = [
-            "dynorouter.py",
-            "dynoplanner.py",
-            "dynosctl.py",
-            "dynomaintain.py",
+            "router.py",
+            "planner.py",
+            "ctl.py",
+            "maintain.py",
         ]
         uses_cli_main = 0
         for mod_name in sample_modules:
@@ -645,9 +645,9 @@ class TestCliBase:
     def test_hook_modules_preserve_sys_path_insert(self) -> None:
         """Hook modules still have sys.path.insert before any local imports."""
         sample_modules = [
-            "dynorouter.py",
-            "dynoplanner.py",
-            "dynomaintain.py",
+            "router.py",
+            "planner.py",
+            "maintain.py",
         ]
         for mod_name in sample_modules:
             source = (HOOKS_DIR / mod_name).read_text()
@@ -702,13 +702,13 @@ class TestBinDynosUnchanged:
         """bin/dynos routes subcommands to the correct hook module files."""
         content = (ROOT / "bin" / "dynos").read_text()
         expected_routes = {
-            "route": "dynorouter.py",
-            "plan": "dynoplanner.py",
-            "patterns": "dynopatterns.py",
-            "ctl": "dynosctl.py",
-            "postmortem": "dynopostmortem.py",
-            "global": "dynoglobal.py",
-            "maintain": "dynomaintain.py",
+            "route": "router.py",
+            "plan": "planner.py",
+            "patterns": "patterns.py",
+            "ctl": "ctl.py",
+            "postmortem": "postmortem.py",
+            "global": "sweeper.py",
+            "maintain": "maintain.py",
         }
         for subcmd, hook_file in expected_routes.items():
             assert hook_file in content, (
@@ -731,36 +731,36 @@ class TestBinDynosUnchanged:
 
 
 # ===================================================================
-# AC 19: dynoslib.py has no __main__ block
+# AC 19: lib.py has no __main__ block
 # ===================================================================
 
 class TestDynoslibNoMainBlock:
-    """AC 19: dynoslib.py has no if __name__ == '__main__' block."""
+    """AC 19: lib.py has no if __name__ == '__main__' block."""
 
     def test_no_main_block(self) -> None:
-        source = (HOOKS_DIR / "dynoslib.py").read_text()
+        source = (HOOKS_DIR / "lib.py").read_text()
         assert "__main__" not in source, (
-            "dynoslib.py contains a __main__ block"
+            "lib.py contains a __main__ block"
         )
 
-    def test_dynoslib_importable_as_module(self) -> None:
-        """dynoslib can be imported without executing a main block."""
-        import dynoslib  # noqa: F401
+    def test_lib_importable_as_module(self) -> None:
+        """lib can be imported without executing a main block."""
+        import lib  # noqa: F401
         # If this does not raise, the module is importable
 
 
 # ===================================================================
-# AC 20: dynomaintain run-once outputs JSON, returns 0
+# AC 20: maintain run-once outputs JSON, returns 0
 # ===================================================================
 
 class TestDynomaintainRunOnceContract:
-    """AC 20: dynomaintain.py run-once outputs JSON stdout, exit code 0."""
+    """AC 20: maintain.py run-once outputs JSON stdout, exit code 0."""
 
     def test_cmd_run_once_exists(self) -> None:
-        """dynomaintain.py has a cmd_run_once function."""
-        import dynomaintain
-        assert hasattr(dynomaintain, "cmd_run_once")
-        assert callable(dynomaintain.cmd_run_once)
+        """maintain.py has a cmd_run_once function."""
+        import maintain
+        assert hasattr(maintain, "cmd_run_once")
+        assert callable(maintain.cmd_run_once)
 
     def test_cmd_run_once_prints_json(self, tmp_path: Path) -> None:
         """cmd_run_once prints valid JSON to stdout."""
@@ -771,7 +771,7 @@ class TestDynomaintainRunOnceContract:
         result = subprocess.run(
             [
                 sys.executable,
-                str(HOOKS_DIR / "dynomaintain.py"),
+                str(HOOKS_DIR / "maintain.py"),
                 "run-once",
                 "--root",
                 str(tmp_path),
@@ -781,14 +781,14 @@ class TestDynomaintainRunOnceContract:
             timeout=60,
         )
         assert result.returncode == 0, (
-            f"dynomaintain run-once returned {result.returncode}. "
+            f"maintain run-once returned {result.returncode}. "
             f"stderr: {result.stderr}"
         )
         # stdout must be valid JSON
         output = result.stdout.strip()
-        assert output, "dynomaintain run-once produced no stdout"
+        assert output, "maintain run-once produced no stdout"
         parsed = json.loads(output)
-        assert isinstance(parsed, dict), "dynomaintain run-once stdout is not a JSON object"
+        assert isinstance(parsed, dict), "maintain run-once stdout is not a JSON object"
 
     def test_cmd_run_once_json_has_ok_field(self, tmp_path: Path) -> None:
         """The JSON output includes an 'ok' field."""
@@ -798,7 +798,7 @@ class TestDynomaintainRunOnceContract:
         result = subprocess.run(
             [
                 sys.executable,
-                str(HOOKS_DIR / "dynomaintain.py"),
+                str(HOOKS_DIR / "maintain.py"),
                 "run-once",
                 "--root",
                 str(tmp_path),
@@ -820,15 +820,15 @@ class TestSubModuleFilesExist:
     """Verify all new sub-module files exist in hooks/."""
 
     NEW_MODULES = [
-        "dynoslib_core.py",
-        "dynoslib_validate.py",
-        "dynoslib_trajectory.py",
-        "dynoslib_registry.py",
-        "dynoslib_benchmark.py",
-        "dynoslib_queue.py",
-        "dynoglobal_stats.py",
-        "dynopostmortem_improve.py",
-        "dyno_cli_base.py",
+        "lib_core.py",
+        "lib_validate.py",
+        "lib_trajectory.py",
+        "lib_registry.py",
+        "lib_benchmark.py",
+        "lib_queue.py",
+        "global_stats.py",
+        "postmortem_improve.py",
+        "cli_base.py",
     ]
 
     @pytest.mark.parametrize("filename", NEW_MODULES)
@@ -843,14 +843,14 @@ class TestSubModuleFilesExist:
 # ===================================================================
 
 class TestIsPidRunningBehavior:
-    """Behavioral test for is_pid_running via dynoslib facade."""
+    """Behavioral test for is_pid_running via lib facade."""
 
     def test_own_pid_is_running(self) -> None:
-        from dynoslib import is_pid_running
+        from lib import is_pid_running
         assert is_pid_running(os.getpid()) is True
 
     def test_dead_pid_is_not_running(self) -> None:
-        from dynoslib import is_pid_running
+        from lib import is_pid_running
         assert is_pid_running(99999999) is False
 
 
@@ -859,11 +859,11 @@ class TestIsPidRunningBehavior:
 # ===================================================================
 
 class TestProjectDirBehavior:
-    """Behavioral test for project_dir via dynoslib facade."""
+    """Behavioral test for project_dir via lib facade."""
 
     def test_project_dir_returns_path(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("DYNOS_HOME", str(tmp_path))
-        from dynoslib import project_dir
+        from lib import project_dir
         result = project_dir(tmp_path / "my-project")
         assert isinstance(result, Path)
         assert result.exists()
