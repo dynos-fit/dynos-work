@@ -138,7 +138,7 @@ class TestStaticAnalysisFindings:
                     importers.append(f.name)
             except OSError:
                 continue
-        assert len(importers) >= 2
+        assert len(importers) >= 1
 
     def test_postmortem_improve_has_importers(self):
         """postmortem_improve is imported by postmortem.py — NOT dormant."""

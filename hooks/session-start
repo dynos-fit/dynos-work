@@ -5,11 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-# Skip registration and daemon for autofix worktrees (they're temporary /tmp paths)
-if [ "${DYNOS_AUTOFIX_WORKTREE:-}" = "1" ]; then
-  printf '{"additional_context": "dynos-work autofix worktree — registration and daemon skipped."}\n'
-  exit 0
-fi
 
 python3 "${SCRIPT_DIR}/registry.py" set-active "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 python3 "${SCRIPT_DIR}/dashboard.py" generate --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true

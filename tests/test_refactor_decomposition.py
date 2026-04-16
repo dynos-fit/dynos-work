@@ -689,8 +689,6 @@ class TestBinDynosUnchanged:
         "maintain",
         "bench",
         "report",
-        "autofix",
-        "proactive",
         "init",
         "list",
         "remove",

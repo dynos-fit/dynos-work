@@ -76,11 +76,6 @@ def _q_table_path(root: Path, table_name: str) -> Path:
     return _persistent_project_dir(root) / f"q-repair-{table_name}.json"
 
 
-def _q_autofix_table_path(root: Path) -> Path:
-    """Return path to the autofix Q-table (q-autofix.json)."""
-    return _persistent_project_dir(root) / "q-autofix.json"
-
-
 def load_q_table(root: Path, table_name: str) -> dict:
     """Load a Q-table from persistent storage. Returns empty table if not found."""
     path = _q_table_path(root, table_name)
@@ -101,42 +96,10 @@ def save_q_table(root: Path, table_name: str, table: dict) -> None:
     write_json(_q_table_path(root, table_name), table)
 
 
-def load_autofix_q_table(root: Path) -> dict:
-    """Load the autofix Q-table from persistent storage. Returns empty table if not found."""
-    path = _q_autofix_table_path(root)
-    if not path.exists():
-        return {"version": 1, "updated_at": now_iso(), "entries": {}}
-    try:
-        data = load_json(path)
-        if not isinstance(data, dict) or "entries" not in data:
-            return {"version": 1, "updated_at": now_iso(), "entries": {}}
-        return data
-    except (json.JSONDecodeError, OSError):
-        return {"version": 1, "updated_at": now_iso(), "entries": {}}
-
-
-def save_autofix_q_table(root: Path, table: dict) -> None:
-    """Save the autofix Q-table to persistent storage."""
-    table["updated_at"] = now_iso()
-    write_json(_q_autofix_table_path(root), table)
-
 
 # ---------------------------------------------------------------------------
 # State encoding
 # ---------------------------------------------------------------------------
-
-def encode_autofix_state(
-    finding_category: str,
-    file_extension: str,
-    centrality_tier: str,
-    severity: str,
-) -> str:
-    """Encode autofix state as a compact colon-separated string key.
-
-    Centrality tier is one of "high", "medium", "low" (derived from PageRank quartiles).
-    Example: "llm-review:.dart:high:medium"
-    """
-    return f"{finding_category}:{file_extension}:{centrality_tier}:{severity}"
 
 
 def encode_repair_state(
