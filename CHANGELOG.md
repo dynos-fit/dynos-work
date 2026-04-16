@@ -7,6 +7,46 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.0.0] - 2026-04-16
+### "Verified Foundry": Tool-Grounded Verification, Compliance, Least Privilege
+
+This release implements the full 17-PR roadmap from `docs/foundry-design.md`. The foundry moves from LLM-reviewing-LLM to deterministic-tool-checking-LLM across every verification surface. Autofix is extracted to a separate repository. The learning layer becomes explicitly optional.
+
+### Added
+- **Compliance auditing** (PR #10): security-auditor flags GPL/AGPL deps, generates SBOM via cyclonedx-bom/syft, verifies dependency provenance via Sigstore, checks for missing privacy code (data export, account deletion). New `compliance` category with `comp-` prefix.
+- **Conditional plan sections** (PR #11): `## API Contracts` required when domains include backend/ui/security; `## Data Model` required when domains include db.
+- **Plan gap analysis** (PR #11): deterministic hook cross-references API Contracts and Data Model tables against actual route definitions (10+ frameworks) and model/schema definitions (8+ ORMs). Plans can't claim endpoints or tables that don't exist.
+- **Doc-accuracy auditing** (PR #12): code-quality-auditor runs `validate_docs_accuracy.py` on tasks touching `.md` files.
+- **Per-agent tool boundaries** (PR #13): all 17 agents declare minimum tool sets in YAML frontmatter. Auditors cannot Write/Edit. Planners cannot Bash.
+- **LEARNING_ENABLED policy flag** (PR #14): `dynos config set learning_enabled false` disables the entire learning layer. Foundry-only mode is now a single config flip.
+- **Phase-labeled start.md** (PR #15): 6 phase headers make structure visible. Zero behavior change.
+- **DORA metrics** (PR #16): `lead_time_seconds`, `change_failure`, `recovery_time_seconds` in retrospectives. `dynos stats dora` aggregator.
+- **Usage telemetry** (PR #17): module-level dormancy detection. `dynos stats usage` CLI.
+- **`dynos config` CLI**: get/set project policy without hand-editing JSON.
+- **`hooks/compliance_check.py`**: license scanning, SBOM, Sigstore provenance, privacy checks across 10 ecosystems.
+- **`hooks/plan_gap_analysis.py`**: deterministic plan verification against codebase.
+- **`hooks/lib_usage_telemetry.py`**: append-only JSONL telemetry for dormancy detection.
+
+### Removed
+- **Autofix system** (6,327 LOC): `hooks/proactive.py` (3,592 lines), `skills/autofix/`, 5 test files, all autofix constants, Q-table functions, daemon integration, `--autofix` CLI flags. Extracted to `dynos-fit/autofix`.
+- `DYNOS_AUTOFIX_WORKTREE` environment variable.
+- `"autofix"` from `VALID_PIPELINES`.
+
+### Changed
+- `security-auditor` covers `security` + `compliance` categories.
+- `code-quality-auditor` covers `code-quality` + `doc-accuracy` categories.
+- `repair-coordinator` routes compliance and doc-accuracy findings.
+- Audit report schema gains optional `category` field.
+- `validate_task_artifacts` enforces conditional headings + gap analysis.
+- `compute_reward` includes DORA fields.
+- Router gated on `is_learning_enabled()`.
+- Event bus skips learning handlers when disabled.
+- `maintain.py` stripped of all autofix code; daemon preserved for non-autofix maintenance.
+- `start/SKILL.md` gains phase labels; trajectory/learned skill injection gated on learning flag.
+- README rewritten (no autofix, DORA metrics, least privilege, tool-grounded verification).
+
+---
+
 ## [6.0.0] - 2026-04-03
 ### "Runtime Control Plane": Deterministic Foundry, Live Dashboard, Maintainer Daemon
 
@@ -253,4 +293,5 @@ Versions prior to 2.8.0 predate this changelog.
 [2.10.0]: https://github.com/dynos-fit/dynos-work/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/dynos-fit/dynos-work/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/dynos-fit/dynos-work/compare/v2.7.0...v2.8.0
+[7.0.0]: https://github.com/dynos-fit/dynos-work/compare/v6.0.0...v7.0.0
 [6.0.0]: https://github.com/dynos-fit/dynos-work/compare/v5.0.0...v6.0.0

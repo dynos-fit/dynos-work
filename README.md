@@ -6,7 +6,7 @@
 
 # dynos-work
 
-A Claude Code plugin that checks its own work, learns from mistakes, and fixes your code while you sleep.
+A Claude Code plugin that checks its own work and learns from mistakes. Human-directed, tool-grounded, self-improving.
 
 ## Install
 
@@ -34,34 +34,39 @@ You approve twice (spec and plan), then it runs.
 /dynos-work:status             check where your task is
 /dynos-work:resume             continue after interruption
 /dynos-work:investigate [bug]  deep bug investigation
-/dynos-work:autofix on         enable background code scanning
-/dynos-work:autofix off        disable it
 ```
 
 ## What it does
 
-**Builds better.** Every task goes through spec, plan, execute, audit. Nothing ships without independent verification.
+**Builds better.** Every task flows through 6 phases: intake, design, specification, planning, verification, and handoff. Nothing ships without independent verification from deterministic tools and adversarial auditors.
 
-**Learns from itself.** After each task, it writes a retrospective. Over time, it learns what works, what fails, and what to watch for. Your 10th task is better than your 1st.
+**Verifies with tools, not opinions.** API Contracts tables are cross-referenced against actual route definitions. Data Model tables are checked against real migrations. Doc paths are verified on disk. License compliance is scanned. The plan can't lie about what exists.
 
-**Fixes your code while you sleep.** Optional autofix scans your codebase for bugs, dead code, security issues, and dependency vulnerabilities. Opens PRs for safe fixes. Opens issues for risky ones.
+**Learns from itself.** After each task, it writes a retrospective with DORA-aligned metrics. Over time, it learns what works, what fails, and what to watch for. Your 10th task is better than your 1st. Disable learning entirely with `dynos config set learning_enabled false`.
 
-**Shows you everything.** A dashboard across all your projects: quality trends, findings, costs, what the system learned.
+**Enforces least privilege.** Each of the 17 agents declares its minimum tool set in frontmatter. Auditors cannot write files. Planners cannot execute commands. The security auditor can never be replaced by a learned agent.
 
-## Power users
+**Shows you everything.** A dashboard across all your projects: quality trends, findings, costs, DORA metrics, what the system learned.
 
-Want the CLI, daemons, dashboard server, and autofix scanner?
+## Architecture
+
+20 skills, 17 agents, 52 hooks. Three layers:
+
+| Layer | What it does | Can be disabled? |
+|---|---|---|
+| **Core** | Spec, plan, execute, audit. The foundry. | No |
+| **Learning** | Trajectory memory, learned agents, pattern extraction, Q-learning repair. | Yes (`dynos config set learning_enabled false`) |
+| **Observability** | Dashboards, reports, lineage. Read-only. | Yes (delete the layer, nothing breaks) |
+
+## CLI
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/dynos-fit/dynos-work/main/install.sh | bash
-```
-
-Then:
-
-```bash
-dynos init --autofix    # set up a project with background scanning
-dynos dashboard         # start the dashboard server
-dynos autofix scan      # run a scan right now
+dynos init                              # set up a project
+dynos dashboard                         # start the dashboard server
+dynos config set learning_enabled false # foundry-only mode
+dynos config get                        # show all policy
+dynos stats dora                        # DORA metrics from retrospectives
+dynos stats usage                       # module usage telemetry
 ```
 
 [Full CLI reference](INTERNALS.md#cli)
@@ -72,30 +77,23 @@ dynos autofix scan      # run a scan right now
 You give it a task
     |
     v
-Discovers what's needed --> you answer questions
-Writes a spec           --> you approve
-Plans the work          --> you approve
-Executes the plan       --> parallel agents
-Audits the result       --> independent auditors
-Repairs any findings    --> automatic
-Writes a retrospective  --> learns for next time
-```
-
-The autofix runs separately in the background:
-
-```
-Scans your code (6 detectors including AI review)
+Phase 1: Intake         --> discovers what's needed, you answer questions
+Phase 2: Design         --> classifies, designs, fast-track gate
+Phase 3: Specification  --> writes spec, you approve
+Phase 4: Planning       --> writes plan + execution graph, you approve
+Phase 5: Verification   --> gap analysis, plan audit, TDD-first tests
+Phase 6: Handoff        --> ready for /dynos-work:execute
     |
     v
-Safe to fix?  --> opens PR automatically
-Needs review? --> opens GitHub issue
+Execute                 --> parallel agents build it
+Audit                   --> independent auditors verify it
+Repair                  --> automatic (hard cap: 3 retries then escalate)
+Retrospective           --> DORA metrics, reward scores, agent attribution
 ```
 
 ## Requirements
 
 Just Claude Code. That's the only requirement.
-
-For autofix PRs: `gh` (GitHub CLI). For autofix code fixes: `claude` CLI.
 
 ## Links
 
@@ -109,4 +107,4 @@ For autofix PRs: `gh` (GitHub CLI). For autofix code fixes: `claude` CLI.
 
 > Completion is a control decision, not a model opinion.
 
-The system does not trust the model when it says the work is done. Every task requires independent evidence of completion.
+The system does not trust the model when it says the work is done. Every task requires independent evidence of completion. Wherever you can replace "LLM reviewing LLM output" with "deterministic tool checking LLM output," you should.
