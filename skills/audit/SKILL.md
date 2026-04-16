@@ -221,7 +221,29 @@ Apply the same parallel batch spawning and model escalation logic as phase 1.
 After phase 2 repairs complete, run a phase 2 re-audit using the same domain-aware incremental scope logic as phase 1 re-audit (scoped to phase 2 repair-modified files).
 
 - If all clear after phase 2 re-audit: append `{timestamp} [DONE] repair-execution-p2 — all phase 2 fixes applied` to log. Proceed to Step 5.
-- If new findings remain: increment `retry_count` for each finding. If any finding has exceeded 3 retries, set stage to `FAILED`, append `[FAILED] max retries exceeded for: {finding-ids}`, and stop. Otherwise loop back into another repair cycle (continuing phase 2).
+- If new findings remain: increment `retry_count` for each finding in `repair-log.json`, then attempt to transition back to `REPAIR_PLANNING`:
+
+  ```text
+  python3 hooks/ctl.py transition .dynos/task-{id} REPAIR_PLANNING
+  ```
+
+  **The state machine enforces the hard cap deterministically.** `transition_task()` in `hooks/lib_core.py` reads `repair-log.json` and refuses the `REPAIR_EXECUTION → REPAIR_PLANNING` transition if any finding has `retry_count >= 3`. This is not a prompt instruction — it's a Python gate. The LLM cannot loop past 3 because the code says no.
+
+  - **If the transition succeeds** (`retry_count < 3` for all findings): loop back into another repair cycle (continuing phase 2).
+  - **If the transition fails** (gate error — max retries exceeded):
+    1. Write `.dynos/task-{id}/escalation.md` listing every unresolved finding with its retry history, severity, file, and the last auditor feedback.
+    2. Transition to `FAILED` instead: `python3 hooks/ctl.py transition .dynos/task-{id} FAILED`
+    3. Print to the user:
+       ```
+       Repair loop exhausted — human review needed.
+
+       The state machine blocked further repair attempts (max 3 retries
+       per finding). See: .dynos/task-{id}/escalation.md
+
+       Review the findings, fix manually or adjust the spec, then
+       re-run /dynos-work:audit to retry.
+       ```
+    4. **Stop.** The transition gate already prevented the loop — there is no 4th attempt to resist.
 
 **Degenerate cases:** If no late auditors exist, phase 2 only contains re-audit findings (skip if none). If no blocking findings from any auditor, both phases are skipped entirely.
 

@@ -296,6 +296,29 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
             if read_receipt(task_dir, "executor-routing") is None:
                 gate_errors.append("receipt: executor-routing (executor routing was never recorded)")
 
+        # REPAIR_PLANNING requires no finding has exceeded max retries.
+        # This is the deterministic hard cap: the LLM cannot loop past 3
+        # repair attempts because the state machine itself refuses the
+        # transition. Code enforces; prompts advise.
+        MAX_REPAIR_RETRIES = 3
+        if next_stage == "REPAIR_PLANNING" and current_stage == "REPAIR_EXECUTION":
+            repair_log_path = task_dir / "repair-log.json"
+            if repair_log_path.exists():
+                repair_log = load_json(repair_log_path)
+                exhausted: list[str] = []
+                for batch in repair_log.get("batches", []):
+                    for task_entry in batch.get("tasks", []):
+                        fid = task_entry.get("finding_id", "unknown")
+                        retries = task_entry.get("retry_count", 0)
+                        if retries >= MAX_REPAIR_RETRIES:
+                            exhausted.append(f"{fid} (retry_count={retries})")
+                if exhausted:
+                    gate_errors.append(
+                        f"repair cap exceeded (max {MAX_REPAIR_RETRIES} retries) "
+                        f"for finding(s): {', '.join(exhausted)}. "
+                        f"Transition to FAILED instead — human review needed."
+                    )
+
         # DONE requires everything
         if next_stage == "DONE":
             if not (task_dir / "task-retrospective.json").exists():
