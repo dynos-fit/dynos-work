@@ -193,6 +193,33 @@ def cmd_crawl_targets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stats_usage(args: argparse.Namespace) -> int:
+    """Show module usage telemetry for dormancy detection."""
+    import json as _json
+    from lib_usage_telemetry import read_telemetry, summarize_telemetry
+
+    monitored = ["dream", "postmortem_improve", "lib_qlearn", "cli_base"]
+
+    if args.json:
+        counts = summarize_telemetry()
+        result = {mod: counts.get(mod, 0) for mod in monitored}
+        result["_other"] = {k: v for k, v in counts.items() if k not in monitored}
+        print(_json.dumps(result, indent=2))
+    else:
+        counts = summarize_telemetry()
+        print("Module Usage Telemetry (dormancy detection)")
+        print(f"{'Module':<25} {'Invocations':>12}  Status")
+        print("-" * 55)
+        for mod in monitored:
+            count = counts.get(mod, 0)
+            status = "ACTIVE" if count > 0 else "DORMANT"
+            print(f"{mod:<25} {count:>12}  {status}")
+        other = {k: v for k, v in counts.items() if k not in monitored}
+        if other:
+            print(f"\nOther modules recorded: {len(other)}")
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     """Get or set project policy values."""
     import json as _json
@@ -378,6 +405,10 @@ def build_parser() -> argparse.ArgumentParser:
     dora_parser.add_argument("--root", default=".", help="Project root")
     dora_parser.add_argument("--json", action="store_true", help="Output as JSON")
     dora_parser.set_defaults(func=cmd_stats_dora)
+
+    usage_parser = subparsers.add_parser("stats-usage", help="Module usage telemetry for dormancy detection")
+    usage_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    usage_parser.set_defaults(func=cmd_stats_usage)
 
     config_parser = subparsers.add_parser("config", help="Get or set project policy values")
     config_parser.add_argument("action", choices=["get", "set"], help="Action: get or set")

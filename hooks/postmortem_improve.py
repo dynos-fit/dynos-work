@@ -12,6 +12,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lib_usage_telemetry import record_usage as _record_usage
+_record_usage("postmortem_improve")
+
 from lib_core import (
     _persistent_project_dir,
     _safe_float,

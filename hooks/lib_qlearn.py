@@ -16,6 +16,8 @@ import random
 from pathlib import Path
 
 from lib_core import _persistent_project_dir, load_json, now_iso, project_policy, write_json
+from lib_usage_telemetry import record_usage as _record_usage
+_record_usage("lib_qlearn")
 from lib_defaults import (
     EFFICIENCY_CLAMP,
     EFFICIENCY_WEIGHT,

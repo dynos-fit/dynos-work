@@ -36,6 +36,7 @@ Global commands:
   registry      Project registration: register, unregister, list, pause, resume
   config        Get or set project policy (e.g. learning_enabled)
   stats dora    DORA metrics from task retrospectives
+  stats usage   Module usage telemetry (dormancy detection)
 
 Internals (advanced):
   route         Deterministic audit/executor routing
@@ -264,8 +265,10 @@ print('no')
   stats)
     if [ $# -gt 0 ] && [ "$1" = "dora" ]; then
       shift; exec python3 "${HOOKS_DIR}/dynosctl.py" stats-dora "$@"
+    elif [ $# -gt 0 ] && [ "$1" = "usage" ]; then
+      shift; exec python3 "${HOOKS_DIR}/dynosctl.py" stats-usage "$@"
     fi
-    echo "Usage: dynos stats dora [--root .] [--json]" >&2; exit 1
+    echo "Usage: dynos stats {dora|usage} [--json]" >&2; exit 1
     ;;
   ctl)        exec python3 "${HOOKS_DIR}/dynosctl.py" "$@" ;;
   postmortem) exec python3 "${HOOKS_DIR}/dynopostmortem.py" "$@" ;;
