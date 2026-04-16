@@ -239,6 +239,61 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_stats_dora(args: argparse.Namespace) -> int:
+    """Compute DORA metrics from all retrospectives."""
+    import json as _json
+    from lib_core import collect_retrospectives
+
+    root = Path(args.root).resolve()
+    retros = collect_retrospectives(root)
+
+    if not retros:
+        print("No retrospectives found.")
+        return 0
+
+    # Deployment frequency: tasks completed per day
+    lead_times: list[int] = []
+    failures = 0
+    recovery_times: list[int] = []
+    total = len(retros)
+
+    for r in retros:
+        lt = r.get("lead_time_seconds")
+        if lt is not None and isinstance(lt, (int, float)) and lt >= 0:
+            lead_times.append(int(lt))
+        if r.get("change_failure") is True:
+            failures += 1
+            rt = r.get("recovery_time_seconds")
+            if rt is not None and isinstance(rt, (int, float)) and rt >= 0:
+                recovery_times.append(int(rt))
+
+    # Compute DORA-aligned metrics
+    avg_lead_time = sum(lead_times) / len(lead_times) if lead_times else None
+    change_failure_rate = failures / total if total > 0 else 0.0
+    avg_recovery = sum(recovery_times) / len(recovery_times) if recovery_times else None
+
+    result = {
+        "total_tasks": total,
+        "tasks_with_lead_time": len(lead_times),
+        "avg_lead_time_seconds": round(avg_lead_time, 1) if avg_lead_time is not None else None,
+        "avg_lead_time_minutes": round(avg_lead_time / 60, 1) if avg_lead_time is not None else None,
+        "change_failure_rate": round(change_failure_rate, 4),
+        "change_failures": failures,
+        "avg_recovery_time_seconds": round(avg_recovery, 1) if avg_recovery is not None else None,
+        "avg_recovery_time_minutes": round(avg_recovery / 60, 1) if avg_recovery is not None else None,
+    }
+
+    if args.json:
+        print(_json.dumps(result, indent=2))
+    else:
+        print(f"DORA Metrics ({total} tasks)")
+        print(f"  Lead time (avg):         {result['avg_lead_time_minutes']}m" if result["avg_lead_time_minutes"] else "  Lead time:               n/a")
+        print(f"  Change failure rate:     {result['change_failure_rate']:.1%}")
+        print(f"  Recovery time (avg):     {result['avg_recovery_time_minutes']}m" if result["avg_recovery_time_minutes"] else "  Recovery time:           n/a")
+        print(f"  Tasks with lead time:    {result['tasks_with_lead_time']}/{total}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -318,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     crawl_targets_parser.add_argument("--root", required=True, help="Project root directory")
     crawl_targets_parser.add_argument("--max", default="10", help="Maximum number of targets (default: 10)")
     crawl_targets_parser.set_defaults(func=cmd_crawl_targets)
+
+    dora_parser = subparsers.add_parser("stats-dora", help="Compute DORA metrics from retrospectives")
+    dora_parser.add_argument("--root", default=".", help="Project root")
+    dora_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    dora_parser.set_defaults(func=cmd_stats_dora)
 
     config_parser = subparsers.add_parser("config", help="Get or set project policy values")
     config_parser.add_argument("action", choices=["get", "set"], help="Action: get or set")

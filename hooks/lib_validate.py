@@ -417,6 +417,16 @@ def validate_retrospective(task_dir: Path) -> list[str]:
             value = data[key]
             if not isinstance(value, (int, float)) or not 0 <= value <= 1:
                 errors.append(f"retrospective field {key!r} must be a number in [0, 1]")
+    # DORA fields — optional for backwards compat with old retrospectives
+    if "lead_time_seconds" in data and data["lead_time_seconds"] is not None:
+        if not isinstance(data["lead_time_seconds"], (int, float)) or data["lead_time_seconds"] < 0:
+            errors.append("retrospective field 'lead_time_seconds' must be a non-negative number")
+    if "change_failure" in data:
+        if not isinstance(data["change_failure"], bool):
+            errors.append("retrospective field 'change_failure' must be a boolean")
+    if "recovery_time_seconds" in data and data["recovery_time_seconds"] is not None:
+        if not isinstance(data["recovery_time_seconds"], (int, float)) or data["recovery_time_seconds"] < 0:
+            errors.append("retrospective field 'recovery_time_seconds' must be a non-negative number")
     return errors
 
 
@@ -508,6 +518,48 @@ def compute_reward(task_dir: Path) -> dict:
     task_domains = ",".join(classification.get("domains", []))
     task_risk_level = classification.get("risk_level", "medium")
 
+    # --- 4b. DORA metrics ---
+    created_at = manifest.get("created_at")
+    completed_at = manifest.get("completed_at")
+    lead_time_seconds: int | None = None
+    if created_at and completed_at:
+        try:
+            from datetime import datetime, timezone
+            t0 = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            t1 = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+            lead_time_seconds = max(0, int((t1 - t0).total_seconds()))
+        except (ValueError, TypeError):
+            pass
+
+    stage = manifest.get("stage", "")
+    change_failure = stage == "REPAIR_FAILED"
+
+    recovery_time_seconds: int | None = None
+    if change_failure and log_path.exists():
+        try:
+            from datetime import datetime, timezone
+            fail_time = None
+            done_time = None
+            for line in log_path.read_text().splitlines():
+                if "REPAIR_FAILED" in line and fail_time is None:
+                    ts = line.split("]")[0].lstrip("[").strip() if "]" in line else ""
+                    if ts:
+                        try:
+                            fail_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+                if "[ADVANCE]" in line and "DONE" in line and done_time is None:
+                    ts = line.split("]")[0].lstrip("[").strip() if "]" in line else ""
+                    if ts:
+                        try:
+                            done_time = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+            if fail_time and done_time and done_time > fail_time:
+                recovery_time_seconds = int((done_time - fail_time).total_seconds())
+        except (OSError, ValueError):
+            pass
+
     # --- 5. Token and model tracking ---
     from lib_tokens import get_summary as _get_token_summary
     token_data = _get_token_summary(task_dir)
@@ -596,6 +648,9 @@ def compute_reward(task_dir: Path) -> dict:
         "quality_score": round(quality_score, 4),
         "cost_score": round(cost_score, 4),
         "efficiency_score": round(efficiency_score, 4),
+        "lead_time_seconds": lead_time_seconds,
+        "change_failure": change_failure,
+        "recovery_time_seconds": recovery_time_seconds,
     }
 
 
