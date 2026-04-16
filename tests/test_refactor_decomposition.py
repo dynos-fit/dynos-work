@@ -91,6 +91,7 @@ class TestDynoslibFacadeReExports:
         # From lib_validate (AC 3)
         "REQUIRED_SPEC_HEADINGS",
         "REQUIRED_PLAN_HEADINGS",
+        "conditional_plan_headings",
         "validate_generated_html",
         "collect_headings",
         "parse_acceptance_criteria",
@@ -213,6 +214,7 @@ class TestDynoslibValidateExports:
     EXPECTED_NAMES = [
         "REQUIRED_SPEC_HEADINGS",
         "REQUIRED_PLAN_HEADINGS",
+        "conditional_plan_headings",
         "validate_generated_html",
         "collect_headings",
         "parse_acceptance_criteria",

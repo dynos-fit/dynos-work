@@ -126,6 +126,32 @@ Write to `.dynos/task-{id}/plan.md`:
 - **States:** [For UI components: loading, empty, error, success, disabled — what each looks like]
 - **Dwell Time:** [For UI components: 2-second / 30-second / 2-minute screen — drives information density decisions]
 
+## API Contracts
+*(Required when domains include backend, ui, or security. Omit for tasks that don't touch API surfaces.)*
+
+[For every endpoint or interface added or modified by this task, document the contract:
+
+| Endpoint | Method | Request shape | Response shape | Auth | Status codes |
+|---|---|---|---|---|---|
+| `/api/example` | POST | `{ field: type }` | `{ field: type }` | bearer | 200, 400, 401, 404 |
+
+For non-HTTP interfaces (WebSocket, gRPC, IPC): document the equivalent contract (message types, stream semantics, error codes).
+
+If the task modifies an existing API: show the before/after diff of the contract. Breaking changes must be called out explicitly with a migration note.]
+
+## Data Model
+*(Required when domains include db. Omit for tasks that don't touch the data layer.)*
+
+[For every table, collection, or schema added or modified:
+
+| Table | Column | Type | Nullable | Default | Index | Notes |
+|---|---|---|---|---|---|---|
+| `users` | `email` | `varchar(255)` | no | — | unique | — |
+
+For schema modifications: show the migration (add column, alter type, drop index) and its reversibility. Flag any destructive migrations (column drops, type narrows) that could lose data.
+
+For ORMs: name the model class and its location. For raw SQL: name the migration file.]
+
 ## Data Flow
 [How data moves through the system, end to end. From user action → through layers → to persistence → back to display. Name the exact providers/services/repositories/tables involved. If data passes through a transformation, name it.]
 

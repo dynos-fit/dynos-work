@@ -40,6 +40,27 @@ REQUIRED_PLAN_HEADINGS: list[str] = [
     "Open Questions",
 ]
 
+# Domain sets that trigger conditional plan sections.
+_API_CONTRACT_DOMAINS: set[str] = {"backend", "ui", "security"}
+_DATA_MODEL_DOMAINS: set[str] = {"db"}
+
+
+def conditional_plan_headings(domains: Iterable[str]) -> list[str]:
+    """Return additional required plan headings based on classification domains.
+
+    - ``API Contracts`` is required when domains include backend, ui, or security
+      (any task touching API surfaces needs explicit contract documentation).
+    - ``Data Model`` is required when domains include db
+      (any task touching the data layer needs schema documentation).
+    """
+    extra: list[str] = []
+    domain_set = set(domains) if not isinstance(domains, set) else domains
+    if domain_set & _API_CONTRACT_DOMAINS:
+        extra.append("API Contracts")
+    if domain_set & _DATA_MODEL_DOMAINS:
+        extra.append("Data Model")
+    return extra
+
 
 def validate_generated_html(html_path: Path) -> list[str]:
     """Validate generated HTML for common template rendering bugs.
@@ -210,7 +231,10 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
 
     if plan_path.exists():
         plan_text = require(plan_path)
-        for heading in REQUIRED_PLAN_HEADINGS:
+        classification = manifest.get("classification") or {}
+        domains = classification.get("domains", [])
+        all_required = REQUIRED_PLAN_HEADINGS + conditional_plan_headings(domains)
+        for heading in all_required:
             if heading not in collect_headings(plan_text):
                 errors.append(f"plan missing heading: {heading}")
         in_ref_section = False

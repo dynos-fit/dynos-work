@@ -56,6 +56,7 @@ class DynosCtlTests(unittest.TestCase):
             "## Technical Approach\nA.\n\n"
             "## Reference Code\nB.\n\n"
             "## Components / Modules\nC.\n\n"
+            "## API Contracts\nContracts.\n\n"
             "## Data Flow\nD.\n\n"
             "## Error Handling Strategy\nE.\n\n"
             "## Test Strategy\nF.\n\n"

@@ -56,6 +56,7 @@ from lib_validate import (
     check_segment_ownership,
     collect_headings,
     compute_fast_track,
+    conditional_plan_headings,
     detect_cycle,
     parse_acceptance_criteria,
     validate_generated_html,
