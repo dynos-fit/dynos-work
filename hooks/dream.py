@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 
 from lib_core import now_iso
+from lib_usage_telemetry import record_usage as _record_usage
+_record_usage("dream")
 from lib_defaults import (
     COMPONENT_MIN_ACCEPTABLE,
     DESIGN_ARCH_COMPLEXITY_DIVISOR,
