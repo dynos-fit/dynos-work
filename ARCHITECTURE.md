@@ -50,11 +50,11 @@ If a rule must be true regardless of model behavior, it belongs in runtime code.
 
 The runtime lives primarily in:
 
-- `hooks/dynoslib.py`
-- `hooks/dynosctl.py`
+- `hooks/lib.py`
+- `hooks/ctl.py`
 - `hooks/validate_task_artifacts.py`
 
-`dynoslib.py` is the shared library for:
+`lib.py` is the shared library for:
 
 - stage definitions and legal transitions
 - task artifact validation
@@ -65,7 +65,7 @@ The runtime lives primarily in:
 - fixture indexing and traceability
 - freshness and route gating
 
-`dynosctl.py` is the control CLI for:
+`ctl.py` is the control CLI for:
 
 - task validation
 - stage transitions
@@ -75,7 +75,7 @@ The runtime lives primarily in:
 
 Design rule:
 
-- reusable logic belongs in `dynoslib.py`
+- reusable logic belongs in `lib.py`
 - narrow operator entrypoints belong in small CLIs under `hooks/`
 
 Avoid putting non-trivial policy directly into multiple scripts. Centralize it in the shared library.
@@ -86,31 +86,31 @@ The adaptive layer is split into several focused runtimes:
 
 ### Memory
 
-- `hooks/dynostate.py`
-- `hooks/dynostrajectory.py`
+- `hooks/state.py`
+- `hooks/trajectory.py`
 
 These implement state signatures and trajectory retrieval from retrospectives.
 
 ### Design Review
 
-- `hooks/dynosdream.py`
+- `hooks/dream.py`
 
 This is the structured design evaluator. It is advisory, not authoritative.
 
 ### Learned Components
 
-- `hooks/dynoevolve.py`
-- `hooks/dynoeval.py`
-- `hooks/dynogenerate.py`
+- `hooks/evolve.py`
+- `hooks/eval.py`
+- `hooks/generate.py`
 
 These manage learned component creation, registration, and evaluation.
 
 ### Benchmarks And Rollouts
 
-- `hooks/dynobench.py`
-- `hooks/dynorollout.py`
-- `hooks/dynochallenge.py`
-- `hooks/dynofixture.py`
+- `hooks/bench.py`
+- `hooks/rollout.py`
+- `hooks/challenge.py`
+- `hooks/fixture.py`
 
 These implement:
 
@@ -122,9 +122,9 @@ These implement:
 
 ### Routing And Automation
 
-- `hooks/dynoroute.py`
-- `hooks/dynoauto.py`
-- `hooks/dynomaintain.py`
+- `hooks/route.py`
+- `hooks/auto.py`
+- `hooks/maintain.py`
 
 These manage:
 
@@ -136,9 +136,9 @@ These manage:
 
 ### Observability
 
-- `hooks/dynoreport.py`
-- `hooks/dynolineage.py`
-- `hooks/dynodashboard.py`
+- `hooks/report.py`
+- `hooks/lineage.py`
+- `hooks/dashboard.py`
 
 These provide:
 
@@ -270,21 +270,21 @@ Each entry tracks:
 
 The global daemon follows this loop:
 
-1. **Start**: `dynoglobal.py start` forks a background process, writes `~/.dynos/daemon.pid`
+1. **Start**: `sweeper.py start` forks a background process, writes `~/.dynos/daemon.pid`
 2. **Run loop**: the daemon iterates over all registered projects in `registry.json`
 3. **Per-project maintenance**: for each active project, run a maintenance cycle (validation sweeps, stale route checks, automation queue processing)
 4. **Backoff for idle projects**: projects whose `last_active_at` is old receive exponential backoff, so the daemon spends less time on dormant repos
 5. **Cross-project aggregation**: after visiting all projects, aggregate anonymous stats and update portable prevention rules in `~/.dynos/`
 6. **Sleep**: wait for the configured interval before repeating
 
-The daemon can be stopped with `dynoglobal.py stop`, which sends SIGTERM to the PID in the pidfile. `dynoglobal.py run-once` executes a single sweep without looping.
+The daemon can be stopped with `sweeper.py stop`, which sends SIGTERM to the PID in the pidfile. `sweeper.py run-once` executes a single sweep without looping.
 
 ### Runtime Files
 
 | File | Purpose |
 |---|---|
-| `hooks/dynoglobal.py` | Global daemon: start, stop, status, run-loop, run-once |
-| `hooks/dynoregistry.py` | Registry CLI: register, unregister, list, status, pause, resume, set-active |
+| `hooks/sweeper.py` | Global daemon: start, stop, status, run-loop, run-once |
+| `hooks/registry.py` | Registry CLI: register, unregister, list, status, pause, resume, set-active |
 
 Both tools expose `--help` for all subcommands.
 
@@ -295,7 +295,7 @@ Both tools expose `--help` for all subcommands.
 Ask:
 
 1. Is this enforcing an invariant?
-2. Does this belong as shared logic in `dynoslib.py` first?
+2. Does this belong as shared logic in `lib.py` first?
 3. Does it need tests covering both happy and blocking paths?
 4. Does it create or mutate `.dynos/` state that should be documented?
 
@@ -349,9 +349,9 @@ For contributors, the best order is:
 4. `skills/start/SKILL.md`
 5. `skills/execute/SKILL.md`
 6. `skills/audit/SKILL.md`
-7. `hooks/dynoslib.py`
-8. `hooks/dynoauto.py`
-9. `hooks/dynodashboard.py`
+7. `hooks/lib.py`
+8. `hooks/auto.py`
+9. `hooks/dashboard.py`
 10. `tests/test_learning_runtime.py`
 
 ## Contributor Principle

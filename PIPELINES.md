@@ -15,9 +15,9 @@ Each pipeline is standalone. They communicate through **events** and **validated
 
 **Event bus.** Pipelines communicate through a file-based event bus (`.dynos/events/`). When a task completes, the `task-completed` hook emits a `task-completed` event. The drain runner processes subscribers in order: learn subscribes to `task-completed`, evolve subscribes to `learn-completed`, and so on. Each handler swallows errors independently.
 
-**Contract enforcement.** Each skill has a `contract.json` with versioned input/output schemas. The runtime validates contracts at pipeline boundaries (`dynosctl.py validate-contract`). Skills in the task pipeline (start, execute, audit) write handoff records confirming contract fulfillment.
+**Contract enforcement.** Each skill has a `contract.json` with versioned input/output schemas. The runtime validates contracts at pipeline boundaries (`ctl.py validate-contract`). Skills in the task pipeline (start, execute, audit) write handoff records confirming contract fulfillment.
 
-**Domain-split imports.** The Python runtime is split by domain: `dynoslib_core` (shared), `dynoslib_validate` (task), `dynoslib_trajectory` (learn), `dynoslib_registry` (learn), `dynoslib_benchmark` (learn), `dynoslib_queue` (observability), `dynoslib_events` (events), `dynoslib_contracts` (contracts). No cross-domain imports. The `dynoslib.py` facade remains for backward compatibility.
+**Domain-split imports.** The Python runtime is split by domain: `lib_core` (shared), `lib_validate` (task), `lib_trajectory` (learn), `lib_registry` (learn), `lib_benchmark` (learn), `lib_queue` (observability), `lib_events` (events), `lib_contracts` (contracts). No cross-domain imports. The `lib.py` facade remains for backward compatibility.
 
 **Event flow:**
 ```
@@ -119,7 +119,7 @@ audit
   out: audit-reports/*.json, repair-log.json, task-retrospective.json
 ```
 
-Each stage validates its required inputs before proceeding. The runtime (`dynosctl.py`, `dynoslib.py`) enforces stage transitions and artifact shape.
+Each stage validates its required inputs before proceeding. The runtime (`ctl.py`, `lib.py`) enforces stage transitions and artifact shape.
 
 ### Agents
 
@@ -129,7 +129,7 @@ Each stage validates its required inputs before proceeding. The runtime (`dynosc
 | Execution | ui-executor, backend-executor, db-executor, ml-executor, integration-executor, refactor-executor, testing-executor | sonnet |
 | Audit | spec-completion-auditor, security-auditor, code-quality-auditor, dead-code-auditor, ui-auditor, db-schema-auditor | opus/sonnet |
 | Repair | repair-coordinator | sonnet |
-| Design review | founder (via dynosdream.py) | opus |
+| Design review | founder (via dream.py) | opus |
 | Investigation | investigator | opus |
 
 ### Artifacts
@@ -321,9 +321,9 @@ The autofix pipeline reuses the same executor and auditor agents from the task p
 ### Runtime
 
 ```
-hooks/dynomaintain.py     daemon lifecycle (start, stop, status)
-hooks/dynoproactive.py    meta-auditor + auto-fix coordinator
-hooks/dynoauto.py         automation queue management
+hooks/maintain.py     daemon lifecycle (start, stop, status)
+hooks/proactive.py    meta-auditor + auto-fix coordinator
+hooks/auto.py         automation queue management
 ```
 
 ---
@@ -391,7 +391,7 @@ shows:  all registered projects unified
 
 ```
 task → component → fixture → benchmark run
-hooks/dynolineage.py generates the lineage graph
+hooks/lineage.py generates the lineage graph
 ```
 
 ### Contract Chain
@@ -428,12 +428,12 @@ dashboard
 ### Runtime
 
 ```
-hooks/dynoreport.py              machine-readable status
-hooks/dynolineage.py             lineage graph output
-hooks/dynodashboard.py           local dashboard generation + serving
-hooks/dynoglobal_dashboard.py    global dashboard UI
-hooks/dynoglobal.py              global daemon lifecycle
-hooks/dynoregistry.py            project registry management
+hooks/report.py              machine-readable status
+hooks/lineage.py             lineage graph output
+hooks/dashboard.py           local dashboard generation + serving
+hooks/global_dashboard.py    global dashboard UI
+hooks/sweeper.py              global daemon lifecycle
+hooks/registry.py            project registry management
 ```
 
 ---
@@ -446,7 +446,7 @@ hooks/dynoregistry.py            project registry management
 | Learn | Evolve | `learn-completed` event via event bus | Event (async) |
 | Evolve | Benchmark | `evolve-completed` event via event bus | Event (async) |
 | Benchmark | Dashboard | `benchmark-completed` event via event bus | Event (async) |
-| Learn | Task | dynos_patterns.md read by dynorouter.py | Artifact (optional) |
+| Learn | Task | dynos_patterns.md read by router.py | Artifact (optional) |
 | Learn | Autofix | gold standards used for drift detection | Artifact (optional) |
 | Task | Observability | task artifacts readable by status/dashboard | Artifact (read-only) |
 
@@ -456,15 +456,15 @@ All cross-pipeline communication is either event-driven (async, fail-tolerant) o
 
 **Contract chain validation:**
 ```
-python3 hooks/dynosctl.py validate-chain
+python3 hooks/ctl.py validate-chain
 ```
 
 Checks that the `output_schema` of each pipeline stage covers the `input_schema` fields required by the next stage.
 
 **Per-skill contract validation:**
 ```
-python3 hooks/dynosctl.py validate-contract --skill execute --task-dir .dynos/task-{id}
-python3 hooks/dynosctl.py validate-contract --skill audit --task-dir .dynos/task-{id} --direction output
+python3 hooks/ctl.py validate-contract --skill execute --task-dir .dynos/task-{id}
+python3 hooks/ctl.py validate-contract --skill audit --task-dir .dynos/task-{id} --direction output
 ```
 
 **Full dry-run:** `/dynos-work:dry-run` runs chain validation plus optional runtime validation against real task artifacts.
@@ -472,13 +472,13 @@ python3 hooks/dynosctl.py validate-contract --skill audit --task-dir .dynos/task
 ## Runtime Modules
 
 ```
-hooks/dynoslib_core.py          shared: constants, paths, JSON, task state
-hooks/dynoslib_validate.py      task pipeline: spec/plan/graph validation
-hooks/dynoslib_trajectory.py    learn pipeline: trajectory store, quality scoring
-hooks/dynoslib_registry.py      learn pipeline: learned agent registry
-hooks/dynoslib_benchmark.py     learn pipeline: fixture evaluation
-hooks/dynoslib_queue.py         observability: automation queue
-hooks/dynoslib_events.py        events: file-based event bus
-hooks/dynoslib_contracts.py     contracts: runtime contract validation
-hooks/dynoslib.py               facade: backward-compatible re-exports
+hooks/lib_core.py          shared: constants, paths, JSON, task state
+hooks/lib_validate.py      task pipeline: spec/plan/graph validation
+hooks/lib_trajectory.py    learn pipeline: trajectory store, quality scoring
+hooks/lib_registry.py      learn pipeline: learned agent registry
+hooks/lib_benchmark.py     learn pipeline: fixture evaluation
+hooks/lib_queue.py         observability: automation queue
+hooks/lib_events.py        events: file-based event bus
+hooks/lib_contracts.py     contracts: runtime contract validation
+hooks/lib.py               facade: backward-compatible re-exports
 ```

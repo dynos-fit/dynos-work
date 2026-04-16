@@ -10,14 +10,14 @@ The Founder is the design-review service for the Foundry. It uses sandbox trials
 If available in this repo, the deterministic runtime for this skill is:
 
 ```text
-python3 hooks/dynostate.py --root . --target <path>
-python3 hooks/dynosdream.py design-options.json --root .
+python3 hooks/state.py --root . --target <path>
+python3 hooks/dream.py design-options.json --root .
 ```
 
 ## **Service 1 — Strategic Interrogation (Insight Generation)**
 
 When called by `skills/start/SKILL.md` during discovery:
-1.  **Trajectory Search**: If available, use `dynostate.py` to produce the current state signature and `dynostrajectory.py search` to retrieve a small set of similar past tasks from `trajectories.json`.
+1.  **Trajectory Search**: If available, use `state.py` to produce the current state signature and `trajectory.py search` to retrieve a small set of similar past tasks from `trajectories.json`.
 2.  **Gaps Search**: Identify the uncertain parts of the prompt based on current repo context first, then use past failures only as advisory prompts.
 3.  **Insight Output**: Provide the `start` skill with 3-5 targeted questions that will uncover hidden complexity.
 
@@ -25,7 +25,7 @@ When called by `skills/start/SKILL.md` during discovery:
 
 When called to vet a **High-Risk Design Option**:
 1.  **The Sandbox**: Initialize a simulation environment at `/tmp/dynos-dream-{id}/`.
-2.  **Playout**: Use `dynosdream.py` to run deterministic MCTS-lite playouts across the provided design options.
+2.  **Playout**: Use `dream.py` to run deterministic MCTS-lite playouts across the provided design options.
 3.  **Autonomous Audit**: Score each option for complexity, maintainability, security exposure, and trajectory support.
 4.  **Comparison Output**: Record the strengths, weaknesses, and concrete failure modes observed in simulation.
 

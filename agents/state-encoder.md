@@ -10,7 +10,7 @@ Your goal is to discretize the technical state of a module into a structured sta
 If available in this repo, the deterministic runtime for this agent is:
 
 ```text
-python3 hooks/dynostate.py --root . --target <path>
+python3 hooks/state.py --root . --target <path>
 ```
 
 ## What you do

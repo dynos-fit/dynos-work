@@ -78,26 +78,26 @@ class TestBuildCrossProjectQueue:
 
     def test_function_exists(self) -> None:
         # AC 15
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
         assert callable(build_cross_project_queue)
 
     def test_returns_list(self, tmp_path: Path) -> None:
         # AC 15
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
         registry = _make_registry()
         result = build_cross_project_queue(registry)
         assert isinstance(result, list)
 
     def test_empty_registry_returns_empty(self) -> None:
         # AC 15
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
         registry = _make_registry()
         result = build_cross_project_queue(registry)
         assert result == []
 
     def test_collects_findings_from_multiple_projects(self, tmp_path: Path) -> None:
         # AC 15: findings from all active projects are collected
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         # Create two project dirs with findings
         proj_a = tmp_path / "project-a"
@@ -117,8 +117,8 @@ class TestBuildCrossProjectQueue:
             _make_project_entry(str(proj_b)),
         )
 
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         finding_ids = {item["finding"]["finding_id"] for item in result}
@@ -127,7 +127,7 @@ class TestBuildCrossProjectQueue:
 
     def test_result_items_have_required_fields(self, tmp_path: Path) -> None:
         # AC 15: each item has finding, project_path, priority, severity_weight, centrality_score, freshness_weight
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "project"
         proj.mkdir()
@@ -137,8 +137,8 @@ class TestBuildCrossProjectQueue:
         )
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         assert len(result) >= 1
@@ -152,7 +152,7 @@ class TestBuildCrossProjectQueue:
 
     def test_sorted_by_priority_descending(self, tmp_path: Path) -> None:
         # AC 15: returned list sorted by priority descending
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "project"
         proj.mkdir()
@@ -165,8 +165,8 @@ class TestBuildCrossProjectQueue:
         (proj / ".dynos" / "findings.json").write_text(json.dumps(findings))
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         priorities = [item["priority"] for item in result]
@@ -175,7 +175,7 @@ class TestBuildCrossProjectQueue:
 
     def test_skips_non_active_projects(self, tmp_path: Path) -> None:
         # AC 15: only active projects are included
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "paused-proj"
         proj.mkdir()
@@ -190,7 +190,7 @@ class TestBuildCrossProjectQueue:
 
     def test_missing_findings_file_skips_project(self, tmp_path: Path) -> None:
         # AC 15: project with missing findings file is skipped gracefully
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "no-findings"
         proj.mkdir()
@@ -198,13 +198,13 @@ class TestBuildCrossProjectQueue:
         # No findings.json file
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper._should_skip_backoff", return_value=False):
             result = build_cross_project_queue(registry)
         assert len(result) == 0
 
     def test_corrupt_findings_file_skips_project(self, tmp_path: Path) -> None:
         # AC 15: corrupt findings file skipped gracefully
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "corrupt-proj"
         proj.mkdir()
@@ -212,7 +212,7 @@ class TestBuildCrossProjectQueue:
         (proj / ".dynos" / "findings.json").write_text("{{invalid json")
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper._should_skip_backoff", return_value=False):
             result = build_cross_project_queue(registry)
         assert len(result) == 0
 
@@ -234,7 +234,7 @@ class TestPriorityComputation:
 
     def test_critical_finding_higher_priority_than_low(self, tmp_path: Path) -> None:
         # AC 16: critical finding should have higher priority than low
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "project"
         proj.mkdir()
@@ -247,8 +247,8 @@ class TestPriorityComputation:
         (proj / ".dynos" / "findings.json").write_text(json.dumps(findings))
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         # Critical should be first (highest priority)
@@ -273,7 +273,7 @@ class TestPriorityComputation:
 
     def test_priority_formula_known_values(self, tmp_path: Path) -> None:
         # AC 16: test with known values to verify formula
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "project"
         proj.mkdir()
@@ -287,8 +287,8 @@ class TestPriorityComputation:
 
         pagerank = {"central.py": 0.8}
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": ["central.py"], "edges": [], "pagerank": pagerank}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": ["central.py"], "edges": [], "pagerank": pagerank}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         assert len(result) == 1
@@ -304,7 +304,7 @@ class TestPriorityComputation:
 
     def test_ordering_with_mixed_attributes(self, tmp_path: Path) -> None:
         # AC 16: verify correct ordering with different severity and freshness
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "project"
         proj.mkdir()
@@ -322,8 +322,8 @@ class TestPriorityComputation:
         (proj / ".dynos" / "findings.json").write_text(json.dumps(findings))
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         # Fresh medium should be higher priority than old high
@@ -340,14 +340,14 @@ class TestSweepLoopRefactored:
     def test_cmd_run_once_uses_queue(self) -> None:
         # AC 17: cmd_run_once should call build_cross_project_queue
         # This test verifies the integration point exists
-        from dynoglobal import cmd_run_once, build_cross_project_queue
+        from sweeper import cmd_run_once, build_cross_project_queue
         assert callable(cmd_run_once)
         assert callable(build_cross_project_queue)
 
     def test_queue_recomputed_each_sweep(self) -> None:
         # AC 17: no persistence; queue recomputed each sweep
         # The queue function takes registry as input, no cache
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
         import inspect
         sig = inspect.signature(build_cross_project_queue)
         params = list(sig.parameters.keys())
@@ -355,7 +355,7 @@ class TestSweepLoopRefactored:
 
     def test_highest_priority_processed_first(self, tmp_path: Path) -> None:
         # AC 17: daemon processes highest-priority finding first, regardless of project
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj_a = tmp_path / "project-a"
         proj_a.mkdir()
@@ -376,8 +376,8 @@ class TestSweepLoopRefactored:
             _make_project_entry(str(proj_a)),
             _make_project_entry(str(proj_b)),
         )
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         # Critical finding from project B should be first
@@ -394,7 +394,7 @@ class TestBackoffExclusion:
 
     def test_backoff_project_excluded(self, tmp_path: Path) -> None:
         # AC 18: project in backoff -> its findings excluded from queue
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "backoff-proj"
         proj.mkdir()
@@ -409,8 +409,8 @@ class TestBackoffExclusion:
             _make_project_entry(str(proj), last_active_at=old_date)
         )
 
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=True):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=True):
                 result = build_cross_project_queue(registry)
 
         # Project is in backoff, so its findings should be excluded
@@ -418,7 +418,7 @@ class TestBackoffExclusion:
 
     def test_non_backoff_project_included(self, tmp_path: Path) -> None:
         # AC 18: project not in backoff -> its findings included
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj = tmp_path / "active-proj"
         proj.mkdir()
@@ -428,15 +428,15 @@ class TestBackoffExclusion:
         )
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", return_value=False):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", return_value=False):
                 result = build_cross_project_queue(registry)
 
         assert len(result) >= 1
 
     def test_mixed_backoff_only_active_included(self, tmp_path: Path) -> None:
         # AC 18: mix of backoff and non-backoff projects
-        from dynoglobal import build_cross_project_queue
+        from sweeper import build_cross_project_queue
 
         proj_active = tmp_path / "active"
         proj_active.mkdir()
@@ -460,8 +460,8 @@ class TestBackoffExclusion:
         def backoff_side_effect(entry, sweep_count):
             return entry["path"] == str(proj_backoff)
 
-        with patch("dynoglobal.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("dynoglobal._should_skip_backoff", side_effect=backoff_side_effect):
+        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
+            with patch("sweeper._should_skip_backoff", side_effect=backoff_side_effect):
                 result = build_cross_project_queue(registry)
 
         finding_ids = {item["finding"]["finding_id"] for item in result}
@@ -470,7 +470,7 @@ class TestBackoffExclusion:
 
     def test_backoff_applies_at_project_level(self) -> None:
         # AC 18: backoff is per-project, not per-finding
-        from dynoglobal import _should_skip_backoff
+        from sweeper import _should_skip_backoff
         # A project idle > 7 days should be in backoff
         old_entry = {
             "path": "/some/project",
@@ -482,7 +482,7 @@ class TestBackoffExclusion:
 
     def test_recently_active_no_backoff(self) -> None:
         # AC 18: recently active project has no backoff
-        from dynoglobal import _should_skip_backoff
+        from sweeper import _should_skip_backoff
         recent_entry = {
             "path": "/some/project",
             "last_active_at": datetime.now(timezone.utc).isoformat(),

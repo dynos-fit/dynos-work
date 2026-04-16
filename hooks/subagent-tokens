@@ -25,7 +25,7 @@ HOOKS_DIR="${CWD}/hooks"
 [ ! -d "$HOOKS_DIR" ] && exit 0
 
 # Run the token parser
-PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/dynoslib_tokens_hook.py" \
+PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/lib_tokens_hook.py" \
   --transcript "$TRANSCRIPT_PATH" \
   --agent-type "$AGENT_TYPE" \
   --agent-desc "$AGENT_DESC" \

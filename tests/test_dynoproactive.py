@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
-from dynoproactive import (
+from proactive import (
     _check_category_health,
     _classify_fixability,
     _compute_pr_quality_score,
@@ -200,7 +200,7 @@ class TestFileScoring:
 
     def test_recently_scanned_gets_cooldown(self, tmp_project: Path) -> None:
         (tmp_project / ".dynos").mkdir(exist_ok=True)
-        from dynoproactive import now_iso
+        from proactive import now_iso
         coverage = {"files": {"hooks/good.py": {"last_scanned_at": now_iso(), "last_result": "clean"}}}
         _save_scan_coverage(tmp_project, coverage)
         scores = _compute_file_scores(tmp_project, coverage)
@@ -236,8 +236,8 @@ class TestProcessFindingRouting:
         finding = _make_finding("dc-low", "low", "dead-code", "desc", {})
         policy = _load_autofix_policy(tmp_project)
         policy["categories"]["dead-code"]["confidence"] = 0.2
-        with patch("dynoproactive._open_github_issue") as issue_mock, \
-             patch("dynoproactive._autofix_finding") as autofix_mock:
+        with patch("proactive._open_github_issue") as issue_mock, \
+             patch("proactive._autofix_finding") as autofix_mock:
             issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project, policy)
         issue_mock.assert_called_once()
@@ -247,7 +247,7 @@ class TestProcessFindingRouting:
     def test_autofixable_dead_code_uses_autofix(self, tmp_project: Path) -> None:
         finding = _make_finding("dc-ok", "low", "dead-code", "desc", {})
         policy = _load_autofix_policy(tmp_project)
-        with patch("dynoproactive._autofix_finding") as autofix_mock:
+        with patch("proactive._autofix_finding") as autofix_mock:
             autofix_mock.side_effect = lambda f, root, policy=None: {**f, "status": "fixed"}
             result = _process_finding(finding, tmp_project, policy)
         autofix_mock.assert_called_once()
@@ -256,8 +256,8 @@ class TestProcessFindingRouting:
     def test_recurring_audit_opens_issue_not_autofix(self, tmp_project: Path) -> None:
         """Recurring audit findings are not fixable code — they open issues."""
         finding = _make_finding("recurring-1", "medium", "recurring-audit", "desc", {})
-        with patch("dynoproactive._open_github_issue") as issue_mock, \
-             patch("dynoproactive._autofix_finding") as autofix_mock:
+        with patch("proactive._open_github_issue") as issue_mock, \
+             patch("proactive._autofix_finding") as autofix_mock:
             issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project)
         issue_mock.assert_called_once()
@@ -267,7 +267,7 @@ class TestProcessFindingRouting:
     def test_max_attempts_falls_back_to_issue(self, tmp_project: Path) -> None:
         finding = _make_finding("retry-1", "low", "dead-code", "desc", {})
         finding["attempt_count"] = 3  # already at max (MAX_ATTEMPTS=3)
-        with patch("dynoproactive._open_github_issue") as issue_mock:
+        with patch("proactive._open_github_issue") as issue_mock:
             issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project)
         issue_mock.assert_called_once()
@@ -294,8 +294,8 @@ class TestProcessFindingRouting:
     def test_high_severity_llm_review_goes_to_autofix(self, tmp_project: Path) -> None:
         """High-severity llm-review findings route to autofix, not issue."""
         finding = _make_finding("llm-high-1", "high", "llm-review", "critical bug", {})
-        with patch("dynoproactive._open_github_issue") as issue_mock, \
-             patch("dynoproactive._autofix_finding") as autofix_mock:
+        with patch("proactive._open_github_issue") as issue_mock, \
+             patch("proactive._autofix_finding") as autofix_mock:
             autofix_mock.side_effect = lambda f, root, policy=None, **kw: {**f, "status": "fixed"}
             result = _process_finding(finding, tmp_project, _load_autofix_policy(tmp_project))
         autofix_mock.assert_called_once()
@@ -305,8 +305,8 @@ class TestProcessFindingRouting:
     def test_dependency_vuln_opens_issue(self, tmp_project: Path) -> None:
         """Dependency vulns are review-only, route to issue."""
         finding = _make_finding("dep-1", "medium", "dependency-vuln", "vuln", {})
-        with patch("dynoproactive._open_github_issue") as issue_mock, \
-             patch("dynoproactive._autofix_finding") as autofix_mock:
+        with patch("proactive._open_github_issue") as issue_mock, \
+             patch("proactive._autofix_finding") as autofix_mock:
             issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project, _load_autofix_policy(tmp_project))
         issue_mock.assert_called_once()
@@ -316,8 +316,8 @@ class TestProcessFindingRouting:
     def test_architectural_drift_opens_issue(self, tmp_project: Path) -> None:
         """Architectural drift is review-only, route to issue."""
         finding = _make_finding("drift-1", "medium", "architectural-drift", "drift", {})
-        with patch("dynoproactive._open_github_issue") as issue_mock, \
-             patch("dynoproactive._autofix_finding") as autofix_mock:
+        with patch("proactive._open_github_issue") as issue_mock, \
+             patch("proactive._autofix_finding") as autofix_mock:
             issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project, _load_autofix_policy(tmp_project))
         issue_mock.assert_called_once()
@@ -470,8 +470,8 @@ class TestOutcomeSync:
                 return Result("{}")
             raise AssertionError(f"unexpected command: {cmd}")
 
-        with patch("dynoproactive.shutil.which", return_value="/usr/bin/gh"), \
-             patch("dynoproactive.subprocess.run", side_effect=fake_run):
+        with patch("proactive.shutil.which", return_value="/usr/bin/gh"), \
+             patch("proactive.subprocess.run", side_effect=fake_run):
             updated, metrics = _sync_outcomes(tmp_project, findings, policy)
 
         assert updated[0]["merge_outcome"] == "merged"
@@ -650,7 +650,7 @@ class TestCategoryHealth:
             f["status"] = "failed"
             f["found_at"] = (now - timedelta(days=i)).isoformat()
             existing.append(f)
-        from dynoproactive import _save_findings
+        from proactive import _save_findings
         _save_findings(tmp_project, existing)
 
         finding = _make_finding("new-dc", "low", "dead-code", "new dead code", {})
@@ -668,12 +668,12 @@ class TestCostTracking:
         """cmd_scan output JSON includes the cost field."""
         import io
         from unittest.mock import patch
-        from dynoproactive import _cmd_scan_locked
-        with patch("dynoproactive._detect_llm_review", return_value=[]), \
-             patch("dynoproactive._detect_dependency_vulns", return_value=[]), \
-             patch("dynoproactive._detect_recurring_audit", return_value=[]), \
-             patch("dynoproactive._detect_architectural_drift", return_value=[]), \
-             patch("dynoproactive._cleanup_merged_branches"):
+        from proactive import _cmd_scan_locked
+        with patch("proactive._detect_llm_review", return_value=[]), \
+             patch("proactive._detect_dependency_vulns", return_value=[]), \
+             patch("proactive._detect_recurring_audit", return_value=[]), \
+             patch("proactive._detect_architectural_drift", return_value=[]), \
+             patch("proactive._cleanup_merged_branches"):
             captured = io.StringIO()
             with patch("sys.stdout", captured):
                 _cmd_scan_locked(tmp_project, max_findings=3)

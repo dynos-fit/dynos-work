@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for dynoglobal.py -- registry, daemon lifecycle, policy merge,
+"""Tests for sweeper.py -- registry, daemon lifecycle, policy merge,
 cross-project aggregation, and isolation."""
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class TestRegistryCRUD:
     """Tests for register, unregister, list, pause, resume, set-active."""
 
     def test_register_new_project(self, tmp_path):
-        from dynoglobal import register_project, list_projects
+        from sweeper import register_project, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         reg = register_project(proj)
@@ -61,7 +61,7 @@ class TestRegistryCRUD:
         assert len(list_projects()) == 1
 
     def test_register_idempotent(self, tmp_path):
-        from dynoglobal import register_project, list_projects
+        from sweeper import register_project, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -69,14 +69,14 @@ class TestRegistryCRUD:
         assert len(list_projects()) == 1
 
     def test_register_non_directory_raises(self, tmp_path):
-        from dynoglobal import register_project
+        from sweeper import register_project
 
         fake = tmp_path / "no-such-dir"
         with pytest.raises(ValueError, match="not a directory"):
             register_project(fake)
 
     def test_unregister_removes_entry(self, tmp_path):
-        from dynoglobal import register_project, unregister_project, list_projects
+        from sweeper import register_project, unregister_project, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -84,7 +84,7 @@ class TestRegistryCRUD:
         assert len(list_projects()) == 0
 
     def test_unregister_idempotent(self, tmp_path):
-        from dynoglobal import unregister_project
+        from sweeper import unregister_project
 
         proj = tmp_path / "never-registered"
         proj.mkdir()
@@ -92,7 +92,7 @@ class TestRegistryCRUD:
         unregister_project(proj)
 
     def test_list_returns_all_projects(self, tmp_path):
-        from dynoglobal import register_project, list_projects
+        from sweeper import register_project, list_projects
 
         for name in ("alpha", "beta", "gamma"):
             register_project(_make_project(tmp_path, name))
@@ -103,7 +103,7 @@ class TestRegistryCRUD:
             assert str(tmp_path / name) in paths
 
     def test_pause_sets_status(self, tmp_path):
-        from dynoglobal import register_project, set_project_status, list_projects
+        from sweeper import register_project, set_project_status, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -112,7 +112,7 @@ class TestRegistryCRUD:
         assert entries[0]["status"] == "paused"
 
     def test_pause_idempotent(self, tmp_path):
-        from dynoglobal import register_project, set_project_status
+        from sweeper import register_project, set_project_status
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -120,7 +120,7 @@ class TestRegistryCRUD:
         set_project_status(proj, "paused")  # no error
 
     def test_resume_sets_active(self, tmp_path):
-        from dynoglobal import register_project, set_project_status, list_projects
+        from sweeper import register_project, set_project_status, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -130,7 +130,7 @@ class TestRegistryCRUD:
         assert entries[0]["status"] == "active"
 
     def test_resume_idempotent(self, tmp_path):
-        from dynoglobal import register_project, set_project_status
+        from sweeper import register_project, set_project_status
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -138,7 +138,7 @@ class TestRegistryCRUD:
         set_project_status(proj, "active")  # no error
 
     def test_set_active_updates_last_active_at(self, tmp_path):
-        from dynoglobal import register_project, set_project_status, list_projects
+        from sweeper import register_project, set_project_status, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -148,7 +148,7 @@ class TestRegistryCRUD:
         assert after >= before
 
     def test_set_status_invalid_raises(self, tmp_path):
-        from dynoglobal import register_project, set_project_status
+        from sweeper import register_project, set_project_status
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -156,7 +156,7 @@ class TestRegistryCRUD:
             set_project_status(proj, "deleted")
 
     def test_set_status_unregistered_raises(self, tmp_path):
-        from dynoglobal import set_project_status
+        from sweeper import set_project_status
 
         proj = tmp_path / "nonexistent"
         proj.mkdir()
@@ -164,7 +164,7 @@ class TestRegistryCRUD:
             set_project_status(proj, "active")
 
     def test_registry_has_required_entry_fields(self, tmp_path):
-        from dynoglobal import register_project, list_projects
+        from sweeper import register_project, list_projects
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -175,7 +175,7 @@ class TestRegistryCRUD:
         assert "status" in entry
 
     def test_registry_version_increments(self, tmp_path):
-        from dynoglobal import register_project, load_registry
+        from sweeper import register_project, load_registry
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -186,7 +186,7 @@ class TestRegistryCRUD:
         assert v2 > v1
 
     def test_registry_checksum_computed(self, tmp_path):
-        from dynoglobal import register_project, load_registry, _compute_checksum
+        from sweeper import register_project, load_registry, _compute_checksum
 
         proj = _make_project(tmp_path, "proj-a")
         register_project(proj)
@@ -205,7 +205,7 @@ class TestDaemonLifecycle:
     """
 
     def test_start_writes_pid_file(self, tmp_path):
-        from dynoglobal import daemon_pid_path, ensure_global_dirs
+        from sweeper import daemon_pid_path, ensure_global_dirs
 
         ensure_global_dirs()
         pid_path = daemon_pid_path()
@@ -215,7 +215,7 @@ class TestDaemonLifecycle:
         assert int(pid_path.read_text().strip()) == os.getpid()
 
     def test_stop_removes_pid_file(self, tmp_path):
-        from dynoglobal import daemon_pid_path, ensure_global_dirs
+        from sweeper import daemon_pid_path, ensure_global_dirs
 
         ensure_global_dirs()
         pid_path = daemon_pid_path()
@@ -224,7 +224,7 @@ class TestDaemonLifecycle:
         assert not pid_path.exists()
 
     def test_current_daemon_pid_returns_pid_when_running(self, tmp_path):
-        from dynoglobal import daemon_pid_path, current_daemon_pid, ensure_global_dirs
+        from sweeper import daemon_pid_path, current_daemon_pid, ensure_global_dirs
 
         ensure_global_dirs()
         # Write our own PID (which is alive)
@@ -232,13 +232,13 @@ class TestDaemonLifecycle:
         assert current_daemon_pid() == os.getpid()
 
     def test_current_daemon_pid_returns_none_when_no_file(self, tmp_path):
-        from dynoglobal import current_daemon_pid, ensure_global_dirs
+        from sweeper import current_daemon_pid, ensure_global_dirs
 
         ensure_global_dirs()
         assert current_daemon_pid() is None
 
     def test_current_daemon_pid_returns_none_for_dead_pid(self, tmp_path):
-        from dynoglobal import daemon_pid_path, current_daemon_pid, ensure_global_dirs
+        from sweeper import daemon_pid_path, current_daemon_pid, ensure_global_dirs
 
         ensure_global_dirs()
         # PID 99999999 is almost certainly not running
@@ -246,17 +246,17 @@ class TestDaemonLifecycle:
         assert current_daemon_pid() is None
 
     def test_is_pid_running_true_for_self(self):
-        from dynoglobal import is_pid_running
+        from sweeper import is_pid_running
 
         assert is_pid_running(os.getpid()) is True
 
     def test_is_pid_running_false_for_bad_pid(self):
-        from dynoglobal import is_pid_running
+        from sweeper import is_pid_running
 
         assert is_pid_running(99999999) is False
 
     def test_daemon_stop_sentinel_path(self, tmp_path):
-        from dynoglobal import daemon_stop_path, ensure_global_dirs
+        from sweeper import daemon_stop_path, ensure_global_dirs
 
         ensure_global_dirs()
         stop = daemon_stop_path()
@@ -267,7 +267,7 @@ class TestDaemonLifecycle:
 
     def test_cmd_status_reports_not_running(self, tmp_path, capsys):
         import argparse
-        from dynoglobal import cmd_status, ensure_global_dirs
+        from sweeper import cmd_status, ensure_global_dirs
 
         ensure_global_dirs()
         args = argparse.Namespace()
@@ -279,7 +279,7 @@ class TestDaemonLifecycle:
 
     def test_cmd_status_reports_running(self, tmp_path, capsys):
         import argparse
-        from dynoglobal import cmd_status, daemon_pid_path, ensure_global_dirs
+        from sweeper import cmd_status, daemon_pid_path, ensure_global_dirs
 
         ensure_global_dirs()
         daemon_pid_path().write_text(f"{os.getpid()}\n")
@@ -292,7 +292,7 @@ class TestDaemonLifecycle:
 
     def test_cmd_status_includes_project_summary(self, tmp_path, capsys):
         import argparse
-        from dynoglobal import cmd_status, register_project, ensure_global_dirs
+        from sweeper import cmd_status, register_project, ensure_global_dirs
 
         ensure_global_dirs()
         proj = _make_project(tmp_path, "proj-a")
@@ -313,7 +313,7 @@ class TestCrossProjectAggregation:
 
     def _register_projects_with_retros(self, tmp_path):
         """Register two mock projects with known retrospective data."""
-        from dynoglobal import register_project
+        from sweeper import register_project
 
         retros_a = [
             {
@@ -344,7 +344,7 @@ class TestCrossProjectAggregation:
         return proj_a, proj_b
 
     def test_aggregate_merges_task_counts(self, tmp_path):
-        from dynoglobal import aggregate_cross_project_stats
+        from sweeper import aggregate_cross_project_stats
 
         self._register_projects_with_retros(tmp_path)
         result = aggregate_cross_project_stats()
@@ -353,7 +353,7 @@ class TestCrossProjectAggregation:
         assert result["task_counts_by_type"]["bugfix"] == 1
 
     def test_aggregate_merges_quality_scores(self, tmp_path):
-        from dynoglobal import aggregate_cross_project_stats
+        from sweeper import aggregate_cross_project_stats
 
         self._register_projects_with_retros(tmp_path)
         result = aggregate_cross_project_stats()
@@ -362,14 +362,14 @@ class TestCrossProjectAggregation:
         assert result["average_quality_score"] == 8.25
 
     def test_aggregate_total_tasks(self, tmp_path):
-        from dynoglobal import aggregate_cross_project_stats
+        from sweeper import aggregate_cross_project_stats
 
         self._register_projects_with_retros(tmp_path)
         result = aggregate_cross_project_stats()
         assert result["total_tasks"] == 3
 
     def test_aggregate_writes_to_patterns_dir(self, tmp_path):
-        from dynoglobal import aggregate_cross_project_stats, patterns_dir
+        from sweeper import aggregate_cross_project_stats, patterns_dir
 
         self._register_projects_with_retros(tmp_path)
         aggregate_cross_project_stats()
@@ -379,7 +379,7 @@ class TestCrossProjectAggregation:
         assert "task_counts_by_type" in data
 
     def test_aggregate_keyed_by_metric_not_project(self, tmp_path):
-        from dynoglobal import aggregate_cross_project_stats
+        from sweeper import aggregate_cross_project_stats
 
         self._register_projects_with_retros(tmp_path)
         result = aggregate_cross_project_stats()
@@ -389,7 +389,7 @@ class TestCrossProjectAggregation:
             assert "proj-b" not in str(key)
 
     def test_promote_rules_at_2_project_threshold(self, tmp_path):
-        from dynoglobal import promote_prevention_rules
+        from sweeper import promote_prevention_rules
 
         self._register_projects_with_retros(tmp_path)
         result = promote_prevention_rules()
@@ -400,7 +400,7 @@ class TestCrossProjectAggregation:
         assert "check nulls" not in promoted_texts
 
     def test_promote_rules_written_to_patterns_dir(self, tmp_path):
-        from dynoglobal import promote_prevention_rules, patterns_dir
+        from sweeper import promote_prevention_rules, patterns_dir
 
         self._register_projects_with_retros(tmp_path)
         promote_prevention_rules()
@@ -411,7 +411,7 @@ class TestCrossProjectAggregation:
         assert data["threshold"] == 2
 
     def test_promote_rules_includes_project_count(self, tmp_path):
-        from dynoglobal import promote_prevention_rules
+        from sweeper import promote_prevention_rules
 
         self._register_projects_with_retros(tmp_path)
         result = promote_prevention_rules()
@@ -419,7 +419,7 @@ class TestCrossProjectAggregation:
             assert rule_entry["project_count"] >= 2
 
     def test_no_project_data_in_aggregated_stats(self, tmp_path):
-        from dynoglobal import aggregate_cross_project_stats
+        from sweeper import aggregate_cross_project_stats
 
         self._register_projects_with_retros(tmp_path)
         result = aggregate_cross_project_stats()
@@ -429,7 +429,7 @@ class TestCrossProjectAggregation:
         assert "proj-b" not in result_str
 
     def test_extract_project_stats_anonymous(self, tmp_path):
-        from dynoglobal import extract_project_stats
+        from sweeper import extract_project_stats
 
         retros = [
             {
@@ -447,7 +447,7 @@ class TestCrossProjectAggregation:
         assert "task_counts_by_type" in stats
 
     def test_single_project_no_promotion(self, tmp_path):
-        from dynoglobal import register_project, promote_prevention_rules
+        from sweeper import register_project, promote_prevention_rules
 
         retros = [
             {
@@ -472,7 +472,7 @@ class TestIsolation:
 
     def test_project_a_cannot_read_project_b_dynos(self, tmp_path):
         """extract_project_stats only reads its own .dynos/ directory."""
-        from dynoglobal import extract_project_stats
+        from sweeper import extract_project_stats
 
         retros_a = [{"task_type": "feature", "quality_score": 9.0, "prevention_rules": ["rule-A"]}]
         retros_b = [{"task_type": "bugfix", "quality_score": 5.0, "prevention_rules": ["rule-B"]}]
@@ -497,7 +497,7 @@ class TestIsolation:
     def test_project_cannot_write_to_another_projects_dynos(self, tmp_path):
         """Verify that calling functions on proj_a does not create or modify
         files in proj_b's .dynos/ directory."""
-        from dynoglobal import register_project, extract_project_stats
+        from sweeper import register_project, extract_project_stats
 
         proj_a = _make_project(tmp_path, "proj-a", [{"task_type": "feature", "quality_score": 8.0}])
         proj_b = _make_project(tmp_path, "proj-b", [{"task_type": "bugfix", "quality_score": 7.0}])
@@ -515,7 +515,7 @@ class TestIsolation:
     def test_global_patterns_not_written_by_project_operations(self, tmp_path):
         """Project-level operations (register, extract stats) should not write
         to the global patterns directory (only aggregation does)."""
-        from dynoglobal import register_project, extract_project_stats, patterns_dir, ensure_global_dirs
+        from sweeper import register_project, extract_project_stats, patterns_dir, ensure_global_dirs
 
         ensure_global_dirs()
         pat_dir = patterns_dir()
@@ -529,7 +529,7 @@ class TestIsolation:
         assert before == after, "project operations wrote to global patterns dir"
 
     def test_aggregate_does_not_leak_project_paths(self, tmp_path):
-        from dynoglobal import register_project, aggregate_cross_project_stats, patterns_dir
+        from sweeper import register_project, aggregate_cross_project_stats, patterns_dir
 
         proj_a = _make_project(tmp_path, "secret-proj-a", [{"task_type": "feature", "quality_score": 8.0}])
         proj_b = _make_project(tmp_path, "secret-proj-b", [{"task_type": "bugfix", "quality_score": 7.0}])
@@ -543,6 +543,6 @@ class TestIsolation:
         assert "secret-proj-b" not in content
 
     def test_global_home_uses_env_var(self, tmp_path):
-        from dynoglobal import global_home
+        from sweeper import global_home
 
         assert global_home() == tmp_path

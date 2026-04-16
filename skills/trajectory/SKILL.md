@@ -10,8 +10,8 @@ This is the memory layer for prior task traces. It is retrieval support, not an 
 If available in this repo, the deterministic runtime for this skill is:
 
 ```text
-python3 hooks/dynostrajectory.py rebuild --root .
-python3 hooks/dynostrajectory.py search query.json --root . --limit 3
+python3 hooks/trajectory.py rebuild --root .
+python3 hooks/trajectory.py search query.json --root . --limit 3
 ```
 
 ## What you do
@@ -25,7 +25,7 @@ Immediately after a successful task completion and `/dynos-work:learn`:
 ### Step 2 -- Behavioral Retrieval (PULL)
 During the "Founder Phase" or "Planning Phase":
 1. **State Signature Search:** Call the `state-encoder` to get the current module's state signature ($).
-2. **Trajectory Search:** Use the deterministic similarity search in `hooks/dynostrajectory.py` to find the 3 most similar successful trajectories in `trajectories.json`.
+2. **Trajectory Search:** Use the deterministic similarity search in `hooks/trajectory.py` to find the 3 most similar successful trajectories in `trajectories.json`.
 
 ### Step 3 -- Advisory Use
 When a similar prior task is found:

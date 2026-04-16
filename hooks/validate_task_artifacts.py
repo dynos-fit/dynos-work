@@ -11,7 +11,7 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 import sys
 from pathlib import Path
 
-from dynoslib_validate import validate_task_artifacts
+from lib_validate import validate_task_artifacts
 
 
 def main() -> int:
@@ -24,11 +24,11 @@ def main() -> int:
 
     # Auto-emit deterministic validation event to per-task token ledger
     try:
-        from dynoslib_tokens import record_tokens
-        from dynoslib_core import load_json
+        from lib_tokens import record_tokens
+        from lib_core import load_json
         manifest = load_json(task_dir / "manifest.json")
         stage = manifest.get("stage", "")
-        from dynoslib_tokens import phase_for_stage
+        from lib_tokens import phase_for_stage
         record_tokens(
             task_dir=task_dir,
             agent="validate_task_artifacts",
@@ -51,8 +51,8 @@ def main() -> int:
 
     # Auto-emit plan-validated receipt when execution graph exists
     try:
-        from dynoslib_receipts import receipt_plan_validated
-        from dynoslib_core import load_json as _load_json
+        from lib_receipts import receipt_plan_validated
+        from lib_core import load_json as _load_json
         graph_path = task_dir / "execution-graph.json"
         spec_path = task_dir / "spec.md"
         if graph_path.exists() and spec_path.exists():

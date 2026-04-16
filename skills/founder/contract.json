@@ -21,12 +21,12 @@
     "design-options.json": {
       "type": "object",
       "required": false,
-      "source": "generated high-risk design options passed to dynosdream.py"
+      "source": "generated high-risk design options passed to dream.py"
     },
     "state_signature": {
       "type": "object",
       "required": false,
-      "source": "hooks/dynostate.py --root . --target <path>"
+      "source": "hooks/state.py --root . --target <path>"
     },
     "similar_trajectories": {
       "type": "array",

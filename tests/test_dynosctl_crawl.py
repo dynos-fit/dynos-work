@@ -1,4 +1,4 @@
-"""Tests for the crawl CLI subcommand in dynosctl.py.
+"""Tests for the crawl CLI subcommand in ctl.py.
 
 Covers AC 16: crawl graph and crawl targets sub-subcommands.
 """
@@ -37,11 +37,11 @@ def tmp_repo(tmp_path: Path) -> Path:
 # ===========================================================================
 
 class TestCrawlSubcommand:
-    """AC 16: dynosctl.py gains a crawl subcommand with graph and targets sub-subcommands."""
+    """AC 16: ctl.py gains a crawl subcommand with graph and targets sub-subcommands."""
 
     def test_parser_has_crawl_subcommand(self) -> None:
         # AC 16
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         # The parser should accept 'crawl' as a valid command
@@ -51,7 +51,7 @@ class TestCrawlSubcommand:
 
     def test_crawl_graph_subcommand_accepted(self) -> None:
         # AC 16: crawl graph --root <path>
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["crawl", "graph", "--root", "/tmp/myrepo"])
@@ -60,7 +60,7 @@ class TestCrawlSubcommand:
 
     def test_crawl_targets_subcommand_accepted(self) -> None:
         # AC 16: crawl targets --root <path> --max <N>
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["crawl", "targets", "--root", "/tmp/myrepo", "--max", "5"])
@@ -69,7 +69,7 @@ class TestCrawlSubcommand:
 
     def test_crawl_targets_max_argument(self) -> None:
         # AC 16: --max parameter for targets
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["crawl", "targets", "--root", ".", "--max", "15"])
@@ -77,7 +77,7 @@ class TestCrawlSubcommand:
 
     def test_crawl_graph_has_func_handler(self) -> None:
         # AC 16: graph subcommand should have a function handler
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["crawl", "graph", "--root", "."])
@@ -85,7 +85,7 @@ class TestCrawlSubcommand:
 
     def test_crawl_targets_has_func_handler(self) -> None:
         # AC 16: targets subcommand should have a function handler
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["crawl", "targets", "--root", ".", "--max", "10"])
@@ -93,7 +93,7 @@ class TestCrawlSubcommand:
 
     def test_crawl_graph_outputs_json(self, tmp_repo: Path, capsys: pytest.CaptureFixture) -> None:
         # AC 16: crawl graph prints the import graph as JSON
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["crawl", "graph", "--root", str(tmp_repo)])
@@ -109,7 +109,7 @@ class TestCrawlSubcommand:
 
     def test_crawl_targets_outputs_scored_list(self, tmp_repo: Path, capsys: pytest.CaptureFixture) -> None:
         # AC 16: crawl targets prints top N scan targets with scores
-        from dynosctl import build_parser
+        from ctl import build_parser
 
         parser = build_parser()
         args = parser.parse_args(["crawl", "targets", "--root", str(tmp_repo), "--max", "5"])

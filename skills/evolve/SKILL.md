@@ -10,18 +10,18 @@ Owns the technical evolution of the system's agents. It processes findings into 
 If available in this repo, the deterministic runtime for registry, routing, promotion, and automatic challenger execution is:
 
 ```text
-python3 hooks/dynoevolve.py init-registry --root .
-python3 hooks/dynoevolve.py register-agent <agent_name> <role> <task_type> <path> <generated_from> --root .
-python3 hooks/dynoeval.py evaluate candidate.json baseline.json
-python3 hooks/dynoeval.py promote <agent_name> <role> <task_type> candidate.json baseline.json --root .
-python3 hooks/dynobench.py run benchmarks/fixtures/<fixture>.json --root . --update-registry
-python3 hooks/dynorollout.py benchmarks/fixtures/<rollout-fixture>.json --root . --update-registry
-python3 hooks/dynoroute.py <role> <task_type> --root .
-python3 hooks/dynofixture.py sync --root .
-python3 hooks/dynogenerate.py <agent_name> <role> <task_type> <output_path> <generated_from> --root .
-python3 hooks/dynoreport.py --root .
-python3 hooks/dynoauto.py sync --root .
-python3 hooks/dynoauto.py run --root .
+python3 hooks/evolve.py init-registry --root .
+python3 hooks/evolve.py register-agent <agent_name> <role> <task_type> <path> <generated_from> --root .
+python3 hooks/eval.py evaluate candidate.json baseline.json
+python3 hooks/eval.py promote <agent_name> <role> <task_type> candidate.json baseline.json --root .
+python3 hooks/bench.py run benchmarks/fixtures/<fixture>.json --root . --update-registry
+python3 hooks/rollout.py benchmarks/fixtures/<rollout-fixture>.json --root . --update-registry
+python3 hooks/route.py <role> <task_type> --root .
+python3 hooks/fixture.py sync --root .
+python3 hooks/generate.py <agent_name> <role> <task_type> <output_path> <generated_from> --root .
+python3 hooks/report.py --root .
+python3 hooks/auto.py sync --root .
+python3 hooks/auto.py run --root .
 ```
 
 ## What you do
@@ -30,7 +30,7 @@ python3 hooks/dynoauto.py run --root .
 
 Generate learned agent or skill `.md` files when specialization opportunities are detected. This step runs inline (no subagent spawns). Every generated runtime component must also be registered in `.dynos/learned-agents/registry.json`.
 
-Prefer `hooks/dynogenerate.py` when you want a deterministic learned component file instead of an ad hoc markdown draft.
+Prefer `hooks/generate.py` when you want a deterministic learned component file instead of an ad hoc markdown draft.
 
 #### 1a -- Generation gate
 
@@ -89,14 +89,14 @@ Create any missing directories. The `.staging/` directory holds new agents enter
 
 ### Step 2 -- Agent Routing
 
-Maintain the `## Agent Routing` section in `dynos_patterns.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/dynoroute.py` as the live routing source of truth.
+Maintain the `## Agent Routing` section in `dynos_patterns.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/route.py` as the live routing source of truth.
 
 #### 2a -- Routing composites (deterministic)
 
 Routing composite scores are computed by the Python runtime. Do not compute them inline. To inspect current composites:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynopatterns.py" effectiveness --root "${PROJECT_ROOT}"
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/patterns.py" effectiveness --root "${PROJECT_ROOT}"
 ```
 
 The `routing_composites` field in the output contains `{role:task_type:source -> score}` using weights `0.6 * quality + 0.25 * efficiency + 0.15 * cost`.
@@ -131,14 +131,14 @@ Manage the lifecycle of learned auditor agents through `alongside` and `replace`
 Perform deterministic offline evaluation for agents in `shadow` mode:
 
 1. Collect candidate benchmark results and baseline benchmark results as JSON arrays of quality/cost/efficiency outcomes.
-2. Evaluate them with `hooks/dynoeval.py evaluate`.
-3. Prefer `hooks/dynobench.py run ... --update-registry` when a fixture benchmark exists. Fixtures may be static score inputs, single-command sandbox cases, or multi-step task fixtures with command pipelines over realistic sandbox workdirs. Prefer `hooks/dynorollout.py` when the benchmark should start from copied repo paths and execute a repo-snapshot rollout. Use `hooks/dynoeval.py promote` for direct benchmark JSON comparisons.
+2. Evaluate them with `hooks/eval.py evaluate`.
+3. Prefer `hooks/bench.py run ... --update-registry` when a fixture benchmark exists. Fixtures may be static score inputs, single-command sandbox cases, or multi-step task fixtures with command pipelines over realistic sandbox workdirs. Prefer `hooks/rollout.py` when the benchmark should start from copied repo paths and execute a repo-snapshot rollout. Use `hooks/eval.py promote` for direct benchmark JSON comparisons.
 4. Store the benchmark summary and recommendation in `.dynos/learned-agents/registry.json`.
 5. If the recommendation is `keep_shadow` or `reject`, keep the agent in shadow mode.
 6. Do not promote an agent on fewer than 3 benchmark cases.
 7. If a fixture declares `must_pass_categories`, any regression in those categories blocks promotion and can automatically demote an active `alongside` or `replace` component back out of the route.
-8. Prefer `python3 hooks/dynoauto.py run --root .` after learn/task completion so shadow challengers are benchmarked automatically when matching fixtures exist.
-9. If no benchmark fixture exists yet for a shadow challenger, prefer `python3 hooks/dynofixture.py sync --root .` to synthesize a task-derived fixture from completed retrospectives before falling back to manual authoring.
+8. Prefer `python3 hooks/auto.py run --root .` after learn/task completion so shadow challengers are benchmarked automatically when matching fixtures exist.
+9. If no benchmark fixture exists yet for a shadow challenger, prefer `python3 hooks/fixture.py sync --root .` to synthesize a task-derived fixture from completed retrospectives before falling back to manual authoring.
 
 ### Step 6 -- Proactive Meta-Audit (The Strategic Scanner)
 

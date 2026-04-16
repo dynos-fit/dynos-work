@@ -39,9 +39,9 @@ The runtime validates these artifacts before allowing the task to advance.
 
 Main control runtime:
 
-- `hooks/dynosctl.py`
+- `hooks/ctl.py`
 - `hooks/validate_task_artifacts.py`
-- `hooks/dynoslib.py`
+- `hooks/lib.py`
 
 These enforce:
 
@@ -72,18 +72,18 @@ That means the system improves through measured outcomes, not through self-asser
 
 Two important pieces drive memory:
 
-- `hooks/dynostate.py`
-- `hooks/dynostrajectory.py`
+- `hooks/state.py`
+- `hooks/trajectory.py`
 
-`dynostate.py` builds a deterministic state signature for the current repo or target slice.
+`state.py` builds a deterministic state signature for the current repo or target slice.
 
-`dynostrajectory.py` manages `.dynos/trajectories.json`, which stores compact task traces derived from retrospectives. The system can search similar prior tasks and use them as advisory context during discovery and design review.
+`trajectory.py` manages `.dynos/trajectories.json`, which stores compact task traces derived from retrospectives. The system can search similar prior tasks and use them as advisory context during discovery and design review.
 
 Retrieval never overrides current repo evidence.
 
 ## Design Review
 
-`hooks/dynosdream.py` is the design-review runtime.
+`hooks/dream.py` is the design-review runtime.
 
 It is an MCTS-lite evaluator over structured design options. It does not autonomously choose architecture. It produces advisory results that feed the human approval path.
 
@@ -108,11 +108,11 @@ Registry state lives in:
 
 Main runtimes:
 
-- `hooks/dynoevolve.py`
-- `hooks/dynoeval.py`
-- `hooks/dynogenerate.py`
+- `hooks/evolve.py`
+- `hooks/eval.py`
+- `hooks/generate.py`
 
-`dynogenerate.py` creates structured learned markdown from observed task patterns and registers it automatically.
+`generate.py` creates structured learned markdown from observed task patterns and registers it automatically.
 
 ## Benchmarking And Promotion
 
@@ -130,10 +130,10 @@ The benchmark layer supports:
 
 Main runtimes:
 
-- `hooks/dynobench.py`
-- `hooks/dynorollout.py`
-- `hooks/dynochallenge.py`
-- `hooks/dynofixture.py`
+- `hooks/bench.py`
+- `hooks/rollout.py`
+- `hooks/challenge.py`
+- `hooks/fixture.py`
 
 Supporting data:
 
@@ -156,7 +156,7 @@ It is controlled by the registry plus runtime policy.
 
 Main runtime:
 
-- `hooks/dynoroute.py`
+- `hooks/route.py`
 
 Routing only uses a learned component if:
 
@@ -172,8 +172,8 @@ Shadow challengers and stale active routes are managed automatically.
 
 Main runtime:
 
-- `hooks/dynoauto.py`
-- `hooks/dynomaintain.py`
+- `hooks/auto.py`
+- `hooks/maintain.py`
 
 What it does:
 
@@ -185,7 +185,7 @@ What it does:
 
 Manual runtime trigger:
 
-- `python3 hooks/dynomaintain.py invoke --root .`
+- `python3 hooks/maintain.py invoke --root .`
 
 Supporting files:
 
@@ -205,9 +205,9 @@ Freshness policy currently includes:
 
 Three runtimes expose the adaptive system:
 
-- `hooks/dynoreport.py`
-- `hooks/dynolineage.py`
-- `hooks/dynodashboard.py`
+- `hooks/report.py`
+- `hooks/lineage.py`
+- `hooks/dashboard.py`
 
 They provide:
 
@@ -225,7 +225,7 @@ The dashboard lives at:
 - `.dynos/dashboard.html`
 - `.dynos/dashboard-data.json`
 
-`dynodashboard.py` can also serve the dashboard locally for live refresh.
+`dashboard.py` can also serve the dashboard locally for live refresh.
 
 ## Hooks
 
@@ -253,8 +253,8 @@ If you want to understand the repo in the shortest useful order, read:
 2. `skills/start/SKILL.md`
 3. `skills/execute/SKILL.md`
 4. `skills/audit/SKILL.md`
-5. `hooks/dynoslib.py`
-6. `hooks/dynoauto.py`
-7. `hooks/dynodashboard.py`
+5. `hooks/lib.py`
+6. `hooks/auto.py`
+7. `hooks/dashboard.py`
 
 That gets you the public workflow, the control layer, the adaptive layer, and the live operator surface.

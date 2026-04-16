@@ -23,8 +23,8 @@ Parse the user's argument (on, off, or status).
 
 1. Ensure the project is registered and daemon is running:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoregistry.py" register "$(pwd)" 2>/dev/null || true
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root "$(pwd)" --autofix 2>/dev/null || true
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/registry.py" register "$(pwd)" 2>/dev/null || true
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" start --root "$(pwd)" --autofix 2>/dev/null || true
 ```
 
 2. Print:
@@ -50,7 +50,7 @@ To re-enable: /dynos-work:autofix on
 
 1. Check the flag:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" status --root "$(pwd)"
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" status --root "$(pwd)"
 ```
 
 2. Print whether autofix is on or off, daemon running or stopped, and last scan time if available.

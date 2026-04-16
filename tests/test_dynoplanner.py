@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for dynoplanner.py CLI subcommands (AC 7-9, 18)."""
+"""Tests for planner.py CLI subcommands (AC 7-9, 18)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS = ROOT / "hooks"
-DYNOPLANNER = HOOKS / "dynoplanner.py"
+DYNOPLANNER = HOOKS / "planner.py"
 
 
 def _make_retrospective(
@@ -110,11 +110,11 @@ def _setup_project(
 
 
 class TestDynoPlannerCLISubcommands(unittest.TestCase):
-    """AC 7: dynoplanner.py has three subcommands that exit cleanly."""
+    """AC 7: planner.py has three subcommands that exit cleanly."""
 
     def test_dynoplanner_file_exists(self) -> None:
-        """dynoplanner.py exists in hooks directory."""
-        self.assertTrue(DYNOPLANNER.exists(), f"dynoplanner.py should exist at {DYNOPLANNER}")
+        """planner.py exists in hooks directory."""
+        self.assertTrue(DYNOPLANNER.exists(), f"planner.py should exist at {DYNOPLANNER}")
 
     def test_start_plan_help_exits_zero(self) -> None:
         """start-plan --help exits cleanly with return code 0."""

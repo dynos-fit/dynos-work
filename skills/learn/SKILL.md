@@ -158,7 +158,7 @@ All EMA computation, Model Policy derivation, Skip Policy derivation, and effect
 Run:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynopatterns.py" --root "${PROJECT_ROOT}"
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/patterns.py" --root "${PROJECT_ROOT}"
 ```
 
 This command:
@@ -177,7 +177,7 @@ The model does NOT perform any of these calculations. The Python runtime handles
 To inspect the computed scores without writing files:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynopatterns.py" effectiveness --root "${PROJECT_ROOT}"
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/patterns.py" effectiveness --root "${PROJECT_ROOT}"
 ```
 
 #### 5e -- Baseline Policy management

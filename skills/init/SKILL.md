@@ -18,7 +18,7 @@ Register the current project and start the local maintenance daemon.
 
 1. Register the project:
 ```bash
-python3 "${PLUGIN_HOOKS}/dynoregistry.py" register "$(pwd)"
+python3 "${PLUGIN_HOOKS}/registry.py" register "$(pwd)"
 ```
 
 2. Create the `.dynos` directory:
@@ -28,14 +28,14 @@ mkdir -p .dynos
 
 3. Check if a daemon is already running:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" status --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" status --root .
 ```
 
 If `running` is `true` in the JSON output, print "Daemon already running" and stop.
 
 4. Start the daemon. If the user passed `--autofix` in the arguments, include the flag:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root . [--autofix]
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" start --root . [--autofix]
 ```
 
 5. Print the result:

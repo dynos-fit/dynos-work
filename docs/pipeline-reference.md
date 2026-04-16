@@ -26,13 +26,13 @@ The dynos-work pipeline transforms a user's task description into audited, teste
 **Skill invocation order:**
 `/dynos-work:start` → `/dynos-work:execute` → `/dynos-work:audit` → (automatic) `task-completed` event bus drain.
 
-**Ownership principle:** Each skill owns specific stages. The `NEXT_COMMAND` map in `dynoslib_core.py` enforces which skill handles which stage.
+**Ownership principle:** Each skill owns specific stages. The `NEXT_COMMAND` map in `lib_core.py` enforces which skill handles which stage.
 
 ---
 
 ## 2. Stage Transition Graph
 
-18 stages defined. Allowed transitions enforced by `ALLOWED_STAGE_TRANSITIONS` in `dynoslib_core.py`.
+18 stages defined. Allowed transitions enforced by `ALLOWED_STAGE_TRANSITIONS` in `lib_core.py`.
 
 **Linear happy path:**
 
@@ -68,8 +68,8 @@ CHECKPOINT_AUDIT → REPAIR_PLANNING → REPAIR_EXECUTION → CHECKPOINT_AUDIT (
 |---|---|
 | **Trigger** | User runs `/dynos-work:start` with task description |
 | **Input** | User-provided task description (text, PRD, screenshot, URL) |
-| **Actions** | 1. Ensure `.dynos/` exists. 2. Register project (`dynoregistry.py`). 3. Start daemon (`dynomaintain.py`). 4. Generate task ID. 5. Create task directory. 6. Write `raw-input.md`. 7. Write `manifest.json`. 8. Init `execution-log.md`. 9. Validate manifest. |
-| **Hooks called** | `dynoregistry.py register`, `dynomaintain.py start`, `dynosctl.py validate-task` |
+| **Actions** | 1. Ensure `.dynos/` exists. 2. Register project (`registry.py`). 3. Start daemon (`maintain.py`). 4. Generate task ID. 5. Create task directory. 6. Write `raw-input.md`. 7. Write `manifest.json`. 8. Init `execution-log.md`. 9. Validate manifest. |
+| **Hooks called** | `registry.py register`, `maintain.py start`, `ctl.py validate-task` |
 | **Output** | `manifest.json`, `raw-input.md`, `execution-log.md` |
 | **Validation** | manifest.json must parse with `task_id`, `created_at`, `raw_input`, `stage` |
 
@@ -87,7 +87,7 @@ CHECKPOINT_AUDIT → REPAIR_PLANNING → REPAIR_EXECUTION → CHECKPOINT_AUDIT (
 |---|---|
 | **Input** | `raw-input.md`, `discovery-notes.md` |
 | **Fast-track skip** | If task is well-scoped (specific files, explicit constraints, bounded change): skip planner, classify directly |
-| **Normal path** | 1. Check for learned plan-skill via `dynorouter.py resolve_route`. 2. Spawn Planner (with learned agent injected if available). 3. Present questions. 4. Write `design-decisions.md`. 5. Write classification to `manifest.json`. 6. Validate classification. |
+| **Normal path** | 1. Check for learned plan-skill via `router.py resolve_route`. 2. Spawn Planner (with learned agent injected if available). 3. Present questions. 4. Write `design-decisions.md`. 5. Write classification to `manifest.json`. 6. Validate classification. |
 | **Receipts** | `plan-routing`, `planner-discovery` |
 | **Stage transition** | FOUNDRY_INITIALIZED → SPEC_NORMALIZATION |
 | **Output** | `discovery-notes.md`, `design-decisions.md`, classification in manifest |
@@ -171,7 +171,7 @@ CHECKPOINT_AUDIT → REPAIR_PLANNING → REPAIR_EXECUTION → CHECKPOINT_AUDIT (
 
 ### Step 0: Contract Validation
 
-`dynosctl.py validate-contract --skill execute` — checks manifest, spec, plan, graph exist.
+`ctl.py validate-contract --skill execute` — checks manifest, spec, plan, graph exist.
 
 ### Step 1-2: Review Plan + Snapshot Base
 
@@ -184,9 +184,9 @@ Read plan, capture HEAD SHA, create snapshot branch.
 | **Preflight** | `validate_task_artifacts.py` — structural checks |
 | **Critical path** | Compute dependency depth, prioritize highest-depth segments |
 | **Caching** | Skip segments with unchanged evidence |
-| **Router call** | `dynorouter.py executor-plan` → model, route_mode, agent_path per segment |
+| **Router call** | `router.py executor-plan` → model, route_mode, agent_path per segment |
 | **Receipt: executor-routing** | Written BEFORE any spawns. **Required by CHECKPOINT_AUDIT gate.** |
-| **Inject-prompt** | Pipes base prompt through `dynorouter.py inject-prompt` → appends learned agent rules + prevention rules. Logs `learned_agent_injected` event. |
+| **Inject-prompt** | Pipes base prompt through `router.py inject-prompt` → appends learned agent rules + prevention rules. Logs `learned_agent_injected` event. |
 | **Executor spawn** | With model from plan, prompt from inject-prompt |
 | **Receipt: executor-{seg-id}** | Per segment. Records `learned_agent_injected`, tokens. Auto-records to `token-usage.json`. |
 | **Post-batch** | Verify file ownership, evidence exists |
@@ -211,7 +211,7 @@ Validates contract. Runs `git diff --name-only {snapshot_sha}`.
 
 | Sub-step | Detail |
 |---|---|
-| **Router call** | `dynorouter.py audit-plan` → which auditors, models, ensemble, skip |
+| **Router call** | `router.py audit-plan` → which auditors, models, ensemble, skip |
 | **Receipt: audit-routing** | Written BEFORE spawns |
 | **Auditor selection** | Fast-track: spec-completion + security only. Normal: +code-quality, +dead-code, +domain-specific |
 | **Skip policy** | Skip-exempt: security, spec-completion, code-quality. Others skip on zero-finding streak ≥ threshold |
@@ -230,7 +230,7 @@ Validates contract. Runs `git diff --name-only {snapshot_sha}`.
 
 | Sub-step | Detail |
 |---|---|
-| **Retrospective** | `dynosctl.py compute-reward --write` → `task-retrospective.json` |
+| **Retrospective** | `ctl.py compute-reward --write` → `task-retrospective.json` |
 | **Receipt: retrospective** | Quality, cost, efficiency scores + total tokens |
 | **Completion** | `transition_task(task_dir, "DONE")` |
 | **DONE gate checks** | `task-retrospective.json` exists, audit reports exist, `retrospective` receipt, `post-completion` receipt |
@@ -245,10 +245,10 @@ Triggered automatically by `transition_task("DONE")`.
 
 | Event | Handlers | Follow-on |
 |---|---|---|
-| `task-completed` | **learn** (dynopatterns.py), **trajectory** (dynostrajectory.py) | `learn-completed` |
-| `learn-completed` | **evolve** (dynoevolve.py), **patterns** (dynopatterns.py) | `evolve-completed` |
-| `evolve-completed` | **postmortem** (dynopostmortem.py), **improve** (dynopostmortem.py), **benchmark** (dynoauto.py) | `benchmark-completed` |
-| `benchmark-completed` | **dashboard** (dynodashboard.py), **register** (dynoregistry.py) | (terminal) |
+| `task-completed` | **learn** (patterns.py), **trajectory** (trajectory.py) | `learn-completed` |
+| `learn-completed` | **evolve** (evolve.py), **patterns** (patterns.py) | `evolve-completed` |
+| `evolve-completed` | **postmortem** (postmortem.py), **improve** (postmortem.py), **benchmark** (auto.py) | `benchmark-completed` |
+| `benchmark-completed` | **dashboard** (dashboard.py), **register** (registry.py) | (terminal) |
 
 Each handler is timed and logged to `events.jsonl` with `eventbus_handler` event type.
 
@@ -278,7 +278,7 @@ Triggered by: `learn-completed` event OR manual `/dynos-work:evolve`.
 | Gate check | ≥5 retrospectives required |
 | Discover slots | Find (role, task_type) with ≥3 repairs and no existing agent |
 | Generate | Write agent `.md` with learned rules. Register in `registry.json` with mode=shadow. |
-| Benchmark | `dynobench.py run` → compare candidate vs baseline |
+| Benchmark | `bench.py run` → compare candidate vs baseline |
 | Promote | shadow → alongside → replace (or demote/archive) |
 | Pruning | Underperforming for 3 consecutive tasks → `.archive/` |
 
@@ -314,7 +314,7 @@ Bold = hard transition gate in `transition_task()`.
 
 Two paths, both write to `.dynos/task-{id}/token-usage.json`:
 
-1. **Direct:** `dynoslib_tokens.py record` called by skills after spawns
+1. **Direct:** `lib_tokens.py record` called by skills after spawns
 2. **Receipt-piggyback:** `receipt_executor_done()` and `receipt_audit_done()` auto-call `_record_tokens()` when `tokens_used > 0`
 
 Token data feeds into: retrospective scores → effectiveness EMA → model policy → UCB selection.
@@ -324,7 +324,7 @@ Token data feeds into: retrospective scores → effectiveness EMA → model poli
 ## 11. Learned Agent Injection Flow
 
 **Write path (evolve):**
-1. `dynoevolve.py` generates `.md` agent file from retrospective patterns
+1. `evolve.py` generates `.md` agent file from retrospective patterns
 2. Registers in `registry.json` with mode=shadow
 3. After benchmarking, promotes to alongside/replace
 

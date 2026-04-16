@@ -66,7 +66,7 @@ class DreamRuntimeTests(unittest.TestCase):
         )
 
     def test_state_encoder_outputs_signature(self) -> None:
-        result = self.run_py("dynostate.py", "--root", str(self.root), "--target", str(self.root / "src"))
+        result = self.run_py("state.py", "--root", str(self.root), "--target", str(self.root / "src"))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["version"], 1)
@@ -75,7 +75,7 @@ class DreamRuntimeTests(unittest.TestCase):
 
     def test_dream_runner_emits_design_certificates(self) -> None:
         subprocess.run(
-            ["python3", str(ROOT / "hooks" / "dynostrajectory.py"), "rebuild", "--root", str(self.root)],
+            ["python3", str(ROOT / "hooks" / "trajectory.py"), "rebuild", "--root", str(self.root)],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -109,7 +109,7 @@ class DreamRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        result = self.run_py("dynosdream.py", str(options_path), "--root", str(self.root))
+        result = self.run_py("dream.py", str(options_path), "--root", str(self.root))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["search_strategy"]["algorithm"], "mcts-lite")

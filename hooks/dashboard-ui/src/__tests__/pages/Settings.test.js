@@ -202,7 +202,7 @@ describe("Settings page", () => {
             // Expected: rendered in a <pre> or monospace-styled element
         });
         it("handles daemon command failure gracefully", () => {
-            const output = { ok: false, error: "dynosctl.py not found" };
+            const output = { ok: false, error: "ctl.py not found" };
             expect(output.ok).toBe(false);
             expect(output.error).toBeDefined();
         });
