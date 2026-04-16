@@ -41,6 +41,7 @@ You are the Repair Coordinator. You receive audit findings and produce a precise
 - Test coverage findings → `testing-executor`
 - Structural/refactor findings → `refactor-executor`
 - ML/model findings → `ml-executor`
+- Compliance findings (category `compliance`, prefix `comp-`) → route by affected file type: dependency manifests and license issues → `integration-executor`; missing privacy features (data export, account deletion) → `backend-executor`
 
 ## Instruction quality
 
