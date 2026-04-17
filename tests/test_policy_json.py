@@ -309,7 +309,7 @@ class TestResolveModelJsonFirst(unittest.TestCase):
         })
 
         # Write markdown with a different model
-        (persistent / "dynos_patterns.md").write_text(
+        (persistent / "project_rules.md").write_text(
             "## Model Policy\n\n"
             "| Role | Task Type | Recommended Model |\n"
             "|------|-----------|-------------------|\n"
@@ -410,7 +410,7 @@ class TestResolveSkipJsonFirst(unittest.TestCase):
             "ui-auditor": {"threshold": 5, "confidence": 0.80}
         })
         # Write markdown with different threshold
-        (persistent / "dynos_patterns.md").write_text(
+        (persistent / "project_rules.md").write_text(
             "## Skip Policy\n\n"
             "| Auditor | Skip Threshold | Confidence |\n"
             "|---------|----------------|------------|\n"
@@ -430,7 +430,7 @@ class TestResolveSkipJsonFirst(unittest.TestCase):
             "dead-code-auditor": {"threshold": 4, "confidence": 0.70}
         })
         # Write markdown with ui-auditor threshold
-        (persistent / "dynos_patterns.md").write_text(
+        (persistent / "project_rules.md").write_text(
             "## Skip Policy\n\n"
             "| Auditor | Skip Threshold | Confidence |\n"
             "|---------|----------------|------------|\n"
@@ -548,7 +548,7 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "policy.json", {"exploration_epsilon": 0})
-        # No model-policy.json, no dynos_patterns.md
+        # No model-policy.json, no project_rules.md
 
         result = resolve_model(self.root, "backend-executor", "feature")
         self.assertEqual(result["source"], "default")
@@ -559,7 +559,7 @@ class TestBackwardCompatFallback(unittest.TestCase):
         from router import _get_skip_threshold, DEFAULT_SKIP_THRESHOLD
 
         _persistent_project_dir(self.root)
-        # No skip-policy.json, no dynos_patterns.md
+        # No skip-policy.json, no project_rules.md
 
         threshold = _get_skip_threshold(self.root, "ui-auditor")
         self.assertEqual(threshold, DEFAULT_SKIP_THRESHOLD)
@@ -572,7 +572,7 @@ class TestBackwardCompatFallback(unittest.TestCase):
         persistent = _persistent_project_dir(self.root)
         # Write corrupt JSON
         (persistent / "model-policy.json").write_text("{not valid json!!!")
-        (persistent / "dynos_patterns.md").write_text(
+        (persistent / "project_rules.md").write_text(
             "## Model Policy\n\n"
             "| Role | Task Type | Recommended Model |\n"
             "|------|-----------|-------------------|\n"

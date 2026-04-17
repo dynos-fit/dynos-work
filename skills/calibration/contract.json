@@ -3,7 +3,7 @@
   "skill": "evolve",
   "description": "Generate learned agents or skills, update routing state, evaluate challengers, and manage promotion, demotion, and maintenance outputs.",
   "input_schema": {
-    "dynos_patterns.md": {
+    "project_rules.md": {
       "type": "string",
       "required": false,
       "source": "project memory patterns file or .dynos routing notes"
@@ -56,7 +56,7 @@
       "type": "object",
       "description": "Live learned-component registry with routing mode, benchmark history, promotion state, and route eligibility"
     },
-    "dynos_patterns.md": {
+    "project_rules.md": {
       "type": "string",
       "description": "Updated agent routing table and last-generation marker"
     },

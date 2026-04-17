@@ -140,7 +140,7 @@ def propose_improvements(root: Path) -> list[dict]:
             proposals.append({
                 "id": f"imp-prevent-{cat}",
                 "type": "prevention_rule",
-                "target": ".dynos/dynos_patterns.md",
+                "target": ".dynos/project_rules.md",
                 "description": f"Finding category '{cat}' has {count} occurrences across all tasks. Add a prevention rule.",
                 "action": "add_prevention_rule",
                 "category": cat,

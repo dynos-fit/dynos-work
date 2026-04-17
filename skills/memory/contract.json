@@ -15,14 +15,14 @@
       "source": "glob .dynos/task-*/audit-reports/*.json",
       "note": "Each audit report is an object; the skill globs for multiple files"
     },
-    "existing_dynos_patterns.md": {
+    "existing_project_rules.md": {
       "type": "string",
       "required": false,
-      "source": "~/.claude/projects/<project>/memory/dynos_patterns.md (for baseline policy preservation)"
+      "source": "~/.claude/projects/<project>/memory/project_rules.md (for baseline policy preservation)"
     }
   },
   "output_schema": {
-    "dynos_patterns.md": {
+    "project_rules.md": {
       "type": "string",
       "description": "Learned patterns file with top finding categories, executor reliability, avg repair cycles, prevention rules, spawn efficiency, effectiveness scores, model policy, skip policy, baseline policy, agent routing"
     },

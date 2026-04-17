@@ -122,7 +122,7 @@ receipt_executor_routing(Path('.dynos/task-{id}'), plan['segments'])
 
 This receipt is required by `transition_task()` before the task can reach CHECKPOINT_AUDIT. If you skip it, the audit transition will be blocked.
 
-Do NOT read dynos_patterns.md tables manually. The router handles model policy, agent routing, and security floors deterministically.
+Do NOT read project_rules.md tables manually. The router handles model policy, agent routing, and security floors deterministically.
 
 **Learned Agent Injection (MANDATORY — NOT OPTIONAL):** For every segment, you MUST build the executor prompt using the deterministic prompt builder. This is not a suggestion. This is an enforcement gate. For each segment in the executor plan:
 

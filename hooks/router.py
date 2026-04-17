@@ -66,7 +66,7 @@ class RouterContext:
     def patterns_text(self) -> str | None:
         """Deprecated — data tables removed from markdown. Use effectiveness_scores instead."""
         if self._patterns_text is None:
-            path = _persistent_project_dir(self.root) / "dynos_patterns.md"
+            path = _persistent_project_dir(self.root) / "project_rules.md"
             try:
                 self._patterns_text = path.read_text()
             except (FileNotFoundError, OSError):
@@ -504,7 +504,7 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
 
 
 def _parse_model_from_patterns(path: Path, role: str, task_type: str) -> str | None:
-    """Parse Model Policy table from dynos_patterns.md."""
+    """Parse Model Policy table from project_rules.md."""
     text = path.read_text()
     in_table = False
     for line in text.splitlines():

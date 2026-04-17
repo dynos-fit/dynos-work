@@ -896,8 +896,8 @@ class LearningRuntimeTests(unittest.TestCase):
         patterns = self.run_py("patterns.py", "--root", str(self.root))
         self.assertEqual(patterns.returncode, 0, patterns.stdout + patterns.stderr)
         payload = json.loads(patterns.stdout)
-        self.assertIn(str(self.persistent_dir / "dynos_patterns.md"), payload["written_paths"])
-        content = (self.persistent_dir / "dynos_patterns.md").read_text()
+        self.assertIn(str(self.persistent_dir / "project_rules.md"), payload["written_paths"])
+        content = (self.persistent_dir / "project_rules.md").read_text()
         # Data tables removed from markdown (now JSON only) — only prevention rules + gold standard remain
         self.assertIn("## Prevention Rules", content)
         # Verify JSON policy files were written
@@ -1052,7 +1052,7 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertIn(agent["mode"], {"alongside", "replace"})
         self.assertTrue(agent["route_allowed"])
         self.assertTrue((self.root / ".dynos" / "dashboard.html").exists())
-        self.assertTrue((self.persistent_dir / "dynos_patterns.md").exists())
+        self.assertTrue((self.persistent_dir / "project_rules.md").exists())
 
     def test_maintainer_invoke_alias_runs(self) -> None:
         invoke = self.run_py("daemon.py", "invoke", "--root", str(self.root))

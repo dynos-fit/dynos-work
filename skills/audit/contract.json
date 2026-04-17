@@ -28,10 +28,10 @@
       "required": true,
       "source": "manifest.json snapshot field"
     },
-    "dynos_patterns.md": {
+    "project_rules.md": {
       "type": "string",
       "required": false,
-      "source": "~/.claude/projects/<project>/memory/dynos_patterns.md"
+      "source": "~/.claude/projects/<project>/memory/project_rules.md"
     },
     "prior_task-retrospective.json": {
       "type": "object",

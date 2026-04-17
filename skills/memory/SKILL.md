@@ -1,6 +1,6 @@
 ---
 name: memory
-description: "Internal dynos-work skill. Aggregate task retrospectives into project memory. Scans task-retrospective.json files, writes dynos_patterns.md, computes effectiveness scores, derives Model Policy and Skip Policy, manages baselines. Runs automatically at task completion."
+description: "Internal dynos-work skill. Aggregate task retrospectives into project memory. Scans task-retrospective.json files, writes project_rules.md, computes effectiveness scores, derives Model Policy and Skip Policy, manages baselines. Runs automatically at task completion."
 ---
 
 # dynos-work: Memory
@@ -19,7 +19,7 @@ If no `task-retrospective.json` files are found at all, print:
 No task retrospectives found. Run /dynos-work:audit to complete a task first.
 ```
 
-Stop. Do not write or overwrite `dynos_patterns.md`.
+Stop. Do not write or overwrite `project_rules.md`.
 
 ### Step 2 -- Aggregate patterns
 
@@ -40,7 +40,7 @@ Once every 10 tasks, the learn skill performs an external documentation check to
 1. **Detect Core Libraries:** Scan `package.json`, `pubspec.yaml`, or `Cargo.toml`. Identify the top 3 most used libraries.
 2. **Fetch Documentation:** Use `read_url_content` to fetch official "Best Practices" or "Upgrade Guide" documentation for those libraries. 
 3. **Analyze for Anti-Patterns:** Compare the fetched documentation against existing **Prevention Rules**.
-4. **Update Patterns:** Add new "Modernization Rules" to `dynos_patterns.md` if any conflict between local patterns and latest official docs is found.
+4. **Update Patterns:** Add new "Modernization Rules" to `project_rules.md` if any conflict between local patterns and latest official docs is found.
 5. **Log update:** `{timestamp} [DOCS] Refreshed patterns for {list of libraries}`.
 
 ### Step 4 -- Determine project memory path
@@ -53,7 +53,7 @@ Verify the directory exists. If it does not, create it.
 
 ### Step 4 -- Write memory file
 
-Write (or overwrite) `dynos_patterns.md` in the project memory directory:
+Write (or overwrite) `project_rules.md` in the project memory directory:
 
 ```markdown
 # dynos-work: Learned Patterns
@@ -128,14 +128,14 @@ If all retrospectives have zeroed-out data, still write the file (its existence 
 
 If the environment variable `GLOBAL_DYNOS_MEMORY_PATH` is set, perform a cross-project sync:
 
-1. **Local and Global Compare:** Compare `dynos_patterns.md` with the file at `GLOBAL_DYNOS_MEMORY_PATH`.
+1. **Local and Global Compare:** Compare `project_rules.md` with the file at `GLOBAL_DYNOS_MEMORY_PATH`.
 2. **Push Generalizable Patterns:** Identify **Prevention Rules** and **Gold Standard** titles that are architectural (not project-specific) and append them to the global memory. 
 3. **Pull Global Insights:** Surface matching global rules that aren't yet in the local project's ruleset.
 4. **Log sync:** `{timestamp} [GLOBAL_SYNC] {N} patterns pushed, {M} patterns pulled to/from global storage`.
 
 ### Step 9 -- Human Insight Gate (Architectural Alignment)
 
-Before finalizing high-impact changes to `dynos_patterns.md`:
+Before finalizing high-impact changes to `project_rules.md`:
 
 1. **Impact Detection:** If a new **Prevention Rule** affects > 2 modules, OR a new **Gold Standard** replaces an existing one: **Trigger the Insight Gate**.
 2. **The Prompt:** Present the change to the user: "I've identified a new global pattern for {domain}. Should I authorize this as a project-wide standard? [Yes/No/Modify]".
@@ -143,13 +143,13 @@ Before finalizing high-impact changes to `dynos_patterns.md`:
 
 Print:
 ```
-dynos-work: Patterns written to {path}/dynos_patterns.md
+dynos-work: Patterns written to {path}/project_rules.md
 Analyzed {N} task retrospective(s).
 ```
 
 ### Step 5 -- Policy Update
 
-After writing the core sections (Steps 1-4), compute effectiveness scores and derive policies from retrospectives that contain reward data (`quality_score`, `cost_score`, `efficiency_score`, `model_used_by_agent`). Append four new sections to `dynos_patterns.md` after the existing Spawn Efficiency section. All existing sections remain unchanged.
+After writing the core sections (Steps 1-4), compute effectiveness scores and derive policies from retrospectives that contain reward data (`quality_score`, `cost_score`, `efficiency_score`, `model_used_by_agent`). Append four new sections to `project_rules.md` after the existing Spawn Efficiency section. All existing sections remain unchanged.
 
 #### 5a-5d -- Deterministic policy computation
 
@@ -169,7 +169,7 @@ This command:
 - Derives Model Policy (composite scoring with tie-breaking, security-auditor monotonicity)
 - Derives Skip Policy (skip-exempt enforcement, threshold from quality EMA)
 - Enforces cold-start gate (no policies until 5+ scored retrospectives)
-- Writes `dynos_patterns.md` with all sections
+- Writes `project_rules.md` with all sections
 - Writes `model-policy.json`, `skip-policy.json`, `route-policy.json`
 
 The model does NOT perform any of these calculations. The Python runtime handles all arithmetic deterministically.
@@ -184,11 +184,11 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/patterns.p
 
 **Tunable parameter:** Baseline reconstruction window size = 3 (number of contiguous tasks used to reconstruct a missing baseline).
 
-1. **Read existing baseline:** Before overwriting `dynos_patterns.md`, read the current file and parse the existing `## Baseline Policy` section if present. Preserve it across rebuilds.
+1. **Read existing baseline:** Before overwriting `project_rules.md`, read the current file and parse the existing `## Baseline Policy` section if present. Preserve it across rebuilds.
 2. **Initialize baseline:** If no baseline exists and this is the first complete policy computation (5+ retrospectives with reward data), set the baseline to match the current Effectiveness Scores.
 3. **Reconstruct missing baseline:** If no baseline exists (neither read from file nor initialized in substep 2) and 5+ retrospectives have reward data, reconstruct it from the best 3-task window. Sort retrospectives with reward data by task ID ascending. Slide a contiguous window of size 3 across these sorted retrospectives, compute the average `quality_score` for each window, and select the window with the highest average. Compute effectiveness scores from those 3 tasks' reward data (using the same EMA logic from Step 5b applied only to those 3 tasks in order) and use the result as the baseline. Never overwrite an existing baseline with reconstruction -- reconstruction only runs when baseline is absent.
 4. **Evolve baseline upward:** If no regression was detected and the average quality EMA over the last 3 retrospectives exceeds the baseline average quality, update the baseline to match the current Effectiveness Scores.
-5. **Baseline survives cache rebuilds:** Deleting `dynos_patterns.md` and re-running learn must regenerate the policy tables from scratch (they are a recomputable cache), but if a baseline was read from the file before deletion, it is preserved and written back.
+5. **Baseline survives cache rebuilds:** Deleting `project_rules.md` and re-running learn must regenerate the policy tables from scratch (they are a recomputable cache), but if a baseline was read from the file before deletion, it is preserved and written back.
 
 #### 5f -- Cold-start gate
 
@@ -201,7 +201,7 @@ Count the number of retrospectives that contain `quality_score`. If fewer than 5
 
 #### 5g -- Write policy sections
 
-Append the following four sections to `dynos_patterns.md` after the `## Spawn Efficiency` section. Use a single atomic write operation for the complete file (do not write sections incrementally).
+Append the following four sections to `project_rules.md` after the `## Spawn Efficiency` section. Use a single atomic write operation for the complete file (do not write sections incrementally).
 
 ```markdown
 ## Effectiveness Scores

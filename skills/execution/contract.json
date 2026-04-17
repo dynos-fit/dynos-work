@@ -21,7 +21,7 @@
     "prevention_rules": {
       "type": "array",
       "required": false,
-      "source": "Filtered from dynos_patterns.md Prevention Rules section matching executor type"
+      "source": "Filtered from project_rules.md Prevention Rules section matching executor type"
     }
   },
   "output_schema": {

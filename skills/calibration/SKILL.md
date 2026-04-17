@@ -37,7 +37,7 @@ Prefer `hooks/generate.py` when you want a deterministic learned component file 
 All three conditions must be true to proceed. If any is false, skip Step 1 silently.
 
 1. **Sufficient data:** At least 5 retrospectives with reward data (`quality_score` present).
-2. **Rate limit:** No generation occurred in the last 3 tasks. The last generation task ID is persisted in `dynos_patterns.md` under the `## Agent Routing` section as `Last generation: {task-ID}`. Compare the current task ID against the stored value; if fewer than 3 task IDs have elapsed, skip. If no stored value exists, the condition is satisfied.
+2. **Rate limit:** No generation occurred in the last 3 tasks. The last generation task ID is persisted in `project_rules.md` under the `## Agent Routing` section as `Last generation: {task-ID}`. Compare the current task ID against the stored value; if fewer than 3 task IDs have elapsed, skip. If no stored value exists, the condition is satisfied.
 3. **Triggered Execution:** This step runs when the evolve skill is invoked (typically after learn).
 
 #### 1b -- Analyze patterns
@@ -89,7 +89,7 @@ Create any missing directories. The `.staging/` directory holds new agents enter
 
 ### Step 2 -- Agent Routing
 
-Maintain the `## Agent Routing` section in `dynos_patterns.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/route.py` as the live routing source of truth.
+Maintain the `## Agent Routing` section in `project_rules.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/route.py` as the live routing source of truth.
 
 #### 2a -- Routing composites (deterministic)
 
@@ -103,7 +103,7 @@ The `routing_composites` field in the output contains `{role:task_type:source ->
 
 #### 2b -- Write Agent Routing table
 
-Write (or update) the `## Agent Routing` section in `dynos_patterns.md`:
+Write (or update) the `## Agent Routing` section in `project_rules.md`:
 
 ```markdown
 ## Agent Routing

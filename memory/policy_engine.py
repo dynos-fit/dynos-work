@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate dynos_patterns.md from live runtime data."""
+"""Policy engine — computes routing policies from task retrospectives."""
 
 from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent)); _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hooks"))
@@ -44,11 +44,11 @@ def project_slug(root: Path) -> str:
 
 
 def local_patterns_path(root: Path) -> Path:
-    return _persistent_project_dir(root) / "dynos_patterns.md"
+    return _persistent_project_dir(root) / "project_rules.md"
 
 
 def claude_patterns_path(root: Path) -> Path:
-    return Path.home() / ".claude" / "projects" / project_slug(root) / "memory" / "dynos_patterns.md"
+    return Path.home() / ".claude" / "projects" / project_slug(root) / "memory" / "project_rules.md"
 
 
 def pattern_paths(root: Path) -> list[Path]:
@@ -630,7 +630,7 @@ def build_patterns_markdown(
     skip_policy_data: dict[str, dict] | None = None,
     route_policy_data: dict[str, dict] | None = None,
 ) -> str:
-    """Build the dynos_patterns.md content.
+    """Build the project_rules.md content.
 
     When policy data dicts are provided, uses them directly (data-first path).
     When called without them, computes the data inline (backward compat).
@@ -654,7 +654,7 @@ def build_patterns_markdown(
         1 for item in registry.get("agents", []) if item.get("route_allowed")
     )
     lines = [
-        "# dynos-work Patterns",
+        "# Project Rules",
         "",
         f"Generated at: {now_iso()}",
         f"Source task count: {len(retrospectives)}",

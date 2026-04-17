@@ -3,10 +3,10 @@
   "skill": "dashboard",
   "description": "Display a terminal report summarizing learned policies, finding trends, and executor reliability from task retrospectives.",
   "input_schema": {
-    "dynos_patterns.md": {
+    "project_rules.md": {
       "type": "string",
       "required": true,
-      "source": "~/.claude/projects/<project>/memory/dynos_patterns.md"
+      "source": "~/.claude/projects/<project>/memory/project_rules.md"
     },
     "task-retrospective.json": {
       "type": "object",
