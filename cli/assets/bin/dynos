@@ -44,7 +44,8 @@ Internals (advanced):
   patterns      Generate patterns from retrospectives
   ctl           Task lifecycle, approvals, validation
   postmortem    Postmortems and improvements
-  evolve        Learned agent management
+  calibration   Agent calibration (generate, benchmark, promote/demote)
+  memory        Memory aggregation (patterns, trajectories)
   trajectory    Trajectory store operations
   bench         Benchmark runner
   report        Generate reports
@@ -272,7 +273,7 @@ print('no')
     ;;
   ctl)        exec python3 "${HOOKS_DIR}/dynosctl.py" "$@" ;;
   postmortem) exec python3 "${HOOKS_DIR}/dynopostmortem.py" "$@" ;;
-  evolve)     exec python3 "${HOOKS_DIR}/dynoevolve.py" "$@" ;;
+  calibration|evolve) exec python3 "${HOOKS_DIR}/dynoevolve.py" "$@" ;;
   trajectory) exec python3 "${HOOKS_DIR}/dynostrajectory.py" "$@" ;;
   bench)      exec python3 "${HOOKS_DIR}/dynobench.py" "$@" ;;
   report)     exec python3 "${HOOKS_DIR}/dynoreport.py" "$@" ;;

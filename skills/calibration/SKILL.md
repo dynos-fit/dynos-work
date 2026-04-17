@@ -1,11 +1,11 @@
 ---
-name: evolve
-description: "Internal dynos-work skill. Evolutionary agent management. Generates learned agents, maintains Agent Routing, prunes underperforming agents, and manages auditor mode transitions. Also performs proactive repo-wide pattern analysis."
+name: calibration
+description: "Internal dynos-work skill. Agent calibration — generates project-specific agents, benchmarks them, promotes/demotes based on performance, and manages auditor mode transitions."
 ---
 
-# dynos-work: Evolve
+# dynos-work: Calibration
 
-Owns the technical evolution of the system's agents. It processes findings into specialized agents and tracks their performance over time.
+Calibrates the system's agents to your project. Generates project-specific specialists from task retrospectives, benchmarks them against generics, promotes when they outperform, archives when they regress.
 
 If available in this repo, the deterministic runtime for registry, routing, promotion, and automatic challenger execution is:
 

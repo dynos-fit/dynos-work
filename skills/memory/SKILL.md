@@ -1,11 +1,11 @@
 ---
-name: learn
-description: "Internal dynos-work skill. Aggregate task retrospectives into project memory. Scans all task-retrospective.json files and writes dynos_patterns.md to Claude Code project memory. Computes effectiveness scores via EMA over (role, model, task_type, source) quads, derives Model Policy and Skip Policy, manages baseline policies, generates learned agents, maintains Agent Routing, and prunes underperforming agents. Runs automatically at task completion and can also be invoked manually."
+name: memory
+description: "Internal dynos-work skill. Aggregate task retrospectives into project memory. Scans task-retrospective.json files, writes dynos_patterns.md, computes effectiveness scores, derives Model Policy and Skip Policy, manages baselines. Runs automatically at task completion."
 ---
 
-# dynos-work: Learn
+# dynos-work: Memory
 
-Aggregates completed task retrospectives into a persistent memory file that informs future planning and execution.
+Aggregates completed task retrospectives into persistent memory that informs future planning and execution.
 
 ## What you do
 
