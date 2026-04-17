@@ -198,8 +198,23 @@ def apply_fast_track(task_dir: Path) -> bool:
     return fast
 
 
+# Stages at which each artifact becomes required
+_SPEC_REQUIRED_AFTER = {"SPEC_NORMALIZATION", "SPEC_REVIEW", "PLANNING", "PLAN_REVIEW",
+                         "PLAN_AUDIT", "EXECUTION_GRAPH_BUILD", "PRE_EXECUTION_SNAPSHOT",
+                         "EXECUTION", "TEST_EXECUTION", "CHECKPOINT_AUDIT", "FINAL_AUDIT",
+                         "REPAIR_PLANNING", "REPAIR_EXECUTION", "DONE"}
+_PLAN_REQUIRED_AFTER = {"PLANNING", "PLAN_REVIEW", "PLAN_AUDIT", "EXECUTION_GRAPH_BUILD",
+                         "PRE_EXECUTION_SNAPSHOT", "EXECUTION", "TEST_EXECUTION",
+                         "CHECKPOINT_AUDIT", "FINAL_AUDIT", "REPAIR_PLANNING",
+                         "REPAIR_EXECUTION", "DONE"}
+
+
 def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
-    """Validate all task artifacts in a task directory."""
+    """Validate all task artifacts in a task directory.
+
+    Stage-aware: only checks artifacts that should exist at the current stage.
+    At FOUNDRY_INITIALIZED, only manifest is required.
+    """
     errors: list[str] = []
     manifest_path = task_dir / "manifest.json"
     spec_path = task_dir / "spec.md"
@@ -214,11 +229,19 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
         return [f"invalid JSON in {manifest_path}: {exc}"]
 
     errors.extend(validate_manifest(manifest))
+    stage = manifest.get("stage", "")
+
+    # Spec is only required after SPEC_NORMALIZATION
+    if stage not in _SPEC_REQUIRED_AFTER and not spec_path.exists():
+        # Early stage — spec doesn't exist yet, that's fine
+        return errors
 
     try:
         spec_text = require(spec_path)
     except FileNotFoundError:
-        return errors + [f"missing required file: {spec_path}"]
+        if stage in _SPEC_REQUIRED_AFTER or strict:
+            return errors + [f"missing required file: {spec_path}"]
+        return errors
 
     spec_headings = collect_headings(spec_text)
     for heading in REQUIRED_SPEC_HEADINGS:
@@ -262,8 +285,9 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
         project_root = task_dir.parent.parent
         gap_report = run_gap_analysis(project_root, task_dir)
         errors.extend(findings_from_report(gap_report))
-    elif strict:
-        errors.append(f"missing required file: {plan_path}")
+    elif strict or stage in _PLAN_REQUIRED_AFTER:
+        if not plan_path.exists():
+            errors.append(f"missing required file: {plan_path}")
 
     if graph_path.exists():
         try:
