@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Compatibility wrapper — implementation moved to memory/trajectory.py."""
+"""Compatibility wrapper — implementation moved to sandbox/."""
 import sys as _sys
 _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 _is_main = __name__ == "__main__"
-from memory import trajectory as _real
-# Make the real module importable under the old name too
+from sandbox.trajectory import trajectory as _real
 _sys.modules[__name__ if not _is_main else "trajectory"] = _real
 if not _is_main:
     _sys.modules["trajectory"] = _real

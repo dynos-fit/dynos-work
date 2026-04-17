@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Compatibility wrapper — implementation moved to memory/fixture.py."""
+"""Compatibility wrapper — implementation moved to sandbox/."""
 import sys as _sys
 _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 _is_main = __name__ == "__main__"
-from memory import fixture as _real
-# Make the real module importable under the old name too
+from sandbox.calibration import fixture as _real
 _sys.modules[__name__ if not _is_main else "fixture"] = _real
 if not _is_main:
     _sys.modules["fixture"] = _real

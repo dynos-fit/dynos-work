@@ -402,7 +402,7 @@ class TestDaemonSubprocessSeparation:
 
     def test_no_direct_maintenance_cycle_import(self) -> None:
         """sweeper.py does not contain 'from daemon import maintenance_cycle'."""
-        source = (MEMORY_DIR / "sweeper.py").read_text()
+        source = (ROOT / "sandbox" / "sweeper.py").read_text()
         tree = ast.parse(source, filename="sweeper.py")
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module in ("maintain", "daemon"):
@@ -413,7 +413,7 @@ class TestDaemonSubprocessSeparation:
 
     def test_subprocess_invocation_pattern_exists(self) -> None:
         """sweeper.py contains subprocess.run invocation for maintain."""
-        source = (MEMORY_DIR / "sweeper.py").read_text()
+        source = (ROOT / "sandbox" / "sweeper.py").read_text()
         assert "subprocess.run" in source, (
             "sweeper.py does not contain subprocess.run invocation"
         )
@@ -423,21 +423,21 @@ class TestDaemonSubprocessSeparation:
 
     def test_subprocess_uses_run_once_subcommand(self) -> None:
         """The subprocess invocation uses the 'run-once' subcommand."""
-        source = (MEMORY_DIR / "sweeper.py").read_text()
+        source = (ROOT / "sandbox" / "sweeper.py").read_text()
         assert "run-once" in source, (
             "sweeper.py subprocess call does not use 'run-once' subcommand"
         )
 
     def test_subprocess_captures_output(self) -> None:
         """The subprocess invocation captures stdout for JSON parsing."""
-        source = (MEMORY_DIR / "sweeper.py").read_text()
+        source = (ROOT / "sandbox" / "sweeper.py").read_text()
         assert "capture_output=True" in source or "stdout=" in source, (
             "sweeper.py subprocess call does not capture output"
         )
 
     def test_subprocess_has_timeout(self) -> None:
         """The subprocess invocation has a timeout parameter."""
-        source = (MEMORY_DIR / "sweeper.py").read_text()
+        source = (ROOT / "sandbox" / "sweeper.py").read_text()
         assert "timeout=" in source, (
             "sweeper.py subprocess call does not have a timeout"
         )
@@ -516,7 +516,7 @@ class TestFunctionRelocation:
 
     def test_sweeper_imports_from_lib_core(self) -> None:
         """sweeper.py imports project_dir from lib_core (or lib)."""
-        source = (MEMORY_DIR / "sweeper.py").read_text()
+        source = (ROOT / "sandbox" / "sweeper.py").read_text()
         tree = ast.parse(source, filename="sweeper.py")
         # project_dir should NOT be defined as a function in sweeper.py anymore
         for node in ast.walk(tree):
@@ -607,7 +607,7 @@ class TestDynopostmortemImproveExtraction:
 
     def test_postmortem_still_wires_improve_subcommand(self) -> None:
         """postmortem.py still has 'improve' in its CLI parser."""
-        source = (MEMORY_DIR / "postmortem.py").read_text()
+        source = (ROOT / "memory" / "postmortem.py").read_text()
         assert "improve" in source, (
             "postmortem.py no longer wires the 'improve' subcommand"
         )

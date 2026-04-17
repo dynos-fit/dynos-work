@@ -89,12 +89,12 @@ class TestModulesInstrumented:
         assert '"dream"' in text
 
     def test_postmortem_improve_instrumented(self):
-        text = (ROOT / "memory" / "postmortem_improve.py").read_text()
+        text = (ROOT / "sandbox" / "postmortem_improve.py").read_text()
         assert "record_usage" in text
         assert '"postmortem_improve"' in text
 
     def test_lib_qlearn_instrumented(self):
-        text = (ROOT / "memory" / "lib_qlearn.py").read_text()
+        text = (ROOT / "sandbox" / "lib_qlearn.py").read_text()
         assert "record_usage" in text
         assert '"lib_qlearn"' in text
 
