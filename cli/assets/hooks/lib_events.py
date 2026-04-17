@@ -22,12 +22,12 @@ from lib_core import load_json, now_iso, write_json
 
 EVENT_TYPES: set[str] = {
     "task-completed",
-    "learn-completed",
-    "evolve-completed",
+    "memory-completed",
+    "calibration-completed",
     "benchmark-completed",
 }
 
-VALID_PIPELINES: set[str] = {"task", "learn", "observability", "eventbus"}
+VALID_PIPELINES: set[str] = {"task", "memory", "observability", "eventbus"}
 
 # Retention: processed events older than this (seconds) are deleted on cleanup
 RETENTION_SECONDS: int = 7 * 24 * 3600  # 7 days
