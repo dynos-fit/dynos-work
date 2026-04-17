@@ -84,17 +84,17 @@ class TestModulesInstrumented:
     """Verify that each monitored module calls record_usage at import time."""
 
     def test_dream_instrumented(self):
-        text = (ROOT / "hooks" / "dream.py").read_text()
+        text = (ROOT / "learn" / "dream.py").read_text()
         assert "record_usage" in text
         assert '"dream"' in text
 
     def test_postmortem_improve_instrumented(self):
-        text = (ROOT / "hooks" / "postmortem_improve.py").read_text()
+        text = (ROOT / "learn" / "postmortem_improve.py").read_text()
         assert "record_usage" in text
         assert '"postmortem_improve"' in text
 
     def test_lib_qlearn_instrumented(self):
-        text = (ROOT / "hooks" / "lib_qlearn.py").read_text()
+        text = (ROOT / "learn" / "lib_qlearn.py").read_text()
         assert "record_usage" in text
         assert '"lib_qlearn"' in text
 
@@ -142,7 +142,7 @@ class TestStaticAnalysisFindings:
 
     def test_postmortem_improve_has_importers(self):
         """postmortem_improve is imported by postmortem.py — NOT dormant."""
-        text = (ROOT / "hooks" / "postmortem.py").read_text()
+        text = (ROOT / "learn" / "postmortem.py").read_text()
         assert "from postmortem_improve import" in text
 
     def test_dream_has_no_python_importers(self):

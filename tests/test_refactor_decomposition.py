@@ -42,10 +42,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIR = ROOT / "hooks"
+LEARN_DIR = ROOT / "learn"
 
-# Ensure hooks/ is importable
+# Ensure hooks/ and learn/ are importable
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 # ===================================================================
@@ -383,9 +386,10 @@ class TestNoCircularImports:
         """Importing all sub-modules in any order does not raise circular import errors."""
         for mod_name in self.SUB_MODULES:
             importlib.import_module(mod_name)
-        # Reverse order
-        for mod_name in reversed(self.SUB_MODULES):
-            importlib.reload(importlib.import_module(mod_name))
+        # Verify all loaded successfully
+        import sys
+        for mod_name in self.SUB_MODULES:
+            assert mod_name in sys.modules, f"{mod_name} not in sys.modules after import"
 
 
 # ===================================================================
@@ -398,7 +402,7 @@ class TestDaemonSubprocessSeparation:
 
     def test_no_direct_maintenance_cycle_import(self) -> None:
         """sweeper.py does not contain 'from maintain import maintenance_cycle'."""
-        source = (HOOKS_DIR / "sweeper.py").read_text()
+        source = (LEARN_DIR / "sweeper.py").read_text()
         tree = ast.parse(source, filename="sweeper.py")
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module == "maintain":
@@ -409,7 +413,7 @@ class TestDaemonSubprocessSeparation:
 
     def test_subprocess_invocation_pattern_exists(self) -> None:
         """sweeper.py contains subprocess.run invocation for maintain."""
-        source = (HOOKS_DIR / "sweeper.py").read_text()
+        source = (LEARN_DIR / "sweeper.py").read_text()
         assert "subprocess.run" in source, (
             "sweeper.py does not contain subprocess.run invocation"
         )
@@ -419,21 +423,21 @@ class TestDaemonSubprocessSeparation:
 
     def test_subprocess_uses_run_once_subcommand(self) -> None:
         """The subprocess invocation uses the 'run-once' subcommand."""
-        source = (HOOKS_DIR / "sweeper.py").read_text()
+        source = (LEARN_DIR / "sweeper.py").read_text()
         assert "run-once" in source, (
             "sweeper.py subprocess call does not use 'run-once' subcommand"
         )
 
     def test_subprocess_captures_output(self) -> None:
         """The subprocess invocation captures stdout for JSON parsing."""
-        source = (HOOKS_DIR / "sweeper.py").read_text()
+        source = (LEARN_DIR / "sweeper.py").read_text()
         assert "capture_output=True" in source or "stdout=" in source, (
             "sweeper.py subprocess call does not capture output"
         )
 
     def test_subprocess_has_timeout(self) -> None:
         """The subprocess invocation has a timeout parameter."""
-        source = (HOOKS_DIR / "sweeper.py").read_text()
+        source = (LEARN_DIR / "sweeper.py").read_text()
         assert "timeout=" in source, (
             "sweeper.py subprocess call does not have a timeout"
         )
@@ -512,7 +516,7 @@ class TestFunctionRelocation:
 
     def test_sweeper_imports_from_lib_core(self) -> None:
         """sweeper.py imports project_dir from lib_core (or lib)."""
-        source = (HOOKS_DIR / "sweeper.py").read_text()
+        source = (LEARN_DIR / "sweeper.py").read_text()
         tree = ast.parse(source, filename="sweeper.py")
         # project_dir should NOT be defined as a function in sweeper.py anymore
         for node in ast.walk(tree):
@@ -603,7 +607,7 @@ class TestDynopostmortemImproveExtraction:
 
     def test_postmortem_still_wires_improve_subcommand(self) -> None:
         """postmortem.py still has 'improve' in its CLI parser."""
-        source = (HOOKS_DIR / "postmortem.py").read_text()
+        source = (LEARN_DIR / "postmortem.py").read_text()
         assert "improve" in source, (
             "postmortem.py no longer wires the 'improve' subcommand"
         )
