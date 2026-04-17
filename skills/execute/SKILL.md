@@ -7,6 +7,15 @@ description: "Execute the approved plan. Orchestrates execution graph segments t
 
 Manages the parallel execution of the implementation plan via the execution graph. Handles dependency ordering, executor spawning, and final integration.
 
+## Ruthlessness Standard
+
+- No silent shortcuts.
+- No executor prompt may omit learned rules or prevention rules when they exist.
+- A segment is not done because code was written; it is done when the required behavior is proven.
+- If verification is weak, the segment is weak.
+- If a segment can pass with shallow evidence, the prompt is too soft.
+- No executor gets to hide behind “close enough.”
+
 ## What you do
 
 ### Step 0 — Contract validation
@@ -46,6 +55,8 @@ Append to log:
 
 Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
 
+Inline execution does not relax standards. It removes spawn overhead, not rigor.
+
 Skipping the router in inline mode silently ignores learned agents and breaks the self-learning feedback loop.
 
 **Normal execution (fast_track is false or >1 segment):**
@@ -79,6 +90,8 @@ Then enforce the following checks:
 8. If `.dynos/task-{id}/evidence/tdd-tests.md` exists, the execution graph must still cover every criterion represented by the approved tests.
 
 If any preflight validation fails, stop and return to `/dynos-work:start` or `/dynos-work:plan` to repair the plan artifacts.
+
+Do not patch around a broken plan during execution. A bad plan is an upstream failure, not an executor challenge.
 
 After preflight validation, perform the following execution optimizations:
 
@@ -139,6 +152,8 @@ This command:
 6. Prints the complete prompt to stdout
 
 **Use the OUTPUT of this command as the prompt for the Agent tool spawn.** Do NOT construct the executor prompt yourself. Do NOT skip this step. If you spawn an executor without running inject-prompt first, the learned agent is silently ignored and the whole self-learning system is broken.
+
+If the injected prompt is weak, strengthen the base prompt before spawning. Do not accept vague executor instructions.
 
 If `inject-prompt` is not available (command not found), fall back to manually reading the `agent_path` file from the executor plan and appending its contents to the prompt. But this should never happen in this repo.
 

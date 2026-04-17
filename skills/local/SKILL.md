@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Manage the project daemon: start, stop,
 
 Manage the local project daemon.
 
+## Ruthlessness Standard
+
+- Do not fake local daemon status from prior runs.
+- Report the exact command result for the requested subcommand.
+- If the command fails, surface the failure directly and do not imply the daemon changed state.
+
 ## Usage
 
 ```

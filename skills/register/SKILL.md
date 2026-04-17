@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Register the current project directory 
 
 Registers the current working directory as a dynos-work project in the global registry at `~/.dynos/`.
 
+## Ruthlessness Standard
+
+- Do not claim registration succeeded unless the command succeeded.
+- If the directory is already registered, say so explicitly.
+- If hook resolution or registry write fails, report the exact failure path.
+
 ## What you do
 
 1. Determine the plugin's hooks directory. Use the `CLAUDE_PLUGIN_ROOT` environment variable if available, otherwise find the `hooks/` directory relative to this skill file.

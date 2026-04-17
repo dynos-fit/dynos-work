@@ -7,6 +7,12 @@ description: "Resume an interrupted task from .dynos/ state. Use after session r
 
 Resume a dynos-work task that was interrupted.
 
+## Ruthlessness Standard
+
+- Do not guess the next command from vibes; derive it from the actual task stage.
+- Missing or corrupt artifacts are not "probably fine". Call them out.
+- If multiple active tasks exist, do not silently pick the wrong one.
+
 ## What you do
 
 1. List all tasks in `.dynos/` that are not DONE or FAILED (read each manifest.json). If available in this repo, use `python3 hooks/ctl.py active-task`.

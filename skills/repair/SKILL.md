@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Manually repair a specific finding. Use
 
 Manually repair a specific finding from an audit report. Use this when you need to fix a precise issue without running the full audit pipeline.
 
+## Ruthlessness Standard
+
+- A repair that cannot survive re-audit is not a repair.
+- Fix the mechanism, not the screenshot of the symptom.
+- If the instruction is vague, stop and sharpen it before spawning an executor.
+
 ## What you do
 
 1. Find the active task in `.dynos/`

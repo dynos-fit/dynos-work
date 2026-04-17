@@ -7,6 +7,12 @@ description: "Show current task state, lifecycle stage, audit results, and open 
 
 Show the current state of the active dynos-work task.
 
+## Ruthlessness Standard
+
+- Missing evidence is not success. Report absent artifacts as gaps.
+- Do not infer PASS from silence, skipped files, or stale reports.
+- The status report must make blockers and weak spots obvious, not polite.
+
 ## What you do
 
 1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED). If available in this repo, use `python3 hooks/ctl.py active-task`.

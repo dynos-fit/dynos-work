@@ -9,6 +9,15 @@ You are the entry point for dynos-work. You own all human-in-the-loop gates befo
 
 There is one pipeline for all tasks. There are no shortcuts. Historical memory may inform discovery and design review, but it is advisory only. Human approval and deterministic artifact checks decide readiness.
 
+## Ruthlessness Standard
+
+- Do not let ambiguity leak downstream.
+- Do not allow vague specs, soft assumptions, or unbounded scope to survive a phase gate.
+- Missing validation, error handling, auth, loading, empty, retry, and rollback requirements are spec defects.
+- If an artifact is weak, send it back. Do not carry weakness forward.
+- Prefer a blocked gate over a rotten artifact.
+- If the work can fail in an obvious way, encode that failure mode before execution starts.
+
 ---
 
 ## MANDATORY: Token Recording After Every Agent Spawn
@@ -173,6 +182,8 @@ Spawn the Planner subagent (`dynos-work:planning`) with instruction:
 Phase: Discovery + Design + Classification (combined).
 Read raw-input.md and discovery-notes.md if present. Also read any attached trajectory context as advisory prior history only.
 
+Be ruthless. Surface ambiguity, hidden requirements, failure modes, and soft assumptions. Do not produce generic questions or generic design options.
+
 Perform three things in one pass:
 1. Discovery: generate only the highest-value unresolved questions.
 2. Design Options: break the task into subtasks. For any subtask rated hard complexity or critical value, generate 2-3 design options with pros and cons. For easy or medium subtasks, decide directly.
@@ -183,6 +194,8 @@ Return three sections:
 - Design Options
 - Classification (JSON)
 ```
+
+Reject lazy output mentally before accepting it. If the planner returns generic questions, generic design options, or a mushy classification, send it back.
 
 Present any remaining discovery questions to the user and append answers to `discovery-notes.md`.
 
@@ -237,8 +250,11 @@ Spawn the Planner subagent with instruction:
 Phase: Spec Normalization.
 Read raw-input.md, discovery-notes.md, and design-decisions.md.
 Also read the actual implementation files referenced in the task (e.g., the files that will be modified). Verify runtime semantics directly from the code — do not assume template engines, escaping conventions, or generation mechanisms without reading the relevant functions. Include specific function signatures, data flow paths, and module boundaries in the spec.
+Write a spec that leaves executors zero room to hand-wave. Name the exact behavior, exact boundaries, exact failure modes, and exact evidence needed to prove completion.
 Write spec.md.
 ```
+
+If the spec still contains vague adjectives, missing states, or unstated boundary behavior after normalization, send it back again.
 
 After `spec.md` is written, run deterministic spec validation:
 1. The file must contain the headings `Task Summary`, `User Context`, `Acceptance Criteria`, `Implicit Requirements Surfaced`, `Out of Scope`, `Assumptions`, and `Risk Notes`.

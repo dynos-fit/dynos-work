@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Validate contract.json chaining across 
 
 Validate that the contract.json files across all skills form a valid pipeline chain. This skill reads every `skills/*/contract.json`, determines the pipeline order, and verifies that each stage's outputs satisfy the next stage's required inputs.
 
+## Ruthlessness Standard
+
+- Treat missing or incompatible contract fields as real pipeline breakage, not paperwork.
+- Do not infer compatibility from naming similarity alone.
+- If a downstream stage depends on behavior the upstream contract does not guarantee, call it broken.
+
 ## What you do
 
 ### Step 1 -- Discover contracts

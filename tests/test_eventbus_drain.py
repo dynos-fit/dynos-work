@@ -63,8 +63,8 @@ class TestFlatChain:
             return fn
 
         handlers = _make_handlers({
+            "improve": track("improve"),
             "policy_engine": track("policy_engine"),
-            "postmortem": track("postmortem"),
             "dashboard": track("dashboard"),
             "register": track("register"),
         })
@@ -74,7 +74,7 @@ class TestFlatChain:
             from eventbus import drain
             drain(root, max_iterations=1)
 
-        assert called == {"policy_engine", "postmortem", "dashboard", "register"}
+        assert called == {"improve", "policy_engine", "dashboard", "register"}
 
     def test_no_follow_on_events(self, tmp_path: Path):
         root = _setup(tmp_path)
@@ -99,7 +99,7 @@ class TestFailedHandlerRetry:
         root = _setup(tmp_path)
         ep = _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
 
-        handlers = _make_handlers({"policy_engine": False, "postmortem": True})
+        handlers = _make_handlers({"policy_engine": False, "improve": True})
         with mock.patch("eventbus.HANDLERS", handlers), \
              mock.patch("lib_core.is_learning_enabled", return_value=True), \
              mock.patch("eventbus.log_event"):
@@ -107,7 +107,7 @@ class TestFailedHandlerRetry:
             drain(root, max_iterations=1)
 
         processed = _processed_by(ep)
-        assert "postmortem" in processed
+        assert "improve" in processed
         assert "policy_engine" not in processed
 
     def test_failed_handler_retried_on_second_drain(self, tmp_path: Path):

@@ -914,7 +914,8 @@ def build_executor_prompt(
                 parts.append(
                     f"\n\n## Learned Agent Instructions ({agent_name})\n"
                     f"You are running as the **{agent_name}** learned agent (mode={route_mode}). "
-                    f"Follow these project-specific rules derived from past task analysis:\n\n"
+                    f"These rules were learned from past failures and regressions. Treat them as hard constraints unless the current spec explicitly overrides them. "
+                    f"If one of these rules is violated without justification, assume you are recreating a known bug.\n\n"
                     f"{agent_content}"
                 )
                 log_event(
@@ -946,7 +947,9 @@ def build_executor_prompt(
         rules_text = "\n".join(f"- {r}" for r in prevention_rules)
         parts.append(
             f"\n\n## Prevention Rules\n"
-            f"These patterns have caused audit findings in past tasks. Avoid them:\n{rules_text}"
+            f"These patterns have already caused audit findings in real tasks. Do not repeat them. "
+            f"Treat each rule below as a known failure mode that must be actively prevented, not passively remembered. "
+            f"If you violate one without an explicit, spec-backed reason, assume you are shipping a regression:\n{rules_text}"
         )
 
     return "\n".join(parts)

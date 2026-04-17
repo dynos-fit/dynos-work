@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Autonomous maintenance worker. Periodic
 
 Maintains the long-term health of the repository by proactively identifying and resolving issues before they become blocking findings.
 
+## Ruthlessness Standard
+
+- Maintenance work must remove real risk, not generate cosmetic churn.
+- Do not open a PR for a shallow fix, a guessed fix, or a fix that was not independently re-checked.
+- If a recurring debt cluster is found, name the mechanism that keeps recreating it instead of spraying point fixes.
+
 ## What you do
 
 ### Step 1 -- Autonomous Debt Polling (The Trigger)

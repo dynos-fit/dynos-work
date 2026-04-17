@@ -7,9 +7,16 @@ description: "Deep bug investigation. Pass a short description of the problem â€
 
 Spawn the `investigator` agent with the user's prompt as the instruction.
 
+## Ruthlessness Standard
+
+- The investigator must name the mechanism, not restate the symptom.
+- Every conclusion needs concrete file/function/condition evidence.
+- If the evidence does not support a claim, the agent must say so instead of guessing.
+
 ## What to pass
 
-Pass the user's full prompt verbatim as the instruction to the agent. Do not summarize or reformat it.
+Pass the user's full prompt verbatim. Do not summarize or sanitize it.
+Prepend a short hard wrapper that tells the agent to trace root cause, immediate cause, and detection failure with evidence.
 
 ## Usage
 

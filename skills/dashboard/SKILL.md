@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Start the global dashboard server showi
 
 Start the global dashboard server. Shows all registered projects in a unified web UI.
 
+## Ruthlessness Standard
+
+- Do not invent server state, URLs, or process health.
+- Report the exact command outcome. If startup fails, surface the failure plainly.
+- If the server is already running or broken, say that directly instead of implying success.
+
 ## Usage
 
 ```

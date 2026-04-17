@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Set up the current project: register wi
 
 Register the current project and start the local maintenance daemon.
 
+## Ruthlessness Standard
+
+- Do not claim initialization succeeded unless registration and daemon startup both succeeded.
+- If the daemon is already running, say so plainly and stop.
+- If any setup step fails, stop immediately and report the exact failing step.
+
 ## Usage
 
 ```

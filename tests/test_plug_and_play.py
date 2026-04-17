@@ -184,3 +184,39 @@ class TestHandlerDiscovery:
         discovered = _discover_handlers()
         assert "task-completed" in discovered
         assert len(discovered["task-completed"]) >= len(_BUILTIN_HANDLERS["task-completed"])
+
+    def test_improve_handler_registered(self):
+        from eventbus import HANDLERS
+        names = [n for n, _ in HANDLERS.get("task-completed", [])]
+        assert "improve" in names
+
+
+# ---------------------------------------------------------------------------
+# Postmortem Improve
+# ---------------------------------------------------------------------------
+
+class TestPostmortemImprove:
+    def test_no_proposals_with_few_retros(self, tmp_path: Path):
+        from memory.postmortem_improve import propose_improvements
+        # Fewer than 3 retrospectives → no proposals
+        proposals = propose_improvements(tmp_path)
+        assert proposals == []
+
+    def test_prevention_rules_flow_to_project_rules(self, tmp_path: Path):
+        from memory.policy_engine import _load_prevention_rules
+        from lib_core import _persistent_project_dir, write_json
+        # Write a prevention rule
+        persistent = _persistent_project_dir(tmp_path)
+        persistent.mkdir(parents=True, exist_ok=True)
+        write_json(persistent / "prevention-rules.json", {
+            "rules": [{"category": "sec", "rule": "Check auth on all endpoints."}],
+            "updated_at": "2026-04-17T00:00:00Z",
+        })
+        rules = _load_prevention_rules(tmp_path)
+        assert len(rules) == 1
+        assert rules[0]["category"] == "sec"
+
+    def test_no_prevention_rules_returns_empty(self, tmp_path: Path):
+        from memory.policy_engine import _load_prevention_rules
+        rules = _load_prevention_rules(tmp_path)
+        assert rules == []

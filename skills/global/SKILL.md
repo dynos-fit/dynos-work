@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Manage the global cross-project sweeper
 
 Manage the global daemon that sweeps all registered projects.
 
+## Ruthlessness Standard
+
+- Do not fake daemon health from stale assumptions.
+- Report the exact status returned by the command.
+- If the subcommand fails, surface the failure directly instead of printing a polite summary.
+
 ## Usage
 
 ```

@@ -7,6 +7,13 @@ description: "Internal: Refactor Executor. Restructures code without changing be
 
 Spawn the `refactor-executor` agent with the user's prompt as the instruction.
 
+## Ruthlessness Standard
+
+- Do not let "refactor" become cover for behavior drift, ambiguity, or renamed confusion.
+- The executor must preserve semantics exactly unless the instruction explicitly authorizes behavioral change.
+- If the refactor increases indirection without reducing risk or complexity, it is not an improvement.
+
 ## What to pass
 
-Pass the user's full prompt verbatim as the instruction to the agent. Do not summarize or reformat it.
+Pass the user's full prompt verbatim. Do not summarize or sanitize it.
+Prepend a short hard wrapper that tells the agent to preserve behavior, verify that meaning and call flow did not drift, and only then write evidence.

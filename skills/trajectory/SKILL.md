@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. Sequence memory manager. Stores compact
 
 This is the memory layer for prior task traces. It is retrieval support, not an autonomous policy engine.
 
+## Ruthlessness Standard
+
+- Retrieved history is evidence of recurrence, not permission to cargo-cult old solutions.
+- If current code contradicts memory, trust the repo and call the memory mismatch out.
+- Do not store or retrieve traces so loosely that they become decorative noise.
+
 If available in this repo, the deterministic runtime for this skill is:
 
 ```text

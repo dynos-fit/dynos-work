@@ -7,6 +7,12 @@ description: "Internal dynos-work skill. List all registered dynos-work projects
 
 Show all projects registered with dynos-work.
 
+## Ruthlessness Standard
+
+- Do not invent project status or last-active data.
+- Print what the registry actually returns.
+- If the registry read fails, report that failure instead of showing a guessed empty list.
+
 ## Usage
 
 ```

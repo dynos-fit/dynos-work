@@ -1,5 +1,11 @@
 # Canonical Audit Report Schema
 
+## Ruthlessness Standard
+
+- Findings must describe the broken mechanism, not just the symptom.
+- Evidence must point to concrete inspected code or generated output, not assumptions.
+- If coverage or confidence is weak, say so explicitly instead of padding the report.
+
 All auditors write their report as a JSON file to `.dynos/task-{id}/audit-reports/{auditor-name}-{timestamp}.json` using this schema:
 
 ```json
