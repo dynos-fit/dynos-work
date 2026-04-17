@@ -378,7 +378,7 @@ class TestResolveModelJsonFirst(unittest.TestCase):
         )
 
         # Write minimal policy.json (no overrides)
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
 
         result = resolve_model(self.root, "backend-executor", "feature")
         self.assertEqual(result["model"], "haiku")
@@ -397,7 +397,7 @@ class TestResolveModelJsonFirst(unittest.TestCase):
                 "mean_quality": 0.7,
             }
         })
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
 
         result = resolve_model(self.root, "testing-executor", "bugfix")
         self.assertEqual(result["model"], "sonnet")
@@ -438,7 +438,7 @@ class TestResolveModelJsonFirst(unittest.TestCase):
                 "mean_quality": 0.85,
             }
         })
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
 
         result = resolve_model(self.root, "security-auditor", "feature")
         self.assertEqual(result["model"], "opus")
@@ -525,7 +525,7 @@ class TestPostmortemWritesToModelPolicyJson(unittest.TestCase):
 
         persistent = _persistent_project_dir(self.root)
         # Initialize empty policy.json
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
 
         proposal = {
             "id": "imp-model-haiku",
@@ -555,7 +555,7 @@ class TestPostmortemWritesToModelPolicyJson(unittest.TestCase):
         from postmortem import apply_improvement
 
         persistent = _persistent_project_dir(self.root)
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
 
         # Pre-seed model-policy.json with an explicit_policy entry
         write_json(persistent / "model-policy.json", {
@@ -615,7 +615,7 @@ class TestBackwardCompatFallback(unittest.TestCase):
             "|------|-----------|-------------------|\n"
             "| backend-executor | feature | sonnet |\n"
         )
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
 
         result = resolve_model(self.root, "backend-executor", "feature")
         self.assertEqual(result["model"], "sonnet")
@@ -628,7 +628,7 @@ class TestBackwardCompatFallback(unittest.TestCase):
         from router import resolve_model
 
         persistent = _persistent_project_dir(self.root)
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
         # No model-policy.json, no dynos_patterns.md
 
         result = resolve_model(self.root, "backend-executor", "feature")
@@ -675,7 +675,7 @@ class TestBackwardCompatFallback(unittest.TestCase):
             "|------|-----------|-------------------|\n"
             "| backend-executor | feature | haiku |\n"
         )
-        write_json(persistent / "policy.json", {})
+        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
 
         # Should not crash; should fall back
         result = resolve_model(self.root, "backend-executor", "feature")

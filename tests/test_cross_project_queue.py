@@ -117,9 +117,8 @@ class TestBuildCrossProjectQueue:
             _make_project_entry(str(proj_b)),
         )
 
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         finding_ids = {item["finding"]["finding_id"] for item in result}
         assert "a-001" in finding_ids
@@ -137,9 +136,8 @@ class TestBuildCrossProjectQueue:
         )
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         assert len(result) >= 1
         item = result[0]
@@ -165,9 +163,8 @@ class TestBuildCrossProjectQueue:
         (proj / ".dynos" / "findings.json").write_text(json.dumps(findings))
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         priorities = [item["priority"] for item in result]
         assert priorities == sorted(priorities, reverse=True), \
@@ -247,9 +244,8 @@ class TestPriorityComputation:
         (proj / ".dynos" / "findings.json").write_text(json.dumps(findings))
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         # Critical should be first (highest priority)
         assert result[0]["finding"]["finding_id"] == "f-crit"
@@ -285,22 +281,20 @@ class TestPriorityComputation:
         ]
         (proj / ".dynos" / "findings.json").write_text(json.dumps(findings))
 
-        pagerank = {"central.py": 0.8}
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("sweeper.build_import_graph", return_value={"nodes": ["central.py"], "edges": [], "pagerank": pagerank}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         assert len(result) == 1
         item = result[0]
         # severity_weight for high = 3
         assert item["severity_weight"] == 3
-        # centrality from pagerank = 0.8
-        assert item["centrality_score"] == pytest.approx(0.8, abs=0.01)
+        # centrality defaults to 0.5 (PageRank removed with autofix extraction)
+        assert item["centrality_score"] == pytest.approx(0.5, abs=0.01)
         # freshness for today ~= 1.0
         assert item["freshness_weight"] == pytest.approx(1.0, abs=0.1)
-        # priority = 3 * 0.8 * ~1.0 = ~2.4
-        assert item["priority"] == pytest.approx(3 * 0.8 * 1.0, abs=0.5)
+        # priority = 3 * 0.5 * ~1.0 = ~1.5
+        assert item["priority"] == pytest.approx(3 * 0.5 * 1.0, abs=0.5)
 
     def test_ordering_with_mixed_attributes(self, tmp_path: Path) -> None:
         # AC 16: verify correct ordering with different severity and freshness
@@ -322,9 +316,8 @@ class TestPriorityComputation:
         (proj / ".dynos" / "findings.json").write_text(json.dumps(findings))
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         # Fresh medium should be higher priority than old high
         assert result[0]["finding"]["finding_id"] == "f-fresh-med"
@@ -376,9 +369,8 @@ class TestSweepLoopRefactored:
             _make_project_entry(str(proj_a)),
             _make_project_entry(str(proj_b)),
         )
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         # Critical finding from project B should be first
         assert result[0]["finding"]["finding_id"] == "b-crit"
@@ -409,9 +401,8 @@ class TestBackoffExclusion:
             _make_project_entry(str(proj), last_active_at=old_date)
         )
 
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=True):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=True):
+            result = build_cross_project_queue(registry)
 
         # Project is in backoff, so its findings should be excluded
         assert len(result) == 0
@@ -428,9 +419,8 @@ class TestBackoffExclusion:
         )
 
         registry = _make_registry(_make_project_entry(str(proj)))
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", return_value=False):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", return_value=False):
+            result = build_cross_project_queue(registry)
 
         assert len(result) >= 1
 
@@ -460,9 +450,8 @@ class TestBackoffExclusion:
         def backoff_side_effect(entry, sweep_count):
             return entry["path"] == str(proj_backoff)
 
-        with patch("sweeper.build_import_graph", return_value={"nodes": [], "edges": [], "pagerank": {}}):
-            with patch("sweeper._should_skip_backoff", side_effect=backoff_side_effect):
-                result = build_cross_project_queue(registry)
+        with patch("sweeper._should_skip_backoff", side_effect=backoff_side_effect):
+            result = build_cross_project_queue(registry)
 
         finding_ids = {item["finding"]["finding_id"] for item in result}
         assert "active-001" in finding_ids

@@ -24,6 +24,7 @@ from lib_core import (
     project_policy,
 )
 from lib_defaults import (
+    DEFAULT_MODEL as _DEFAULT_MODEL_CONST,
     DEFAULT_SKIP_THRESHOLD as _DEFAULT_SKIP_THRESHOLD,
     ROUTER_WEIGHT_COST,
     ROUTER_WEIGHT_EFFICIENCY,
@@ -120,7 +121,7 @@ DEFAULT_EPSILON = 0.1  # 10% exploration rate
 # ---------------------------------------------------------------------------
 
 SECURITY_FLOOR_MODEL = "opus"
-DEFAULT_MODEL = None  # None means "use whatever the caller's default is"
+DEFAULT_MODEL = _DEFAULT_MODEL_CONST  # "opus" — from lib_defaults.py
 
 
 def _read_policy_json(root: Path, filename: str, key: str) -> dict | None:
@@ -350,9 +351,17 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
     policy = ctx.policy if ctx else project_policy(root)
     key = f"{role}:{task_type}"
 
-    # 0. Epsilon-greedy exploration — randomly try a different model
-    # to feed the UCB1 bandit with multi-arm data. Skipped for
-    # security-auditor (always opus) and when exploration is disabled.
+    # 1. Explicit policy.json overrides (highest priority — never overridden)
+    model_overrides = policy.get("model_overrides", {})
+    model = model_overrides.get(key) or model_overrides.get(role)
+    if model:
+        result = {"model": model, "source": "explicit_policy"}
+        log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
+        return result
+
+    # 1b. Epsilon-greedy exploration — randomly try a different model
+    # to feed the UCB1 bandit with multi-arm data. Fires AFTER explicit
+    # policy (user config always wins) but BEFORE learned data tiers.
     epsilon = float(policy.get("exploration_epsilon", DEFAULT_EPSILON))
     if (
         epsilon > 0
@@ -363,14 +372,6 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
         model = random.choice([m for m in VALID_MODELS if m != SECURITY_FLOOR_MODEL])
         result = {"model": model, "source": "exploration", "epsilon": epsilon}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=model, source="exploration")
-        return result
-
-    # 1. Explicit policy.json overrides (highest priority)
-    model_overrides = policy.get("model_overrides", {})
-    model = model_overrides.get(key) or model_overrides.get(role)
-    if model:
-        result = {"model": model, "source": "explicit_policy"}
-        log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
 
     # Steps 2-4 use learned data — skip when learning is disabled.

@@ -165,33 +165,6 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return _approve(args)
 
 
-def cmd_crawl_graph(args: argparse.Namespace) -> int:
-    import json as _json
-    from lib_crawler import build_import_graph
-    root = Path(args.root).resolve()
-    if not root.is_dir():
-        print(f"Error: {root} is not a directory", file=sys.stderr)
-        return 1
-    result = build_import_graph(root)
-    print(_json.dumps(result, indent=2, default=str))
-    return 0
-
-
-def cmd_crawl_targets(args: argparse.Namespace) -> int:
-    from lib_crawler import compute_scan_targets
-    root = Path(args.root).resolve()
-    if not root.is_dir():
-        print(f"Error: {root} is not a directory", file=sys.stderr)
-        return 1
-    max_files = int(args.max)
-    if max_files < 1:
-        print("Error: --max must be at least 1", file=sys.stderr)
-        return 1
-    targets = compute_scan_targets(root, max_files=max_files)
-    for filepath, score in targets:
-        print(f"{score:.2f}  {filepath}")
-    return 0
-
 
 def cmd_stats_usage(args: argparse.Namespace) -> int:
     """Show module usage telemetry for dormancy detection."""
@@ -388,18 +361,6 @@ def build_parser() -> argparse.ArgumentParser:
     approve_parser.add_argument("improvement_id", help="Proposal ID (e.g. imp-prevent-cq)")
     approve_parser.add_argument("--root", default=".")
     approve_parser.set_defaults(func=cmd_approve)
-
-    crawl_parser = subparsers.add_parser("crawl", help="Crawl and analyze project import structure")
-    crawl_subs = crawl_parser.add_subparsers(dest="crawl_command", required=True)
-
-    crawl_graph_parser = crawl_subs.add_parser("graph", help="Print import graph as JSON")
-    crawl_graph_parser.add_argument("--root", required=True, help="Project root directory")
-    crawl_graph_parser.set_defaults(func=cmd_crawl_graph)
-
-    crawl_targets_parser = crawl_subs.add_parser("targets", help="Print top N scan targets with scores")
-    crawl_targets_parser.add_argument("--root", required=True, help="Project root directory")
-    crawl_targets_parser.add_argument("--max", default="10", help="Maximum number of targets (default: 10)")
-    crawl_targets_parser.set_defaults(func=cmd_crawl_targets)
 
     dora_parser = subparsers.add_parser("stats-dora", help="Compute DORA metrics from retrospectives")
     dora_parser.add_argument("--root", default=".", help="Project root")

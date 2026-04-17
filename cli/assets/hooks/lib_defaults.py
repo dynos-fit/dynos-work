@@ -12,44 +12,10 @@ compile-time defaults that policy.json values take precedence over.
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# PageRank (lib_crawler.py)
+# Global model default
 # ---------------------------------------------------------------------------
 
-PAGERANK_DAMPING: float = 0.85
-PAGERANK_ITERATIONS: int = 20
-
-# ---------------------------------------------------------------------------
-# Scan target scoring (lib_crawler.py)
-#
-#   score = WEIGHT_PAGERANK * pagerank
-#         + WEIGHT_FRESHNESS * freshness
-#         + WEIGHT_FINDING_HISTORY * finding_history
-#         + WEIGHT_CHANGE_VELOCITY * change_velocity
-#         + WEIGHT_COMPLEXITY * complexity
-#         - cooldown
-# ---------------------------------------------------------------------------
-
-WEIGHT_PAGERANK: float = 30.0
-WEIGHT_FRESHNESS: float = 25.0
-WEIGHT_FINDING_HISTORY: float = 20.0
-WEIGHT_CHANGE_VELOCITY: float = 15.0
-WEIGHT_COMPLEXITY: float = 10.0
-
-MAX_SCAN_TARGET_FILES: int = 10
-MAX_NEIGHBOR_FILES: int = 5
-MAX_NEIGHBOR_LINES: int = 100
-
-FRESHNESS_NORM_DAYS: float = 365.0
-COMPLEXITY_LINE_CAP: float = 1000.0
-
-# Cooldown penalties (subtracted from composite score)
-COOLDOWN_THRESHOLD_1DAY: int = 1
-COOLDOWN_PENALTY_1DAY: float = 100.0
-COOLDOWN_THRESHOLD_3DAY: int = 3
-COOLDOWN_PENALTY_3DAY: float = 30.0
-COOLDOWN_THRESHOLD_7DAY: int = 7
-COOLDOWN_PENALTY_7DAY: float = 10.0
-COOLDOWN_BONUS_CLEAN: float = 5.0
+DEFAULT_MODEL: str = "opus"
 
 # Git subprocess timeouts (seconds)
 GIT_REVPARSE_TIMEOUT: int = 10

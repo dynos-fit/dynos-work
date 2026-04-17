@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lib_core import load_json, now_iso, write_json, project_dir, is_pid_running
-from lib_crawler import build_import_graph
 from lib_defaults import (
     BACKOFF_HOURS_1DAY,
     BACKOFF_HOURS_3DAY,
@@ -441,13 +440,9 @@ def build_cross_project_queue(registry: dict, sweep_count: int = 0) -> list[dict
         if not isinstance(findings, list):
             continue
 
-        # Build import graph once per project for PageRank lookup
-        try:
-            graph = build_import_graph(root)
-        except Exception:
-            graph = {"nodes": [], "edges": [], "pagerank": {}}
-
-        pagerank = graph.get("pagerank", {})
+        # PageRank was provided by lib_crawler.py (removed with autofix extraction).
+        # Centrality scoring is no longer available — use empty pagerank.
+        pagerank: dict[str, float] = {}
 
         for finding in findings:
             if not isinstance(finding, dict):

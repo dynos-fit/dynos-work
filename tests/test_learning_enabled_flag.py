@@ -112,7 +112,7 @@ class TestResolveModelWithLearning:
     def test_returns_default_when_disabled(self, mock_log, mock_policy, mock_learning, tmp_path: Path):
         from router import resolve_model
         result = resolve_model(tmp_path, "backend-executor", "feature")
-        assert result["model"] is None  # DEFAULT_MODEL = None
+        assert result["model"] == "opus"  # DEFAULT_MODEL from lib_defaults
         assert "default" in result["source"]
 
     @mock.patch("router.is_learning_enabled", return_value=False)
