@@ -7,6 +7,14 @@ description: "Run checkpoint audit, repair any findings, then reach DONE — all
 
 Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 
+## Ruthlessness Standard
+
+- Missing evidence is a finding.
+- Partial compliance is non-compliance.
+- Cosmetic fixes do not count as repairs.
+- If a path is unverified, treat it as suspect.
+- Prefer surfacing a real risk over preserving a comforting narrative.
+
 ## What you do
 
 ### Step 0 — Contract validation
@@ -312,7 +320,7 @@ Append to log:
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem_analysis.py" build-prompt .dynos/task-{id}
 ```
 
-2. If the result has `"has_findings": true`, spawn a **haiku** agent with the prompt from the `"prompt"` field. Instruct the agent to respond with ONLY the JSON object described in the prompt — no markdown, no explanation.
+2. If the result has `"has_findings": true`, spawn an **opus** agent with the prompt from the `"prompt"` field. Instruct the agent to respond with ONLY the JSON object described in the prompt — no markdown, no explanation.
 
 3. Parse the agent's JSON response and apply it:
 ```bash
