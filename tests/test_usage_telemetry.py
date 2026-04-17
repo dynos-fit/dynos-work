@@ -84,7 +84,7 @@ class TestModulesInstrumented:
     """Verify that each monitored module calls record_usage at import time."""
 
     def test_dream_instrumented(self):
-        text = (ROOT / "memory" / "dream.py").read_text()
+        text = (ROOT / "sandbox" / "dream.py").read_text()
         assert "record_usage" in text
         assert '"dream"' in text
 

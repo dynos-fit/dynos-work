@@ -81,7 +81,7 @@ python3 hooks/ctl.py validate-task .dynos/task-{id}
 
 After every subagent spawn AND every deterministic validation, record the event:
 
-**For LLM subagent spawns** (planner, founder, testing-executor, spec-completion-auditor):
+**For LLM subagent spawns** (planner, testing-executor, spec-completion-auditor):
 ```bash
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
@@ -119,7 +119,6 @@ This writes to `.dynos/task-{id}/token-usage.json` with a chronological event lo
 
 **Specific events to record in this skill:**
 - Step 2: Planner spawn (phase=planning, stage=DISCOVERY)
-- Step 2: Founder simulation spawns (phase=planning, stage=DISCOVERY)
 - Step 2: Classification validation (type=deterministic, stage=DISCOVERY)
 - Step 2b: Fast-track gate check (type=deterministic, stage=DISCOVERY)
 - Step 3: Planner spec normalization spawn (phase=planning, stage=SPEC_NORMALIZATION)
@@ -187,10 +186,7 @@ Return three sections:
 
 Present any remaining discovery questions to the user and append answers to `discovery-notes.md`.
 
-If hard or critical design options were returned:
-1. Run the Founder skill in simulation mode for each high-risk design option.
-2. Treat simulation output as advisory evidence, not automatic approval.
-3. Present each option to the user with the simulation evidence and record the chosen design in `design-decisions.md`.
+If hard or critical design options were returned, present each option to the user with pros/cons and record the chosen design in `design-decisions.md`.
 
 If no high-risk design options were returned, write `design-decisions.md` with the autonomous design choices and rationale.
 
@@ -442,7 +438,7 @@ Next: /dynos-work:execute
 - You do not audit production code.
 - You do not decide when the task is done.
 - You do not skip discovery, spec review, plan review, plan audit, or TDD review.
-- You do not let historical memory or the Founder override human approval or deterministic validation.
+- You do not let historical memory override human approval or deterministic validation.
 
 ---
 
@@ -450,6 +446,5 @@ Next: /dynos-work:execute
 
 - **No stealth paths:** all tasks follow Steps 0-9.
 - **Memory is advisory:** trajectory retrieval may inform questions or design review, but it never overrides the current repo or user instructions.
-- **Founder is a consultant:** simulation output informs design decisions but never replaces review gates.
 - **Validation before trust:** do not present `spec.md`, `plan.md`, `execution-graph.json`, or the generated test suite for approval until deterministic validation passes.
 - **Stop on ambiguity:** if a blocking ambiguity remains unresolved after discovery, flag it explicitly instead of silently choosing.

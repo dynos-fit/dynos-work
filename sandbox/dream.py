@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""MCTS-lite design dreaming runner for dynos-work."""
+"""MCTS-lite design dreaming runner.
+
+Extracted from the dynos-work main pipeline into a standalone module.
+Can be used independently for design option scoring via Monte Carlo
+sandbox simulations.
+"""
 
 from __future__ import annotations
-import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent)); _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hooks"))
+import sys as _sys
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hooks"))
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "memory"))
 
 import argparse
 import json

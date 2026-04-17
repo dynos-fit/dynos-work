@@ -49,7 +49,6 @@ READ_ONLY_OTHER = {
     "planning",
     "repair-coordinator",
     "investigator",
-    "state-encoder",
 }
 
 WRITE_TOOLS = {"Write", "Edit"}
@@ -100,7 +99,7 @@ class TestAllAgentsHaveTools:
         assert len(fm["tools"]) > 0, f"{agent_file.name} tools: must not be empty"
 
     def test_all_17_agents_found(self):
-        assert len(AGENT_FILES) == 19, f"Expected 19 agents, found {len(AGENT_FILES)}"
+        assert len(AGENT_FILES) == 18, f"Expected 19 agents, found {len(AGENT_FILES)}"
 
 
 # ---------------------------------------------------------------------------
@@ -201,10 +200,7 @@ class TestSpecificAssignments:
         fm = _parse_frontmatter(AGENTS_DIR / "repair-coordinator.md")
         assert "Bash" not in fm["tools"]
 
-    def test_state_encoder_no_bash(self):
-        """State encoder is pure analysis."""
-        fm = _parse_frontmatter(AGENTS_DIR / "state-encoder.md")
-        assert "Bash" not in fm["tools"]
+    # state-encoder moved to sandbox/ — no longer in agents/
 
     def test_investigator_has_bash(self):
         """Investigator needs Bash for diagnostic commands."""

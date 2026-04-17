@@ -1,0 +1,203 @@
+
+<h2 class="sr-only">Interactive diagram of a Software Foundry showing 6 phases with 21 specialized sub-agent skills organized from intake to evolution</h2>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+.foundry{font-family:var(--font-sans);padding:1.5rem 0}
+.phase{margin-bottom:2px;border-radius:var(--border-radius-lg);overflow:hidden;transition:all .3s}
+.phase-header{display:flex;align-items:center;gap:12px;padding:14px 20px;cursor:pointer;user-select:none;transition:background .2s}
+.phase-header:hover{filter:brightness(1.05)}
+.phase-num{font-size:11px;font-weight:500;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.phase-title{font-size:15px;font-weight:500;flex:1}
+.phase-meta{font-size:12px;opacity:.7}
+.phase-chevron{font-size:14px;transition:transform .3s;opacity:.5}
+.phase.open .phase-chevron{transform:rotate(90deg)}
+.skills-grid{display:none;padding:4px 20px 16px 54px;gap:8px;flex-wrap:wrap}
+.phase.open .skills-grid{display:flex}
+.skill{padding:10px 14px;border-radius:var(--border-radius-md);cursor:pointer;transition:all .2s;min-width:140px;flex:1;max-width:220px;border:0.5px solid transparent}
+.skill:hover{transform:translateY(-1px);border-color:var(--color-border-secondary)}
+.skill-name{font-size:13px;font-weight:500;margin-bottom:3px}
+.skill-desc{font-size:11px;line-height:1.4;opacity:.7}
+.cross{margin-top:20px;padding:16px 20px;border-radius:var(--border-radius-lg);border:1px dashed var(--color-border-secondary)}
+.cross-title{font-size:13px;font-weight:500;color:var(--color-text-secondary);margin-bottom:10px}
+.cross-items{display:flex;gap:8px;flex-wrap:wrap}
+.cross-item{padding:8px 12px;border-radius:var(--border-radius-md);background:var(--color-background-secondary);font-size:12px;color:var(--color-text-secondary);border:0.5px solid var(--color-border-tertiary)}
+.cross-item span{font-weight:500;color:var(--color-text-primary)}
+/* Phase colors using palette stops */
+.p0 .phase-header{background:#EEEDFE}.p0 .phase-num{background:#AFA9EC;color:#26215C}.p0 .skill{background:#EEEDFE}.p0 .skill-name{color:#3C3489}
+.p1 .phase-header{background:#E6F1FB}.p1 .phase-num{background:#85B7EB;color:#042C53}.p1 .skill{background:#E6F1FB}.p1 .skill-name{color:#0C447C}
+.p2 .phase-header{background:#E1F5EE}.p2 .phase-num{background:#5DCAA5;color:#04342C}.p2 .skill{background:#E1F5EE}.p2 .skill-name{color:#085041}
+.p3 .phase-header{background:#FAECE7}.p3 .phase-num{background:#F0997B;color:#4A1B0C}.p3 .skill{background:#FAECE7}.p3 .skill-name{color:#712B13}
+.p4 .phase-header{background:#FAEEDA}.p4 .phase-num{background:#FAC775;color:#412402}.p4 .skill{background:#FAEEDA}.p4 .skill-name{color:#633806}
+.p5 .phase-header{background:#FBEAF0}.p5 .phase-num{background:#ED93B1;color:#4B1528}.p5 .skill{background:#FBEAF0}.p5 .skill-name{color:#72243E}
+@media(prefers-color-scheme:dark){
+.p0 .phase-header{background:#26215C}.p0 .phase-num{background:#534AB7;color:#EEEDFE}.p0 .skill{background:#26215C}.p0 .skill-name{color:#CECBF6}.p0 .skill-desc{color:#AFA9EC}
+.p1 .phase-header{background:#042C53}.p1 .phase-num{background:#185FA5;color:#E6F1FB}.p1 .skill{background:#042C53}.p1 .skill-name{color:#B5D4F4}.p1 .skill-desc{color:#85B7EB}
+.p2 .phase-header{background:#04342C}.p2 .phase-num{background:#0F6E56;color:#E1F5EE}.p2 .skill{background:#04342C}.p2 .skill-name{color:#9FE1CB}.p2 .skill-desc{color:#5DCAA5}
+.p3 .phase-header{background:#4A1B0C}.p3 .phase-num{background:#993C1D;color:#FAECE7}.p3 .skill{background:#4A1B0C}.p3 .skill-name{color:#F5C4B3}.p3 .skill-desc{color:#F0997B}
+.p4 .phase-header{background:#412402}.p4 .phase-num{background:#854F0B;color:#FAEEDA}.p4 .skill{background:#412402}.p4 .skill-name{color:#FAC775}.p4 .skill-desc{color:#EF9F27}
+.p5 .phase-header{background:#4B1528}.p5 .phase-num{background:#993556;color:#FBEAF0}.p5 .skill{background:#4B1528}.p5 .skill-name{color:#F4C0D1}.p5 .skill-desc{color:#ED93B1}
+.phase-title{color:var(--color-text-primary)}
+}
+</style>
+<div class="foundry">
+
+<div class="phase p0 open" onclick="this.classList.toggle('open')">
+<div class="phase-header">
+<div class="phase-num">0</div>
+<div class="phase-title">Intake — understand intent</div>
+<div class="phase-meta">3 skills</div>
+<div class="phase-chevron">&#x25B6;</div>
+</div>
+<div class="skills-grid">
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Requirements Analyst skill for software foundry')">
+<div class="skill-name">Requirements analyst</div>
+<div class="skill-desc">Decomposes vague intent into structured specs with acceptance criteria</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Domain Modeler skill for software foundry')">
+<div class="skill-name">Domain modeler</div>
+<div class="skill-desc">Extracts entities, relationships, and invariants from business context</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Research Scout skill for software foundry')">
+<div class="skill-name">Research scout</div>
+<div class="skill-desc">Surveys prior art, libraries, and APIs relevant to the problem space</div>
+</div>
+</div>
+</div>
+
+<div class="phase p1" onclick="this.classList.toggle('open')">
+<div class="phase-header">
+<div class="phase-num">1</div>
+<div class="phase-title">Blueprint — architect the system</div>
+<div class="phase-meta">3 skills</div>
+<div class="phase-chevron">&#x25B6;</div>
+</div>
+<div class="skills-grid">
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: System Architect skill for software foundry')">
+<div class="skill-name">System architect</div>
+<div class="skill-desc">Selects patterns, defines service boundaries, and produces architecture decision records</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: API Designer skill for software foundry')">
+<div class="skill-name">API designer</div>
+<div class="skill-desc">Defines contracts, schemas, and protocol choices before a line of code exists</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Data Architect skill for software foundry')">
+<div class="skill-name">Data architect</div>
+<div class="skill-desc">Designs schemas, migration strategies, and data flow topologies</div>
+</div>
+</div>
+</div>
+
+<div class="phase p2" onclick="this.classList.toggle('open')">
+<div class="phase-header">
+<div class="phase-num">2</div>
+<div class="phase-title">Forge — write the code</div>
+<div class="phase-meta">4 skills</div>
+<div class="phase-chevron">&#x25B6;</div>
+</div>
+<div class="skills-grid">
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Implementation Engineer skill for software foundry')">
+<div class="skill-name">Implementation engineer</div>
+<div class="skill-desc">Writes production code — backend logic, algorithms, data transformations</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Frontend Builder skill for software foundry')">
+<div class="skill-name">Frontend builder</div>
+<div class="skill-desc">Produces UI components, layouts, and interaction logic from design specs</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Integration Weaver skill for software foundry')">
+<div class="skill-name">Integration weaver</div>
+<div class="skill-desc">Connects services, third-party APIs, message queues, and data pipelines</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Migration Specialist skill for software foundry')">
+<div class="skill-name">Migration specialist</div>
+<div class="skill-desc">Handles database migrations, data transformations, and legacy system bridges</div>
+</div>
+</div>
+</div>
+
+<div class="phase p3" onclick="this.classList.toggle('open')">
+<div class="phase-header">
+<div class="phase-num">3</div>
+<div class="phase-title">Temper — harden and verify</div>
+<div class="phase-meta">4 skills</div>
+<div class="phase-chevron">&#x25B6;</div>
+</div>
+<div class="skills-grid">
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Test Engineer skill for software foundry')">
+<div class="skill-name">Test engineer</div>
+<div class="skill-desc">Generates unit, integration, and e2e tests with meaningful coverage analysis</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Code Critic skill for software foundry')">
+<div class="skill-name">Code critic</div>
+<div class="skill-desc">Reviews for anti-patterns, readability, naming, and architectural drift</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Security Auditor skill for software foundry')">
+<div class="skill-name">Security auditor</div>
+<div class="skill-desc">Scans for OWASP vulnerabilities, supply chain risks, and secret leakage</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Performance Analyst skill for software foundry')">
+<div class="skill-name">Performance analyst</div>
+<div class="skill-desc">Profiles bottlenecks, benchmarks critical paths, and validates resource usage</div>
+</div>
+</div>
+</div>
+
+<div class="phase p4" onclick="this.classList.toggle('open')">
+<div class="phase-header">
+<div class="phase-num">4</div>
+<div class="phase-title">Finish — polish and ship</div>
+<div class="phase-meta">4 skills</div>
+<div class="phase-chevron">&#x25B6;</div>
+</div>
+<div class="skills-grid">
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Documentation Writer skill for software foundry')">
+<div class="skill-name">Documentation writer</div>
+<div class="skill-desc">Generates READMEs, API docs, architecture guides, and inline comments</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: DevOps Engineer skill for software foundry')">
+<div class="skill-name">DevOps engineer</div>
+<div class="skill-desc">Produces Dockerfiles, CI/CD pipelines, IaC templates, and deploy scripts</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Release Manager skill for software foundry')">
+<div class="skill-name">Release manager</div>
+<div class="skill-desc">Handles versioning, changelogs, canary rollouts, and rollback strategies</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Accessibility Auditor skill for software foundry')">
+<div class="skill-name">Accessibility auditor</div>
+<div class="skill-desc">Validates WCAG compliance, screen reader compatibility, keyboard navigation</div>
+</div>
+</div>
+</div>
+
+<div class="phase p5" onclick="this.classList.toggle('open')">
+<div class="phase-header">
+<div class="phase-num">5</div>
+<div class="phase-title">Evolve — observe and adapt</div>
+<div class="phase-meta">3 skills</div>
+<div class="phase-chevron">&#x25B6;</div>
+</div>
+<div class="skills-grid">
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Observability Agent skill for software foundry')">
+<div class="skill-name">Observability agent</div>
+<div class="skill-desc">Instruments telemetry, sets up alerting, interprets logs and traces</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Bug Triager skill for software foundry')">
+<div class="skill-name">Bug triager</div>
+<div class="skill-desc">Reproduces issues, isolates root cause, and proposes targeted fixes</div>
+</div>
+<div class="skill" onclick="event.stopPropagation();sendPrompt('Deep dive: Refactoring Surgeon skill for software foundry')">
+<div class="skill-name">Refactoring surgeon</div>
+<div class="skill-desc">Pays down tech debt, modernizes patterns, and migrates across versions</div>
+</div>
+</div>
+</div>
+
+<div class="cross">
+<div class="cross-title">Cross-cutting — skills that span every phase</div>
+<div class="cross-items">
+<div class="cross-item" onclick="sendPrompt('Deep dive: Orchestrator meta-agent for software foundry')"><span>Orchestrator</span> — decomposes, delegates, synthesizes</div>
+<div class="cross-item" onclick="sendPrompt('Deep dive: Context Librarian for software foundry')"><span>Context librarian</span> — maintains shared memory and state</div>
+<div class="cross-item" onclick="sendPrompt('Deep dive: Compliance Guardian for software foundry')"><span>Compliance guardian</span> — enforces license, regulatory, and policy rules</div>
+</div>
+</div>
+
+</div>

@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Deterministic state encoder for dynos-work."""
+"""Deterministic state encoder for design option scoring.
+
+Extracted from dynos-work main pipeline into standalone module.
+"""
 
 from __future__ import annotations
-import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+import sys as _sys
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+_sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hooks"))
 
 import argparse
 import json

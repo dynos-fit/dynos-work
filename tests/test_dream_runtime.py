@@ -66,7 +66,10 @@ class DreamRuntimeTests(unittest.TestCase):
         )
 
     def test_state_encoder_outputs_signature(self) -> None:
-        result = self.run_py("state.py", "--root", str(self.root), "--target", str(self.root / "src"))
+        result = subprocess.run(
+            ["python3", str(ROOT / "sandbox" / "state.py"), "--root", str(self.root), "--target", str(self.root / "src")],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
         self.assertEqual(payload["version"], 1)
