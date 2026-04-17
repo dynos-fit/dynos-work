@@ -87,14 +87,17 @@ def run_register(root: Path, _payload: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
-# Flat chain: all handlers fire on task-completed. No intermediate events.
-# Previously this was a 4-hop chain (task-completed → memory-completed →
-# calibration-completed → benchmark-completed) with 10 handlers and 6 no-ops.
-# Flattened because the learning pipeline is sandboxed.
+# Flat chain: all handlers fire on task-completed.
+# Built-in handlers are defined above. Additional handlers can be
+# auto-discovered from hooks/handlers/*.py — each module must export:
+#   EVENT_TYPE: str  (e.g. "task-completed")
+#   def run(root: Path, payload: dict) -> bool
+
+import importlib.util
 
 HandlerEntry = tuple[str, Callable[[Path, dict], bool]]
 
-HANDLERS: dict[str, list[HandlerEntry]] = {
+_BUILTIN_HANDLERS: dict[str, list[HandlerEntry]] = {
     "task-completed": [
         ("policy_engine", run_policy_engine),
         ("postmortem", run_postmortem),
@@ -102,6 +105,38 @@ HANDLERS: dict[str, list[HandlerEntry]] = {
         ("register", run_register),
     ],
 }
+
+
+def _discover_handlers() -> dict[str, list[HandlerEntry]]:
+    """Auto-discover handler modules from hooks/handlers/*.py.
+
+    Each module must export EVENT_TYPE (str) and run(root, payload) -> bool.
+    Merges with built-in handlers. Falls back to built-ins only if
+    the handlers/ directory doesn't exist or is empty.
+    """
+    handlers = {k: list(v) for k, v in _BUILTIN_HANDLERS.items()}
+    handlers_dir = SCRIPT_DIR / "handlers"
+    if not handlers_dir.is_dir():
+        return handlers
+    for path in sorted(handlers_dir.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(path.stem, path)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            event_type = getattr(mod, "EVENT_TYPE", None)
+            run_fn = getattr(mod, "run", None)
+            if event_type and callable(run_fn):
+                handlers.setdefault(event_type, []).append((path.stem, run_fn))
+        except Exception as exc:
+            print(f"  [warn] handler discovery: {path.name}: {exc}", file=sys.stderr)
+    return handlers
+
+
+HANDLERS: dict[str, list[HandlerEntry]] = _discover_handlers()
 
 # No follow-on events needed — everything fires from task-completed directly.
 FOLLOW_ON: dict[str, str] = {}

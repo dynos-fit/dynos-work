@@ -54,21 +54,12 @@ DEFAULT_ALPHA = QLEARN_ALPHA      # learning rate
 DEFAULT_GAMMA = QLEARN_GAMMA      # discount factor
 DEFAULT_EPSILON = QLEARN_EPSILON  # exploration rate
 
-ALL_EXECUTORS = [
-    "backend-executor",
-    "db-executor",
-    "docs-executor",
-    "integration-executor",
-    "ml-executor",
-    "refactor-executor",
-    "testing-executor",
-    "ui-executor",
-]
+from lib_core import VALID_EXECUTORS as _DISCOVERED_EXECUTORS
 
-# Per-category executor action spaces — restrict to executors that
-# can actually fix this type of finding. Eliminates impossible
-# assignments and makes Q-tables converge faster.
-EXECUTOR_ACTION_SPACE: dict[str, list[str]] = {
+ALL_EXECUTORS = sorted(_DISCOVERED_EXECUTORS)
+
+# Default per-category action spaces — overridable via .dynos/config/action-spaces.json
+_DEFAULT_ACTION_SPACE: dict[str, list[str]] = {
     "sec":  ["backend-executor", "integration-executor"],
     "comp": ["integration-executor", "backend-executor"],
     "cq":   ["backend-executor", "refactor-executor", "testing-executor"],
@@ -78,6 +69,8 @@ EXECUTOR_ACTION_SPACE: dict[str, list[str]] = {
     "perf": ["backend-executor", "db-executor"],
     "sc":   ["backend-executor", "ui-executor", "db-executor", "integration-executor"],
 }
+
+EXECUTOR_ACTION_SPACE = _DEFAULT_ACTION_SPACE  # module-level default
 
 VALID_ROUTE_MODES = ["generic", "learned"]
 VALID_MODELS = ["haiku", "sonnet", "opus"]
@@ -259,9 +252,22 @@ def compute_repair_reward(
 # Repair plan builder
 # ---------------------------------------------------------------------------
 
-def _executors_for_category(category: str) -> list[str]:
+def _load_action_spaces(root: Path) -> dict[str, list[str]]:
+    """Load action spaces from .dynos/config/action-spaces.json with fallback to defaults."""
+    config_path = root / ".dynos" / "config" / "action-spaces.json"
+    try:
+        data = load_json(config_path)
+        if isinstance(data, dict):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return _DEFAULT_ACTION_SPACE
+
+
+def _executors_for_category(category: str, root: Path | None = None) -> list[str]:
     """Return the valid executor action space for a finding category."""
-    return EXECUTOR_ACTION_SPACE.get(category, ALL_EXECUTORS)
+    spaces = _load_action_spaces(root) if root else _DEFAULT_ACTION_SPACE
+    return spaces.get(category, ALL_EXECUTORS)
 
 
 def _has_learned_agent(root: Path, executor: str, task_type: str) -> tuple[bool, str | None, str | None]:
@@ -313,7 +319,7 @@ def build_repair_plan(
         base_state = encode_repair_state(category, severity, task_type, retry_count)
 
         # --- Step 1: Executor (restricted by category) ---
-        valid_executors = _executors_for_category(category)
+        valid_executors = _executors_for_category(category, root)
         if enabled:
             executor, executor_source = select_action(
                 executor_q, base_state, valid_executors, epsilon,

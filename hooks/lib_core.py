@@ -16,16 +16,20 @@ from typing import Any, Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_EXECUTORS: set[str] = {
-    "ui-executor",
-    "backend-executor",
-    "ml-executor",
-    "db-executor",
-    "refactor-executor",
-    "testing-executor",
-    "integration-executor",
-    "docs-executor",
-}
+def _discover_executors() -> set[str]:
+    """Auto-discover executor types from agents/*-executor.md files."""
+    agents_dir = Path(__file__).resolve().parent.parent / "agents"
+    _FALLBACK = {
+        "ui-executor", "backend-executor", "ml-executor", "db-executor",
+        "refactor-executor", "testing-executor", "integration-executor", "docs-executor",
+    }
+    if not agents_dir.is_dir():
+        return _FALLBACK
+    discovered = {f.stem for f in agents_dir.glob("*-executor.md") if f.is_file()}
+    return discovered if discovered else _FALLBACK
+
+
+VALID_EXECUTORS: set[str] = _discover_executors()
 
 VALID_CLASSIFICATION_TYPES: set[str] = {
     "feature",

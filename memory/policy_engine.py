@@ -8,20 +8,12 @@ import argparse
 import json
 from pathlib import Path
 
-from lib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json
+from lib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json, VALID_EXECUTORS
 from lib_log import log_event
 from lib_registry import ensure_learned_registry
 
 DEFAULT_TASK_TYPES = ["feature", "bugfix", "refactor", "migration", "ml", "full-stack"]
-DEFAULT_EXECUTOR_ROLES = [
-    "ui-executor",
-    "backend-executor",
-    "ml-executor",
-    "db-executor",
-    "refactor-executor",
-    "testing-executor",
-    "integration-executor",
-]
+DEFAULT_EXECUTOR_ROLES = sorted(VALID_EXECUTORS)  # auto-discovered from agents/
 DEFAULT_AUDITOR_ROLES = [
     "ui-auditor",
     "db-schema-auditor",

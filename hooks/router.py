@@ -697,25 +697,62 @@ def load_prevention_rules(root: Path) -> list[dict]:
         return []
 
 
-# Ensemble voting: these auditors get two cheap models first.
-# If both return zero findings, pass. If either finds something, escalate to opus.
-ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
-ENSEMBLE_VOTING_MODELS = ["haiku", "sonnet"]
-ENSEMBLE_ESCALATION_MODEL = "opus"
+# Ensemble voting defaults — overridable via .dynos/config/policy.json
+_DEFAULT_ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
+_DEFAULT_ENSEMBLE_VOTING_MODELS = ["haiku", "sonnet"]
+_DEFAULT_ENSEMBLE_ESCALATION_MODEL = "opus"
+
+# Default auditor registry — overridable via .dynos/config/auditors.json
+_DEFAULT_AUDITOR_REGISTRY = {
+    "always": ["spec-completion-auditor", "security-auditor", "code-quality-auditor", "dead-code-auditor"],
+    "fast_track": ["spec-completion-auditor", "security-auditor"],
+    "domain_conditional": {
+        "ui": ["ui-auditor"],
+        "db": ["db-schema-auditor", "performance-auditor"],
+        "backend": ["performance-auditor"],
+    },
+}
+
+
+def _load_auditor_registry(root: Path) -> dict:
+    """Load auditor registry from .dynos/config/auditors.json with fallback to defaults."""
+    config_path = root / ".dynos" / "config" / "auditors.json"
+    try:
+        data = load_json(config_path)
+        if isinstance(data, dict) and "always" in data:
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return _DEFAULT_AUDITOR_REGISTRY
+
+
+def _load_ensemble_config(config: dict) -> tuple[set[str], list[str], str]:
+    """Load ensemble voting config from .dynos/config/policy.json with fallback to defaults."""
+    auditors = set(config.get("ensemble_auditors", _DEFAULT_ENSEMBLE_AUDITORS))
+    models = config.get("ensemble_voting_models", _DEFAULT_ENSEMBLE_VOTING_MODELS)
+    escalation = config.get("ensemble_escalation_model", _DEFAULT_ENSEMBLE_ESCALATION_MODEL)
+    return auditors, models, escalation
 
 
 def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track: bool = False) -> dict:
     """Build a complete, deterministic audit spawn plan.
 
-    Returns a structured dict that tells the caller exactly:
-    - which auditors to spawn
-    - which to skip
-    - what model each should use
-    - whether to use generic or learned prompt
-
-    No prompt interpretation needed. The caller just follows the plan.
+    Reads .dynos/config/auditors.json for the auditor registry and
+    .dynos/config/policy.json for ensemble voting config. Falls back
+    to hardcoded defaults when config files are missing.
     """
     ctx = RouterContext(root)
+    registry = _load_auditor_registry(root)
+
+    # Load user config from .dynos/config/policy.json
+    config_policy_path = root / ".dynos" / "config" / "policy.json"
+    try:
+        user_config = load_json(config_policy_path)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        user_config = {}
+
+    ensemble_auditors, ensemble_models, ensemble_escalation = _load_ensemble_config(user_config)
+
     plan = {
         "generated_at": now_iso(),
         "task_type": task_type,
@@ -724,17 +761,16 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
         "auditors": [],
     }
 
-    # Determine which auditors are eligible
+    # Determine which auditors are eligible from the registry
     if fast_track:
-        eligible = ["spec-completion-auditor", "security-auditor"]
+        eligible = list(registry.get("fast_track", _DEFAULT_AUDITOR_REGISTRY["fast_track"]))
     else:
-        eligible = ["spec-completion-auditor", "security-auditor", "code-quality-auditor", "dead-code-auditor"]
-        if "ui" in domains:
-            eligible.append("ui-auditor")
-        if "db" in domains:
-            eligible.append("db-schema-auditor")
-        if "backend" in domains or "db" in domains:
-            eligible.append("performance-auditor")
+        eligible = list(registry.get("always", _DEFAULT_AUDITOR_REGISTRY["always"]))
+        domain_map = registry.get("domain_conditional", _DEFAULT_AUDITOR_REGISTRY["domain_conditional"])
+        for domain in domains:
+            for auditor in domain_map.get(domain, []):
+                if auditor not in eligible:
+                    eligible.append(auditor)
 
     for auditor in eligible:
         # Skip check (uses cached retrospectives via ctx)
@@ -772,10 +808,10 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
         }
 
         # Ensemble voting for high-risk auditors
-        if auditor in ENSEMBLE_AUDITORS and not fast_track:
+        if auditor in ensemble_auditors and not fast_track:
             entry["ensemble"] = True
-            entry["ensemble_voting_models"] = list(ENSEMBLE_VOTING_MODELS)
-            entry["ensemble_escalation_model"] = ENSEMBLE_ESCALATION_MODEL
+            entry["ensemble_voting_models"] = list(ensemble_models)
+            entry["ensemble_escalation_model"] = ensemble_escalation
         else:
             entry["ensemble"] = False
 
