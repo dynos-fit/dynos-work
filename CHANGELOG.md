@@ -13,15 +13,15 @@ and this project adheres to **Semantic Versioning**.
 The foundry moves from LLM-reviewing-LLM to deterministic-tool-checking-LLM across every verification surface. Autofix is extracted to a separate repository. The learning layer becomes explicitly optional.
 
 ### Added
-- **Compliance auditing** (PR #10): security-auditor flags GPL/AGPL deps, generates SBOM via cyclonedx-bom/syft, verifies dependency provenance via Sigstore, checks for missing privacy code (data export, account deletion). New `compliance` category with `comp-` prefix.
-- **Conditional plan sections** (PR #11): `## API Contracts` required when domains include backend/ui/security; `## Data Model` required when domains include db.
-- **Plan gap analysis** (PR #11): deterministic hook cross-references API Contracts and Data Model tables against actual route definitions (10+ frameworks) and model/schema definitions (8+ ORMs). Plans can't claim endpoints or tables that don't exist.
-- **Doc-accuracy auditing** (PR #12): code-quality-auditor runs `validate_docs_accuracy.py` on tasks touching `.md` files.
-- **Per-agent tool boundaries** (PR #13): all 17 agents declare minimum tool sets in YAML frontmatter. Auditors cannot Write/Edit. Planners cannot Bash.
-- **LEARNING_ENABLED policy flag** (PR #14): `dynos config set learning_enabled false` disables the entire learning layer. Foundry-only mode is now a single config flip.
-- **Phase-labeled start.md** (PR #15): 6 phase headers make structure visible. Zero behavior change.
-- **DORA metrics** (PR #16): `lead_time_seconds`, `change_failure`, `recovery_time_seconds` in retrospectives. `dynos stats dora` aggregator.
-- **Usage telemetry** (PR #17): module-level dormancy detection. `dynos stats usage` CLI.
+- **Compliance auditing**: security-auditor flags GPL/AGPL deps, generates SBOM via cyclonedx-bom/syft, verifies dependency provenance via Sigstore, checks for missing privacy code (data export, account deletion). New `compliance` category with `comp-` prefix.
+- **Conditional plan sections**: `## API Contracts` required when domains include backend/ui/security; `## Data Model` required when domains include db.
+- **Plan gap analysis**: deterministic hook cross-references API Contracts and Data Model tables against actual route definitions (10+ frameworks) and model/schema definitions (8+ ORMs). Plans can't claim endpoints or tables that don't exist.
+- **Doc-accuracy auditing**: code-quality-auditor runs `validate_docs_accuracy.py` on tasks touching `.md` files.
+- **Per-agent tool boundaries**: all 17 agents declare minimum tool sets in YAML frontmatter. Auditors cannot Write/Edit. Planners cannot Bash.
+- **LEARNING_ENABLED policy flag**: `dynos config set learning_enabled false` disables the entire learning layer. Foundry-only mode is now a single config flip.
+- **Phase-labeled start.md**: 6 phase headers make structure visible. Zero behavior change.
+- **DORA metrics**: `lead_time_seconds`, `change_failure`, `recovery_time_seconds` in retrospectives. `dynos stats dora` aggregator.
+- **Usage telemetry**: module-level dormancy detection. `dynos stats usage` CLI.
 - **`dynos config` CLI**: get/set project policy without hand-editing JSON.
 - **`hooks/compliance_check.py`**: license scanning, SBOM, Sigstore provenance, privacy checks across 10 ecosystems.
 - **`hooks/plan_gap_analysis.py`**: deterministic plan verification against codebase.

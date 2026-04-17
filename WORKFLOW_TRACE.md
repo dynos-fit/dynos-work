@@ -115,7 +115,7 @@ def cmd_ensure(args: argparse.Namespace) -> int:
 
 ---
 
-### daemon.maintainer_policy  **← updated (fix #6)**
+### daemon.maintainer_policy
 
 ```python
 def maintainer_policy(root: Path) -> dict:
@@ -143,7 +143,6 @@ def maintainer_policy(root: Path) -> dict:
     return merged
 ```
 
-**What changed:** previously this helper "self-healed" `policy.json` by overwriting it with its own partial defaults, clobbering keys owned by `project_policy` (freshness windows, token budget, fast-track). Now it only adds *missing* keys from its own default set and leaves everything else intact. Only writes on first creation or when new defaults were injected.
 
 **What it does:** loads daemon-specific settings from the shared `policy.json`; tops up defaults without touching other namespaces.
 **When:** inside `cmd_ensure`, `cmd_start`, and `cmd_run_loop` whenever poll interval is needed.
@@ -170,7 +169,7 @@ ctx = {
 Path('${PROJECT_ROOT}/.dynos/routing-context.json').write_text(json.dumps(ctx, indent=2))
 ```
 
-#### lib_core.project_policy  **← updated (fix #6)**
+#### lib_core.project_policy
 
 ```python
 def project_policy(root: Path) -> dict:
@@ -198,7 +197,6 @@ def project_policy(root: Path) -> dict:
     return merged
 ```
 
-**What changed:** previously the function re-wrote `policy.json` on any parse error with its own partial defaults (wiping maintainer keys). Now it only writes on *first creation* — corruption is absorbed silently, preserving any partially-salvageable data and not truncating the file.
 
 **What it does:** returns the merged project policy (defaults ⨁ file). Creates the file only if missing.
 **When:** every time any code needs to know project policy — the router calls it for every model/skip/route decision, the session-start hook calls it to build the context blob, `/start` calls it during fast-track gating, etc.
@@ -223,7 +221,7 @@ def load_prevention_rules(root: Path) -> list[dict]:
 **What it does:** reads the list of prevention rules — short strings like "always validate JWT before decode" — accumulated across prior tasks from finding categories. Returns `[]` on any error.
 
 **When:** every session start (count goes in the context blob), every executor spawn (injected into the prompt).
-**Why:** lets the router inject learned "avoid this" patterns into every executor prompt. The actual crash safety and filtering (see fix #5) now lives in `router.build_executor_plan`, not here — `load_prevention_rules` is intentionally permissive.
+**Why:** lets the router inject learned "avoid this" patterns into every executor prompt. The actual crash safety and filtering now lives in `router.build_executor_plan`, not here — `load_prevention_rules` is intentionally permissive.
 **Hands off to:** `router.build_executor_plan` filters them per-executor.
 
 ---
@@ -436,7 +434,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
 
 Thin wrapper. Delegates to `lib_core.transition_task`.
 
-#### lib_core.transition_task  **← updated (fix #1)**
+#### lib_core.transition_task
 
 ```python
 def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> tuple[str, dict]:
@@ -528,10 +526,6 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
     return current_stage, manifest
 ```
 
-**What changed:** the DONE gate no longer requires `post-completion` (previously gated on a receipt that is only written *after* the transition — an unreachable loop). DONE now requires only:
-1. `task-retrospective.json` exists
-2. At least one audit report exists
-3. `retrospective` receipt exists (proves reward was deterministically computed)
 
 The `post-completion` receipt is still written by the event bus, just no longer as a precondition.
 
@@ -546,7 +540,7 @@ The `post-completion` receipt is still written by the event bus, just no longer 
 **Why:** illegal flows are impossible. The fix makes DONE actually reachable on first try.
 **Hands off to:** on DONE, `_fire_task_completed` → `lib_events.emit_event` → `eventbus.drain` → the memory/calibration/benchmark/dashboard pipeline (PART 4).
 
-#### lib_core._fire_task_completed  **← updated (fix #3)**
+#### lib_core._fire_task_completed
 
 ```python
 def _fire_task_completed(task_dir: Path) -> None:
@@ -586,7 +580,6 @@ def _fire_task_completed(task_dir: Path) -> None:
         print(f"[dynos] event drain failed: {exc}")
 ```
 
-**What changed:** the emitted `task-completed` event now carries `{"task_id": ..., "task_dir": ...}` in its payload. Previously it was bare, and the drain had to guess which task it belonged to by scanning manifests.
 
 **What it does:** fires the post-completion pipeline in-process: emit typed event with task identity, drain up to 120s.
 **When:** every DONE transition.
@@ -847,7 +840,7 @@ def cmd_validate_contract(args: argparse.Namespace) -> int:
 python3 hooks/router.py executor-plan --root . --task-type {type} --graph .dynos/task-{id}/execution-graph.json
 ```
 
-#### router.build_executor_plan  **← updated (fix #5)**
+#### router.build_executor_plan
 
 ```python
 def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dict:
@@ -885,10 +878,6 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
     return plan
 ```
 
-**What changed:** the list comprehension now verifies each rule is a dict *and* filters by per-rule `executor` field. Previously any string entry crashed with `AttributeError`; and every executor got every rule regardless of relevance. Now:
-- `"just a string"` is silently filtered out
-- `{"rule": "X", "executor": "backend-executor"}` goes only to backend-executor
-- `{"rule": "X"}` (no executor field) goes to all executors — default behavior preserved for unscoped rules
 
 **What it does:** for each segment, ask router (1) which model? (2) generic, learned, or alongside? (3) which prevention rules apply? Returns flat list ready for spawning.
 **When:** Step 4 of /execute.
@@ -1021,7 +1010,7 @@ python3 hooks/ctl.py transition .dynos/task-{id} CHECKPOINT_AUDIT
 python3 hooks/router.py audit-plan --root . --task-type {type} --domains ui,backend [--fast-track]
 ```
 
-#### router.build_audit_plan  **← updated (added performance-auditor)**
+#### router.build_audit_plan
 
 ```python
 AUDITOR_ROLES = [
@@ -1072,7 +1061,6 @@ def build_audit_plan(root, task_type, domains, fast_track=False) -> dict:
     return plan
 ```
 
-**What changed:** new `performance-auditor` agent (agents/performance-auditor.md) added for backend/db domains. It inspects query patterns (N+1, missing indexes, unbounded queries, missing transactions), algorithmic complexity (O(n²), unnecessary recomputation), resource usage (connection pool, memory accumulation, missing timeouts, blocking event loop). Read-only, model=sonnet.
 
 **What it does:** computes audit spawn plan deterministically. Per eligible auditor: resolve skip, resolve model, resolve route. Turn on ensemble voting for security + db-schema auditors.
 **When:** first thing /audit does.
@@ -1183,15 +1171,15 @@ def cmd_compute_reward(args):
 python3 hooks/ctl.py transition .dynos/task-{id} DONE
 ```
 
-`transition_task` verifies: retrospective file exists, audit reports exist, `retrospective` receipt exists. **Post-completion no longer required at this gate (fix #1).**
+`transition_task` verifies: retrospective file exists, audit reports exist, `retrospective` receipt exists. **Post-completion no longer required at this gate**.**
 
 Gate passes → stage flips to DONE → `_fire_task_completed()` runs → event bus drains → `post-completion` receipt gets written by the drain (for the *next* time this task is referenced).
 
 ---
 
-## PART 4 — `TaskCompleted` hook + event bus  **← heavily updated**
+## PART 4 — `TaskCompleted` hook + event bus
 
-### hooks/task-completed (bash)  **← updated (fix #3)**
+### hooks/task-completed (bash)
 
 ```bash
 #!/usr/bin/env bash
@@ -1233,7 +1221,6 @@ PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/eventbus.py" d
 # ... (unchanged)
 ```
 
-**What changed:** the bash hook now resolves the most recently DONE task and passes `{task_id, task_dir}` as the event payload. Previously it emitted a bare event and the drain had to guess.
 
 **When:** fires on every Claude Code task completion (parallel with the in-process fire from `transition_task(DONE)` — both paths carry the same payload now).
 **Why:** identity-correlated events mean the `post-completion` receipt can no longer attach to the wrong task under concurrency.
@@ -1254,7 +1241,7 @@ def emit_event(root, event_type, source_pipeline, payload=None) -> Path:
     return event_path
 ```
 
-### eventbus.drain — the central fan-out  **← heavily updated (fixes #2, #3, #4)**
+### eventbus.drain — the central fan-out
 
 ```python
 HANDLERS: dict[str, list[HandlerEntry]] = {
@@ -1275,8 +1262,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     """Process all pending events until the queue is drained."""
     summary: dict[str, list[str]] = {}
     iteration = 0
-    emitted_follow_ons: set[str] = set()   # tracked ACROSS iterations — fix #2
-    completed_task_dirs: list[str] = []    # ALL task dirs from task-completed events — fix #3
+    emitted_follow_ons: set[str] = set()   # tracked ACROSS iterations
+    completed_task_dirs: list[str] = []    # ALL task dirs from task-completed events
 
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
@@ -1300,7 +1287,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     processed_any = True
                     payload = event_data.get("payload", {})
 
-                    # Capture task identity from task-completed events (fix #3)
+                    # Capture task identity from task-completed events
                     if event_type == "task-completed" and isinstance(payload, dict):
                         td = payload.get("task_dir")
                         if td and td not in completed_task_dirs:
@@ -1322,18 +1309,18 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                                   duration_s=round(time.monotonic() - t0, 3),
                                   error=err_msg if not success else None)
 
-                    # AND semantics: any failure sticks  (fix #4)
+                    # AND semantics: any failure sticks
                     prev = handler_all_ok.setdefault(event_type, {}).get(consumer_name, True)
                     handler_all_ok[event_type][consumer_name] = prev and success
 
-                    # Only mark processed on success — failed events stay for retry  (fix #4)
+                    # Only mark processed on success — failed events stay for retry
                     if success:
                         mark_processed(event_path, consumer_name)
 
                     status = "ok" if success else "failed"
                     summary.setdefault(event_type, []).append(f"{consumer_name}:{status}")
 
-            # Emit follow-on only when ALL active handlers for this event type succeeded.  (fix #2 + #4)
+            # Emit follow-on only when ALL active handlers for this event type succeeded.
             if event_type in handler_all_ok and event_type in FOLLOW_ON:
                 results = handler_all_ok[event_type]
                 all_succeeded = all(results.values())
@@ -1351,7 +1338,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
 
     cleanup_old_events(root)
 
-    # Write post-completion receipt for EACH completed task  (fix #3)
+    # Write post-completion receipt for EACH completed task 
     if "task-completed" in summary and completed_task_dirs:
         handlers_run = [...]
         postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("calibration-completed", []))
@@ -1371,15 +1358,9 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     return summary
 ```
 
-**What changed (three compounding fixes):**
 
-**Fix #2 (fan-out explosion) —** `emitted_follow_ons` is a *drain-lifetime* set. Previously `summary` (cumulative) was consulted per iteration, so a single `task-completed` would emit `memory-completed` on every iteration after first occurrence — producing `max_iterations` duplicate downstream events. Now each follow-on fires at most once per drain.
 
-**Fix #4 (failure semantics) —** two changes:
-1. `mark_processed` now only fires on `success=True`. Failed events stay on disk with an unadvanced `processed_by` list, so the next drain retries them. Previously transient failures became permanent state loss.
-2. Follow-on emission uses AND semantics: every handler for an event type must succeed. A single failure blocks the follow-on and prints a diagnostic `[gate]` line.
 
-**Fix #3 (identity correlation) —** `completed_task_dirs` is populated from `task-completed` payload (`task_dir`). The post-completion receipt writer iterates this list and writes one receipt *per completed task*, rather than scanning manifests and attaching to an arbitrary "most recent" directory.
 
 **Also notable —** handler function names tracked the event-name rename:
 - `run_memory` (was `run_learn`)
@@ -1802,7 +1783,7 @@ SessionStart hook
   ├─ ctl.cmd_validate_contract        → lib_contracts.validate_inputs/outputs
   ├─ router.cmd_executor_plan         → build_executor_plan
   │                                      → resolve_model (UCB1), resolve_route
-  │                                      → prevention-rule per-executor filter  (fix #5)
+  │                                      → prevention-rule per-executor filter
   ├─ lib_receipts.receipt_executor_routing
   ├─ per segment:
   │    ├─ router.cmd_inject_prompt    → build_executor_prompt
@@ -1829,11 +1810,11 @@ SessionStart hook
   ├─ ctl.cmd_compute_reward           → lib_validate.compute_reward → task-retrospective.json,
   │                                     lib_receipts.receipt_retrospective
   └─ ctl.cmd_transition               → lib_core.transition_task (→ DONE)
-                                        [no more post-completion gate — fix #1]
+                                        [no more post-completion gate]
                                         ↓
 TaskCompleted hook (also fired from transition_task DONE via _fire_task_completed)
-  ├─ lib_events.emit_event("task-completed", payload={task_id, task_dir})   [fix #3]
-  └─ eventbus.drain                                                         [fix #2, #4]
+  ├─ lib_events.emit_event("task-completed", payload={task_id, task_dir})
+  └─ eventbus.drain
         ├─ task-completed → memory          (patterns.write_patterns)
         ├─ task-completed → trajectory      (trajectory.cmd_rebuild)
         ├─ emits memory-completed (once per drain, only if all handlers OK)
@@ -1859,12 +1840,12 @@ Background (maintain daemon, poll_seconds interval)
 
 | Area | Before | After |
 |---|---|---|
-| DONE gate | required `post-completion` receipt (impossible on first try) | requires only retrospective artifacts + `retrospective` receipt (fix #1) |
-| Event fan-out | one `task-completed` could emit up to N duplicate `memory-completed` events | follow-on emitted at most once per drain lifetime (fix #2) |
-| Event identity | `task-completed` was bare; receipt attached to "most recent task" by scan | payload carries `task_id`+`task_dir`; receipt writes per-task from payload (fix #3) |
-| Failed handlers | silently consumed, cascade continued | stay unconsumed for retry; follow-on blocked on AND-failure (fix #4) |
-| Prevention rules | dict-only assumption crashed on strings; every rule went to every executor | shape-validated; per-rule `executor` filter (fix #5) |
-| `policy.json` | both helpers self-healed with partial defaults, wiping each other | merge defaults without clobbering; project_policy only writes on first create (fix #6) |
+| DONE gate | required `post-completion` receipt (impossible on first try) | requires only retrospective artifacts + `retrospective` receipt |
+| Event fan-out | one `task-completed` could emit up to N duplicate `memory-completed` events | follow-on emitted at most once per drain lifetime |
+| Event identity | `task-completed` was bare; receipt attached to "most recent task" by scan | payload carries `task_id`+`task_dir`; receipt writes per-task from payload |
+| Failed handlers | silently consumed, cascade continued | stay unconsumed for retry; follow-on blocked on AND-failure |
+| Prevention rules | dict-only assumption crashed on strings; every rule went to every executor | shape-validated; per-rule `executor` filter |
+| `policy.json` | both helpers self-healed with partial defaults, wiping each other | merge defaults without clobbering; project_policy only writes on first create |
 | Event names | `learn` / `evolve` / `observe` | `memory` / `calibration` / `telemetry` |
 | New auditor | — | `performance-auditor` for backend/db domains |
 | New executor | — | `docs-executor` for documentation segments |
