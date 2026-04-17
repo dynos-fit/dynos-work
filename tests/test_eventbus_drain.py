@@ -212,6 +212,32 @@ class TestLearningDisabled:
 
 
 # ---------------------------------------------------------------------------
+# No tight-loop retry within a single drain call
+# ---------------------------------------------------------------------------
+
+class TestNoTightRetry:
+    def test_permanently_failing_handler_runs_once_per_drain(self, tmp_path: Path):
+        """A handler that always fails should run exactly once per drain(),
+        not once per iteration (which would be 10 times with max_iterations=10)."""
+        root = _setup(tmp_path)
+        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
+
+        calls = {"n": 0}
+        def always_fail(root, payload):
+            calls["n"] += 1
+            return False
+
+        handlers = _make_handlers({"memory": always_fail, "trajectory": True})
+        with mock.patch("eventbus.HANDLERS", handlers), \
+             mock.patch("lib_core.is_learning_enabled", return_value=True), \
+             mock.patch("eventbus.log_event"):
+            from eventbus import drain
+            drain(root, max_iterations=10)
+
+        assert calls["n"] == 1, f"permanently failing handler ran {calls['n']} times, expected 1"
+
+
+# ---------------------------------------------------------------------------
 # Multiple queued events: AND semantics
 # ---------------------------------------------------------------------------
 
