@@ -107,9 +107,9 @@ HandlerEntry = tuple[str, Callable[[Path, dict], bool]]
 
 _BUILTIN_HANDLERS: dict[str, list[HandlerEntry]] = {
     "task-completed": [
-        ("policy_engine", run_policy_engine),
         ("postmortem", run_postmortem),
         ("improve", run_improve),
+        ("policy_engine", run_policy_engine),
         ("dashboard", run_dashboard),
         ("register", run_register),
     ],
