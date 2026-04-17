@@ -180,18 +180,24 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
     # Handlers that are part of the learning layer — skipped when learning is disabled.
+    # Note: only the handler FUNCTIONS are skipped. The event types still flow through
+    # so that non-learning handlers in downstream events (dashboard, register, postmortem)
+    # still fire. A skipped handler counts as succeeded for follow-on gating.
     _LEARNING_HANDLERS = {"memory", "trajectory", "calibration", "patterns", "improve", "benchmark"}
 
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
-        # Track per-event-type: which handlers ran and whether each succeeded
-        handler_results: dict[str, dict[str, bool]] = {}  # {event_type: {consumer: success}}
+        # Track per-event-type: whether ALL handlers succeeded across ALL events
+        # Uses AND semantics: any failure for a consumer sticks (later success doesn't override)
+        handler_all_ok: dict[str, dict[str, bool]] = {}  # {event_type: {consumer: all_succeeded}}
 
         for event_type, handlers in HANDLERS.items():
             for consumer_name, handler_fn in handlers:
-                if not learning and consumer_name in _LEARNING_HANDLERS:
-                    continue
+                # When learning is disabled, skip the handler execution but still
+                # consume and mark events processed so the chain continues to
+                # non-learning handlers downstream (dashboard, register, postmortem)
+                skip_execution = not learning and consumer_name in _LEARNING_HANDLERS
                 try:
                     events = consume_events(root, event_type, consumer_name)
                 except Exception as e:
@@ -207,39 +213,45 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                         if td and td not in completed_task_dirs:
                             completed_task_dirs.append(td)
 
-                    # Run handler
-                    err_msg = None
-                    t0 = time.monotonic()
-                    try:
-                        success = handler_fn(root, payload)
-                    except Exception as e:
-                        err_msg = str(e)
-                        print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
-                        success = False
+                    # Run handler (or skip if learning disabled)
+                    if skip_execution:
+                        success = True
+                        err_msg = None
+                    else:
+                        err_msg = None
+                        t0 = time.monotonic()
+                        try:
+                            success = handler_fn(root, payload)
+                        except Exception as e:
+                            err_msg = str(e)
+                            print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
+                            success = False
 
-                    handler_results.setdefault(event_type, {})[consumer_name] = success
+                        log_event(
+                            root,
+                            "eventbus_handler",
+                            handler=consumer_name,
+                            trigger_event=event_type,
+                            success=success,
+                            duration_s=round(time.monotonic() - t0, 3),
+                            error=err_msg if not success else None,
+                        )
 
-                    log_event(
-                        root,
-                        "eventbus_handler",
-                        handler=consumer_name,
-                        trigger_event=event_type,
-                        success=success,
-                        duration_s=round(time.monotonic() - t0, 3),
-                        error=err_msg if not success else None,
-                    )
+                    # Track success with AND semantics: any failure sticks
+                    prev = handler_all_ok.setdefault(event_type, {}).get(consumer_name, True)
+                    handler_all_ok[event_type][consumer_name] = prev and success
 
-                    # Mark as processed regardless of success
-                    mark_processed(event_path, consumer_name)
+                    # Only mark processed on success — failed events stay for retry
+                    if success:
+                        mark_processed(event_path, consumer_name)
 
                     # Track in summary
                     status = "ok" if success else "failed"
                     summary.setdefault(event_type, []).append(f"{consumer_name}:{status}")
 
-            # Emit follow-on only when ALL handlers for this event type succeeded.
-            # If learn fails but trajectory succeeds, learn-completed must NOT fire.
-            if event_type in handler_results and event_type in FOLLOW_ON:
-                results = handler_results[event_type]
+            # Emit follow-on only when ALL active handlers for this event type succeeded.
+            if event_type in handler_all_ok and event_type in FOLLOW_ON:
+                results = handler_all_ok[event_type]
                 all_succeeded = all(results.values())
                 if all_succeeded:
                     follow_on = FOLLOW_ON[event_type]
@@ -249,6 +261,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                 else:
                     failed = [k for k, v in results.items() if not v]
                     print(f"  [gate] {event_type} follow-on blocked — failed: {', '.join(failed)}", file=sys.stderr)
+
 
         if not processed_any:
             break
