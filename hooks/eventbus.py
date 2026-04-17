@@ -84,6 +84,14 @@ def run_register(root: Path, _payload: dict) -> bool:
     )
 
 
+def run_improve(root: Path, _payload: dict) -> bool:
+    """Run the auto-improvement engine on postmortem data."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "postmortem_improve.py"), "improve", "--root", str(root)],
+        root,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
@@ -101,6 +109,7 @@ _BUILTIN_HANDLERS: dict[str, list[HandlerEntry]] = {
     "task-completed": [
         ("policy_engine", run_policy_engine),
         ("postmortem", run_postmortem),
+        ("improve", run_improve),
         ("dashboard", run_dashboard),
         ("register", run_register),
     ],
@@ -160,7 +169,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     learning = is_learning_enabled(root)
     # policy_engine is the only learning handler — skipped when learning is disabled.
     # postmortem, dashboard, register always run regardless.
-    _LEARNING_HANDLERS = {"policy_engine"}
+    _LEARNING_HANDLERS = {"policy_engine", "improve"}
 
     # Track consumers that failed during this drain call — don't retry them
     # in subsequent iterations. Retries happen on the NEXT drain() invocation.

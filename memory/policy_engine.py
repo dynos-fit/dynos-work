@@ -52,6 +52,18 @@ def pattern_paths(root: Path) -> list[Path]:
     return unique
 
 
+def _load_prevention_rules(root: Path) -> list[dict]:
+    """Load learned prevention rules written by postmortem_improve."""
+    rules_path = _persistent_project_dir(root) / "prevention-rules.json"
+    try:
+        data = load_json(rules_path)
+        if isinstance(data, dict):
+            return data.get("rules", [])
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
 def _observed_task_types(retrospectives: list[dict], registry: dict) -> list[str]:
     task_types = {
         str(item.get("task_type"))
@@ -660,12 +672,20 @@ def build_patterns_markdown(
         "| ui-executor | Validate visual intent against existing dashboard structure before broad styling changes. | default |",
         "| backend-executor | Prefer narrower edits with explicit acceptance coverage and test verification. | default |",
         "| testing-executor | Capture failing expectations before broad test rewrites. | default |",
+    ]
+    # Append learned prevention rules from postmortem_improve
+    learned_rules = _load_prevention_rules(root)
+    for rule in learned_rules:
+        cat = rule.get("category", "unknown")
+        text = rule.get("rule", "")
+        lines.append(f"| all | {text} | learned:{cat} |")
+    lines.extend([
         "",
         "## Gold Standard Instances",
         "",
         "| Task ID | Type | Why It Matters |",
         "|---------|------|----------------|",
-    ]
+    ])
     scored_tasks = [
         item
         for item in retrospectives
