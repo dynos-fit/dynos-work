@@ -94,7 +94,7 @@ class TestModulesInstrumented:
         assert '"postmortem_improve"' in text
 
     def test_lib_qlearn_instrumented(self):
-        text = (ROOT / "sandbox" / "lib_qlearn.py").read_text()
+        text = (ROOT / "memory" / "lib_qlearn.py").read_text()
         assert "record_usage" in text
         assert '"lib_qlearn"' in text
 
