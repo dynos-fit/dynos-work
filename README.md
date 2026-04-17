@@ -104,7 +104,7 @@ Just Claude Code. That's the only requirement.
 - [Pipelines](PIPELINES.md)
 - [Internals & CLI reference](INTERNALS.md)
 - [Architecture](ARCHITECTURE.md)
-- [Under the hood](UNDER_THE_HOOD.md)
+- [Function-by-function workflow trace](WORKFLOW_TRACE.md)
 - [Changelog](CHANGELOG.md)
 
 ## Philosophy

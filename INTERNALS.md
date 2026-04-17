@@ -306,7 +306,7 @@ Those are implementation details for the plugin and its agents.
 
 Normal users should not need to learn or run them to benefit from the system.
 
-If you do want the implementation details, read [UNDER_THE_HOOD.md](UNDER_THE_HOOD.md).
+If you do want the implementation details, read [WORKFLOW_TRACE.md](WORKFLOW_TRACE.md) — a function-by-function walkthrough of every pipeline step with the actual code and narrative.
 
 If you want the contributor-oriented codebase map, read [ARCHITECTURE.md](ARCHITECTURE.md).
 
