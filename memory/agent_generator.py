@@ -18,16 +18,45 @@ from lib_log import log_event
 from lib_registry import ensure_learned_registry, register_learned_agent
 
 
+# Fallback imperative instructions for each known finding category.
+# Used when no specific prevention rules exist for a category.
+CATEGORY_INSTRUCTIONS: dict[str, str] = {
+    "sec": "ALWAYS validate authentication and authorization before accessing protected resources.",
+    "cq": "BEFORE submitting, verify that all code meets quality standards including lint, type checks, and consistent style.",
+    "dc": "ALWAYS ensure documentation is accurate and matches the implemented behavior.",
+    "perf": "DO NOT introduce O(n^2) or worse algorithms without explicit justification. ALWAYS consider performance impact of loops and queries.",
+    "comp": "ALWAYS verify backward compatibility before modifying public interfaces or data formats.",
+    "ui": "BEFORE submitting, verify that UI changes render correctly across supported viewports and do not break existing layouts.",
+    "db": "ALWAYS use parameterized queries. DO NOT modify schema without migration scripts.",
+    "test": "ALWAYS include tests for new behavior and verify existing tests pass before submitting.",
+    "process": "ALWAYS follow the established workflow steps. DO NOT skip required review or validation stages.",
+    "unknown": "BEFORE submitting, review changes for correctness and verify no regressions are introduced.",
+}
+
+
 def _matching_retrospectives(
-    retrospectives: list[dict], role: str, task_type: str
+    retrospectives: list[dict], role: str, task_type: str, root: Path
 ) -> list[dict]:
-    """Return retrospectives where *role* appears in executor_repair_frequency and task_type matches."""
+    """Return retrospectives where *role* participated per the execution graph and task_type matches."""
     matched: list[dict] = []
     for retro in retrospectives:
         if retro.get("task_type") != task_type:
             continue
-        if role in retro.get("executor_repair_frequency", {}):
-            matched.append(retro)
+        if "_path" not in retro:
+            continue
+        try:
+            task_dir = Path(retro["_path"]).parent
+            graph_path = task_dir / "execution-graph.json"
+            graph = json.loads(graph_path.read_text())
+            executors = {
+                seg.get("executor")
+                for seg in graph.get("segments", [])
+                if seg.get("executor")
+            }
+            if role in executors:
+                matched.append(retro)
+        except (json.JSONDecodeError, OSError, KeyError):
+            continue
     return matched
 
 
@@ -38,18 +67,6 @@ def _aggregate_finding_categories(retros: list[dict]) -> dict[str, int]:
         for cat, count in retro.get("findings_by_category", {}).items():
             totals[cat] = totals.get(cat, 0) + count
     return dict(sorted(totals.items(), key=lambda kv: kv[1], reverse=True))
-
-
-def _aggregate_repair_frequency(retros: list[dict], role: str) -> dict[str, int]:
-    """Compute total and per-task repair counts for *role*."""
-    total_repairs = 0
-    tasks_with_repairs = 0
-    for retro in retros:
-        repairs = retro.get("executor_repair_frequency", {}).get(role, 0)
-        total_repairs += repairs
-        if repairs > 0:
-            tasks_with_repairs += 1
-    return {"total_repairs": total_repairs, "tasks_with_repairs": tasks_with_repairs}
 
 
 def _load_prevention_rules(root: Path) -> list[dict]:
@@ -72,18 +89,27 @@ def _build_agent_content(
     generated_from: str,
     root: Path,
 ) -> str:
-    """Build structured markdown content for a learned agent file."""
+    """Build structured markdown content for a learned agent file.
+
+    Emits imperative failure-prevention instructions derived from finding
+    patterns and prevention rules, not descriptive telemetry.
+    """
     generation_date = now_iso()
     observation_count = len(matched_retros)
 
     finding_categories = _aggregate_finding_categories(matched_retros)
-    repair_stats = _aggregate_repair_frequency(matched_retros, role)
 
     prevention_rules = _load_prevention_rules(root)
-    relevant_rules = [
-        r for r in prevention_rules
-        if r.get("category") in finding_categories
-    ]
+    # Filter rules: category must match AND executor must be this role or "all"
+    relevant_rules: dict[str, list[dict]] = {}
+    for r in prevention_rules:
+        cat = r.get("category")
+        if cat not in finding_categories:
+            continue
+        rule_executor = r.get("executor", "all")
+        if rule_executor not in (role, "all"):
+            continue
+        relevant_rules.setdefault(cat, []).append(r)
 
     lines: list[str] = []
 
@@ -91,7 +117,7 @@ def _build_agent_content(
     lines.append(f"# {agent_name}")
     lines.append("")
 
-    # Context section
+    # Context metadata section (brief)
     lines.append("## Context")
     lines.append("")
     lines.append(f"- **Role**: {role}")
@@ -101,38 +127,22 @@ def _build_agent_content(
     lines.append(f"- **Generated from**: {generated_from}")
     lines.append("")
 
-    # Patterns section
-    lines.append("## Patterns")
+    # Failure Prevention Rules section (imperative instructions)
+    lines.append("## Failure Prevention Rules")
     lines.append("")
 
-    # Finding categories
-    lines.append("### Finding categories")
-    lines.append("")
     if finding_categories:
-        for cat, count in finding_categories.items():
-            lines.append(f"- `{cat}`: {count} findings")
+        for cat in finding_categories:
+            cat_rules = relevant_rules.get(cat, [])
+            if cat_rules:
+                for rule in cat_rules:
+                    lines.append(f"- [{cat}] {rule.get('rule', '')}")
+            else:
+                # Fallback to category-level imperative instruction
+                fallback = CATEGORY_INSTRUCTIONS.get(cat, CATEGORY_INSTRUCTIONS["unknown"])
+                lines.append(f"- [{cat}] {fallback}")
     else:
-        lines.append("No finding categories recorded.")
-    lines.append("")
-
-    # Repair frequency
-    lines.append("### Repair frequency")
-    lines.append("")
-    lines.append(f"- Total repairs: {repair_stats['total_repairs']}")
-    lines.append(f"- Tasks requiring repairs: {repair_stats['tasks_with_repairs']} / {observation_count}")
-    if observation_count > 0:
-        avg = repair_stats["total_repairs"] / observation_count
-        lines.append(f"- Average repairs per task: {avg:.1f}")
-    lines.append("")
-
-    # Prevention rules
-    lines.append("### Prevention rules")
-    lines.append("")
-    if relevant_rules:
-        for rule in relevant_rules:
-            lines.append(f"- [{rule.get('category', '?')}] {rule.get('rule', '')}")
-    else:
-        lines.append("No prevention rules applicable to observed finding categories.")
+        lines.append("No failure patterns observed yet. Follow standard best practices.")
     lines.append("")
 
     return "\n".join(lines)
@@ -158,7 +168,6 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
     # Step 2: Discover uncovered (role, task_type) slots
     # Scan execution graphs for ALL executors that ran, not just those with repairs.
-    # executor_repair_frequency only contains executors that failed — misses clean runs.
     role_type_counts: dict[tuple[str, str], int] = {}
     dynos_dir = root / ".dynos"
     for task_dir in sorted(dynos_dir.iterdir()) if dynos_dir.exists() else []:
@@ -192,13 +201,23 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
     # Step 3: Generate agents for uncovered slots
     for role, task_type, count in candidates:
+        matched_retros = _matching_retrospectives(retrospectives, role, task_type, root)
+
+        # Skip slot if no matching retrospectives (no observational data)
+        if not matched_retros:
+            log_event(root, "agent_generator_step", step="skip_no_match", role=role, task_type=task_type)
+            result["skipped_reasons"].append(f"no matching retrospectives for {role}/{task_type}")
+            continue
+
         agent_name = f"auto-{role.replace('-executor', '')}-{task_type}"
         agent_dir = _persistent_project_dir(root) / "learned-agents" / "executors"
         agent_dir.mkdir(parents=True, exist_ok=True)
         agent_path = agent_dir / f"{agent_name}.md"
-        latest_task = retrospectives[-1].get("task_id", "unknown")
+
+        # Provenance: use latest matched retro, not global latest
+        latest_task = matched_retros[-1].get("task_id", "unknown")
+
         if not agent_path.exists():
-            matched_retros = _matching_retrospectives(retrospectives, role, task_type)
             content = _build_agent_content(
                 agent_name, role, task_type, matched_retros, latest_task, root
             )
