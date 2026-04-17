@@ -699,24 +699,13 @@ def build_patterns_markdown(
             )
     else:
         lines.append("| none | n/a | No completed retrospectives available yet. |")
-    # Effectiveness scores (computed deterministically from retrospectives)
-    effectiveness_scores = compute_effectiveness_scores(retrospectives)
-    lines.extend([""] + _build_effectiveness_scores_section(effectiveness_scores))
+    # Data tables (effectiveness scores, model policy, skip policy, agent routing)
+    # are NOT included in the markdown. They are written as JSON files
+    # (model-policy.json, skip-policy.json, route-policy.json) which the
+    # router reads directly. Keeping them out of the markdown avoids
+    # injecting ~60 lines of numeric tables into the LLM context window
+    # where they serve no purpose (the LLM can't act on EMA scores).
 
-    # Model Policy and Skip Policy are always rendered in markdown
-    # (legacy _build_model_policy_data has its own 2-observation threshold).
-    # The cold-start gate only affects EMA-derived policies in JSON files.
-    lines.extend(
-        [""]
-        + _build_model_policy(task_types, executor_roles, auditor_roles, model_policy_data)
-    )
-    lines.extend([""] + _build_skip_policy(auditor_roles, skip_policy_data))
-    lines.extend(
-        [""]
-        + _build_agent_routing(
-            task_types, executor_roles, auditor_roles, registry, route_policy_data
-        )
-    )
     return "\n".join(lines) + "\n"
 
 
@@ -768,8 +757,10 @@ def write_patterns(root: Path) -> dict:
 
     steps_completed.append(f"route:{len(route_policy_data)} routes")
 
-    # Step 4: Write JSON policy files
+    # Step 4: Write JSON policy files + effectiveness scores
     _write_policy_json_files(root, model_policy_data, skip_policy_data, route_policy_data)
+    persistent = _persistent_project_dir(root)
+    write_json(persistent / "effectiveness-scores.json", effectiveness_scores)
     steps_completed.append("json_written")
     log_event(root, "learn_step", step="write_json_policies",
               model_count=len(model_policy_data), skip_count=len(skip_policy_data), route_count=len(route_policy_data))

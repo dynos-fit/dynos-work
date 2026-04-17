@@ -898,10 +898,12 @@ class LearningRuntimeTests(unittest.TestCase):
         payload = json.loads(patterns.stdout)
         self.assertIn(str(self.persistent_dir / "dynos_patterns.md"), payload["written_paths"])
         content = (self.persistent_dir / "dynos_patterns.md").read_text()
-        self.assertIn("## Model Policy", content)
-        self.assertIn("## Skip Policy", content)
-        self.assertIn("## Agent Routing", content)
-        self.assertIn("| backend-executor | feature |", content)
+        # Data tables removed from markdown (now JSON only) — only prevention rules + gold standard remain
+        self.assertIn("## Prevention Rules", content)
+        # Verify JSON policy files were written
+        self.assertTrue((self.persistent_dir / "model-policy.json").exists())
+        self.assertTrue((self.persistent_dir / "skip-policy.json").exists())
+        self.assertTrue((self.persistent_dir / "effectiveness-scores.json").exists())
 
     def test_task_artifact_challenge_rollout_runs(self) -> None:
         self.run_py("calibrate.py", "init-registry", "--root", str(self.root))

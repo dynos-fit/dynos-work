@@ -275,67 +275,6 @@ class TestRoutePolicyJsonGeneration(unittest.TestCase):
             self.assertIsInstance(value["composite_score"], (int, float))
 
 
-class TestJsonMatchesMarkdown(unittest.TestCase):
-    """AC 4: JSON and markdown are generated from the same data."""
-
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tempdir.name)
-        self.orig_dynos_home = os.environ.get("DYNOS_HOME")
-        os.environ["DYNOS_HOME"] = str(self.root / ".dynos-home")
-
-    def tearDown(self) -> None:
-        if self.orig_dynos_home is None:
-            os.environ.pop("DYNOS_HOME", None)
-        else:
-            os.environ["DYNOS_HOME"] = self.orig_dynos_home
-        self.tempdir.cleanup()
-
-    def test_model_policy_json_keys_match_markdown_rows(self) -> None:
-        """Every role:task_type in model-policy.json has a matching markdown table row."""
-        from patterns import write_patterns, local_patterns_path
-        from lib import _persistent_project_dir
-
-        retros = [
-            _make_retrospective(
-                "task-001", "feature",
-                quality_score=0.9,
-                models={"backend-executor": "opus"},
-            ),
-            _make_retrospective(
-                "task-002", "feature",
-                quality_score=0.85,
-                models={"backend-executor": "opus"},
-            ),
-        ]
-        _setup_project(self.root, retrospectives=retros)
-
-        write_patterns(self.root)
-
-        model_policy_path = _persistent_project_dir(self.root) / "model-policy.json"
-        data = json.loads(model_policy_path.read_text())
-
-        # Read markdown and extract model policy rows
-        md_path = local_patterns_path(self.root)
-        md_content = md_path.read_text()
-        md_rows = set()
-        in_model = False
-        for line in md_content.splitlines():
-            if "## Model Policy" in line:
-                in_model = True
-                continue
-            if in_model and line.startswith("## "):
-                break
-            if not in_model or not line.startswith("|") or "---" in line or "Role" in line:
-                continue
-            parts = [p.strip() for p in line.split("|") if p.strip()]
-            if len(parts) >= 3:
-                md_rows.add(f"{parts[0]}:{parts[1]}")
-
-        # Every key in the JSON with a non-default model should exist in the markdown
-        for key in data:
-            self.assertIn(key, md_rows, f"JSON key {key} should have a matching markdown row")
-
 
 class TestResolveModelJsonFirst(unittest.TestCase):
     """AC 5: resolve_model() reads model-policy.json first, falls back to markdown."""
@@ -602,26 +541,6 @@ class TestBackwardCompatFallback(unittest.TestCase):
             os.environ["DYNOS_HOME"] = self.orig_dynos_home
         self.tempdir.cleanup()
 
-    def test_resolve_model_falls_back_to_markdown_when_no_json(self) -> None:
-        """Without model-policy.json, resolve_model() reads from markdown."""
-        from lib import _persistent_project_dir, write_json
-        from router import resolve_model
-
-        persistent = _persistent_project_dir(self.root)
-        # No model-policy.json, only markdown
-        (persistent / "dynos_patterns.md").write_text(
-            "## Model Policy\n\n"
-            "| Role | Task Type | Recommended Model |\n"
-            "|------|-----------|-------------------|\n"
-            "| backend-executor | feature | sonnet |\n"
-        )
-        write_json(persistent / "policy.json", {"exploration_epsilon": 0})
-
-        result = resolve_model(self.root, "backend-executor", "feature")
-        self.assertEqual(result["model"], "sonnet")
-        # Source should reflect fallback
-        self.assertIn(result["source"], ("policy", "learned_history", "default"))
-
     def test_resolve_model_returns_default_when_no_json_no_markdown(self) -> None:
         """Without both JSON and markdown, resolve_model() returns default."""
         from lib import _persistent_project_dir, write_json
@@ -633,22 +552,6 @@ class TestBackwardCompatFallback(unittest.TestCase):
 
         result = resolve_model(self.root, "backend-executor", "feature")
         self.assertEqual(result["source"], "default")
-
-    def test_skip_threshold_falls_back_to_markdown_when_no_json(self) -> None:
-        """Without skip-policy.json, _get_skip_threshold() reads from markdown."""
-        from lib import _persistent_project_dir
-        from router import _get_skip_threshold
-
-        persistent = _persistent_project_dir(self.root)
-        (persistent / "dynos_patterns.md").write_text(
-            "## Skip Policy\n\n"
-            "| Auditor | Skip Threshold | Confidence |\n"
-            "|---------|----------------|------------|\n"
-            "| ui-auditor | 4 | 0.80 |\n"
-        )
-
-        threshold = _get_skip_threshold(self.root, "ui-auditor")
-        self.assertEqual(threshold, 4)
 
     def test_skip_threshold_returns_default_when_no_json_no_markdown(self) -> None:
         """Without both JSON and markdown, _get_skip_threshold() returns DEFAULT_SKIP_THRESHOLD."""

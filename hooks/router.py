@@ -64,6 +64,7 @@ class RouterContext:
 
     @property
     def patterns_text(self) -> str | None:
+        """Deprecated — data tables removed from markdown. Use effectiveness_scores instead."""
         if self._patterns_text is None:
             path = _persistent_project_dir(self.root) / "dynos_patterns.md"
             try:
@@ -71,6 +72,18 @@ class RouterContext:
             except (FileNotFoundError, OSError):
                 self._patterns_text = ""
         return self._patterns_text or None
+
+    @property
+    def effectiveness_scores(self) -> list[dict]:
+        """Read effectiveness scores from JSON (no longer parsed from markdown)."""
+        if not hasattr(self, "_effectiveness"):
+            path = _persistent_project_dir(self.root) / "effectiveness-scores.json"
+            try:
+                data = load_json(path)
+                self._effectiveness = data if isinstance(data, list) else []
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                self._effectiveness = []
+        return self._effectiveness
 
     @property
     def retrospectives(self) -> list[dict]:
@@ -211,6 +224,50 @@ def _parse_effectiveness_scores_from_text(
                 "samples": max(samples, 1),
             }
 
+    return list(rows.values())
+
+
+def _filter_effectiveness_scores(
+    scores: list[dict], role: str, task_type: str,
+) -> list[dict]:
+    """Filter and aggregate effectiveness scores for a given role and task_type.
+
+    Reads from the JSON effectiveness-scores.json (no markdown parsing).
+    Aggregates across source values (generic + learned) per model.
+    """
+    rows: dict[str, dict] = {}
+    for entry in scores:
+        if entry.get("role") != role or entry.get("task_type") != task_type:
+            continue
+        m = entry.get("model", "")
+        if not m or m not in ("haiku", "sonnet", "opus"):
+            continue
+        try:
+            quality = float(entry.get("quality_ema", 0))
+            cost = float(entry.get("cost_ema", 0))
+            efficiency = float(entry.get("efficiency_ema", 0))
+            samples = int(entry.get("sample_count", 1))
+        except (ValueError, TypeError):
+            continue
+
+        if m in rows:
+            existing = rows[m]
+            total = existing["samples"] + samples
+            if total > 0:
+                w_old = existing["samples"] / total
+                w_new = samples / total
+                existing["quality"] = existing["quality"] * w_old + quality * w_new
+                existing["cost"] = existing["cost"] * w_old + cost * w_new
+                existing["efficiency"] = existing["efficiency"] * w_old + efficiency * w_new
+                existing["samples"] = total
+        else:
+            rows[m] = {
+                "model": m,
+                "quality": quality,
+                "cost": cost,
+                "efficiency": efficiency,
+                "samples": max(samples, 1),
+            }
     return list(rows.values())
 
 
@@ -380,16 +437,18 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source="default (learning_enabled=false)")
         return result
 
-    # 2. UCB1 over effectiveness scores
-    patterns_text = ctx.patterns_text if ctx else None
-    if patterns_text is None:
-        patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
+    # 2. UCB1 over effectiveness scores (read from JSON, not markdown)
+    if ctx:
+        all_scores = ctx.effectiveness_scores
+    else:
         try:
-            patterns_text = patterns_path.read_text()
-        except (FileNotFoundError, OSError):
-            patterns_text = None
-    if patterns_text:
-        candidates = _parse_effectiveness_scores_from_text(patterns_text, role, task_type)
+            all_scores = load_json(_persistent_project_dir(root) / "effectiveness-scores.json")
+            if not isinstance(all_scores, list):
+                all_scores = []
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            all_scores = []
+    if all_scores:
+        candidates = _filter_effectiveness_scores(all_scores, role, task_type)
         if candidates:
             exploration_c = float(policy.get("ucb_exploration_constant", DEFAULT_UCB_C))
             winner = _ucb_select_model(candidates, exploration_c)
@@ -433,22 +492,7 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
 
-    # 4. Model Policy markdown table fallback (oldest format)
-    if patterns_path.exists():
-        try:
-            model = _parse_model_from_patterns(patterns_path, role, task_type)
-            if model and model != "default":
-                if role == "security-auditor" and model in ("haiku", "sonnet"):
-                    result = {"model": SECURITY_FLOOR_MODEL, "source": "security_floor"}
-                    log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
-                    return result
-                result = {"model": model, "source": "learned_history"}
-                log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
-                return result
-        except (OSError, ValueError):
-            pass
-
-    # 5. No data — default
+    # 4. No data — default
     if role == "security-auditor":
         result = {"model": SECURITY_FLOOR_MODEL, "source": "security_floor"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
@@ -517,32 +561,11 @@ def resolve_skip(root: Path, auditor: str, task_type: str, ctx: RouterContext | 
 def _get_skip_threshold(root: Path, auditor: str) -> int:
     """Read skip threshold for *auditor*.
 
-    Priority: skip-policy.json -> dynos_patterns.md markdown -> DEFAULT_SKIP_THRESHOLD.
+    Priority: skip-policy.json -> DEFAULT_SKIP_THRESHOLD.
     """
-    # 1. JSON policy file
     entry = _read_policy_json(root, "skip-policy.json", auditor)
     if entry and isinstance(entry, dict) and "threshold" in entry:
         return int(entry["threshold"])
-
-    # 2. Markdown fallback
-    patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
-    if patterns_path.exists():
-        try:
-            text = patterns_path.read_text()
-            in_table = False
-            for line in text.splitlines():
-                if "## Skip Policy" in line:
-                    in_table = True
-                    continue
-                if in_table and line.startswith("## "):
-                    break
-                if not in_table or not line.startswith("|") or "---" in line or "Auditor" in line:
-                    continue
-                parts = [p.strip() for p in line.split("|") if p.strip()]
-                if len(parts) >= 2 and parts[0] == auditor:
-                    return int(parts[1])
-        except (OSError, ValueError):
-            pass
 
     return DEFAULT_SKIP_THRESHOLD
 
