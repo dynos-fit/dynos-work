@@ -256,7 +256,7 @@ def automation_queue_path(root: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 def project_policy(root: Path) -> dict:
-    """Read project policy from persistent dir. Accepts all JSON value types."""
+    """Read project policy from persistent dir. Merges defaults without clobbering existing keys."""
     path = _persistent_project_dir(root) / "policy.json"
     default: dict[str, Any] = {
         "freshness_task_window": 5,
@@ -265,15 +265,18 @@ def project_policy(root: Path) -> dict:
         "token_budget_multiplier": 1.0,
         "fast_track_skip_plan_audit": False,
     }
-    if not path.exists() or not path.read_text().strip():
-        write_json(path, default)
-        return default
-    try:
-        data = load_json(path)
-    except (json.JSONDecodeError, FileNotFoundError, OSError):
-        write_json(path, default)
-        return default
+    data: dict = {}
+    if path.exists() and path.read_text().strip():
+        try:
+            data = load_json(path)
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
+            data = {}
+    # Merge: existing keys take precedence over defaults
     merged = {**default, **data}
+    # Only write if file doesn't exist yet (never overwrite existing keys)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, merged)
     return merged
 
 
@@ -333,7 +336,8 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                         f"Transition to FAILED instead — human review needed."
                     )
 
-        # DONE requires everything
+        # DONE requires retrospective + audit reports (post-completion receipt
+        # is written AFTER the transition by the event bus, so cannot be gated here)
         if next_stage == "DONE":
             if not (task_dir / "task-retrospective.json").exists():
                 gate_errors.append("task-retrospective.json (run /dynos-work:audit to generate)")
@@ -341,8 +345,6 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 gate_errors.append("audit-reports/ (no audit reports found — audit was never run)")
             if read_receipt(task_dir, "retrospective") is None:
                 gate_errors.append("receipt: retrospective (reward was never computed via receipts)")
-            if read_receipt(task_dir, "post-completion") is None:
-                gate_errors.append("receipt: post-completion (post-completion pipeline never ran)")
 
         if gate_errors:
             raise ValueError(
@@ -433,11 +435,14 @@ def _fire_task_completed(task_dir: Path) -> None:
     hooks_dir = root / "hooks"
     env_path = f"{hooks_dir}:{__import__('os').environ.get('PYTHONPATH', '')}"
 
-    # Step 1: Emit task-completed event
+    # Step 1: Emit task-completed event with task identity
+    task_id = task_dir.name
+    payload = json.dumps({"task_id": task_id, "task_dir": str(task_dir)})
     try:
         subprocess.run(
             ["python3", str(hooks_dir / "lib_events.py"), "emit",
-             "--root", str(root), "--type", "task-completed", "--source", "task"],
+             "--root", str(root), "--type", "task-completed", "--source", "task",
+             "--payload", payload],
             env={**__import__("os").environ, "PYTHONPATH": env_path},
             capture_output=True, text=True, timeout=10,
         )

@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-from lib_core import load_json, now_iso, _persistent_project_dir
+from lib_core import load_json, write_json, now_iso, _persistent_project_dir
 from lib_log import log_event
 
 
@@ -48,20 +48,20 @@ def maintainer_policy(root: Path) -> dict:
         "maintainer_poll_seconds": 3600,
     }
     path = policy_path(root)
-    if not path.exists() or not path.read_text().strip():
+    data: dict = {}
+    if path.exists() and path.read_text().strip():
+        try:
+            data = load_json(path)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    # Merge defaults into existing data without clobbering other keys
+    merged = {**data}
+    for k, v in default.items():
+        if k not in merged:
+            merged[k] = v
+    if not path.exists() or not data:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(default, indent=2) + "\n")
-        return default
-    try:
-        data = load_json(path)
-    except (json.JSONDecodeError, FileNotFoundError, OSError):
-        path.write_text(json.dumps(default, indent=2) + "\n")
-        return default
-    merged = dict(default)
-    if isinstance(data.get("maintainer_autostart"), bool):
-        merged["maintainer_autostart"] = data["maintainer_autostart"]
-    if isinstance(data.get("maintainer_poll_seconds"), int) and data["maintainer_poll_seconds"] > 0:
-        merged["maintainer_poll_seconds"] = data["maintainer_poll_seconds"]
+        write_json(path, merged)
     if merged != data:
         path.write_text(json.dumps({**data, **merged}, indent=2) + "\n")
     return merged
