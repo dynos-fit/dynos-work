@@ -345,14 +345,15 @@ For contributors, the best order is:
 
 1. `README.md`
 2. `PIPELINES.md`
-3. `UNDER_THE_HOOD.md`
-4. `skills/start/SKILL.md`
-5. `skills/execute/SKILL.md`
-6. `skills/audit/SKILL.md`
-7. `hooks/lib.py`
-8. `hooks/auto.py`
-9. `hooks/dashboard.py`
-10. `tests/test_learning_runtime.py`
+3. `INTERNALS.md`
+4. `WORKFLOW_TRACE.md`
+5. `skills/start/SKILL.md`
+6. `skills/execute/SKILL.md`
+7. `skills/audit/SKILL.md`
+8. `hooks/lib.py`
+9. `hooks/auto.py`
+10. `hooks/dashboard.py`
+11. `tests/test_learning_runtime.py`
 
 ## Contributor Principle
 
