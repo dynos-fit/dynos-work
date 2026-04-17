@@ -185,6 +185,10 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     # still fire. A skipped handler counts as succeeded for follow-on gating.
     _LEARNING_HANDLERS = {"memory", "trajectory", "calibration", "patterns", "improve", "benchmark"}
 
+    # Track consumers that failed during this drain call — don't retry them
+    # in subsequent iterations. Retries happen on the NEXT drain() invocation.
+    failed_this_drain: set[tuple[str, str]] = set()  # {(event_type, consumer)}
+
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
@@ -194,6 +198,9 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
 
         for event_type, handlers in HANDLERS.items():
             for consumer_name, handler_fn in handlers:
+                # Skip consumers that already failed this drain — retry on next drain() call
+                if (event_type, consumer_name) in failed_this_drain:
+                    continue
                 # When learning is disabled, skip the handler execution but still
                 # consume and mark events processed so the chain continues to
                 # non-learning handlers downstream (dashboard, register, postmortem)
@@ -244,6 +251,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     # Only mark processed on success — failed events stay for retry
                     if success:
                         mark_processed(event_path, consumer_name)
+                    else:
+                        failed_this_drain.add((event_type, consumer_name))
 
                     # Track in summary
                     status = "ok" if success else "failed"
