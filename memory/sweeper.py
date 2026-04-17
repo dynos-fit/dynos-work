@@ -381,11 +381,11 @@ def _stop_handler(signum: int, frame: object) -> None:
 def _run_maintenance_cycle(root: Path) -> dict:
     """Run maintenance_cycle via subprocess to avoid tight coupling.
 
-    Invokes maintain.py run-once and parses the JSON output.
+    Invokes daemon.py run-once and parses the JSON output.
     """
     hooks_dir = Path(__file__).resolve().parent
     result = subprocess.run(
-        [sys.executable, str(hooks_dir / "maintain.py"), "run-once", "--root", str(root)],
+        [sys.executable, str(hooks_dir / "daemon.py"), "run-once", "--root", str(root)],
         capture_output=True,
         text=True,
         timeout=MAINTENANCE_CYCLE_TIMEOUT,

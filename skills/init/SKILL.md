@@ -27,14 +27,14 @@ mkdir -p .dynos
 
 3. Check if a daemon is already running:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" status --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" status --root .
 ```
 
 If `running` is `true` in the JSON output, print "Daemon already running" and stop.
 
 4. Start the daemon:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" start --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" start --root .
 ```
 
 5. Print the result:

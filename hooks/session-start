@@ -8,7 +8,7 @@ PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 python3 "${SCRIPT_DIR}/registry.py" set-active "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 python3 "${SCRIPT_DIR}/dashboard.py" generate --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
-python3 "${SCRIPT_DIR}/maintain.py" ensure --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
+python3 "${SCRIPT_DIR}/daemon.py" ensure --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 
 # Pre-generate routing context so Claude has it from the start
 PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 -c "

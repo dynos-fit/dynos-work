@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Persistent maintainer worker for dynos-work."""
+"""Memory pipeline daemon for dynos-work."""
 
 from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
@@ -276,7 +276,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         poll_seconds = int(args.poll_seconds or maintainer_policy(root)["maintainer_poll_seconds"])
         cmd = [
             "python3",
-            str(hooks_dir / "maintain.py"),
+            str(hooks_dir / "daemon.py"),
             "run-loop",
             "--root",
             str(root),

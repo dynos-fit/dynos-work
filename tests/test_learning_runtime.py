@@ -1039,7 +1039,7 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        maintain = self.run_py("maintain.py", "run-once", "--root", str(self.root))
+        maintain = self.run_py("daemon.py", "run-once", "--root", str(self.root))
         self.assertEqual(maintain.returncode, 0, maintain.stdout + maintain.stderr)
         payload = json.loads(maintain.stdout)
         self.assertTrue(payload["ok"])
@@ -1053,7 +1053,7 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue((self.persistent_dir / "dynos_patterns.md").exists())
 
     def test_maintainer_invoke_alias_runs(self) -> None:
-        invoke = self.run_py("maintain.py", "invoke", "--root", str(self.root))
+        invoke = self.run_py("daemon.py", "invoke", "--root", str(self.root))
         self.assertEqual(invoke.returncode, 0, invoke.stdout + invoke.stderr)
         payload = json.loads(invoke.stdout)
         self.assertIn("actions", payload)

@@ -401,14 +401,14 @@ class TestDaemonSubprocessSeparation:
     instead of importing maintenance_cycle directly."""
 
     def test_no_direct_maintenance_cycle_import(self) -> None:
-        """sweeper.py does not contain 'from maintain import maintenance_cycle'."""
+        """sweeper.py does not contain 'from daemon import maintenance_cycle'."""
         source = (MEMORY_DIR / "sweeper.py").read_text()
         tree = ast.parse(source, filename="sweeper.py")
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == "maintain":
+            if isinstance(node, ast.ImportFrom) and node.module in ("maintain", "daemon"):
                 imported_names = [alias.name for alias in node.names]
                 assert "maintenance_cycle" not in imported_names, (
-                    "sweeper.py still imports maintenance_cycle from maintain"
+                    "sweeper.py still imports maintenance_cycle from daemon"
                 )
 
     def test_subprocess_invocation_pattern_exists(self) -> None:
@@ -451,20 +451,20 @@ class TestCycleLock:
     """AC 10: maintenance_cycle acquires exclusive file lock on cycle.lock."""
 
     def test_maintenance_cycle_uses_flock(self) -> None:
-        """maintenance_cycle in maintain.py uses fcntl.flock for cycle.lock."""
-        source = (HOOKS_DIR / "maintain.py").read_text()
+        """maintenance_cycle in daemon.py uses fcntl.flock for cycle.lock."""
+        source = (HOOKS_DIR / "daemon.py").read_text()
         assert "cycle.lock" in source, (
-            "maintain.py does not reference cycle.lock"
+            "daemon.py does not reference cycle.lock"
         )
         assert "fcntl.flock" in source or "fcntl.LOCK_EX" in source, (
-            "maintain.py does not use fcntl.flock"
+            "daemon.py does not use fcntl.flock"
         )
 
     def test_lock_has_finally_block(self) -> None:
         """The lock is released in a finally block."""
-        source = (HOOKS_DIR / "maintain.py").read_text()
+        source = (HOOKS_DIR / "daemon.py").read_text()
         # Parse the AST and find try/finally around the lock
-        tree = ast.parse(source, filename="maintain.py")
+        tree = ast.parse(source, filename="daemon.py")
         found_try_finally = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Try) and node.finalbody:
@@ -474,17 +474,17 @@ class TestCycleLock:
                     found_try_finally = True
                     break
         assert found_try_finally, (
-            "maintain.py does not have a try/finally block around flock"
+            "daemon.py does not have a try/finally block around flock"
         )
 
     def test_lock_skip_returns_correct_dict(self) -> None:
         """When lock is held, maintenance_cycle returns skip dict."""
-        source = (HOOKS_DIR / "maintain.py").read_text()
+        source = (HOOKS_DIR / "daemon.py").read_text()
         assert "skipped" in source, (
-            "maintain.py does not return a skip indicator when lock is held"
+            "daemon.py does not return a skip indicator when lock is held"
         )
         assert "cycle lock held" in source or "cycle lock" in source.lower(), (
-            "maintain.py does not mention cycle lock in skip reason"
+            "daemon.py does not mention cycle lock in skip reason"
         )
 
 
@@ -645,7 +645,7 @@ class TestCliBase:
             "router.py",
             "planner.py",
             "ctl.py",
-            "maintain.py",
+            "daemon.py",
         ]
         uses_cli_main = 0
         for mod_name in sample_modules:
@@ -661,7 +661,7 @@ class TestCliBase:
         sample_modules = [
             "router.py",
             "planner.py",
-            "maintain.py",
+            "daemon.py",
         ]
         for mod_name in sample_modules:
             source = (HOOKS_DIR / mod_name).read_text()
@@ -722,7 +722,7 @@ class TestBinDynosUnchanged:
             "ctl": "ctl.py",
             "postmortem": "postmortem.py",
             "global": "sweeper.py",
-            "maintain": "maintain.py",
+            "maintain": "daemon.py",
         }
         for subcmd, hook_file in expected_routes.items():
             assert hook_file in content, (
@@ -768,13 +768,13 @@ class TestDynoslibNoMainBlock:
 # ===================================================================
 
 class TestDynomaintainRunOnceContract:
-    """AC 20: maintain.py run-once outputs JSON stdout, exit code 0."""
+    """AC 20: daemon.py run-once outputs JSON stdout, exit code 0."""
 
     def test_cmd_run_once_exists(self) -> None:
-        """maintain.py has a cmd_run_once function."""
-        import maintain
-        assert hasattr(maintain, "cmd_run_once")
-        assert callable(maintain.cmd_run_once)
+        """daemon.py has a cmd_run_once function."""
+        import daemon
+        assert hasattr(daemon, "cmd_run_once")
+        assert callable(daemon.cmd_run_once)
 
     def test_cmd_run_once_prints_json(self, tmp_path: Path) -> None:
         """cmd_run_once prints valid JSON to stdout."""
@@ -785,7 +785,7 @@ class TestDynomaintainRunOnceContract:
         result = subprocess.run(
             [
                 sys.executable,
-                str(HOOKS_DIR / "maintain.py"),
+                str(HOOKS_DIR / "daemon.py"),
                 "run-once",
                 "--root",
                 str(tmp_path),
@@ -812,7 +812,7 @@ class TestDynomaintainRunOnceContract:
         result = subprocess.run(
             [
                 sys.executable,
-                str(HOOKS_DIR / "maintain.py"),
+                str(HOOKS_DIR / "daemon.py"),
                 "run-once",
                 "--root",
                 str(tmp_path),

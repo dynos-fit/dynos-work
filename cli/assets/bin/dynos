@@ -78,7 +78,7 @@ case "$cmd" in
     if python3 -c "
 import sys
 sys.path.insert(0, '${HOOKS_DIR}')
-from maintain import current_pid
+from daemon import current_pid
 from pathlib import Path
 pid = current_pid(Path('$root'))
 sys.exit(0 if pid else 1)
@@ -87,7 +87,7 @@ sys.exit(0 if pid else 1)
       exit 0
     fi
     echo "Starting local daemon..."
-    python3 "${HOOKS_DIR}/maintain.py" start --root "$root" $autofix 2>/dev/null || true
+    python3 "${HOOKS_DIR}/daemon.py" start --root "$root" $autofix 2>/dev/null || true
     echo ""
     echo "Project ready: $root"
     if [ -n "$autofix" ]; then
@@ -106,9 +106,9 @@ sys.exit(0 if pid else 1)
       shift
       exec python3 "${HOOKS_DIR}/dashboard.py" generate "$@"
     fi
-    exec python3 "${HOOKS_DIR}/maintain.py" "$@"
+    exec python3 "${HOOKS_DIR}/daemon.py" "$@"
     ;;
-  maintain) exec python3 "${HOOKS_DIR}/maintain.py" "$@" ;;
+  daemon|maintain) exec python3 "${HOOKS_DIR}/daemon.py" "$@" ;;
   autofix|proactive)
     # dynos autofix scan [/path]  — scan one or all registered projects
     # dynos autofix list [/path]  — list findings
@@ -123,7 +123,7 @@ sys.exit(0 if pid else 1)
       if python3 -c "
 import sys
 sys.path.insert(0, '${HOOKS_DIR}')
-from maintain import current_pid
+from daemon import current_pid
 from pathlib import Path
 pid = current_pid(Path('$resolved'))
 sys.exit(0 if pid else 1)
@@ -210,7 +210,7 @@ print('no')
     done
     # Stop daemon first if running
     echo "Stopping daemon for $target..."
-    PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/maintain.py" stop --root "$target" 2>/dev/null || true
+    PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/daemon.py" stop --root "$target" 2>/dev/null || true
     # Unregister
     exec python3 "${HOOKS_DIR}/registry.py" unregister "$target"
     ;;

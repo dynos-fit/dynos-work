@@ -24,29 +24,29 @@ Parse the user's arguments to determine the subcommand. Run the corresponding Py
 
 ### start
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" start --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" start --root .
 ```
 
 ### stop
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" stop --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" stop --root .
 ```
 
 ### status
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" status --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" status --root .
 ```
 
 Print the JSON result in a human-readable format: running/stopped, last cycle time, cycle count.
 
 ### logs
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" logs --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" logs --root .
 ```
 
 ### run-once
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" run-once --root .
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" run-once --root .
 ```
 
 ### dashboard

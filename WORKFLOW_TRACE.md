@@ -1,8 +1,25 @@
 # dynos-work — Function-by-function workflow trace
 
-Re-run of the trace against current `main` (post-PRs #75–#79). Six known bugs have been fixed and internal event names renamed (`learn → memory`, `evolve → calibration`, `observe → telemetry`). For every Python function the pipeline touches: the **code**, then in prose — **what it does**, **when it fires**, **why**, and **what it hands off to**. Ordered by the workflow (boot → start → execute → audit → post-completion → memory → calibration → maintain).
+For every Python function the pipeline touches: the **code**, then in prose — **what it does**, **when it fires**, **why**, and **what it hands off to**. Ordered by the workflow (boot → start → execute → audit → post-completion → memory → calibration → daemon).
 
-What changed vs. the prior trace is flagged inline.
+---
+
+## Adaptive algorithms index
+
+Every place the system uses a statistical or RL-inspired algorithm, marked with the algorithm name in **bold** throughout the document:
+
+| Algorithm | Where | What it decides | File |
+|---|---|---|---|
+| **UCB1 (Upper Confidence Bound)** | Model selection | Which model (opus/sonnet/haiku) to assign each agent | `router.py:resolve_model` |
+| **EMA (Exponential Moving Average)** | Effectiveness scoring | Per-(role, model, task_type, source) quality/cost/efficiency tracking | `memory/patterns.py:_compute_ema` |
+| **Weighted composite scoring** | Model policy, skip policy | `0.5*quality + 0.3*cost + 0.2*efficiency` ranks model candidates | `memory/patterns.py:_derive_model_policy` |
+| **Tabular Q-learning** | Repair planning | Which executor + model to assign per finding type | `hooks/lib_qlearn.py:build_repair_plan` |
+| **Epsilon-greedy exploration** | Q-learning action selection | Balance exploit (best Q-value) vs explore (random action) | `hooks/lib_qlearn.py:select_action` |
+| **Bellman update** | Q-value update | `Q(s,a) += α * (r + γ * max Q(s',a') - Q(s,a))` | `hooks/lib_qlearn.py:update_q_value` |
+| **EMA baseline blend-back** | Regression detection | Pull EMA toward baseline on 2+ consecutive quality drops | `memory/patterns.py:_compute_ema` |
+| **Adaptive skip threshold** | Auditor skipping | `threshold = clamp(3 + 2*(1 - avg_quality), 1, 10)` | `memory/patterns.py:_derive_skip_policy` |
+| **MCTS-lite (Monte Carlo Tree Search)** | Design option scoring | Sandbox simulation with rollout noise for founder design review | `memory/dream.py:run_mcts` |
+| **Trajectory similarity search** | Discovery priors | Cosine-like similarity over (type, domains, risk, repair, spawns) | `memory/lib_trajectory.py:search_trajectories` |
 
 ---
 
@@ -15,7 +32,7 @@ Claude Code loads `.claude-plugin/plugin.json`, reads `hooks.json`, and register
 ```bash
 python3 "${SCRIPT_DIR}/registry.py"  set-active "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 python3 "${SCRIPT_DIR}/dashboard.py" generate   --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
-python3 "${SCRIPT_DIR}/maintain.py"  ensure     --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
+python3 "${SCRIPT_DIR}/daemon.py"  ensure     --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 # …then inline Python to build .dynos/routing-context.json
 ```
 
@@ -74,7 +91,7 @@ def cmd_set_active(args: argparse.Namespace) -> int:
 
 ---
 
-### maintain.cmd_ensure
+### daemon.cmd_ensure
 
 ```python
 def cmd_ensure(args: argparse.Namespace) -> int:
@@ -94,11 +111,11 @@ def cmd_ensure(args: argparse.Namespace) -> int:
 
 **When:** every session boot.
 **Why:** the local daemon runs background maintenance — pattern refresh, benchmark sweeps, proactive findings. It should be running *but only if the user opted in* (via `dynos init` or setting `maintainer_autostart: true` in `policy.json`).
-**Hands off to:** `maintain.cmd_start` → `maintain.cmd_run_loop` → `maintain.maintenance_cycle` (see PART 8).
+**Hands off to:** `daemon.cmd_start` → `daemon.cmd_run_loop` → `daemon.maintenance_cycle` (see PART 8).
 
 ---
 
-### maintain.maintainer_policy  **← updated (fix #6)**
+### daemon.maintainer_policy  **← updated (fix #6)**
 
 ```python
 def maintainer_policy(root: Path) -> dict:
@@ -221,7 +238,7 @@ Claude creates `.dynos/task-{id}/manifest.json`, `raw-input.md`, `execution-log.
 
 ```bash
 python3 hooks/registry.py register "$(pwd)"
-python3 hooks/maintain.py  start --root "$(pwd)"
+python3 hooks/daemon.py  start --root "$(pwd)"
 python3 hooks/ctl.py       validate-task .dynos/task-{id}
 ```
 
@@ -263,7 +280,7 @@ def cmd_register(args: argparse.Namespace) -> int:
 **Why:** the registry is where the global daemon learns which projects exist.
 **Hands off to:** writes to `~/.dynos/registry.json`, creates `~/.dynos/projects/{slug}/`.
 
-#### maintain.cmd_start
+#### daemon.cmd_start
 
 ```python
 def cmd_start(args: argparse.Namespace) -> int:
@@ -284,7 +301,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             return 0
         hooks_dir = Path(__file__).resolve().parent
         poll_seconds = int(args.poll_seconds or maintainer_policy(root)["maintainer_poll_seconds"])
-        cmd = ["python3", str(hooks_dir / "maintain.py"), "run-loop",
+        cmd = ["python3", str(hooks_dir / "daemon.py"), "run-loop",
                "--root", str(root), "--poll-seconds", str(poll_seconds)]
         process = subprocess.Popen(cmd, cwd=root,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
@@ -297,7 +314,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         lock_fd.close()
 ```
 
-**What it does:** acquires a non-blocking `flock` on `start.lock` so concurrent `start` calls can't race. If another process is starting, exits cleanly. If a daemon is already alive, exits cleanly. Otherwise spawns `maintain.py run-loop` in a detached process group (survives parent session exit) with stdio redirected to /dev/null.
+**What it does:** acquires a non-blocking `flock` on `start.lock` so concurrent `start` calls can't race. If another process is starting, exits cleanly. If a daemon is already alive, exits cleanly. Otherwise spawns `daemon.py run-loop` in a detached process group (survives parent session exit) with stdio redirected to /dev/null.
 
 **When:** from the start skill (ensures the daemon is running before a task begins), and from `cmd_ensure` if autostart is enabled.
 **Why:** daemon-side work (shadow benchmarks, proactive findings) should be running in the background.
@@ -878,20 +895,20 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
 **Why:** centralizes routing, and is now crash-safe against bad prevention-rules data.
 **Hands off to:** skill spawns executor subagents per entry.
 
-#### router.resolve_model (unchanged; abbreviated)
+#### router.resolve_model — **UCB1 BANDIT**
 
 Five priority tiers, first match wins:
-1. **Explicit policy override** — `policy.json model_overrides`.
-2. **UCB1 bandit over effectiveness scores** — `_ucb_select_model` reads `dynos_patterns.md`, runs Upper-Confidence-Bound selection over `composite + C*sqrt(ln N / n_i)`.
-3. **Benchmark model performance** — `_benchmark_model_for_agent` groups learned-agent benchmark runs by model.
-4. **`model-policy.json`** — historical winner.
-5. **Patterns markdown table fallback**; else default.
+1. **Explicit policy override** — `policy.json model_overrides`. No algorithm — user config.
+2. **UCB1 (Upper Confidence Bound)** — `_ucb_select_model` reads effectiveness scores from `dynos_patterns.md`. For each model candidate, computes `ucb_score = composite + C * sqrt(ln(N) / n_i)` where `composite = 0.5*quality + 0.3*cost + 0.2*efficiency`, `N` = total observations across all models, `n_i` = observations for this model, `C` = exploration constant (default 0.5). Picks the model with highest UCB score. This naturally explores under-observed models while exploiting known-good ones.
+3. **Benchmark model performance** — `_benchmark_model_for_agent` groups learned-agent benchmark runs by model. Uses mean composite from benchmark history.
+4. **`model-policy.json`** — historical EMA winner (see memory/patterns.py).
+5. **Patterns markdown table fallback**; else default (caller's frontmatter model).
 
 `SECURITY_FLOOR_MODEL = "opus"` applies at every tier: security-auditor never below opus.
 
-#### router.resolve_skip (unchanged; abbreviated)
+#### router.resolve_skip — **ADAPTIVE SKIP THRESHOLD**
 
-For each auditor, if `role in {security-auditor, spec-completion-auditor, code-quality-auditor}`: never skip. Otherwise compare `auditor_zero_finding_streaks[auditor]` (from latest retrospective) against threshold from `skip-policy.json` or `dynos_patterns.md`. Skip if streak ≥ threshold.
+For each auditor, if `role in {security-auditor, spec-completion-auditor, code-quality-auditor}`: never skip (exempt). Otherwise compare `auditor_zero_finding_streaks[auditor]` (from latest retrospective) against threshold from `skip-policy.json` or `dynos_patterns.md`. Skip if streak ≥ threshold. The threshold is derived by the EMA engine: `threshold = clamp(round(3 + 2*(1 - avg_quality_ema)), 1, 10)`. High-quality auditors skip after 3 consecutive zero-finding tasks; low-quality after up to 10.
 
 ### Step 5 — Prompt injection per segment
 
@@ -1108,10 +1125,12 @@ def cmd_repair_update(args):
     return 0
 ```
 
-**What they do:** `build_repair_plan` groups findings into parallel-safe batches, assigns executors, picks per-finding model overrides (opus floor for security-auditor findings, opus for `retry_count >= 2`, else learned policy). `update_from_outcomes` increments retry counts and feeds the Q-learning table.
+**What they do:** `build_repair_plan` groups findings into parallel-safe batches, assigns executors, picks per-finding model overrides (opus floor for security-auditor findings, opus for `retry_count >= 2`, else learned policy). **`update_from_outcomes` feeds the TABULAR Q-LEARNING table** — it encodes the repair state as `{finding_category}:{severity}:{task_type}:{retry_count}`, computes a reward from the outcome (resolved=+1.0, partial=+0.3, failed=-0.5, new findings penalized at -0.1 each), and runs a **Bellman update: `Q(s,a) += α * (r + γ * max Q(s',a') - Q(s,a))`** with α=0.2, γ=0.9.
+
+**`build_repair_plan` uses EPSILON-GREEDY** action selection from the Q-table: with probability ε=0.1, pick a random executor; otherwise pick the executor with the highest Q-value for that state. This balances exploiting known-good executor assignments with exploring alternatives.
 
 **When:** after `repair-coordinator` categorizes findings; after each repair batch.
-**Why:** ownership batching in code (can't run two executors on the same file simultaneously). The hard-cap check in `transition_task` reads the retry counts update_from_outcomes writes.
+**Why:** ownership batching in code (can't run two executors on the same file simultaneously). The Q-table learns which executor+model combinations work best for each finding type over time.
 
 ### Step 4 — Compute reward + transition to DONE
 
@@ -1142,7 +1161,7 @@ def cmd_compute_reward(args):
     return 0
 ```
 
-`lib_validate.compute_reward` walks the task directory and produces the reward vector. Seven phases:
+`lib_validate.compute_reward` walks the task directory and produces the **REWARD VECTOR** — the ground truth signal that drives all adaptive algorithms. Seven phases:
 
 1. **Scan audit reports** — count findings by auditor + category. Run hallucination sanitizer: findings marked `blocking` but saying "no action required" get downgraded to non-blocking minor.
 2. **Repair scan** — count repair cycles, which executors had to fix things (feeds `executor_repair_frequency` → calibration uses this).
@@ -1155,7 +1174,7 @@ def cmd_compute_reward(args):
    - `cost_score = 1 / (1 + avg_tokens_per_spawn/risk_budget)` where `RISK_BUDGETS = {low:8k, medium:12k, high:18k, critical:25k}`
    - `efficiency_score = 1 - repair_cycles/3 - 0.1*(spec_iters-1)`
 
-**Why:** this is the ground truth the learning layer optimizes against.
+**Why:** this reward vector is the **ground truth signal** that the UCB1 bandit, EMA effectiveness scores, Q-learning table, and skip thresholds all optimize against. Every adaptive algorithm in the system traces back to these three numbers.
 **Hands off to:** `task-retrospective.json` + `retrospective` receipt.
 
 #### Transition to DONE
@@ -1421,24 +1440,24 @@ def receipt_post_completion(task_dir, handlers_run, postmortem_written, patterns
 
 ---
 
-## PART 5 — `memory` handler → patterns.py (the learning core)
+## PART 5 — `memory` handler → patterns.py (the **EMA + POLICY ENGINE**)
 
-When the drain runs the `task-completed → memory` handler, it invokes `patterns.py --root .`, which calls `write_patterns(root)`.
+When the drain runs the `task-completed → memory` handler, it invokes `patterns.py --root .`, which calls `write_patterns(root)`. This is where the system "remembers" — replaying all task outcomes through statistical accumulators to produce the policies that the UCB1 bandit, skip threshold, and model selection all read.
 
 ### patterns.write_patterns
 
 Six steps:
 
 1. **Collect retrospectives** — scan `.dynos/task-*/task-retrospective.json`. Derive observed task_types, executor_roles, auditor_roles.
-2. **Compute effectiveness scores** via EMA — per-(role, model, task_type, source) quality/cost/efficiency.
-3. **Derive policies** — `ema_model_policy` (which model wins for each role × task_type) and `ema_skip_policy` (skip threshold per auditor).
+2. **Compute effectiveness scores via EMA** — per-(role, model, task_type, source) quality/cost/efficiency. **This is the core adaptive signal.**
+3. **Derive policies from EMA scores** — `ema_model_policy` (which model wins for each role × task_type via **weighted composite scoring**) and `ema_skip_policy` (**adaptive skip threshold** per auditor).
 4. **Merge EMA into JSON** — EMA wins when both EMA and legacy sources have a value.
 5. **Migrate manual overrides** — move any `model_overrides` from `policy.json` into `model-policy.json`.
 6. **Write to disk** — `model-policy.json`, `skip-policy.json`, `route-policy.json`, then render `dynos_patterns.md` and write to TWO locations:
    - `~/.dynos/projects/{slug}/dynos_patterns.md` (canonical local)
    - `~/.claude/projects/{slug}/memory/dynos_patterns.md` (Claude Code auto-loads on session start)
 
-### patterns.compute_effectiveness_scores
+### patterns.compute_effectiveness_scores — **EMA (Exponential Moving Average)**
 
 ```python
 EMA_ALPHA = 0.3
@@ -1492,19 +1511,19 @@ def compute_effectiveness_scores(retrospectives, baseline=None) -> list[dict]:
     return rows[:MAX_EFFECTIVENESS_ROWS]
 ```
 
-**What it does:** the EMA engine. Replays every retrospective's (role, model, task_type, source) → (quality, cost, efficiency) in task-id order. Maintains per-quad EMA with α=0.3. Cold start uses first observation as-is. On two consecutive quality drops + baseline available, pulls EMA toward the baseline (demotion safety net for learned agents that regress). Caps output at 50 rows sorted by sample count.
+**What it does:** the **EMA engine**. Replays every retrospective's `(role, model, task_type, source) → (quality, cost, efficiency)` in task-id order. Maintains per-quad EMA with **α=0.3** (new observation contributes 30%, recent tasks dominate). Cold start: first observation sets the EMA directly (α=1.0). **Regression detection via EMA baseline blend-back:** on 2+ consecutive quality drops, pulls EMA toward the stored baseline — a safety net that prevents learned agents from dragging scores down permanently.
 
-**When:** inside `write_patterns`, after every retrospective.
-**Why:** EMA gives recency bias — a learned agent that just started regressing pulls its score down within a few tasks. α=0.3 means new observation contributes 30%.
+**When:** inside `write_patterns`, replays ALL retrospectives every time (deterministic replay, not incremental).
+**Why:** EMA gives recency bias — a learned agent that just started regressing pulls its score down within a few tasks. The baseline blend-back ensures the system recovers even if a learned agent causes a string of bad outcomes.
 **Hands off to:** `derive_model_policy` and `derive_skip_policy`.
 
-### patterns.derive_model_policy
+### patterns.derive_model_policy — **WEIGHTED COMPOSITE SCORING**
 
-For each `(role, task_type)`, weighted-average across source. Composite = `0.5*quality + 0.3*cost + 0.2*efficiency`. Rank by composite (tie-break: higher quality within 0.03). Security-auditor forced to opus regardless. Writes `{role:task_type → {model, confidence, updated}}`.
+For each `(role, task_type)`, weighted-average across source. **Composite = `0.5*quality + 0.3*cost + 0.2*efficiency`**. Rank by composite (tie-break: higher quality within 0.03). Security-auditor forced to opus regardless. Writes `{role:task_type → {model, confidence, updated}}`. This is the data the **UCB1 bandit** in `router.resolve_model` reads.
 
-### patterns.derive_skip_policy
+### patterns.derive_skip_policy — **ADAPTIVE SKIP THRESHOLD**
 
-For each non-exempt auditor (security, spec-completion, code-quality are always-run), average quality_ema across rows. Threshold = `clamp(round(3 + 2*(1 - avg_quality)), 1, 10)`. High-quality auditors skip after 3 zero-streaks; low-quality after 5.
+For each non-exempt auditor (security, spec-completion, code-quality are always-run), average quality_ema across rows. **Threshold = `clamp(round(3 + 2*(1 - avg_quality)), 1, 10)`**. High-quality auditors (avg ≥ 0.9) skip after 3 consecutive zero-finding tasks; low-quality auditors (avg ≤ 0.5) skip after 5. This is read by `router.resolve_skip`.
 
 ---
 
@@ -1523,7 +1542,7 @@ def cmd_rebuild(args):
 
 Delegates to `lib_trajectory.rebuild_trajectory_store` which scans retrospectives + execution graphs, produces compact `(state_signature, sequence, outcome)` traces in `~/.dynos/projects/{slug}/trajectories.json`.
 
-**When:** after every task completion (parallel with `run_memory`); also in every `maintain.maintenance_cycle`.
+**When:** after every task completion (parallel with `run_memory`); also in every `daemon.maintenance_cycle`.
 **Why:** `/start` reads this during discovery via `hooks/trajectory.py search` to surface similar past tasks and their common failure patterns. Advisory only — human approval still decides.
 
 ---
@@ -1591,7 +1610,7 @@ def cmd_auto(args):
     return 0
 ```
 
-**When:** on `memory-completed` event; also in every `maintain.maintenance_cycle`.
+**When:** on `memory-completed` event; also in every `daemon.maintenance_cycle`.
 **Why:** project-specific specialists emerge from observed patterns. After seeing 3 backend-executor-feature tasks, the system synthesizes an agent capturing their common finding categories and repair locations. Starts in `shadow` mode — doesn't affect routing until benchmarks prove it out.
 **Hands off to:** `register_learned_agent` writes to the registry; subsequent `patterns.write_patterns` computes its effectiveness; `router.resolve_route` may promote it.
 
@@ -1607,7 +1626,7 @@ Synthesizes a learned agent's prompt content from past observations. Three secti
 
 Separate from the event bus. Runs periodically (default hourly) for bulk maintenance.
 
-### maintain.cmd_run_loop
+### daemon.cmd_run_loop
 
 ```python
 def cmd_run_loop(args):
@@ -1636,7 +1655,7 @@ def cmd_run_loop(args):
 
 **What it does:** daemon main loop. Writes PID file. Installs SIGTERM/SIGINT handlers. Sleeps in 1s increments (SIGTERM-responsive) up to poll_seconds. Each iteration runs `maintenance_cycle`. On exit, cleans up PID and stop files.
 
-### maintain.maintenance_cycle
+### daemon.maintenance_cycle
 
 ```python
 def maintenance_cycle(root: Path) -> dict:
@@ -1676,7 +1695,7 @@ def maintenance_cycle(root: Path) -> dict:
 
 **What it does:** one cycle = nine subprocess calls in sequence. `fcntl.LOCK_EX | LOCK_NB` ensures only one cycle runs at a time. Each script has 300s timeout. Logs every cycle to `.dynos/maintenance/cycles.jsonl`. Updates `.dynos/maintenance/status.json`.
 
-**When:** every `poll_seconds` (default 3600) while daemon runs. Also triggered manually via `maintain.py run-once`.
+**When:** every `poll_seconds` (default 3600) while daemon runs. Also triggered manually via `daemon.py run-once`.
 **Why:** idempotent. All nine scripts are safe to run repeatedly. Running doesn't require any prior state.
 
 ---
@@ -1759,13 +1778,13 @@ Each is invoked directly by the relevant agent or skill and writes a structured 
 SessionStart hook
   ├─ registry.cmd_set_active          → ~/.dynos/registry.json bump
   ├─ dashboard.py generate            → .dynos/dashboard-{data.json,html}
-  ├─ maintain.cmd_ensure              → conditionally starts daemon
+  ├─ daemon.cmd_ensure              → conditionally starts daemon
   └─ inline: router.load_prevention_rules + lib_core.project_policy
                                       → .dynos/routing-context.json
 
 /dynos-work:start
   ├─ registry.cmd_register            → register the project
-  ├─ maintain.cmd_start               → guaranteed daemon running
+  ├─ daemon.cmd_start               → guaranteed daemon running
   ├─ ctl.cmd_validate_task            → lib_validate.validate_task_artifacts
   ├─ router.resolve_route             → learned-skill check
   ├─ Agent(planning)                  → spec.md, classification
@@ -1832,7 +1851,7 @@ SubagentStop hook (every subagent)
         └─ lib_tokens.record_tokens       → append event to token-usage.json
 
 Background (maintain daemon, poll_seconds interval)
-  └─ maintain.maintenance_cycle
+  └─ daemon.maintenance_cycle
         └─ 9 scripts: trajectory, patterns, evolve, postmortem×2, fixture, auto, dashboard, report
 ```
 
