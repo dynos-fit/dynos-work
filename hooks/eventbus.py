@@ -177,7 +177,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     learning = is_learning_enabled(root)
     # policy_engine is the only learning handler — skipped when learning is disabled.
     # postmortem, dashboard, register always run regardless.
-    _LEARNING_HANDLERS = {"policy_engine", "improve", "agent_generator"}
+    _LEARNING_HANDLERS = {"policy_engine", "improve", "agent_generator", "benchmark_scheduler"}
 
     # Track consumers that failed during this drain call — don't retry them
     # in subsequent iterations. Retries happen on the NEXT drain() invocation.
