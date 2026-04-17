@@ -688,6 +688,7 @@ class TestBinDynosUnchanged:
         "global",
         "calibration",
         "evolve",
+        "memory",
         "trajectory",
         "dashboard",
         "local",

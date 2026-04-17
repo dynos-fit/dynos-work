@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "skill": "maintain",
+  "description": "Autonomous maintenance worker. Scans for technical debt, security anti-patterns, and architectural drift. Creates repair branches, implements fixes, verifies with audits/tests, and opens PRs.",
+  "input_schema": {
+    "root": {
+      "type": "string",
+      "required": false,
+      "source": "repository root path (defaults to current directory)"
+    }
+  },
+  "output_schema": {
+    "maintenance_result": {
+      "type": "object",
+      "description": "Summary of findings discovered, fixes applied, and PRs opened"
+    }
+  }
+}

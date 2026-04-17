@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Hook: SubagentStop — capture token usage from subagent transcripts
+# Fires after every subagent completes. Reads hook JSON from stdin.
+# Parses the subagent transcript to sum input/output tokens, then
+# records them to the active task's token-usage.json.
+
+set -euo pipefail
+
+# Read hook payload from stdin
+PAYLOAD=$(cat)
+
+# Extract fields from hook JSON
+TRANSCRIPT_PATH=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('agent_transcript_path', d.get('transcript_path', '')))" 2>/dev/null || true)
+AGENT_TYPE=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('agent_type', d.get('subagent_type', 'unknown')))" 2>/dev/null || true)
+AGENT_DESC=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('description', '')[:80])" 2>/dev/null || true)
+CWD=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('cwd', ''))" 2>/dev/null || true)
+
+# Need transcript path and cwd
+[ -z "$TRANSCRIPT_PATH" ] && exit 0
+[ -z "$CWD" ] && exit 0
+[ ! -f "$TRANSCRIPT_PATH" ] && exit 0
+
+# Find the active task in .dynos/
+HOOKS_DIR="${CWD}/hooks"
+[ ! -d "$HOOKS_DIR" ] && exit 0
+
+# Run the token parser
+PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/lib_tokens_hook.py" \
+  --transcript "$TRANSCRIPT_PATH" \
+  --agent-type "$AGENT_TYPE" \
+  --agent-desc "$AGENT_DESC" \
+  --root "$CWD" 2>/dev/null || true

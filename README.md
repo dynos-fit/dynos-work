@@ -6,7 +6,7 @@
 
 # dynos-work
 
-A Claude Code plugin that checks its own work and learns from mistakes. Human-directed, tool-grounded, self-improving.
+A Claude Code plugin that checks its own work and calibrates to your project over time. Human-directed, tool-grounded, self-improving.
 
 ## Install
 
@@ -42,31 +42,35 @@ You approve twice (spec and plan), then it runs.
 
 **Verifies with tools, not opinions.** API Contracts tables are cross-referenced against actual route definitions. Data Model tables are checked against real migrations. Doc paths are verified on disk. License compliance is scanned. The plan can't lie about what exists.
 
-**Learns from itself.** After each task, it writes a retrospective with DORA-aligned metrics. Over time, it learns what works, what fails, and what to watch for. Your 10th task is better than your 1st. Disable learning entirely with `dynos config set learning_enabled false`.
+**Remembers what works.** After each task, it writes a retrospective with DORA-aligned metrics. Over time, it builds project memory — what works, what fails, what to watch for. Your 10th task is better than your 1st. Disable memory entirely with `dynos config set learning_enabled false`.
 
-**Enforces least privilege.** Each of the 17 agents declares its minimum tool set in frontmatter. Auditors cannot write files. Planners cannot execute commands. The security auditor can never be replaced by a learned agent.
+**Calibrates to your project.** Generates project-specific specialist agents from past task data, benchmarks them against generics, promotes the ones that outperform. Disable calibration with a single config flip.
 
-**Shows you everything.** A dashboard across all your projects: quality trends, findings, costs, DORA metrics, what the system learned.
+**Enforces least privilege.** Each of the 19 agents declares its minimum tool set in frontmatter. Auditors cannot write files. Planners cannot execute commands. The security auditor can never be replaced by a calibrated agent.
+
+**Shows you everything.** Telemetry across all your projects: quality trends, findings, costs, DORA metrics.
 
 ## Architecture
 
-20 skills, 17 agents, 52 hooks. Three layers:
+20 skills, 19 agents, 54 hooks. Three layers:
 
-| Layer | What it does | Can be disabled? |
-|---|---|---|
-| **Core** | Spec, plan, execute, audit. The foundry. | No |
-| **Learning** | Trajectory memory, learned agents, pattern extraction, Q-learning repair. | Yes (`dynos config set learning_enabled false`) |
-| **Observability** | Dashboards, reports, lineage. Read-only. | Yes (delete the layer, nothing breaks) |
+| Layer | Directory | What it does | Can be disabled? |
+|---|---|---|---|
+| **Core** | `hooks/` | Spec, plan, execute, audit. The foundry. | No |
+| **Memory** | `memory/` | Project memory, calibrated agents, pattern extraction, Q-learning repair. | Yes (`dynos config set learning_enabled false`) |
+| **Telemetry** | `telemetry/` | Dashboards, reports, lineage. Read-only. | Yes (delete the layer, nothing breaks) |
 
 ## CLI
 
 ```bash
 dynos init                              # set up a project
 dynos dashboard                         # start the dashboard server
-dynos config set learning_enabled false # foundry-only mode
+dynos config set learning_enabled false # foundry-only mode (no memory/calibration)
 dynos config get                        # show all policy
 dynos stats dora                        # DORA metrics from retrospectives
 dynos stats usage                       # module usage telemetry
+dynos calibration                       # manage calibrated agents
+dynos memory                            # view project memory
 ```
 
 [Full CLI reference](INTERNALS.md#cli)

@@ -34,9 +34,6 @@ Global commands:
   pause         Pause maintenance for a project
   resume        Resume maintenance for a project
   registry      Project registration: register, unregister, list, pause, resume
-  config        Get or set project policy (e.g. learning_enabled)
-  stats dora    DORA metrics from task retrospectives
-  stats usage   Module usage telemetry (dormancy detection)
 
 Internals (advanced):
   route         Deterministic audit/executor routing
@@ -76,12 +73,12 @@ case "$cmd" in
       esac
     done
     echo "Registering project..."
-    python3 "${HOOKS_DIR}/dynoregistry.py" register "$root" 2>/dev/null || true
+    python3 "${HOOKS_DIR}/registry.py" register "$root" 2>/dev/null || true
     mkdir -p "$root/.dynos"
     if python3 -c "
 import sys
 sys.path.insert(0, '${HOOKS_DIR}')
-from dynomaintain import current_pid
+from maintain import current_pid
 from pathlib import Path
 pid = current_pid(Path('$root'))
 sys.exit(0 if pid else 1)
@@ -90,7 +87,7 @@ sys.exit(0 if pid else 1)
       exit 0
     fi
     echo "Starting local daemon..."
-    python3 "${HOOKS_DIR}/dynomaintain.py" start --root "$root" $autofix 2>/dev/null || true
+    python3 "${HOOKS_DIR}/maintain.py" start --root "$root" $autofix 2>/dev/null || true
     echo ""
     echo "Project ready: $root"
     if [ -n "$autofix" ]; then
@@ -107,11 +104,11 @@ sys.exit(0 if pid else 1)
     # dynos local dashboard → generate only (no serve, global dashboard is the server)
     if [ $# -gt 0 ] && [ "$1" = "dashboard" ]; then
       shift
-      exec python3 "${HOOKS_DIR}/dynodashboard.py" generate "$@"
+      exec python3 "${HOOKS_DIR}/dashboard.py" generate "$@"
     fi
-    exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@"
+    exec python3 "${HOOKS_DIR}/maintain.py" "$@"
     ;;
-  maintain) exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@" ;;
+  maintain) exec python3 "${HOOKS_DIR}/maintain.py" "$@" ;;
   autofix|proactive)
     # dynos autofix scan [/path]  — scan one or all registered projects
     # dynos autofix list [/path]  — list findings
@@ -126,7 +123,7 @@ sys.exit(0 if pid else 1)
       if python3 -c "
 import sys
 sys.path.insert(0, '${HOOKS_DIR}')
-from dynomaintain import current_pid
+from maintain import current_pid
 from pathlib import Path
 pid = current_pid(Path('$resolved'))
 sys.exit(0 if pid else 1)
@@ -154,7 +151,7 @@ print(len([f for f in findings if f.get('status') != 'suppressed']))
         projects=$(python3 -c "
 import sys, json
 sys.path.insert(0, '${HOOKS_DIR}')
-from dynoglobal import load_registry
+from sweeper import load_registry
 reg = load_registry()
 for p in reg.get('projects', []):
     if p.get('status') == 'active':
@@ -168,7 +165,7 @@ for p in reg.get('projects', []):
         echo ""
         while IFS= read -r proj; do
           echo "━━━ $proj"
-          python3 "${HOOKS_DIR}/dynoproactive.py" scan --root "$proj" 2>/dev/null || true
+          python3 "${HOOKS_DIR}/proactive.py" scan --root "$proj" 2>/dev/null || true
           echo ""
         done <<< "$projects"
       else
@@ -177,7 +174,7 @@ for p in reg.get('projects', []):
         is_registered=$(python3 -c "
 import sys, json
 sys.path.insert(0, '${HOOKS_DIR}')
-from dynoglobal import load_registry
+from sweeper import load_registry
 reg = load_registry()
 for p in reg.get('projects', []):
     if p['path'] == '$resolved':
@@ -189,17 +186,17 @@ print('no')
           echo "Error: $resolved is not a registered project. Run 'dynos init' there first." >&2
           exit 1
         fi
-        exec python3 "${HOOKS_DIR}/dynoproactive.py" scan --root "$resolved"
+        exec python3 "${HOOKS_DIR}/proactive.py" scan --root "$resolved"
       fi
     else
-      exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@"
+      exec python3 "${HOOKS_DIR}/proactive.py" "$@"
     fi
     ;;
 
   # --- Global commands ---
-  global) exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@" ;;
-  registry) exec python3 "${HOOKS_DIR}/dynoregistry.py" "$@" ;;
-  list) exec python3 "${HOOKS_DIR}/dynoregistry.py" list "$@" ;;
+  global) exec python3 "${HOOKS_DIR}/sweeper.py" "$@" ;;
+  registry) exec python3 "${HOOKS_DIR}/registry.py" "$@" ;;
+  list) exec python3 "${HOOKS_DIR}/registry.py" list "$@" ;;
   remove)
     # dynos remove [--root /path] or dynos remove /path (positional)
     target="$(pwd)"
@@ -213,9 +210,9 @@ print('no')
     done
     # Stop daemon first if running
     echo "Stopping daemon for $target..."
-    PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/dynomaintain.py" stop --root "$target" 2>/dev/null || true
+    PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/maintain.py" stop --root "$target" 2>/dev/null || true
     # Unregister
-    exec python3 "${HOOKS_DIR}/dynoregistry.py" unregister "$target"
+    exec python3 "${HOOKS_DIR}/registry.py" unregister "$target"
     ;;
   pause)
     target="$(pwd)"
@@ -227,7 +224,7 @@ print('no')
         *) target="$arg" ;;
       esac
     done
-    exec python3 "${HOOKS_DIR}/dynoregistry.py" pause "$target"
+    exec python3 "${HOOKS_DIR}/registry.py" pause "$target"
     ;;
   resume)
     target="$(pwd)"
@@ -239,44 +236,36 @@ print('no')
         *) target="$arg" ;;
       esac
     done
-    exec python3 "${HOOKS_DIR}/dynoregistry.py" resume "$target"
+    exec python3 "${HOOKS_DIR}/registry.py" resume "$target"
     ;;
 
   # --- Global dashboard (top-level) ---
   dashboard)
     # Default to serve if no subcommand given
     if [ $# -eq 0 ]; then
-      exec python3 "${HOOKS_DIR}/dynoglobal.py" dashboard serve
+      exec python3 "${HOOKS_DIR}/sweeper.py" dashboard serve
     fi
     subcmd="$1"
     case "$subcmd" in
-      serve)   shift; exec python3 "${HOOKS_DIR}/dynoglobal.py" dashboard serve "$@" ;;
-      stop)    exec python3 "${HOOKS_DIR}/dynoglobal.py" dashboard kill ;;
-      restart) shift; exec python3 "${HOOKS_DIR}/dynoglobal.py" dashboard restart "$@" ;;
-      generate) shift; exec python3 "${HOOKS_DIR}/dynoglobal.py" dashboard generate "$@" ;;
-      *)       exec python3 "${HOOKS_DIR}/dynoglobal.py" dashboard "$subcmd" "$@" ;;
+      serve)   shift; exec python3 "${HOOKS_DIR}/sweeper.py" dashboard serve "$@" ;;
+      stop)    exec python3 "${HOOKS_DIR}/sweeper.py" dashboard kill ;;
+      restart) shift; exec python3 "${HOOKS_DIR}/sweeper.py" dashboard restart "$@" ;;
+      generate) shift; exec python3 "${HOOKS_DIR}/sweeper.py" dashboard generate "$@" ;;
+      *)       exec python3 "${HOOKS_DIR}/sweeper.py" dashboard "$subcmd" "$@" ;;
     esac
     ;;
 
   # --- Internals ---
-  route)      exec python3 "${HOOKS_DIR}/dynorouter.py" "$@" ;;
-  plan)       exec python3 "${HOOKS_DIR}/dynoplanner.py" "$@" ;;
-  patterns)   exec python3 "${HOOKS_DIR}/dynopatterns.py" "$@" ;;
-  config)     exec python3 "${HOOKS_DIR}/dynosctl.py" config "$@" ;;
-  stats)
-    if [ $# -gt 0 ] && [ "$1" = "dora" ]; then
-      shift; exec python3 "${HOOKS_DIR}/dynosctl.py" stats-dora "$@"
-    elif [ $# -gt 0 ] && [ "$1" = "usage" ]; then
-      shift; exec python3 "${HOOKS_DIR}/dynosctl.py" stats-usage "$@"
-    fi
-    echo "Usage: dynos stats {dora|usage} [--json]" >&2; exit 1
-    ;;
-  ctl)        exec python3 "${HOOKS_DIR}/dynosctl.py" "$@" ;;
-  postmortem) exec python3 "${HOOKS_DIR}/dynopostmortem.py" "$@" ;;
-  calibration|evolve) exec python3 "${HOOKS_DIR}/dynoevolve.py" "$@" ;;
-  trajectory) exec python3 "${HOOKS_DIR}/dynostrajectory.py" "$@" ;;
-  bench)      exec python3 "${HOOKS_DIR}/dynobench.py" "$@" ;;
-  report)     exec python3 "${HOOKS_DIR}/dynoreport.py" "$@" ;;
+  route)      exec python3 "${HOOKS_DIR}/router.py" "$@" ;;
+  plan)       exec python3 "${HOOKS_DIR}/planner.py" "$@" ;;
+  patterns)   exec python3 "${HOOKS_DIR}/patterns.py" "$@" ;;
+  ctl)        exec python3 "${HOOKS_DIR}/ctl.py" "$@" ;;
+  postmortem) exec python3 "${HOOKS_DIR}/postmortem.py" "$@" ;;
+  calibration|evolve) exec python3 "${HOOKS_DIR}/evolve.py" "$@" ;;
+  memory)     exec python3 "${HOOKS_DIR}/patterns.py" "$@" ;;
+  trajectory) exec python3 "${HOOKS_DIR}/trajectory.py" "$@" ;;
+  bench)      exec python3 "${HOOKS_DIR}/bench.py" "$@" ;;
+  report)     exec python3 "${HOOKS_DIR}/report.py" "$@" ;;
 
   help|-h|--help) usage ;;
   *) echo "Unknown subcommand: $cmd" >&2; usage >&2; exit 1 ;;

@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "name": "list",
+  "description": "List all registered dynos-work projects.",
+  "input_schema": {},
+  "output_schema": {}
+}

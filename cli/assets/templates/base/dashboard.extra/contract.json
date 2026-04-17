@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "skill": "dashboard",
+  "description": "Display a terminal report summarizing learned policies, finding trends, and executor reliability from task retrospectives.",
+  "input_schema": {
+    "dynos_patterns.md": {
+      "type": "string",
+      "required": true,
+      "source": "~/.claude/projects/<project>/memory/dynos_patterns.md"
+    },
+    "task-retrospective.json": {
+      "type": "object",
+      "required": false,
+      "source": "glob .dynos/task-*/task-retrospective.json"
+    }
+  },
+  "output_schema": {
+    "terminal_report": {
+      "type": "string",
+      "description": "Terminal report with policy summary, finding trends, executor reliability scores, and repair cycle statistics"
+    }
+  }
+}

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+
+
+python3 "${SCRIPT_DIR}/registry.py" set-active "${PROJECT_ROOT}" >/dev/null 2>&1 || true
+python3 "${SCRIPT_DIR}/dashboard.py" generate --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
+python3 "${SCRIPT_DIR}/maintain.py" ensure --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
+
+# Pre-generate routing context so Claude has it from the start
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 -c "
+import json, sys
+sys.path.insert(0, '${SCRIPT_DIR}')
+from router import load_prevention_rules
+from lib_core import project_policy, _persistent_project_dir
+from pathlib import Path
+root = Path('${PROJECT_ROOT}')
+policy = project_policy(root)
+rules = load_prevention_rules(root)
+ctx = {
+    'policy': {k: v for k, v in policy.items() if k in ('token_budget_multiplier', 'fast_track_skip_plan_audit', 'model_overrides')},
+    'prevention_rules': len(rules),
+    'has_learned_agents': (_persistent_project_dir(root) / 'learned-agents' / 'registry.json').exists(),
+}
+Path('${PROJECT_ROOT}/.dynos/routing-context.json').parent.mkdir(parents=True, exist_ok=True)
+Path('${PROJECT_ROOT}/.dynos/routing-context.json').write_text(json.dumps(ctx, indent=2))
+" 2>/dev/null || true
+
+# Escape string for JSON embedding
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Build session context with routing summary
+ROUTING_SUMMARY=""
+if [ -f "${PROJECT_ROOT}/.dynos/routing-context.json" ]; then
+  ROUTING_SUMMARY=$(python3 -c "
+import json
+ctx = json.load(open('${PROJECT_ROOT}/.dynos/routing-context.json'))
+parts = []
+mo = ctx.get('policy', {}).get('model_overrides', {})
+if mo: parts.append(f'{len(mo)} model overrides active')
+pr = ctx.get('prevention_rules', 0)
+if pr: parts.append(f'{pr} prevention rules')
+if ctx.get('policy', {}).get('fast_track_skip_plan_audit'): parts.append('fast-track plan-audit skip enabled')
+if ctx.get('has_learned_agents'): parts.append('learned agents available')
+print('. '.join(parts) if parts else 'defaults only')
+" 2>/dev/null || echo "defaults only")
+fi
+
+session_context="dynos-work active. Routing: ${ROUTING_SUMMARY:-defaults only}. IMPORTANT: For /dynos-work:execute and /dynos-work:audit, run router.py to get deterministic model/skip/route decisions before spawning agents. Use /dynos-work:start for new tasks."
+
+if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+  printf '{\n  "additional_context": "%s"\n}\n' "$session_context"
+elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$session_context"
+else
+  printf '{\n  "additional_context": "%s"\n}\n' "$session_context"
+fi
+
+exit 0

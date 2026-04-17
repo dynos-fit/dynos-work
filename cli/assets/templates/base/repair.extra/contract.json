@@ -1,0 +1,42 @@
+{
+  "version": "1.0.0",
+  "skill": "repair",
+  "description": "Manually repair a specific finding from an audit report without running the full audit pipeline.",
+  "input_schema": {
+    "finding_id": {
+      "type": "string",
+      "required": false,
+      "source": "user argument (e.g. sec-003) or interactive selection"
+    },
+    "all_flag": {
+      "type": "boolean",
+      "required": false,
+      "source": "user argument --all"
+    },
+    "manifest.json": {
+      "type": "object",
+      "required": true,
+      "source": ".dynos/task-{id}/manifest.json"
+    },
+    "audit-reports": {
+      "type": "array",
+      "required": true,
+      "source": ".dynos/task-{id}/audit-reports/*.json (latest reports)"
+    },
+    "spec.md": {
+      "type": "string",
+      "required": true,
+      "source": ".dynos/task-{id}/spec.md"
+    }
+  },
+  "output_schema": {
+    "repair-log.json": {
+      "type": "object",
+      "description": "Updated repair log with result of the repair"
+    },
+    "audit-reports/{auditor}-checkpoint-{timestamp}.json": {
+      "type": "object",
+      "description": "Re-audit reports from auditors that reported the finding plus spec-completion and security"
+    }
+  }
+}

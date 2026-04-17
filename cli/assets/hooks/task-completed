@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Hook: TaskCompleted
+# Runs after every task completion.
+#
+# Pipeline: event-driven via eventbus.py
+# The drain runner processes: learn → trajectory → evolve → patterns →
+# postmortem → improve → auto-benchmark → dashboard → register
+#
+# Every handler swallows errors so failures never block the session.
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+
+# --- Step 1: Emit the triggering event ---
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/lib_events.py" emit \
+  --root "${PROJECT_ROOT}" \
+  --type task-completed \
+  --source task || true
+
+# --- Step 2: Drain all events (learn → evolve → benchmark → dashboard) ---
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/eventbus.py" drain \
+  --root "${PROJECT_ROOT}" || true
+
+# --- Step 3: Conditional auto-commit ---
+PROJECT_DIR=$(echo "${PROJECT_ROOT}" | sed 's|/|-|g')
+SETTINGS="$HOME/.claude/projects/$PROJECT_DIR/settings.json"
+if [ -f "$SETTINGS" ] && grep -q '"dynos_auto_commit".*true' "$SETTINGS" 2>/dev/null; then
+  cd "${PROJECT_ROOT}" && git add .dynos/ benchmarks/ && git diff --cached --quiet || git commit -m "dynos-work: auto-commit after task completion" || true
+fi
