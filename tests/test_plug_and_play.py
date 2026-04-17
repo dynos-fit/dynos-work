@@ -90,7 +90,7 @@ class TestExecutorDiscovery:
 
 class TestActionSpacesConfig:
     def test_config_present_uses_custom_spaces(self, tmp_path: Path):
-        from sandbox.lib_qlearn import _load_action_spaces
+        from memory.lib_qlearn import _load_action_spaces
         config_dir = tmp_path / ".dynos" / "config"
         config_dir.mkdir(parents=True)
         (config_dir / "action-spaces.json").write_text(json.dumps({
@@ -102,12 +102,12 @@ class TestActionSpacesConfig:
         assert spaces["a11y"] == ["ui-executor"]
 
     def test_config_absent_uses_defaults(self, tmp_path: Path):
-        from sandbox.lib_qlearn import _load_action_spaces, _DEFAULT_ACTION_SPACE
+        from memory.lib_qlearn import _load_action_spaces, _DEFAULT_ACTION_SPACE
         spaces = _load_action_spaces(tmp_path)
         assert spaces == _DEFAULT_ACTION_SPACE
 
     def test_config_malformed_uses_defaults(self, tmp_path: Path):
-        from sandbox.lib_qlearn import _load_action_spaces, _DEFAULT_ACTION_SPACE
+        from memory.lib_qlearn import _load_action_spaces, _DEFAULT_ACTION_SPACE
         config_dir = tmp_path / ".dynos" / "config"
         config_dir.mkdir(parents=True)
         (config_dir / "action-spaces.json").write_text("{bad json")
