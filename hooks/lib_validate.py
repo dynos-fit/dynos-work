@@ -45,13 +45,15 @@ _API_CONTRACT_DOMAINS: set[str] = {"backend", "ui", "security"}
 _DATA_MODEL_DOMAINS: set[str] = {"db"}
 
 
-def conditional_plan_headings(domains: Iterable[str]) -> list[str]:
-    """Return additional required plan headings based on classification domains.
+_HIGH_RISK_LEVELS: set[str] = {"high", "critical"}
 
-    - ``API Contracts`` is required when domains include backend, ui, or security
-      (any task touching API surfaces needs explicit contract documentation).
-    - ``Data Model`` is required when domains include db
-      (any task touching the data layer needs schema documentation).
+
+def conditional_plan_headings(domains: Iterable[str], risk_level: str = "medium") -> list[str]:
+    """Return additional required plan headings based on classification.
+
+    - ``API Contracts`` is required when domains include backend, ui, or security.
+    - ``Data Model`` is required when domains include db.
+    - ``Architecture Decisions`` is required when risk_level is high or critical.
     """
     extra: list[str] = []
     domain_set = set(domains) if not isinstance(domains, set) else domains
@@ -59,6 +61,8 @@ def conditional_plan_headings(domains: Iterable[str]) -> list[str]:
         extra.append("API Contracts")
     if domain_set & _DATA_MODEL_DOMAINS:
         extra.append("Data Model")
+    if risk_level in _HIGH_RISK_LEVELS:
+        extra.append("Architecture Decisions")
     return extra
 
 
@@ -233,7 +237,8 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
         plan_text = require(plan_path)
         classification = manifest.get("classification") or {}
         domains = classification.get("domains", [])
-        all_required = REQUIRED_PLAN_HEADINGS + conditional_plan_headings(domains)
+        risk_level = classification.get("risk_level", "medium")
+        all_required = REQUIRED_PLAN_HEADINGS + conditional_plan_headings(domains, risk_level)
         for heading in all_required:
             if heading not in collect_headings(plan_text):
                 errors.append(f"plan missing heading: {heading}")
