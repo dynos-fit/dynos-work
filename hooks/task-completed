@@ -13,11 +13,31 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-# --- Step 1: Emit the triggering event ---
+# --- Step 1: Find the most recently completed task and emit with identity ---
+TASK_DIR=$(PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 -c "
+import json, sys
+from pathlib import Path
+dynos = Path('${PROJECT_ROOT}') / '.dynos'
+best = None
+for mp in sorted(dynos.glob('task-*/manifest.json'), reverse=True):
+    try:
+        m = json.loads(mp.read_text())
+        if m.get('stage') == 'DONE':
+            print(str(mp.parent)); sys.exit(0)
+    except: pass
+" 2>/dev/null)
+
+PAYLOAD="{}"
+if [ -n "${TASK_DIR:-}" ]; then
+  TASK_ID=$(basename "$TASK_DIR")
+  PAYLOAD="{\"task_id\": \"${TASK_ID}\", \"task_dir\": \"${TASK_DIR}\"}"
+fi
+
 PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/lib_events.py" emit \
   --root "${PROJECT_ROOT}" \
   --type task-completed \
-  --source task || true
+  --source task \
+  --payload "$PAYLOAD" || true
 
 # --- Step 2: Drain all events (learn → evolve → benchmark → dashboard) ---
 PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/eventbus.py" drain \

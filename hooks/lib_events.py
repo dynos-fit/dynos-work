@@ -111,7 +111,11 @@ def mark_processed(event_path: Path, consumer_name: str) -> None:
 
 
 def cleanup_old_events(root: Path) -> int:
-    """Delete processed events older than RETENTION_SECONDS.
+    """Delete fully-processed events older than RETENTION_SECONDS.
+
+    An event is fully processed when ALL registered consumers for its
+    event type have marked it. Partially-processed events are kept
+    regardless of age so slow/offline consumers don't lose work.
 
     Returns count of deleted files.
     """
@@ -119,15 +123,27 @@ def cleanup_old_events(root: Path) -> int:
     cutoff = time.time() - RETENTION_SECONDS
     deleted = 0
 
+    # Import HANDLERS lazily to get the consumer list per event type
+    try:
+        from eventbus import HANDLERS
+    except ImportError:
+        HANDLERS = {}
+
     for event_path in events_dir.glob("*.json"):
         try:
             event = load_json(event_path)
         except (json.JSONDecodeError, FileNotFoundError, OSError):
             continue
 
-        # Only delete fully processed events
-        if not event.get("processed_by"):
+        processed_by = set(event.get("processed_by", []))
+        if not processed_by:
             continue
+
+        # Check that ALL consumers for this event type have processed it
+        event_type = event.get("event_type", "")
+        expected_consumers = {name for name, _ in HANDLERS.get(event_type, [])}
+        if expected_consumers and not expected_consumers.issubset(processed_by):
+            continue  # partially processed — keep it
 
         # Check file age
         try:

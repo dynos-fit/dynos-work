@@ -175,7 +175,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     summary: dict[str, list[str]] = {}
     iteration = 0
     emitted_follow_ons: set[str] = set()  # track across ALL iterations to prevent duplicates
-    _completed_task_dir: str | None = None  # captured from task-completed event payload
+    completed_task_dirs: list[str] = []  # ALL task dirs from task-completed events
 
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
@@ -185,6 +185,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
+        # Track per-iteration: which event types had at least one successful handler
+        succeeded_this_iteration: set[str] = set()
         processed_this_iteration: set[str] = set()
 
         for event_type, handlers in HANDLERS.items():
@@ -203,9 +205,11 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
 
                     # Capture task identity from task-completed events
                     if event_type == "task-completed" and isinstance(payload, dict):
-                        _completed_task_dir = payload.get("task_dir") or _completed_task_dir
+                        td = payload.get("task_dir")
+                        if td and td not in completed_task_dirs:
+                            completed_task_dirs.append(td)
 
-                    # Run handler, swallow errors (|| true semantics)
+                    # Run handler
                     err_msg = None
                     t0 = time.monotonic()
                     try:
@@ -214,6 +218,9 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                         err_msg = str(e)
                         print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
                         success = False
+
+                    if success:
+                        succeeded_this_iteration.add(event_type)
 
                     log_event(
                         root,
@@ -232,9 +239,9 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     status = "ok" if success else "failed"
                     summary.setdefault(event_type, []).append(f"{consumer_name}:{status}")
 
-            # Emit follow-on only if this event type was ACTUALLY processed in THIS
-            # iteration (not just present in cumulative summary) and hasn't been emitted yet
-            if event_type in processed_this_iteration and event_type in FOLLOW_ON:
+            # Emit follow-on only when: (a) event type was processed THIS iteration,
+            # (b) at least one handler succeeded, (c) follow-on not already emitted
+            if event_type in succeeded_this_iteration and event_type in FOLLOW_ON:
                 follow_on = FOLLOW_ON[event_type]
                 if follow_on not in emitted_follow_ons:
                     emit_event(root, follow_on, "eventbus")
@@ -246,27 +253,28 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     # Cleanup old events
     cleanup_old_events(root)
 
-    # Write post-completion receipt if task-completed was processed
-    if "task-completed" in summary and _completed_task_dir:
-        try:
-            from lib_receipts import receipt_post_completion
-            task_dir = Path(_completed_task_dir)
-            if task_dir.exists():
-                handlers_run = []
-                for evt_type, results in summary.items():
-                    for r in results:
-                        name, status = r.split(":", 1)
-                        handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
-                postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("evolve-completed", []))
-                patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("learn-completed", []))
-                receipt_post_completion(
-                    task_dir,
-                    handlers_run=handlers_run,
-                    postmortem_written=postmortem_ok,
-                    patterns_updated=patterns_ok,
-                )
-        except Exception as exc:
-            print(f"  [warn] post-completion receipt failed: {exc}", file=sys.stderr)
+    # Write post-completion receipt for EACH completed task
+    if "task-completed" in summary and completed_task_dirs:
+        handlers_run = []
+        for evt_type, results in summary.items():
+            for r in results:
+                name, status = r.split(":", 1)
+                handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
+        postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("evolve-completed", []))
+        patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("learn-completed", []))
+        for td in completed_task_dirs:
+            try:
+                from lib_receipts import receipt_post_completion
+                task_dir = Path(td)
+                if task_dir.exists():
+                    receipt_post_completion(
+                        task_dir,
+                        handlers_run=handlers_run,
+                        postmortem_written=postmortem_ok,
+                        patterns_updated=patterns_ok,
+                    )
+            except Exception as exc:
+                print(f"  [warn] post-completion receipt failed for {td}: {exc}", file=sys.stderr)
 
     return summary
 
