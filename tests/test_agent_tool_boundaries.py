@@ -27,6 +27,7 @@ AGENT_FILES = sorted(
 EXECUTORS = {
     "backend-executor",
     "db-executor",
+    "docs-executor",
     "integration-executor",
     "ml-executor",
     "refactor-executor",
@@ -99,7 +100,7 @@ class TestAllAgentsHaveTools:
         assert len(fm["tools"]) > 0, f"{agent_file.name} tools: must not be empty"
 
     def test_all_17_agents_found(self):
-        assert len(AGENT_FILES) == 18, f"Expected 18 agents, found {len(AGENT_FILES)}"
+        assert len(AGENT_FILES) == 19, f"Expected 19 agents, found {len(AGENT_FILES)}"
 
 
 # ---------------------------------------------------------------------------

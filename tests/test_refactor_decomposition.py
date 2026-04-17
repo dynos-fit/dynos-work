@@ -874,5 +874,5 @@ class TestProjectDirBehavior:
         from lib import project_dir
         result = project_dir(tmp_path / "my-project")
         assert isinstance(result, Path)
-        assert result.exists()
+        # project_dir is pure path resolution — does NOT create the directory
         assert "projects" in str(result)

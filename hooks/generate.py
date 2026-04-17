@@ -64,6 +64,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     output = Path(args.output_path)
     if not output.is_absolute():
         output = root / output
+    output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     frontmatter = [
         "---",

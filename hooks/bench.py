@@ -84,7 +84,7 @@ def _assert_path_within(resolved: Path, parent: Path, label: str) -> None:
 
 
 def materialize_sandbox(case: dict) -> Path:
-    sandbox = Path(tempfile.mkdtemp(prefix="dynos-bench-", dir="/tmp"))
+    sandbox = Path(tempfile.mkdtemp(prefix="dynos-bench-", dir="/tmp")).resolve()
     for relative_path, content in case.get("sandbox", {}).get("files", {}).items():
         target = (sandbox / relative_path).resolve()
         _assert_path_within(target, sandbox, "sandbox")
