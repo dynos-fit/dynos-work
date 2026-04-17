@@ -188,7 +188,7 @@ Also write `.dynos/task-{id}/execution-graph.json`:
   "segments": [
     {
       "id": "seg-1",
-      "executor": "ui-executor | backend-executor | ml-executor | db-executor | refactor-executor | testing-executor | integration-executor",
+      "executor": "ui-executor | backend-executor | ml-executor | db-executor | refactor-executor | testing-executor | integration-executor | docs-executor",
       "description": "What this segment implements",
       "files_expected": ["path/to/file"],
       "depends_on": [],

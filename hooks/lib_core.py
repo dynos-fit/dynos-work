@@ -24,6 +24,7 @@ VALID_EXECUTORS: set[str] = {
     "refactor-executor",
     "testing-executor",
     "integration-executor",
+    "docs-executor",
 }
 
 VALID_CLASSIFICATION_TYPES: set[str] = {

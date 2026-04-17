@@ -149,7 +149,7 @@ If `inject-prompt` is not available (command not found), fall back to manually r
 Spawn the prioritized batch of non-cached executor agents in parallel.
 
 Executor agents by type:
-- `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`.
+- `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`, `docs-executor`.
 
 The base prompt for each executor (before inject-prompt) must include:
 1. Its specific segment object from `execution-graph.json`
