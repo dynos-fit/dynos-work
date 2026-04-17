@@ -8,20 +8,12 @@ import argparse
 import json
 from pathlib import Path
 
-from lib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json
+from lib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json, VALID_EXECUTORS
 from lib_log import log_event
 from lib_registry import ensure_learned_registry
 
 DEFAULT_TASK_TYPES = ["feature", "bugfix", "refactor", "migration", "ml", "full-stack"]
-DEFAULT_EXECUTOR_ROLES = [
-    "ui-executor",
-    "backend-executor",
-    "ml-executor",
-    "db-executor",
-    "refactor-executor",
-    "testing-executor",
-    "integration-executor",
-]
+DEFAULT_EXECUTOR_ROLES = sorted(VALID_EXECUTORS)  # auto-discovered from agents/
 DEFAULT_AUDITOR_ROLES = [
     "ui-auditor",
     "db-schema-auditor",
@@ -32,11 +24,29 @@ DEFAULT_AUDITOR_ROLES = [
 ]
 SKIP_EXEMPT_AUDITORS = {"security-auditor", "spec-completion-auditor", "code-quality-auditor"}
 VALID_MODELS = {"haiku", "sonnet", "opus"}
-EMA_ALPHA = 0.3
-COLD_START_MINIMUM = 5
-MAX_EFFECTIVENESS_ROWS = 50
-COMPOSITE_WEIGHTS = (0.5, 0.3, 0.2)  # quality, cost, efficiency
+from lib_defaults import (
+    EMA_ALPHA,
+    EMA_COLD_START_MINIMUM,
+    EMA_MAX_EFFECTIVENESS_ROWS,
+    EMA_TIE_BREAKING_THRESHOLD,
+    ROUTER_WEIGHT_QUALITY,
+    ROUTER_WEIGHT_COST,
+    ROUTER_WEIGHT_EFFICIENCY,
+    ROUTING_WEIGHT_QUALITY,
+    ROUTING_WEIGHT_EFFICIENCY,
+    ROUTING_WEIGHT_COST,
+    SKIP_THRESHOLD_BASE,
+    SKIP_THRESHOLD_SLOPE,
+    SKIP_THRESHOLD_MIN,
+    SKIP_THRESHOLD_MAX,
+    CONFIDENCE_MAX_CLAMP,
+    UCB_COLD_START_MINIMUM,
+)
+COMPOSITE_WEIGHTS = (ROUTER_WEIGHT_QUALITY, ROUTER_WEIGHT_COST, ROUTER_WEIGHT_EFFICIENCY)
 MODEL_COST_ORDER = {"haiku": 0, "sonnet": 1, "opus": 2}
+# Backwards compat aliases
+COLD_START_MINIMUM = EMA_COLD_START_MINIMUM
+MAX_EFFECTIVENESS_ROWS = EMA_MAX_EFFECTIVENESS_ROWS
 
 
 def project_slug(root: Path) -> str:
@@ -279,9 +289,9 @@ def derive_model_policy(effectiveness_scores: list[dict]) -> dict[str, dict]:
             x["model"],
         ))
 
-        # Tie-breaking: if top two within 0.03, prefer higher quality
+        # Tie-breaking: if top two within threshold, prefer higher quality
         if len(candidates) >= 2:
-            if abs(candidates[0]["composite"] - candidates[1]["composite"]) < 0.03:
+            if abs(candidates[0]["composite"] - candidates[1]["composite"]) < EMA_TIE_BREAKING_THRESHOLD:
                 if candidates[1]["quality_ema"] > candidates[0]["quality_ema"]:
                     candidates[0], candidates[1] = candidates[1], candidates[0]
 
@@ -293,7 +303,7 @@ def derive_model_policy(effectiveness_scores: list[dict]) -> dict[str, dict]:
             model = "opus"
 
         # Confidence
-        confidence = min(1.0, winner["quality_ema"] * min(1.0, winner["sample_count"] / 5))
+        confidence = min(1.0, winner["quality_ema"] * min(1.0, winner["sample_count"] / UCB_COLD_START_MINIMUM))
         confidence = max(0.0, min(1.0, confidence))
 
         policy_key = f"{role}:{task_type}"
@@ -324,8 +334,8 @@ def derive_skip_policy(effectiveness_scores: list[dict]) -> dict[str, dict]:
     result: dict[str, dict] = {}
     for role, qualities in auditor_quality.items():
         avg_quality = _mean(qualities)
-        threshold = round(3 + 2 * (1 - avg_quality))
-        threshold = max(1, min(10, threshold))
+        threshold = round(SKIP_THRESHOLD_BASE + SKIP_THRESHOLD_SLOPE * (1 - avg_quality))
+        threshold = max(SKIP_THRESHOLD_MIN, min(SKIP_THRESHOLD_MAX, threshold))
         result[role] = {
             "threshold": threshold,
             "confidence": round(avg_quality, 4),
@@ -338,34 +348,15 @@ def derive_skip_policy(effectiveness_scores: list[dict]) -> dict[str, dict]:
 def compute_routing_composite(effectiveness_scores: list[dict]) -> dict[str, float]:
     """Compute routing composite for each (role, task_type, source).
 
-    Uses evolve weights: 0.6 * quality + 0.25 * efficiency + 0.15 * cost.
+    Uses calibration weights: quality + efficiency + cost.
     Returns {role:task_type:source -> composite_score}.
     """
     result: dict[str, float] = {}
     for row in effectiveness_scores:
         key = f"{row['role']}:{row['task_type']}:{row['source']}"
-        composite = 0.6 * row["quality_ema"] + 0.25 * row["efficiency_ema"] + 0.15 * row["cost_ema"]
+        composite = ROUTING_WEIGHT_QUALITY * row["quality_ema"] + ROUTING_WEIGHT_EFFICIENCY * row["efficiency_ema"] + ROUTING_WEIGHT_COST * row["cost_ema"]
         result[key] = round(composite, 4)
     return result
-
-
-def _build_effectiveness_scores_section(effectiveness_scores: list[dict]) -> list[str]:
-    """Render the Effectiveness Scores markdown table."""
-    lines = [
-        "## Effectiveness Scores",
-        "",
-        "| Role | Model | Task Type | Source | Quality EMA | Cost EMA | Efficiency EMA | Sample Count | Updated |",
-        "|------|-------|-----------|--------|-------------|----------|----------------|--------------|---------|",
-    ]
-    for row in effectiveness_scores:
-        lines.append(
-            f"| {row['role']} | {row['model']} | {row['task_type']} | {row['source']} "
-            f"| {row['quality_ema']:.4f} | {row['cost_ema']:.4f} | {row['efficiency_ema']:.4f} "
-            f"| {row['sample_count']} | {row['updated']} |"
-        )
-    if not effectiveness_scores:
-        lines.append("No effectiveness data yet -- no retrospectives contain reward data.")
-    return lines
 
 
 def _build_model_policy_data(
@@ -405,28 +396,6 @@ def _build_model_policy_data(
     return result
 
 
-def _build_model_policy(
-    task_types: list[str],
-    executor_roles: list[str],
-    auditor_roles: list[str],
-    model_policy_data: dict[str, dict],
-) -> list[str]:
-    """Render model policy markdown from pre-computed data."""
-    lines = [
-        "## Model Policy",
-        "",
-        "| Role | Task Type | Recommended Model |",
-        "|------|-----------|-------------------|",
-    ]
-    for role in sorted(set(executor_roles + auditor_roles)):
-        for task_type in task_types:
-            key = f"{role}:{task_type}"
-            entry = model_policy_data.get(key)
-            model = entry["model"] if entry else "default"
-            lines.append(f"| {role} | {task_type} | {model} |")
-    return lines
-
-
 def _build_skip_policy_data(
     retrospectives: list[dict],
     auditor_roles: list[str],
@@ -446,31 +415,12 @@ def _build_skip_policy_data(
             continue
         avg_streak = _mean(streaks.get(role, []))
         threshold = max(3, min(6, int(round(avg_streak)) or 3))
-        confidence = min(0.99, round(avg_streak / 5, 2))
+        confidence = min(CONFIDENCE_MAX_CLAMP, round(avg_streak / UCB_COLD_START_MINIMUM, 2))
         result[role] = {
             "threshold": threshold,
             "confidence": confidence,
         }
     return result
-
-
-def _build_skip_policy(
-    auditor_roles: list[str],
-    skip_policy_data: dict[str, dict],
-) -> list[str]:
-    """Render skip policy markdown from pre-computed data."""
-    lines = [
-        "## Skip Policy",
-        "",
-        "| Auditor | Skip Threshold | Confidence |",
-        "|---------|----------------|------------|",
-    ]
-    for role in auditor_roles:
-        if role in SKIP_EXEMPT_AUDITORS:
-            continue
-        entry = skip_policy_data.get(role, {"threshold": 3, "confidence": 0.0})
-        lines.append(f"| {role} | {entry['threshold']} | {entry['confidence']:.2f} |")
-    return lines
 
 
 def _build_route_policy_data(
@@ -505,52 +455,6 @@ def _build_route_policy_data(
                     "composite_score": 0.0,
                 }
     return result
-
-
-def _build_agent_routing(
-    task_types: list[str],
-    executor_roles: list[str],
-    auditor_roles: list[str],
-    registry: dict,
-    route_policy_data: dict[str, dict],
-) -> list[str]:
-    """Render agent routing markdown from pre-computed data."""
-    lines = [
-        "## Agent Routing",
-        "",
-    ]
-    generated_from = [
-        str(item.get("generated_from"))
-        for item in registry.get("agents", [])
-        if isinstance(item.get("generated_from"), str) and item.get("generated_from")
-    ]
-    last_generation = max(generated_from) if generated_from else "none"
-    lines.extend(
-        [
-            f"Last generation: {last_generation}",
-            "",
-            "| Role | Task Type | Agent Source | Agent Path | Composite Score | Mode |",
-            "|------|-----------|-------------|------------|-----------------|------|",
-        ]
-    )
-    seen: set[tuple[str, str]] = set()
-    for item in registry.get("agents", []):
-        role = str(item.get("role", ""))
-        task_type = str(item.get("task_type", ""))
-        if not role or not task_type:
-            continue
-        seen.add((role, task_type))
-        source = f"learned:{item.get('agent_name')}"
-        path = str(item.get("path", ""))
-        composite = float(item.get("benchmark_summary", {}).get("mean_composite", 0.0) or 0.0)
-        mode = str(item.get("mode", "shadow"))
-        lines.append(f"| {role} | {task_type} | {source} | {path} | {composite:.3f} | {mode} |")
-    for role in sorted(set(executor_roles + auditor_roles)):
-        for task_type in task_types:
-            if (role, task_type) in seen:
-                continue
-            lines.append(f"| {role} | {task_type} | built-in | built-in | 0.000 | generic |")
-    return lines
 
 
 def _migrate_model_overrides(root: Path, model_policy_data: dict[str, dict]) -> dict[str, dict]:

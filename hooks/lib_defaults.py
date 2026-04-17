@@ -218,6 +218,28 @@ UCB_EXPLORATION_CONSTANT: float = 0.5
 UCB_COLD_START_MINIMUM: int = 5
 DEFAULT_SKIP_THRESHOLD: int = 3
 
+# ---------------------------------------------------------------------------
+# Policy engine (policy_engine.py)
+# ---------------------------------------------------------------------------
+
+EMA_ALPHA: float = 0.3                  # EMA smoothing factor
+EMA_COLD_START_MINIMUM: int = 5         # samples before EMA is trusted
+EMA_MAX_EFFECTIVENESS_ROWS: int = 50    # row cap for effectiveness scores
+EMA_TIE_BREAKING_THRESHOLD: float = 0.03  # composite delta for tie-breaking
+
+# Skip threshold formula: threshold = base + slope * (1 - avg_quality)
+SKIP_THRESHOLD_BASE: int = 3
+SKIP_THRESHOLD_SLOPE: int = 2
+SKIP_THRESHOLD_MIN: int = 1
+SKIP_THRESHOLD_MAX: int = 10
+
+CONFIDENCE_MAX_CLAMP: float = 0.99
+
+# Routing composite weights (quality-biased for route selection)
+ROUTING_WEIGHT_QUALITY: float = 0.6
+ROUTING_WEIGHT_EFFICIENCY: float = 0.25
+ROUTING_WEIGHT_COST: float = 0.15
+
 # Recurring pattern detection
 RECURRING_PATTERN_MIN_TASKS: int = 3
 RECURRING_PATTERN_THRESHOLD: float = 0.5  # 50% of task count
