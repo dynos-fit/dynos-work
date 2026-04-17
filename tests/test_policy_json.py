@@ -591,6 +591,9 @@ class TestBackwardCompatFallback(unittest.TestCase):
         self.root = Path(self.tempdir.name)
         self.orig_dynos_home = os.environ.get("DYNOS_HOME")
         os.environ["DYNOS_HOME"] = str(self.root / ".dynos-home")
+        # Ensure the persistent project directory exists for tests that write to it
+        from lib import _persistent_project_dir
+        _persistent_project_dir(self.root).mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
         if self.orig_dynos_home is None:
