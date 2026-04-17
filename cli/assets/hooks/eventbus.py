@@ -52,35 +52,8 @@ def _run(cmd: list[str], root: Path) -> bool:
         return False
 
 
-def run_memory(root: Path, _payload: dict) -> bool:
-    """Aggregate retrospectives into project memory (deterministic Python)."""
-    # patterns.py does everything the learn skill does:
-    # EMA effectiveness scores, model policy, skip policy, baseline policy,
-    # agent routing table, prevention rules — all written to dynos_patterns.md
-    return _run(
-        ["python3", str(SCRIPT_DIR / "patterns.py"), "--root", str(root)],
-        root,
-    )
-
-
-def run_trajectory(root: Path, _payload: dict) -> bool:
-    """Rebuild trajectory store from all retrospectives."""
-    return _run(
-        ["python3", str(SCRIPT_DIR / "trajectory.py"), "rebuild", "--root", str(root)],
-        root,
-    )
-
-
-def run_calibration(root: Path, _payload: dict) -> bool:
-    """Deterministic project-specific agent generation."""
-    return _run(
-        ["python3", str(SCRIPT_DIR / "calibrate.py"), "auto", "--root", str(root)],
-        root,
-    )
-
-
-def run_patterns(root: Path, _payload: dict) -> bool:
-    """Refresh patterns file from live runtime state."""
+def run_policy_engine(root: Path, _payload: dict) -> bool:
+    """Compute EMA scores and write routing policies from retrospectives."""
     return _run(
         ["python3", str(SCRIPT_DIR / "patterns.py"), "--root", str(root)],
         root,
@@ -88,25 +61,9 @@ def run_patterns(root: Path, _payload: dict) -> bool:
 
 
 def run_postmortem(root: Path, _payload: dict) -> bool:
-    """Generate automatic postmortem."""
+    """Generate human-readable postmortem report."""
     return _run(
         ["python3", str(SCRIPT_DIR / "postmortem.py"), "generate", "--root", str(root)],
-        root,
-    )
-
-
-def run_improve(root: Path, _payload: dict) -> bool:
-    """Run improvement cycle (project-local only)."""
-    return _run(
-        ["python3", str(SCRIPT_DIR / "postmortem.py"), "improve", "--root", str(root)],
-        root,
-    )
-
-
-def run_benchmark(root: Path, _payload: dict) -> bool:
-    """Auto-benchmark shadow challengers."""
-    return _run(
-        ["python3", str(SCRIPT_DIR / "auto.py"), "run", "--root", str(root)],
         root,
     )
 
@@ -130,37 +87,24 @@ def run_register(root: Path, _payload: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Handler registry
 # ---------------------------------------------------------------------------
-# Each event type maps to a list of (consumer_name, handler_fn).
-# Follow-on events are defined separately in the FOLLOW_ON dict.
+# Flat chain: all handlers fire on task-completed. No intermediate events.
+# Previously this was a 4-hop chain (task-completed → memory-completed →
+# calibration-completed → benchmark-completed) with 10 handlers and 6 no-ops.
+# Flattened because the learning pipeline is sandboxed.
 
 HandlerEntry = tuple[str, Callable[[Path, dict], bool]]
 
 HANDLERS: dict[str, list[HandlerEntry]] = {
     "task-completed": [
-        ("memory", run_memory),
-        ("trajectory", run_trajectory),
-    ],
-    "memory-completed": [
-        ("calibration", run_calibration),
-        ("patterns", run_patterns),
-    ],
-    "calibration-completed": [
+        ("policy_engine", run_policy_engine),
         ("postmortem", run_postmortem),
-        ("improve", run_improve),
-        ("benchmark", run_benchmark),
-    ],
-    "benchmark-completed": [
         ("dashboard", run_dashboard),
         ("register", run_register),
     ],
 }
 
-# Maps event type to the follow-on event emitted when handlers complete
-FOLLOW_ON: dict[str, str] = {
-    "task-completed": "memory-completed",
-    "memory-completed": "calibration-completed",
-    "calibration-completed": "benchmark-completed",
-}
+# No follow-on events needed — everything fires from task-completed directly.
+FOLLOW_ON: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +123,9 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
 
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
-    # Handlers that are part of the learning layer — skipped when learning is disabled.
-    # Note: only the handler FUNCTIONS are skipped. The event types still flow through
-    # so that non-learning handlers in downstream events (dashboard, register, postmortem)
-    # still fire. A skipped handler counts as succeeded for follow-on gating.
-    _LEARNING_HANDLERS = {"memory", "trajectory", "calibration", "patterns", "improve", "benchmark"}
+    # policy_engine is the only learning handler — skipped when learning is disabled.
+    # postmortem, dashboard, register always run regardless.
+    _LEARNING_HANDLERS = {"policy_engine"}
 
     # Track consumers that failed during this drain call — don't retry them
     # in subsequent iterations. Retries happen on the NEXT drain() invocation.

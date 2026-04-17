@@ -1,11 +1,7 @@
 """Integration tests for eventbus.drain() behavior.
 
-Covers the drain semantics that were previously untested:
-  - Failed handlers leave events available for retry
-  - Follow-on events only fire when ALL handlers succeed
-  - learning_enabled=false still runs non-learning downstream handlers
-  - Multiple queued events: failure on one blocks follow-on (AND semantics)
-  - Duplicate follow-on prevention across iterations
+Flat chain: all handlers fire on task-completed directly.
+No intermediate events.
 """
 from __future__ import annotations
 
@@ -20,12 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _setup(tmp_path: Path) -> Path:
-    """Create minimal .dynos/events/ for drain testing."""
     (tmp_path / ".dynos" / "events").mkdir(parents=True)
     (tmp_path / ".dynos" / "events.jsonl").touch()
     return tmp_path
@@ -45,19 +36,11 @@ def _processed_by(event_path: Path) -> list[str]:
 
 
 def _make_handlers(overrides: dict):
-    """Build a test HANDLERS dict with controllable return values.
-
-    overrides: {consumer_name: bool_or_callable}
-    Missing consumers default to True.
-    """
     import eventbus
-
     def _make_fn(result):
         if callable(result):
             return result
         return lambda root, payload: result
-
-    # Start from the real handler structure but replace functions
     test_handlers = {}
     for event_type, handlers in eventbus.HANDLERS.items():
         test_handlers[event_type] = []
@@ -67,16 +50,56 @@ def _make_handlers(overrides: dict):
     return test_handlers
 
 
-# ---------------------------------------------------------------------------
-# Failed handlers: retry on next drain
-# ---------------------------------------------------------------------------
+class TestFlatChain:
+    def test_all_handlers_fire_on_task_completed(self, tmp_path: Path):
+        root = _setup(tmp_path)
+        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
+
+        called = set()
+        def track(name):
+            def fn(root, payload):
+                called.add(name)
+                return True
+            return fn
+
+        handlers = _make_handlers({
+            "policy_engine": track("policy_engine"),
+            "postmortem": track("postmortem"),
+            "dashboard": track("dashboard"),
+            "register": track("register"),
+        })
+        with mock.patch("eventbus.HANDLERS", handlers), \
+             mock.patch("lib_core.is_learning_enabled", return_value=True), \
+             mock.patch("eventbus.log_event"):
+            from eventbus import drain
+            drain(root, max_iterations=1)
+
+        assert called == {"policy_engine", "postmortem", "dashboard", "register"}
+
+    def test_no_follow_on_events(self, tmp_path: Path):
+        root = _setup(tmp_path)
+        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
+
+        handlers = _make_handlers({})
+        with mock.patch("eventbus.HANDLERS", handlers), \
+             mock.patch("lib_core.is_learning_enabled", return_value=True), \
+             mock.patch("eventbus.log_event"):
+            from eventbus import drain
+            drain(root, max_iterations=5)
+
+        # No intermediate events should exist
+        events_dir = root / ".dynos" / "events"
+        all_events = list(events_dir.glob("*.json"))
+        event_types = {json.loads(f.read_text()).get("event_type") for f in all_events}
+        assert event_types == {"task-completed"}
+
 
 class TestFailedHandlerRetry:
-    def test_failed_handler_event_not_marked_processed(self, tmp_path: Path):
+    def test_failed_handler_not_marked_processed(self, tmp_path: Path):
         root = _setup(tmp_path)
         ep = _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
 
-        handlers = _make_handlers({"memory": False, "trajectory": True})
+        handlers = _make_handlers({"policy_engine": False, "postmortem": True})
         with mock.patch("eventbus.HANDLERS", handlers), \
              mock.patch("lib_core.is_learning_enabled", return_value=True), \
              mock.patch("eventbus.log_event"):
@@ -84,8 +107,8 @@ class TestFailedHandlerRetry:
             drain(root, max_iterations=1)
 
         processed = _processed_by(ep)
-        assert "trajectory" in processed
-        assert "memory" not in processed
+        assert "postmortem" in processed
+        assert "policy_engine" not in processed
 
     def test_failed_handler_retried_on_second_drain(self, tmp_path: Path):
         root = _setup(tmp_path)
@@ -96,7 +119,7 @@ class TestFailedHandlerRetry:
             calls["n"] += 1
             return calls["n"] > 1
 
-        handlers = _make_handlers({"memory": fail_then_succeed, "trajectory": True})
+        handlers = _make_handlers({"policy_engine": fail_then_succeed})
         with mock.patch("eventbus.HANDLERS", handlers), \
              mock.patch("lib_core.is_learning_enabled", return_value=True), \
              mock.patch("eventbus.log_event"):
@@ -107,118 +130,33 @@ class TestFailedHandlerRetry:
             assert calls["n"] == 2
 
 
-# ---------------------------------------------------------------------------
-# Follow-on gating: ALL handlers must succeed
-# ---------------------------------------------------------------------------
-
-class TestFollowOnGating:
-    def test_blocked_when_one_handler_fails(self, tmp_path: Path):
-        root = _setup(tmp_path)
-        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
-
-        handlers = _make_handlers({"memory": False, "trajectory": True})
-        with mock.patch("eventbus.HANDLERS", handlers), \
-             mock.patch("lib_core.is_learning_enabled", return_value=True), \
-             mock.patch("eventbus.log_event"):
-            from eventbus import drain
-            drain(root, max_iterations=1)
-
-        assert _count_events(root, "memory-completed") == 0
-
-    def test_emitted_when_all_succeed(self, tmp_path: Path):
-        root = _setup(tmp_path)
-        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
-
-        handlers = _make_handlers({})  # all default to True
-        with mock.patch("eventbus.HANDLERS", handlers), \
-             mock.patch("lib_core.is_learning_enabled", return_value=True), \
-             mock.patch("eventbus.log_event"):
-            from eventbus import drain
-            drain(root, max_iterations=1)
-
-        assert _count_events(root, "memory-completed") == 1
-
-    def test_no_duplicates_across_iterations(self, tmp_path: Path):
-        root = _setup(tmp_path)
-        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
-
-        handlers = _make_handlers({})
-        with mock.patch("eventbus.HANDLERS", handlers), \
-             mock.patch("lib_core.is_learning_enabled", return_value=True), \
-             mock.patch("eventbus.log_event"):
-            from eventbus import drain
-            drain(root, max_iterations=5)
-
-        assert _count_events(root, "memory-completed") == 1
-        assert _count_events(root, "calibration-completed") == 1
-        assert _count_events(root, "benchmark-completed") == 1
-
-
-# ---------------------------------------------------------------------------
-# learning_enabled=false: non-learning handlers still fire
-# ---------------------------------------------------------------------------
-
 class TestLearningDisabled:
-    def test_skipped_handlers_mark_events_processed(self, tmp_path: Path):
+    def test_policy_engine_skipped_when_learning_off(self, tmp_path: Path):
         root = _setup(tmp_path)
-        ep = _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
+        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
 
-        handlers = _make_handlers({})
+        pe_called = {"v": False}
+        dash_called = {"v": False}
+        def track_pe(root, payload):
+            pe_called["v"] = True
+            return True
+        def track_dash(root, payload):
+            dash_called["v"] = True
+            return True
+
+        handlers = _make_handlers({"policy_engine": track_pe, "dashboard": track_dash})
         with mock.patch("eventbus.HANDLERS", handlers), \
              mock.patch("lib_core.is_learning_enabled", return_value=False), \
              mock.patch("eventbus.log_event"):
             from eventbus import drain
             drain(root, max_iterations=1)
 
-        processed = _processed_by(ep)
-        assert "memory" in processed
-        assert "trajectory" in processed
+        assert not pe_called["v"], "policy_engine should NOT run with learning off"
+        assert dash_called["v"], "dashboard should run with learning off"
 
-    def test_chain_reaches_dashboard(self, tmp_path: Path):
-        root = _setup(tmp_path)
-        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
-
-        dashboard_called = {"v": False}
-        def track_dashboard(root, payload):
-            dashboard_called["v"] = True
-            return True
-
-        handlers = _make_handlers({"dashboard": track_dashboard})
-        with mock.patch("eventbus.HANDLERS", handlers), \
-             mock.patch("lib_core.is_learning_enabled", return_value=False), \
-             mock.patch("eventbus.log_event"):
-            from eventbus import drain
-            drain(root, max_iterations=5)
-
-        assert dashboard_called["v"], "dashboard should run with learning off"
-
-    def test_learning_handlers_not_executed(self, tmp_path: Path):
-        root = _setup(tmp_path)
-        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
-
-        memory_called = {"v": False}
-        def track_memory(root, payload):
-            memory_called["v"] = True
-            return True
-
-        handlers = _make_handlers({"memory": track_memory})
-        with mock.patch("eventbus.HANDLERS", handlers), \
-             mock.patch("lib_core.is_learning_enabled", return_value=False), \
-             mock.patch("eventbus.log_event"):
-            from eventbus import drain
-            drain(root, max_iterations=5)
-
-        assert not memory_called["v"], "memory should NOT execute with learning off"
-
-
-# ---------------------------------------------------------------------------
-# No tight-loop retry within a single drain call
-# ---------------------------------------------------------------------------
 
 class TestNoTightRetry:
     def test_permanently_failing_handler_runs_once_per_drain(self, tmp_path: Path):
-        """A handler that always fails should run exactly once per drain(),
-        not once per iteration (which would be 10 times with max_iterations=10)."""
         root = _setup(tmp_path)
         _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
 
@@ -227,36 +165,35 @@ class TestNoTightRetry:
             calls["n"] += 1
             return False
 
-        handlers = _make_handlers({"memory": always_fail, "trajectory": True})
+        handlers = _make_handlers({"policy_engine": always_fail})
         with mock.patch("eventbus.HANDLERS", handlers), \
              mock.patch("lib_core.is_learning_enabled", return_value=True), \
              mock.patch("eventbus.log_event"):
             from eventbus import drain
             drain(root, max_iterations=10)
 
-        assert calls["n"] == 1, f"permanently failing handler ran {calls['n']} times, expected 1"
+        assert calls["n"] == 1
 
 
-# ---------------------------------------------------------------------------
-# Multiple queued events: AND semantics
-# ---------------------------------------------------------------------------
-
-class TestMultiEventAND:
-    def test_failure_on_one_event_blocks_follow_on(self, tmp_path: Path):
+class TestMultiTaskReceipts:
+    def test_receipts_for_multiple_tasks(self, tmp_path: Path):
         root = _setup(tmp_path)
-        _emit(root, "task-completed", {"task_id": "t1", "task_dir": str(tmp_path)})
-        _emit(root, "task-completed", {"task_id": "t2", "task_dir": str(tmp_path)})
+        task1 = tmp_path / ".dynos" / "task-1"
+        task2 = tmp_path / ".dynos" / "task-2"
+        task1.mkdir(parents=True)
+        task2.mkdir(parents=True)
 
-        calls = {"n": 0}
-        def fail_first(root, payload):
-            calls["n"] += 1
-            return calls["n"] > 1
+        _emit(root, "task-completed", {"task_id": "task-1", "task_dir": str(task1)})
+        _emit(root, "task-completed", {"task_id": "task-2", "task_dir": str(task2)})
 
-        handlers = _make_handlers({"memory": fail_first, "trajectory": True})
+        handlers = _make_handlers({})
         with mock.patch("eventbus.HANDLERS", handlers), \
              mock.patch("lib_core.is_learning_enabled", return_value=True), \
-             mock.patch("eventbus.log_event"):
+             mock.patch("eventbus.log_event"), \
+             mock.patch("lib_receipts.receipt_post_completion") as mock_receipt:
             from eventbus import drain
-            drain(root, max_iterations=1)
+            drain(root, max_iterations=5)
 
-        assert _count_events(root, "memory-completed") == 0
+        call_dirs = [str(call.args[0]) for call in mock_receipt.call_args_list]
+        assert str(task1) in call_dirs
+        assert str(task2) in call_dirs

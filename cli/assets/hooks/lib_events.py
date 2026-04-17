@@ -22,9 +22,6 @@ from lib_core import load_json, now_iso, write_json
 
 EVENT_TYPES: set[str] = {
     "task-completed",
-    "memory-completed",
-    "calibration-completed",
-    "benchmark-completed",
 }
 
 VALID_PIPELINES: set[str] = {"task", "memory", "observability", "eventbus"}

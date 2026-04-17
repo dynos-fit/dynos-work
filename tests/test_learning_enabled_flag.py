@@ -153,16 +153,16 @@ class TestResolveSkipWithLearning:
 class TestEventBusLearningGate:
     def test_learning_handlers_identified(self):
         """Verify the learning handler set covers the right handlers."""
-        learning_handlers = {"memory", "trajectory", "calibration", "patterns", "improve", "benchmark"}
+        learning_handlers = {"policy_engine"}
         observability_handlers = {"dashboard", "register", "postmortem"}
-        # Postmortem is in calibration-completed along with improve and benchmark
+        # policy_engine is the only learning handler
         # but postmortem writes retrospective improvements — it's borderline
         # For now it's NOT in the learning set (it runs even without learning)
         assert learning_handlers & observability_handlers == set()
 
     def test_learning_handler_names_exist_in_registry(self):
         """Verify all learning handler names exist in the HANDLERS registry."""
-        expected = {"memory", "trajectory", "calibration", "patterns", "improve", "benchmark"}
+        expected = {"policy_engine"}
         from eventbus import HANDLERS
         all_handler_names = set()
         for handlers in HANDLERS.values():
@@ -172,7 +172,7 @@ class TestEventBusLearningGate:
 
     def test_observability_handlers_not_in_learning_set(self):
         """Dashboard, register, postmortem should run even with learning off."""
-        learning_handlers = {"memory", "trajectory", "calibration", "patterns", "improve", "benchmark"}
+        learning_handlers = {"policy_engine"}
         assert "dashboard" not in learning_handlers
         assert "register" not in learning_handlers
         assert "postmortem" not in learning_handlers
