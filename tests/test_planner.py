@@ -7,9 +7,9 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
-import unittest
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS = ROOT / "hooks"
@@ -109,12 +109,12 @@ def _setup_project(
     return task_dir
 
 
-class TestDynoPlannerCLISubcommands(unittest.TestCase):
+class TestDynoPlannerCLISubcommands:
     """AC 7: planner.py has three subcommands that exit cleanly."""
 
     def test_dynoplanner_file_exists(self) -> None:
         """planner.py exists in hooks directory."""
-        self.assertTrue(DYNOPLANNER.exists(), f"planner.py should exist at {DYNOPLANNER}")
+        assert DYNOPLANNER.exists(), f"planner.py should exist at {DYNOPLANNER}"
 
     def test_start_plan_help_exits_zero(self) -> None:
         """start-plan --help exits cleanly with return code 0."""
@@ -122,8 +122,8 @@ class TestDynoPlannerCLISubcommands(unittest.TestCase):
             ["python3", str(DYNOPLANNER), "start-plan", "--help"],
             capture_output=True, text=True, timeout=10,
         )
-        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
-        self.assertIn("start-plan", result.stdout.lower() + result.stderr.lower())
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "start-plan" in (result.stdout.lower() + result.stderr.lower())
 
     def test_planning_mode_help_exits_zero(self) -> None:
         """planning-mode --help exits cleanly with return code 0."""
@@ -131,7 +131,7 @@ class TestDynoPlannerCLISubcommands(unittest.TestCase):
             ["python3", str(DYNOPLANNER), "planning-mode", "--help"],
             capture_output=True, text=True, timeout=10,
         )
-        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
     def test_task_policy_help_exits_zero(self) -> None:
         """task-policy --help exits cleanly with return code 0."""
@@ -139,7 +139,7 @@ class TestDynoPlannerCLISubcommands(unittest.TestCase):
             ["python3", str(DYNOPLANNER), "task-policy", "--help"],
             capture_output=True, text=True, timeout=10,
         )
-        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
     def test_top_level_help_shows_all_subcommands(self) -> None:
         """Top-level --help lists all three subcommands."""
@@ -147,71 +147,62 @@ class TestDynoPlannerCLISubcommands(unittest.TestCase):
             ["python3", str(DYNOPLANNER), "--help"],
             capture_output=True, text=True, timeout=10,
         )
-        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
         output = result.stdout.lower()
-        self.assertIn("start-plan", output)
-        self.assertIn("planning-mode", output)
-        self.assertIn("task-policy", output)
+        assert "start-plan" in output
+        assert "planning-mode" in output
+        assert "task-policy" in output
 
 
-class TestTaskPolicySubcommand(unittest.TestCase):
+class TestTaskPolicySubcommand:
     """AC 8: task-policy generates policy-packet.json with required fields."""
 
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tempdir.name)
-        self.orig_dynos_home = os.environ.get("DYNOS_HOME")
-        os.environ["DYNOS_HOME"] = str(self.root / ".dynos-home")
-
-    def tearDown(self) -> None:
-        if self.orig_dynos_home is None:
-            os.environ.pop("DYNOS_HOME", None)
-        else:
-            os.environ["DYNOS_HOME"] = self.orig_dynos_home
-        self.tempdir.cleanup()
-
-    def test_task_policy_creates_policy_packet_json(self) -> None:
+    def test_task_policy_creates_policy_packet_json(self, tmp_path: Path, monkeypatch) -> None:
         """task-policy creates .dynos/task-{id}/policy-packet.json."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         result = subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
-        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}\nstdout: {result.stdout}")
+        assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
-        self.assertTrue(packet_path.exists(), "policy-packet.json should be created")
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
+        assert packet_path.exists(), "policy-packet.json should be created"
 
         data = json.loads(packet_path.read_text())
-        self.assertIsInstance(data, dict)
+        assert isinstance(data, dict)
 
-    def test_policy_packet_has_required_fields(self) -> None:
+    def test_policy_packet_has_required_fields(self, tmp_path: Path, monkeypatch) -> None:
         """policy-packet.json contains all required top-level fields."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
         if not packet_path.exists():
-            self.fail("policy-packet.json not created")
+            pytest.fail("policy-packet.json not created")
 
         data = json.loads(packet_path.read_text())
 
@@ -227,120 +218,115 @@ class TestTaskPolicySubcommand(unittest.TestCase):
             "curiosity_targets",
         ]
         for field in required_fields:
-            self.assertIn(field, data, f"policy-packet.json missing required field: {field}")
+            assert field in data, f"policy-packet.json missing required field: {field}"
 
-    def test_policy_packet_decisions_have_source_field(self) -> None:
+    def test_policy_packet_decisions_have_source_field(self, tmp_path: Path, monkeypatch) -> None:
         """Each decision in policy-packet.json has a source field."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
         if not packet_path.exists():
-            self.fail("policy-packet.json not created")
+            pytest.fail("policy-packet.json not created")
 
         data = json.loads(packet_path.read_text())
 
         # Models should have source
         for key, value in data.get("models", {}).items():
-            self.assertIn("source", value, f"Model decision for {key} missing source field")
+            assert "source" in value, f"Model decision for {key} missing source field"
 
         # Skip decisions should have source
         for key, value in data.get("skip_decisions", {}).items():
-            self.assertIn("source", value, f"Skip decision for {key} missing source field")
+            assert "source" in value, f"Skip decision for {key} missing source field"
 
         # Route decisions should have source
         for key, value in data.get("route_decisions", {}).items():
-            self.assertIn("source", value, f"Route decision for {key} missing source field")
+            assert "source" in value, f"Route decision for {key} missing source field"
 
-    def test_policy_packet_task_id_matches(self) -> None:
+    def test_policy_packet_task_id_matches(self, tmp_path: Path, monkeypatch) -> None:
         """policy-packet.json task_id matches the provided task id."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
         if not packet_path.exists():
-            self.fail("policy-packet.json not created")
+            pytest.fail("policy-packet.json not created")
 
         data = json.loads(packet_path.read_text())
-        self.assertEqual(data["task_id"], task_id)
+        assert data["task_id"] == task_id
 
 
-class TestStartPlanSubcommand(unittest.TestCase):
+class TestStartPlanSubcommand:
     """AC 9: start-plan returns JSON with expected structure."""
 
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tempdir.name)
-        self.orig_dynos_home = os.environ.get("DYNOS_HOME")
-        os.environ["DYNOS_HOME"] = str(self.root / ".dynos-home")
-
-    def tearDown(self) -> None:
-        if self.orig_dynos_home is None:
-            os.environ.pop("DYNOS_HOME", None)
-        else:
-            os.environ["DYNOS_HOME"] = self.orig_dynos_home
-        self.tempdir.cleanup()
-
-    def test_start_plan_returns_json(self) -> None:
+    def test_start_plan_returns_json(self, tmp_path: Path, monkeypatch) -> None:
         """start-plan returns valid JSON output."""
-        _setup_project(self.root)
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
+        _setup_project(root)
 
         result = subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "start-plan",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-type", "feature",
                 "--domains", "backend",
                 "--risk-level", "medium",
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
-        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
         data = json.loads(result.stdout)
-        self.assertIsInstance(data, dict)
+        assert isinstance(data, dict)
 
-    def test_start_plan_has_required_fields(self) -> None:
+    def test_start_plan_has_required_fields(self, tmp_path: Path, monkeypatch) -> None:
         """start-plan output contains planning_mode, planner_model, discovery_skip, trajectory_adjustments."""
-        _setup_project(self.root)
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
+        _setup_project(root)
 
         result = subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "start-plan",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-type", "feature",
                 "--domains", "backend",
                 "--risk-level", "medium",
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
-        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        assert result.returncode == 0, f"stderr: {result.stderr}"
 
         data = json.loads(result.stdout)
 
@@ -351,161 +337,156 @@ class TestStartPlanSubcommand(unittest.TestCase):
             "trajectory_adjustments",
         ]
         for field in required_fields:
-            self.assertIn(field, data, f"start-plan output missing required field: {field}")
+            assert field in data, f"start-plan output missing required field: {field}"
 
-    def test_start_plan_planning_mode_is_valid(self) -> None:
+    def test_start_plan_planning_mode_is_valid(self, tmp_path: Path, monkeypatch) -> None:
         """start-plan planning_mode is either 'standard' or 'hierarchical'."""
-        _setup_project(self.root)
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
+        _setup_project(root)
 
         result = subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "start-plan",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-type", "feature",
                 "--domains", "backend",
                 "--risk-level", "medium",
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
         data = json.loads(result.stdout)
-        self.assertIn(data.get("planning_mode"), ("standard", "hierarchical"))
+        assert data.get("planning_mode") in ("standard", "hierarchical")
 
-    def test_start_plan_with_high_risk_may_recommend_hierarchical(self) -> None:
+    def test_start_plan_with_high_risk_may_recommend_hierarchical(self, tmp_path: Path, monkeypatch) -> None:
         """start-plan with high risk level may recommend hierarchical planning."""
-        _setup_project(self.root)
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
+        _setup_project(root)
 
         result = subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "start-plan",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-type", "feature",
                 "--domains", "backend,ui,db",
                 "--risk-level", "high",
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
         data = json.loads(result.stdout)
         # High-risk with many domains may be hierarchical, but we just check it returns valid JSON
-        self.assertIn(data.get("planning_mode"), ("standard", "hierarchical"))
+        assert data.get("planning_mode") in ("standard", "hierarchical")
 
 
-class TestDreamingAndCuriosity(unittest.TestCase):
+class TestDreamingAndCuriosity:
     """AC 18: policy-packet.json includes dreaming (bool) and curiosity_targets (list)."""
 
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tempdir.name)
-        self.orig_dynos_home = os.environ.get("DYNOS_HOME")
-        os.environ["DYNOS_HOME"] = str(self.root / ".dynos-home")
-
-    def tearDown(self) -> None:
-        if self.orig_dynos_home is None:
-            os.environ.pop("DYNOS_HOME", None)
-        else:
-            os.environ["DYNOS_HOME"] = self.orig_dynos_home
-        self.tempdir.cleanup()
-
-    def test_policy_packet_dreaming_is_bool(self) -> None:
+    def test_policy_packet_dreaming_is_bool(self, tmp_path: Path, monkeypatch) -> None:
         """dreaming field in policy-packet.json is a boolean."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
         if not packet_path.exists():
-            self.fail("policy-packet.json not created")
+            pytest.fail("policy-packet.json not created")
 
         data = json.loads(packet_path.read_text())
-        self.assertIn("dreaming", data)
-        self.assertIsInstance(data["dreaming"], bool)
+        assert "dreaming" in data
+        assert isinstance(data["dreaming"], bool)
 
-    def test_policy_packet_curiosity_targets_is_list(self) -> None:
+    def test_policy_packet_curiosity_targets_is_list(self, tmp_path: Path, monkeypatch) -> None:
         """curiosity_targets field in policy-packet.json is a list of strings."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
         if not packet_path.exists():
-            self.fail("policy-packet.json not created")
+            pytest.fail("policy-packet.json not created")
 
         data = json.loads(packet_path.read_text())
-        self.assertIn("curiosity_targets", data)
-        self.assertIsInstance(data["curiosity_targets"], list)
+        assert "curiosity_targets" in data
+        assert isinstance(data["curiosity_targets"], list)
         # Each item should be a string
         for item in data["curiosity_targets"]:
-            self.assertIsInstance(item, str)
+            assert isinstance(item, str)
 
-    def test_policy_packet_dreaming_default_false(self) -> None:
+    def test_policy_packet_dreaming_default_false(self, tmp_path: Path, monkeypatch) -> None:
         """dreaming defaults to false when no novel patterns in trajectory."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
         if not packet_path.exists():
-            self.fail("policy-packet.json not created")
+            pytest.fail("policy-packet.json not created")
 
         data = json.loads(packet_path.read_text())
-        self.assertFalse(data["dreaming"])
+        assert data["dreaming"] is False
 
-    def test_policy_packet_curiosity_targets_default_empty(self) -> None:
+    def test_policy_packet_curiosity_targets_default_empty(self, tmp_path: Path, monkeypatch) -> None:
         """curiosity_targets defaults to empty list when no novel patterns."""
+        root = tmp_path
+        monkeypatch.setenv("DYNOS_HOME", str(root / ".dynos-home"))
         task_id = "task-20260404-001"
-        _setup_project(self.root, task_id=task_id)
+        _setup_project(root, task_id=task_id)
 
         subprocess.run(
             [
                 "python3", str(DYNOPLANNER),
                 "task-policy",
-                "--root", str(self.root),
+                "--root", str(root),
                 "--task-id", task_id,
             ],
             capture_output=True, text=True, timeout=30,
-            env={**os.environ, "DYNOS_HOME": str(self.root / ".dynos-home")},
+            env={**os.environ, "DYNOS_HOME": str(root / ".dynos-home")},
         )
 
-        packet_path = self.root / ".dynos" / task_id / "policy-packet.json"
+        packet_path = root / ".dynos" / task_id / "policy-packet.json"
         if not packet_path.exists():
-            self.fail("policy-packet.json not created")
+            pytest.fail("policy-packet.json not created")
 
         data = json.loads(packet_path.read_text())
-        self.assertEqual(data["curiosity_targets"], [])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert data["curiosity_targets"] == []

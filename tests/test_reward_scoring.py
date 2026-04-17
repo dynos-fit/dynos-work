@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import sys
-import unittest
 from pathlib import Path
+
+import pytest
 
 # Import hooks modules
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
@@ -49,74 +50,74 @@ def _make_retrospective(
     }
 
 
-class TestComputeQualityScore(unittest.TestCase):
+class TestComputeQualityScore:
     """AC 1: compute_quality_score() deterministic function."""
 
     def test_zero_findings_returns_09(self) -> None:
         from lib import compute_quality_score
-        self.assertAlmostEqual(compute_quality_score({}, 0), 0.9)
+        assert compute_quality_score({}, 0) == pytest.approx(0.9)
 
     def test_findings_no_repairs(self) -> None:
         from lib import compute_quality_score
-        # 8 findings, 0 repairs → 1/(1+8) = 0.111...
+        # 8 findings, 0 repairs -> 1/(1+8) = 0.111...
         score = compute_quality_score({"sec": 6, "cq": 2}, 0)
-        self.assertAlmostEqual(score, 1 / 9, places=4)
+        assert score == pytest.approx(1 / 9, abs=1e-4)
 
     def test_findings_with_repairs(self) -> None:
         from lib import compute_quality_score
-        # 8 findings, 2 repair cycles → surviving = max(0, 8-4)=4 → 1-(4/8)=0.5
+        # 8 findings, 2 repair cycles -> surviving = max(0, 8-4)=4 -> 1-(4/8)=0.5
         score = compute_quality_score({"sec": 6, "cq": 2}, 2)
-        self.assertAlmostEqual(score, 0.5, places=4)
+        assert score == pytest.approx(0.5, abs=1e-4)
 
     def test_repairs_exceed_findings(self) -> None:
         from lib import compute_quality_score
-        # 2 findings, 3 repairs → surviving = max(0, 2-6)=0 → 1-(0/2)=1.0
+        # 2 findings, 3 repairs -> surviving = max(0, 2-6)=0 -> 1-(0/2)=1.0
         score = compute_quality_score({"sec": 2}, 3)
-        self.assertAlmostEqual(score, 1.0, places=4)
+        assert score == pytest.approx(1.0, abs=1e-4)
 
     def test_invalid_findings_dict(self) -> None:
         from lib import compute_quality_score
-        self.assertAlmostEqual(compute_quality_score("not a dict", 0), 0.9)
-        self.assertAlmostEqual(compute_quality_score(None, 0), 0.9)
+        assert compute_quality_score("not a dict", 0) == pytest.approx(0.9)
+        assert compute_quality_score(None, 0) == pytest.approx(0.9)
 
     def test_single_finding_no_repair(self) -> None:
         from lib import compute_quality_score
-        # 1 finding → 1/(1+1) = 0.5
+        # 1 finding -> 1/(1+1) = 0.5
         score = compute_quality_score({"cq": 1}, 0)
-        self.assertAlmostEqual(score, 0.5, places=4)
+        assert score == pytest.approx(0.5, abs=1e-4)
 
 
-class TestEstimateTokenUsage(unittest.TestCase):
+class TestEstimateTokenUsage:
     """AC 3: estimate_token_usage() heuristic function."""
 
     def test_with_model_dict(self) -> None:
         from lib import estimate_token_usage, TOKEN_ESTIMATES
         models = {"sec": "opus", "cq": "haiku"}
         expected = TOKEN_ESTIMATES["opus"] + TOKEN_ESTIMATES["haiku"]
-        self.assertEqual(estimate_token_usage(2, models), expected)
+        assert estimate_token_usage(2, models) == expected
 
     def test_empty_model_dict_falls_back(self) -> None:
         from lib import estimate_token_usage, TOKEN_ESTIMATES
         result = estimate_token_usage(5, {})
-        self.assertEqual(result, 5 * TOKEN_ESTIMATES["default"])
+        assert result == 5 * TOKEN_ESTIMATES["default"]
 
     def test_none_model_dict(self) -> None:
         from lib import estimate_token_usage, TOKEN_ESTIMATES
         result = estimate_token_usage(3, None)
-        self.assertEqual(result, 3 * TOKEN_ESTIMATES["default"])
+        assert result == 3 * TOKEN_ESTIMATES["default"]
 
     def test_unknown_model_uses_default(self) -> None:
         from lib import estimate_token_usage, TOKEN_ESTIMATES
         result = estimate_token_usage(1, {"x": "unknown-model"})
-        self.assertEqual(result, TOKEN_ESTIMATES["default"])
+        assert result == TOKEN_ESTIMATES["default"]
 
     def test_zero_spawns(self) -> None:
         from lib import estimate_token_usage, TOKEN_ESTIMATES
         result = estimate_token_usage(0, {})
-        self.assertEqual(result, TOKEN_ESTIMATES["default"])  # max(1, 0) * default
+        assert result == TOKEN_ESTIMATES["default"]  # max(1, 0) * default
 
 
-class TestValidateRetrospectiveScores(unittest.TestCase):
+class TestValidateRetrospectiveScores:
     """AC 5: validate_retrospective_scores() consistency check."""
 
     def test_overwrites_bad_quality(self) -> None:
@@ -127,69 +128,63 @@ class TestValidateRetrospectiveScores(unittest.TestCase):
             repair_cycles=0,
         )
         fixed = validate_retrospective_scores(retro)
-        # Should be 1/(1+8) ≈ 0.111, not 0.9
-        self.assertAlmostEqual(fixed["quality_score"], 1 / 9, places=4)
+        # Should be 1/(1+8) ~ 0.111, not 0.9
+        assert fixed["quality_score"] == pytest.approx(1 / 9, abs=1e-4)
 
     def test_does_not_mutate_original(self) -> None:
         from lib import validate_retrospective_scores
         retro = _make_retrospective(quality_score=0.9, findings_by_auditor={"sec": 2})
         validate_retrospective_scores(retro)
-        self.assertAlmostEqual(retro["quality_score"], 0.9)  # original unchanged
+        assert retro["quality_score"] == pytest.approx(0.9)  # original unchanged
 
-    def test_estimates_tokens_when_zero(self) -> None:
+    def test_estimates_tokens_when_zero(self, tmp_path: Path) -> None:
         from lib import validate_retrospective_scores
         retro = _make_retrospective(tokens=0, spawns=4, model_used={"a": "opus", "b": "haiku"})
         fixed = validate_retrospective_scores(retro)
-        self.assertTrue(fixed.get("token_usage_estimated", False))
-        self.assertGreater(fixed["cost_score"], 0.0)
+        assert fixed.get("token_usage_estimated", False) is True
+        assert fixed["cost_score"] > 0.0
 
-    def test_real_tokens_not_estimated(self) -> None:
+    def test_real_tokens_not_estimated(self, tmp_path: Path) -> None:
         from lib import validate_retrospective_scores
         retro = _make_retrospective(tokens=50000, spawns=4)
         fixed = validate_retrospective_scores(retro)
-        self.assertFalse(fixed.get("token_usage_estimated", False))
+        assert fixed.get("token_usage_estimated", False) is False
 
 
-class TestLoadTokenUsage(unittest.TestCase):
+class TestLoadTokenUsage:
     """load_token_usage reads token-usage.json from task directory."""
 
-    def test_reads_valid_file(self) -> None:
-        import tempfile
+    def test_reads_valid_file(self, tmp_path: Path) -> None:
         from lib import load_token_usage
-        with tempfile.TemporaryDirectory() as td:
-            task_dir = Path(td)
-            (task_dir / "token-usage.json").write_text(
-                '{"agents": {"security-auditor": 45000, "cq-auditor": 12000}, "total": 57000}'
-            )
-            data = load_token_usage(task_dir)
-            self.assertEqual(data["total"], 57000)
-            self.assertEqual(data["agents"]["security-auditor"], 45000)
+        task_dir = tmp_path
+        (task_dir / "token-usage.json").write_text(
+            '{"agents": {"security-auditor": 45000, "cq-auditor": 12000}, "total": 57000}'
+        )
+        data = load_token_usage(task_dir)
+        assert data["total"] == 57000
+        assert data["agents"]["security-auditor"] == 45000
 
-    def test_missing_file_returns_empty(self) -> None:
-        import tempfile
+    def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
         from lib import load_token_usage
-        with tempfile.TemporaryDirectory() as td:
-            data = load_token_usage(Path(td))
-            self.assertEqual(data["agents"], {})
-            self.assertEqual(data["total"], 0)
-            self.assertEqual(data["total_input_tokens"], 0)
-            self.assertEqual(data["total_output_tokens"], 0)
+        data = load_token_usage(tmp_path)
+        assert data["agents"] == {}
+        assert data["total"] == 0
+        assert data["total_input_tokens"] == 0
+        assert data["total_output_tokens"] == 0
 
-    def test_validate_uses_token_file(self) -> None:
-        import tempfile
+    def test_validate_uses_token_file(self, tmp_path: Path) -> None:
         from lib import validate_retrospective_scores
-        with tempfile.TemporaryDirectory() as td:
-            task_dir = Path(td)
-            (task_dir / "token-usage.json").write_text(
-                '{"agents": {"sec": 45000}, "total": 45000}'
-            )
-            retro = _make_retrospective(tokens=0, spawns=1, findings_by_auditor={})
-            fixed = validate_retrospective_scores(retro, task_dir=task_dir)
-            self.assertEqual(fixed["total_token_usage"], 45000)
-            self.assertFalse(fixed.get("token_usage_estimated", False))
+        task_dir = tmp_path
+        (task_dir / "token-usage.json").write_text(
+            '{"agents": {"sec": 45000}, "total": 45000}'
+        )
+        retro = _make_retrospective(tokens=0, spawns=1, findings_by_auditor={})
+        fixed = validate_retrospective_scores(retro, task_dir=task_dir)
+        assert fixed["total_token_usage"] == 45000
+        assert fixed.get("token_usage_estimated", False) is False
 
 
-class TestMakeTrajectoryEntry(unittest.TestCase):
+class TestMakeTrajectoryEntry:
     """AC 2, 4: make_trajectory_entry() always recomputes quality and estimates tokens."""
 
     def test_quality_always_recomputed_from_findings(self) -> None:
@@ -202,13 +197,13 @@ class TestMakeTrajectoryEntry(unittest.TestCase):
         )
         entry = make_trajectory_entry(retro)
         # Should be 1/(1+8), not 0.9
-        self.assertAlmostEqual(entry["reward"]["quality_score"], 1 / 9, places=4)
+        assert entry["reward"]["quality_score"] == pytest.approx(1 / 9, abs=1e-4)
 
     def test_quality_zero_findings_capped_at_09(self) -> None:
         from lib import make_trajectory_entry
         retro = _make_retrospective(findings_by_auditor={})
         entry = make_trajectory_entry(retro)
-        self.assertAlmostEqual(entry["reward"]["quality_score"], 0.9)
+        assert entry["reward"]["quality_score"] == pytest.approx(0.9)
 
     def test_token_estimation_when_zero_tokens(self) -> None:
         """When total_token_usage is 0 and spawns > 0, tokens are estimated."""
@@ -220,14 +215,14 @@ class TestMakeTrajectoryEntry(unittest.TestCase):
             findings_by_auditor={},
         )
         entry = make_trajectory_entry(retro)
-        self.assertTrue(entry["reward"]["token_usage_estimated"])
-        self.assertGreater(entry["reward"]["cost_score"], 0.0)
+        assert entry["reward"]["token_usage_estimated"] is True
+        assert entry["reward"]["cost_score"] > 0.0
 
     def test_real_tokens_not_estimated(self) -> None:
         from lib import make_trajectory_entry
         retro = _make_retrospective(tokens=50000, spawns=4, findings_by_auditor={})
         entry = make_trajectory_entry(retro)
-        self.assertFalse(entry["reward"]["token_usage_estimated"])
+        assert entry["reward"]["token_usage_estimated"] is False
 
     def test_composite_uses_standard_weights(self) -> None:
         from lib import make_trajectory_entry, COMPOSITE_WEIGHTS
@@ -244,17 +239,13 @@ class TestMakeTrajectoryEntry(unittest.TestCase):
         e = entry["reward"]["efficiency_score"]
         c = entry["reward"]["cost_score"]
         expected = round(wq * q + we * e + wc * c, 6)
-        self.assertAlmostEqual(entry["reward"]["composite_reward"], expected, places=5)
+        assert entry["reward"]["composite_reward"] == pytest.approx(expected, abs=1e-5)
 
     def test_quality_with_repairs_uses_heuristic(self) -> None:
         from lib import make_trajectory_entry
         retro = _make_retrospective(
             findings_by_auditor={"sec": 4, "cq": 4},  # 8 total
-            repair_cycles=2,  # survives: max(0, 8-4)=4 → quality=1-4/8=0.5
+            repair_cycles=2,  # survives: max(0, 8-4)=4 -> quality=1-4/8=0.5
         )
         entry = make_trajectory_entry(retro)
-        self.assertAlmostEqual(entry["reward"]["quality_score"], 0.5, places=4)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert entry["reward"]["quality_score"] == pytest.approx(0.5, abs=1e-4)

@@ -5,101 +5,96 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import tempfile
-import unittest
+import types
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class LearningRuntimeTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.root = Path(self.tempdir.name)
-        (self.root / ".dynos").mkdir()
-        # Redirect persistent state to temp dir
-        self.dynos_home = self.root / ".dynos-home"
-        self.dynos_home.mkdir()
-        self._orig_dynos_home = os.environ.get("DYNOS_HOME")
-        os.environ["DYNOS_HOME"] = str(self.dynos_home)
-        self.make_task(
-            "task-20260401-001",
-            {
-                "task_id": "task-20260401-001",
-                "task_outcome": "DONE",
-                "task_type": "feature",
-                "task_domains": "backend",
-                "task_risk_level": "high",
-                "findings_by_auditor": {"security-auditor": 1},
-                "findings_by_category": {"sec": 1},
-                "executor_repair_frequency": {"backend-executor": 1},
-                "spec_review_iterations": 1,
-                "repair_cycle_count": 1,
-                "subagent_spawn_count": 10,
-                "wasted_spawns": 2,
-                "auditor_zero_finding_streaks": {"security-auditor": 0},
-                "executor_zero_repair_streak": 0,
-                "quality_score": 0.8,
-                "cost_score": 0.7,
-                "efficiency_score": 0.6,
-            },
-        )
-        self.make_task(
-            "task-20260401-002",
-            {
-                "task_id": "task-20260401-002",
-                "task_outcome": "DONE",
-                "task_type": "refactor",
-                "task_domains": "backend",
-                "task_risk_level": "medium",
-                "findings_by_auditor": {"code-quality-auditor": 2},
-                "findings_by_category": {"cq": 2},
-                "executor_repair_frequency": {"refactor-executor": 1},
-                "spec_review_iterations": 1,
-                "repair_cycle_count": 0,
-                "subagent_spawn_count": 8,
-                "wasted_spawns": 1,
-                "auditor_zero_finding_streaks": {"code-quality-auditor": 0},
-                "executor_zero_repair_streak": 0,
-                "quality_score": 0.9,
-                "cost_score": 0.8,
-                "efficiency_score": 0.9,
-            },
-        )
+def _make_task(root: Path, task_id: str, retrospective: dict) -> None:
+    task_dir = root / ".dynos" / task_id
+    task_dir.mkdir(parents=True)
+    (task_dir / "task-retrospective.json").write_text(json.dumps(retrospective, indent=2) + "\n")
 
-    def tearDown(self) -> None:
-        if self._orig_dynos_home is None:
-            os.environ.pop("DYNOS_HOME", None)
-        else:
-            os.environ["DYNOS_HOME"] = self._orig_dynos_home
-        self.tempdir.cleanup()
 
-    def make_task(self, task_id: str, retrospective: dict) -> None:
-        task_dir = self.root / ".dynos" / task_id
-        task_dir.mkdir(parents=True)
-        (task_dir / "task-retrospective.json").write_text(json.dumps(retrospective, indent=2) + "\n")
+def _run_py(dynos_home: Path, script: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["python3", str(ROOT / "hooks" / script), *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "DYNOS_HOME": str(dynos_home)},
+    )
 
-    @property
-    def persistent_dir(self) -> Path:
-        """The persistent project dir under DYNOS_HOME for the temp root."""
-        slug = str(self.root.resolve()).strip("/").replace("/", "-")
-        return self.dynos_home / "projects" / slug
 
-    def run_py(self, script: str, *args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["python3", str(ROOT / "hooks" / script), *args],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-            env={**os.environ, "DYNOS_HOME": str(self.dynos_home)},
-        )
+@pytest.fixture
+def learning_env(tmp_path: Path, monkeypatch):
+    root = tmp_path
+    dynos_home = tmp_path / ".dynos-home"
+    (root / ".dynos").mkdir()
+    dynos_home.mkdir()
+    monkeypatch.setenv("DYNOS_HOME", str(dynos_home))
+    _make_task(
+        root,
+        "task-20260401-001",
+        {
+            "task_id": "task-20260401-001",
+            "task_outcome": "DONE",
+            "task_type": "feature",
+            "task_domains": "backend",
+            "task_risk_level": "high",
+            "findings_by_auditor": {"security-auditor": 1},
+            "findings_by_category": {"sec": 1},
+            "executor_repair_frequency": {"backend-executor": 1},
+            "spec_review_iterations": 1,
+            "repair_cycle_count": 1,
+            "subagent_spawn_count": 10,
+            "wasted_spawns": 2,
+            "auditor_zero_finding_streaks": {"security-auditor": 0},
+            "executor_zero_repair_streak": 0,
+            "quality_score": 0.8,
+            "cost_score": 0.7,
+            "efficiency_score": 0.6,
+        },
+    )
+    _make_task(
+        root,
+        "task-20260401-002",
+        {
+            "task_id": "task-20260401-002",
+            "task_outcome": "DONE",
+            "task_type": "refactor",
+            "task_domains": "backend",
+            "task_risk_level": "medium",
+            "findings_by_auditor": {"code-quality-auditor": 2},
+            "findings_by_category": {"cq": 2},
+            "executor_repair_frequency": {"refactor-executor": 1},
+            "spec_review_iterations": 1,
+            "repair_cycle_count": 0,
+            "subagent_spawn_count": 8,
+            "wasted_spawns": 1,
+            "auditor_zero_finding_streaks": {"code-quality-auditor": 0},
+            "executor_zero_repair_streak": 0,
+            "quality_score": 0.9,
+            "cost_score": 0.8,
+            "efficiency_score": 0.9,
+        },
+    )
+    slug = str(root.resolve()).strip("/").replace("/", "-")
+    persistent_dir = dynos_home / "projects" / slug
+    return types.SimpleNamespace(root=root, dynos_home=dynos_home, persistent_dir=persistent_dir)
 
-    def test_rebuild_trajectory_store_and_search(self) -> None:
-        rebuild = self.run_py("trajectory.py", "rebuild", "--root", str(self.root))
-        self.assertEqual(rebuild.returncode, 0, rebuild.stdout + rebuild.stderr)
-        query_path = self.root / "query.json"
+
+class TestLearningRuntime:
+    def test_rebuild_trajectory_store_and_search(self, learning_env) -> None:
+        env = learning_env
+        rebuild = _run_py(env.dynos_home, "trajectory.py", "rebuild", "--root", str(env.root))
+        assert rebuild.returncode == 0, rebuild.stdout + rebuild.stderr
+        query_path = env.root / "query.json"
         query_path.write_text(
             json.dumps(
                 {
@@ -113,15 +108,17 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        search = self.run_py("trajectory.py", "search", str(query_path), "--root", str(self.root), "--limit", "1")
-        self.assertEqual(search.returncode, 0, search.stdout + search.stderr)
+        search = _run_py(env.dynos_home, "trajectory.py", "search", str(query_path), "--root", str(env.root), "--limit", "1")
+        assert search.returncode == 0, search.stdout + search.stderr
         results = json.loads(search.stdout)
-        self.assertEqual(results[0]["trajectory"]["source_task_id"], "task-20260401-001")
+        assert results[0]["trajectory"]["source_task_id"] == "task-20260401-001"
 
-    def test_register_and_promote_learned_agent(self) -> None:
-        init = self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.assertEqual(init.returncode, 0)
-        register = self.run_py(
+    def test_register_and_promote_learned_agent(self, learning_env) -> None:
+        env = learning_env
+        init = _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        assert init.returncode == 0
+        register = _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-sharp",
@@ -130,12 +127,12 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-sharp.md",
             "task-20260401-002",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(register.returncode, 0, register.stdout + register.stderr)
+        assert register.returncode == 0, register.stdout + register.stderr
 
-        candidate_path = self.root / "candidate.json"
-        baseline_path = self.root / "baseline.json"
+        candidate_path = env.root / "candidate.json"
+        baseline_path = env.root / "baseline.json"
         candidate_path.write_text(
             json.dumps(
                 [
@@ -155,7 +152,8 @@ class LearningRuntimeTests(unittest.TestCase):
             )
         )
 
-        promote = self.run_py(
+        promote = _run_py(
+            env.dynos_home,
             "eval.py",
             "promote",
             "backend-sharp",
@@ -164,20 +162,22 @@ class LearningRuntimeTests(unittest.TestCase):
             str(candidate_path),
             str(baseline_path),
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(promote.returncode, 0, promote.stdout + promote.stderr)
+        assert promote.returncode == 0, promote.stdout + promote.stderr
         output = json.loads(promote.stdout)
-        self.assertEqual(output["target_mode"], "replace")
+        assert output["target_mode"] == "replace"
 
-        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
+        registry = json.loads((env.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
-        self.assertEqual(agent["mode"], "replace")
-        self.assertEqual(agent["last_evaluation"]["recommendation"], "promote_replace")
+        assert agent["mode"] == "replace"
+        assert agent["last_evaluation"]["recommendation"] == "promote_replace"
 
-    def test_skill_shadow_mode_and_benchmark_runner(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        register = self.run_py(
+    def test_skill_shadow_mode_and_benchmark_runner(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        register = _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "plan-tightener",
@@ -188,10 +188,10 @@ class LearningRuntimeTests(unittest.TestCase):
             "--item-kind",
             "skill",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(register.returncode, 0, register.stdout + register.stderr)
-        fixture_path = self.root / "fixture.json"
+        assert register.returncode == 0, register.stdout + register.stderr
+        fixture_path = env.root / "fixture.json"
         fixture_path.write_text(
             json.dumps(
                 {
@@ -262,20 +262,21 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root), "--update-registry")
-        self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
+        bench = _run_py(env.dynos_home, "bench.py", "run", str(fixture_path), "--root", str(env.root), "--update-registry")
+        assert bench.returncode == 0, bench.stdout + bench.stderr
         payload = json.loads(bench.stdout)
-        self.assertEqual(payload["item_kind"], "skill")
-        self.assertEqual(payload["evaluation"]["target_mode"], "replace")
-        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
+        assert payload["item_kind"] == "skill"
+        assert payload["evaluation"]["target_mode"] == "replace"
+        registry = json.loads((env.persistent_dir / "learned-agents" / "registry.json").read_text())
         skill = registry["agents"][0]
-        self.assertEqual(skill["item_kind"], "skill")
-        self.assertEqual(skill["mode"], "replace")
-        history = json.loads((self.persistent_dir / "benchmarks" / "history.json").read_text())
-        self.assertEqual(len(history["runs"]), 1)
+        assert skill["item_kind"] == "skill"
+        assert skill["mode"] == "replace"
+        history = json.loads((env.persistent_dir / "benchmarks" / "history.json").read_text())
+        assert len(history["runs"]) == 1
 
-    def test_sandbox_benchmark_runner_executes_commands(self) -> None:
-        fixture_path = self.root / "sandbox-fixture.json"
+    def test_sandbox_benchmark_runner_executes_commands(self, learning_env) -> None:
+        env = learning_env
+        fixture_path = env.root / "sandbox-fixture.json"
         fixture_path.write_text(
             json.dumps(
                 {
@@ -309,15 +310,16 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root))
-        self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
+        bench = _run_py(env.dynos_home, "bench.py", "run", str(fixture_path), "--root", str(env.root))
+        assert bench.returncode == 0, bench.stdout + bench.stderr
         payload = json.loads(bench.stdout)
-        self.assertEqual(payload["cases"][0]["execution_mode"], "sandbox")
-        self.assertEqual(payload["cases"][0]["candidate_observed"]["tests_passed"], 10)
-        self.assertGreaterEqual(payload["cases"][0]["candidate_observed"]["files_touched"], 1)
+        assert payload["cases"][0]["execution_mode"] == "sandbox"
+        assert payload["cases"][0]["candidate_observed"]["tests_passed"] == 10
+        assert payload["cases"][0]["candidate_observed"]["files_touched"] >= 1
 
-    def test_task_fixture_runner_supports_command_sequences(self) -> None:
-        fixture_path = self.root / "task-fixture.json"
+    def test_task_fixture_runner_supports_command_sequences(self, learning_env) -> None:
+        env = learning_env
+        fixture_path = env.root / "task-fixture.json"
         fixture_path.write_text(
             json.dumps(
                 {
@@ -369,16 +371,17 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root))
-        self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
+        bench = _run_py(env.dynos_home, "bench.py", "run", str(fixture_path), "--root", str(env.root))
+        assert bench.returncode == 0, bench.stdout + bench.stderr
         payload = json.loads(bench.stdout)
-        self.assertEqual(payload["cases"][0]["candidate_observed"]["tests_passed"], 3)
-        self.assertEqual(payload["cases"][0]["baseline_observed"]["tests_passed"], 1)
-        self.assertEqual(payload["cases"][0]["winner"], "candidate")
+        assert payload["cases"][0]["candidate_observed"]["tests_passed"] == 3
+        assert payload["cases"][0]["baseline_observed"]["tests_passed"] == 1
+        assert payload["cases"][0]["winner"] == "candidate"
 
-    def test_repo_rollout_harness_copies_repo_paths(self) -> None:
-        (self.root / "README.md").write_text("Repo fixture\n")
-        fixture_path = self.root / "rollout-fixture.json"
+    def test_repo_rollout_harness_copies_repo_paths(self, learning_env) -> None:
+        env = learning_env
+        (env.root / "README.md").write_text("Repo fixture\n")
+        fixture_path = env.root / "rollout-fixture.json"
         fixture_path.write_text(
             json.dumps(
                 {
@@ -432,16 +435,18 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        rollout = self.run_py("rollout.py", str(fixture_path), "--root", str(self.root))
-        self.assertEqual(rollout.returncode, 0, rollout.stdout + rollout.stderr)
+        rollout = _run_py(env.dynos_home, "rollout.py", str(fixture_path), "--root", str(env.root))
+        assert rollout.returncode == 0, rollout.stdout + rollout.stderr
         payload = json.loads(rollout.stdout)
-        self.assertEqual(payload["execution_harness"], "rollout")
-        self.assertEqual(payload["cases"][0]["candidate_observed"]["tests_passed"], 2)
-        self.assertEqual(payload["cases"][0]["baseline_observed"]["tests_passed"], 1)
+        assert payload["execution_harness"] == "rollout"
+        assert payload["cases"][0]["candidate_observed"]["tests_passed"] == 2
+        assert payload["cases"][0]["baseline_observed"]["tests_passed"] == 1
 
-    def test_must_pass_category_blocks_promotion_and_demotes_active_component(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        register = self.run_py(
+    def test_must_pass_category_blocks_promotion_and_demotes_active_component(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        register = _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "security-hardener",
@@ -450,12 +455,12 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/auditors/security-hardener.md",
             "task-20260401-002",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(register.returncode, 0, register.stdout + register.stderr)
+        assert register.returncode == 0, register.stdout + register.stderr
 
-        candidate_path = self.root / "candidate-regress.json"
-        baseline_path = self.root / "baseline-regress.json"
+        candidate_path = env.root / "candidate-regress.json"
+        baseline_path = env.root / "baseline-regress.json"
         candidate_path.write_text(
             json.dumps(
                 [
@@ -475,7 +480,8 @@ class LearningRuntimeTests(unittest.TestCase):
             )
         )
 
-        promote = self.run_py(
+        promote = _run_py(
+            env.dynos_home,
             "eval.py",
             "promote",
             "security-hardener",
@@ -484,15 +490,15 @@ class LearningRuntimeTests(unittest.TestCase):
             str(candidate_path),
             str(baseline_path),
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(promote.returncode, 0, promote.stdout + promote.stderr)
-        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
+        assert promote.returncode == 0, promote.stdout + promote.stderr
+        registry = json.loads((env.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
-        self.assertIn(agent["mode"], {"alongside", "replace"})
-        self.assertTrue(agent["route_allowed"])
+        assert agent["mode"] in {"alongside", "replace"}
+        assert agent["route_allowed"] is True
 
-        fixture_path = self.root / "must-pass-fixture.json"
+        fixture_path = env.root / "must-pass-fixture.json"
         fixture_path.write_text(
             json.dumps(
                 {
@@ -542,19 +548,21 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        bench = self.run_py("bench.py", "run", str(fixture_path), "--root", str(self.root), "--update-registry")
-        self.assertEqual(bench.returncode, 0, bench.stdout + bench.stderr)
+        bench = _run_py(env.dynos_home, "bench.py", "run", str(fixture_path), "--root", str(env.root), "--update-registry")
+        assert bench.returncode == 0, bench.stdout + bench.stderr
         payload = json.loads(bench.stdout)
-        self.assertTrue(payload["evaluation"]["blocked_by_category"])
-        self.assertEqual(payload["evaluation"]["recommendation"], "reject")
-        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
+        assert payload["evaluation"]["blocked_by_category"] is True
+        assert payload["evaluation"]["recommendation"] == "reject"
+        registry = json.loads((env.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
-        self.assertEqual(agent["status"], "demoted_on_regression")
-        self.assertFalse(agent["route_allowed"])
+        assert agent["status"] == "demoted_on_regression"
+        assert agent["route_allowed"] is False
 
-    def test_route_resolution_prefers_allowed_highest_composite(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
+    def test_route_resolution_prefers_allowed_highest_composite(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-sharp",
@@ -563,9 +571,10 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-sharp.md",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.run_py(
+        _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-steady",
@@ -574,11 +583,11 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-steady.md",
             "task-20260401-002",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        low_candidate = self.root / "low.json"
-        high_candidate = self.root / "high.json"
-        baseline = self.root / "baseline.json"
+        low_candidate = env.root / "low.json"
+        high_candidate = env.root / "high.json"
+        baseline = env.root / "baseline.json"
         low_candidate.write_text(
             json.dumps(
                 [
@@ -606,7 +615,8 @@ class LearningRuntimeTests(unittest.TestCase):
                 ]
             )
         )
-        self.run_py(
+        _run_py(
+            env.dynos_home,
             "eval.py",
             "promote",
             "backend-steady",
@@ -615,9 +625,10 @@ class LearningRuntimeTests(unittest.TestCase):
             str(low_candidate),
             str(baseline),
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.run_py(
+        _run_py(
+            env.dynos_home,
             "eval.py",
             "promote",
             "backend-sharp",
@@ -626,23 +637,26 @@ class LearningRuntimeTests(unittest.TestCase):
             str(high_candidate),
             str(baseline),
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        route = self.run_py(
+        route = _run_py(
+            env.dynos_home,
             "route.py",
             "backend-executor",
             "feature",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(route.returncode, 0, route.stdout + route.stderr)
+        assert route.returncode == 0, route.stdout + route.stderr
         payload = json.loads(route.stdout)
-        self.assertEqual(payload["source"], "learned:backend-sharp")
-        self.assertTrue(payload["route_allowed"])
+        assert payload["source"] == "learned:backend-sharp"
+        assert payload["route_allowed"] is True
 
-    def test_auto_runner_executes_matching_shadow_fixture_and_promotes(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        register = self.run_py(
+    def test_auto_runner_executes_matching_shadow_fixture_and_promotes(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        register = _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-shadow",
@@ -651,10 +665,10 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-shadow.md",
             "task-20260401-002",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(register.returncode, 0, register.stdout + register.stderr)
-        fixtures_dir = self.root / "benchmarks" / "fixtures"
+        assert register.returncode == 0, register.stdout + register.stderr
+        fixtures_dir = env.root / "benchmarks" / "fixtures"
         fixtures_dir.mkdir(parents=True)
         fixture_path = fixtures_dir / "backend-shadow.json"
         fixture_path.write_text(
@@ -727,20 +741,22 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        auto = self.run_py("auto.py", "run", "--root", str(self.root))
-        self.assertEqual(auto.returncode, 0, auto.stdout + auto.stderr)
+        auto = _run_py(env.dynos_home, "auto.py", "run", "--root", str(env.root))
+        assert auto.returncode == 0, auto.stdout + auto.stderr
         payload = json.loads(auto.stdout)
-        self.assertEqual(payload["executed"], 1)
-        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
+        assert payload["executed"] == 1
+        registry = json.loads((env.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
-        self.assertEqual(agent["mode"], "replace")
-        self.assertTrue(agent["route_allowed"])
-        queue = json.loads((self.root / ".dynos" / "automation" / "queue.json").read_text())
-        self.assertEqual(queue["items"], [])
+        assert agent["mode"] == "replace"
+        assert agent["route_allowed"] is True
+        queue = json.loads((env.root / ".dynos" / "automation" / "queue.json").read_text())
+        assert queue["items"] == []
 
-    def test_fixture_synthesis_and_auto_sync_create_generated_fixture(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        register = self.run_py(
+    def test_fixture_synthesis_and_auto_sync_create_generated_fixture(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        register = _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-synth",
@@ -749,32 +765,35 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-synth.md",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(register.returncode, 0, register.stdout + register.stderr)
-        synth = self.run_py(
+        assert register.returncode == 0, register.stdout + register.stderr
+        synth = _run_py(
+            env.dynos_home,
             "fixture.py",
             "synthesize",
             "backend-synth",
             "backend-executor",
             "feature",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(synth.returncode, 0, synth.stdout + synth.stderr)
+        assert synth.returncode == 0, synth.stdout + synth.stderr
         payload = json.loads(synth.stdout)
-        self.assertEqual(payload["target_name"], "backend-synth")
-        generated = self.root / "benchmarks" / "generated" / "agent-backend-synth-feature.json"
-        self.assertTrue(generated.exists())
-        auto = self.run_py("auto.py", "sync", "--root", str(self.root))
-        self.assertEqual(auto.returncode, 0, auto.stdout + auto.stderr)
-        queue = json.loads((self.root / ".dynos" / "automation" / "queue.json").read_text())
-        self.assertEqual(len(queue["items"]), 1)
-        self.assertIn("agent-backend-synth-feature.json", queue["items"][0]["fixture_path"])
+        assert payload["target_name"] == "backend-synth"
+        generated = env.root / "benchmarks" / "generated" / "agent-backend-synth-feature.json"
+        assert generated.exists()
+        auto = _run_py(env.dynos_home, "auto.py", "sync", "--root", str(env.root))
+        assert auto.returncode == 0, auto.stdout + auto.stderr
+        queue = json.loads((env.root / ".dynos" / "automation" / "queue.json").read_text())
+        assert len(queue["items"]) == 1
+        assert "agent-backend-synth-feature.json" in queue["items"][0]["fixture_path"]
 
-    def test_structured_generation_registers_component_and_report_surfaces_it(self) -> None:
-        output_path = self.root / ".dynos" / "learned-agents" / "executors" / "backend-crafted.md"
-        generated = self.run_py(
+    def test_structured_generation_registers_component_and_report_surfaces_it(self, learning_env) -> None:
+        env = learning_env
+        output_path = env.root / ".dynos" / "learned-agents" / "executors" / "backend-crafted.md"
+        generated = _run_py(
+            env.dynos_home,
             "generate.py",
             "backend-crafted",
             "backend-executor",
@@ -784,22 +803,24 @@ class LearningRuntimeTests(unittest.TestCase):
             "--source-task",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
-        self.assertTrue(output_path.exists())
+        assert generated.returncode == 0, generated.stdout + generated.stderr
+        assert output_path.exists()
         content = output_path.read_text()
-        self.assertIn("## Operating Focus", content)
-        report = self.run_py("report.py", "--root", str(self.root))
-        self.assertEqual(report.returncode, 0, report.stdout + report.stderr)
+        assert "## Operating Focus" in content
+        report = _run_py(env.dynos_home, "report.py", "--root", str(env.root))
+        assert report.returncode == 0, report.stdout + report.stderr
         payload = json.loads(report.stdout)
-        self.assertEqual(payload["summary"]["learned_components"], 1)
-        self.assertEqual(payload["summary"]["shadow_components"], 1)
+        assert payload["summary"]["learned_components"] == 1
+        assert payload["summary"]["shadow_components"] == 1
 
-    def test_freshness_policy_blocks_stale_route(self) -> None:
+    def test_freshness_policy_blocks_stale_route(self, learning_env) -> None:
+        env = learning_env
         for number in range(3, 9):
             task_id = f"task-20260401-00{number}"
-            self.make_task(
+            _make_task(
+                env.root,
                 task_id,
                 {
                     "task_id": task_id,
@@ -821,9 +842,10 @@ class LearningRuntimeTests(unittest.TestCase):
                     "efficiency_score": 0.85,
                 },
             )
-        (self.root / ".dynos" / "policy.json").write_text(json.dumps({"freshness_task_window": 1}, indent=2) + "\n")
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
+        (env.root / ".dynos" / "policy.json").write_text(json.dumps({"freshness_task_window": 1}, indent=2) + "\n")
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-stale",
@@ -832,13 +854,14 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-stale.md",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        candidate = self.root / "candidate-stale.json"
-        baseline = self.root / "baseline-stale.json"
+        candidate = env.root / "candidate-stale.json"
+        baseline = env.root / "baseline-stale.json"
         candidate.write_text(json.dumps([{"quality_score": 0.95, "cost_score": 0.82, "efficiency_score": 0.9}] * 3))
         baseline.write_text(json.dumps([{"quality_score": 0.82, "cost_score": 0.8, "efficiency_score": 0.81}] * 3))
-        self.run_py(
+        _run_py(
+            env.dynos_home,
             "eval.py",
             "promote",
             "backend-stale",
@@ -847,17 +870,19 @@ class LearningRuntimeTests(unittest.TestCase):
             str(candidate),
             str(baseline),
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        route = self.run_py("route.py", "backend-executor", "feature", "--root", str(self.root))
-        self.assertEqual(route.returncode, 0, route.stdout + route.stderr)
+        route = _run_py(env.dynos_home, "route.py", "backend-executor", "feature", "--root", str(env.root))
+        assert route.returncode == 0, route.stdout + route.stderr
         payload = json.loads(route.stdout)
-        self.assertEqual(payload["source"], "generic")
-        self.assertTrue(payload["freshness_blocked"])
+        assert payload["source"] == "generic"
+        assert payload["freshness_blocked"] is True
 
-    def test_dashboard_and_lineage_generation(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
+    def test_dashboard_and_lineage_generation(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-lineage",
@@ -866,23 +891,25 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-lineage.md",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        self.run_py("fixture.py", "sync", "--root", str(self.root))
-        dashboard = self.run_py("dashboard.py", "generate", "--root", str(self.root))
-        self.assertEqual(dashboard.returncode, 0, dashboard.stdout + dashboard.stderr)
+        _run_py(env.dynos_home, "fixture.py", "sync", "--root", str(env.root))
+        dashboard = _run_py(env.dynos_home, "dashboard.py", "generate", "--root", str(env.root))
+        assert dashboard.returncode == 0, dashboard.stdout + dashboard.stderr
         payload = json.loads(dashboard.stdout)
-        self.assertTrue((self.root / ".dynos" / "dashboard.html").exists())
-        self.assertTrue((self.root / ".dynos" / "dashboard-data.json").exists())
-        self.assertIn("summary", payload)
-        lineage = self.run_py("lineage.py", "--root", str(self.root))
-        self.assertEqual(lineage.returncode, 0, lineage.stdout + lineage.stderr)
+        assert (env.root / ".dynos" / "dashboard.html").exists()
+        assert (env.root / ".dynos" / "dashboard-data.json").exists()
+        assert "summary" in payload
+        lineage = _run_py(env.dynos_home, "lineage.py", "--root", str(env.root))
+        assert lineage.returncode == 0, lineage.stdout + lineage.stderr
         graph = json.loads(lineage.stdout)
-        self.assertTrue(any(node["kind"] == "component" for node in graph["nodes"]))
+        assert any(node["kind"] == "component" for node in graph["nodes"])
 
-    def test_patterns_generation_writes_policy_tables(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
+    def test_patterns_generation_writes_policy_tables(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-patterned",
@@ -891,23 +918,25 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-patterned.md",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        patterns = self.run_py("patterns.py", "--root", str(self.root))
-        self.assertEqual(patterns.returncode, 0, patterns.stdout + patterns.stderr)
+        patterns = _run_py(env.dynos_home, "patterns.py", "--root", str(env.root))
+        assert patterns.returncode == 0, patterns.stdout + patterns.stderr
         payload = json.loads(patterns.stdout)
-        self.assertIn(str(self.persistent_dir / "project_rules.md"), payload["written_paths"])
-        content = (self.persistent_dir / "project_rules.md").read_text()
-        # Data tables removed from markdown (now JSON only) — only prevention rules + gold standard remain
-        self.assertIn("## Prevention Rules", content)
+        assert str(env.persistent_dir / "project_rules.md") in payload["written_paths"]
+        content = (env.persistent_dir / "project_rules.md").read_text()
+        # Data tables removed from markdown (now JSON only) -- only prevention rules + gold standard remain
+        assert "## Prevention Rules" in content
         # Verify JSON policy files were written
-        self.assertTrue((self.persistent_dir / "model-policy.json").exists())
-        self.assertTrue((self.persistent_dir / "skip-policy.json").exists())
-        self.assertTrue((self.persistent_dir / "effectiveness-scores.json").exists())
+        assert (env.persistent_dir / "model-policy.json").exists()
+        assert (env.persistent_dir / "skip-policy.json").exists()
+        assert (env.persistent_dir / "effectiveness-scores.json").exists()
 
-    def test_task_artifact_challenge_rollout_runs(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
+    def test_task_artifact_challenge_rollout_runs(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-runner",
@@ -916,11 +945,11 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-runner.md",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        task_dir = self.root / ".dynos" / "task-20260409-001"
+        task_dir = env.root / ".dynos" / "task-20260409-001"
         task_dir.mkdir(parents=True)
-        (self.root / "README.md").write_text("Challenge fixture\n")
+        (env.root / "README.md").write_text("Challenge fixture\n")
         (task_dir / "execution-graph.json").write_text(
             json.dumps(
                 {
@@ -938,27 +967,30 @@ class LearningRuntimeTests(unittest.TestCase):
             )
             + "\n"
         )
-        rollout = self.run_py(
+        rollout = _run_py(
+            env.dynos_home,
             "challenge.py",
             "task-20260409-001",
             "backend-runner",
             "backend-executor",
             "feature",
             "--root",
-            str(self.root),
+            str(env.root),
             "--baseline-command",
             json.dumps(["python3", "-c", "import json; print(json.dumps({'tests_passed': 1, 'tests_total': 2, 'findings': 1, 'tokens_used': 12000}))"]),
             "--candidate-command",
             json.dumps(["python3", "-c", "import json; print(json.dumps({'tests_passed': 2, 'tests_total': 2, 'findings': 0, 'tokens_used': 12000}))"]),
         )
-        self.assertEqual(rollout.returncode, 0, rollout.stdout + rollout.stderr)
+        assert rollout.returncode == 0, rollout.stdout + rollout.stderr
         payload = json.loads(rollout.stdout)
-        self.assertEqual(payload["execution_harness"], "rollout")
-        self.assertEqual(payload["cases"][0]["winner"], "candidate")
+        assert payload["execution_harness"] == "rollout"
+        assert payload["cases"][0]["winner"] == "candidate"
 
-    def test_maintainer_run_once_executes_cycle_and_writes_status(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
+    def test_maintainer_run_once_executes_cycle_and_writes_status(self, learning_env) -> None:
+        env = learning_env
+        _run_py(env.dynos_home, "calibrate.py", "init-registry", "--root", str(env.root))
+        _run_py(
+            env.dynos_home,
             "calibrate.py",
             "register-agent",
             "backend-maintainer",
@@ -967,9 +999,9 @@ class LearningRuntimeTests(unittest.TestCase):
             ".dynos/learned-agents/executors/backend-maintainer.md",
             "task-20260401-001",
             "--root",
-            str(self.root),
+            str(env.root),
         )
-        fixture_dir = self.root / "benchmarks" / "fixtures"
+        fixture_dir = env.root / "benchmarks" / "fixtures"
         fixture_dir.mkdir(parents=True)
         (fixture_dir / "backend-maintainer.json").write_text(
             json.dumps(
@@ -1041,25 +1073,22 @@ class LearningRuntimeTests(unittest.TestCase):
                 }
             )
         )
-        maintain = self.run_py("daemon.py", "run-once", "--root", str(self.root))
-        self.assertEqual(maintain.returncode, 0, maintain.stdout + maintain.stderr)
+        maintain = _run_py(env.dynos_home, "daemon.py", "run-once", "--root", str(env.root))
+        assert maintain.returncode == 0, maintain.stdout + maintain.stderr
         payload = json.loads(maintain.stdout)
-        self.assertTrue(payload["ok"])
-        status = json.loads((self.root / ".dynos" / "maintenance" / "status.json").read_text())
-        self.assertIn("last_cycle", status)
-        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
+        assert payload["ok"] is True
+        status = json.loads((env.root / ".dynos" / "maintenance" / "status.json").read_text())
+        assert "last_cycle" in status
+        registry = json.loads((env.persistent_dir / "learned-agents" / "registry.json").read_text())
         agent = registry["agents"][0]
-        self.assertIn(agent["mode"], {"alongside", "replace"})
-        self.assertTrue(agent["route_allowed"])
-        self.assertTrue((self.root / ".dynos" / "dashboard.html").exists())
-        self.assertTrue((self.persistent_dir / "project_rules.md").exists())
+        assert agent["mode"] in {"alongside", "replace"}
+        assert agent["route_allowed"] is True
+        assert (env.root / ".dynos" / "dashboard.html").exists()
+        assert (env.persistent_dir / "project_rules.md").exists()
 
-    def test_maintainer_invoke_alias_runs(self) -> None:
-        invoke = self.run_py("daemon.py", "invoke", "--root", str(self.root))
-        self.assertEqual(invoke.returncode, 0, invoke.stdout + invoke.stderr)
+    def test_maintainer_invoke_alias_runs(self, learning_env) -> None:
+        env = learning_env
+        invoke = _run_py(env.dynos_home, "daemon.py", "invoke", "--root", str(env.root))
+        assert invoke.returncode == 0, invoke.stdout + invoke.stderr
         payload = json.loads(invoke.stdout)
-        self.assertIn("actions", payload)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert "actions" in payload
