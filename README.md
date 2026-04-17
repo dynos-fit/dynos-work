@@ -42,9 +42,9 @@ You approve twice (spec and plan), then it runs.
 
 **Verifies with tools, not opinions.** API Contracts tables are cross-referenced against actual route definitions. Data Model tables are checked against real migrations. Doc paths are verified on disk. License compliance is scanned. The plan can't lie about what exists.
 
-**Remembers what works.** After each task, it writes a retrospective with DORA-aligned metrics. Over time, it builds project memory — what works, what fails, what to watch for. Your 10th task is better than your 1st. Disable memory entirely with `dynos config set learning_enabled false`.
+**Learns from every task.** After each task, an opus agent performs root cause analysis on audit findings and repair failures. It writes specific prevention rules that are injected into future executor prompts as hard constraints. The policy engine tracks EMA effectiveness scores across all agents and models, updating routing decisions for the next task. Your 10th task is measurably better than your 1st. Disable with `dynos config set learning_enabled false`.
 
-**Calibrates to your project.** Generates project-specific specialist agents from past task data, benchmarks them against generics, promotes the ones that outperform. Disable calibration with a single config flip.
+**Calibrates to your project.** After enough tasks, the agent generator creates specialist agents from observed failure patterns. A benchmark scheduler tests them against generic baselines. Agents that outperform get promoted to production routing. Agents that regress get demoted. The whole lifecycle is automatic and event-driven.
 
 **Enforces least privilege.** Each of the 19 agents declares its minimum tool set in frontmatter. Auditors cannot write files. Planners cannot execute commands. The security auditor can never be replaced by a calibrated agent.
 
@@ -52,25 +52,29 @@ You approve twice (spec and plan), then it runs.
 
 ## Architecture
 
-20 skills, 19 agents, 54 hooks. Three layers:
+20 skills, 19 agents. Three layers:
 
 | Layer | Directory | What it does | Can be disabled? |
 |---|---|---|---|
 | **Core** | `hooks/` | Spec, plan, execute, audit. The foundry. | No |
-| **Memory** | `memory/` | Project memory, calibrated agents, pattern extraction, Q-learning repair. | Yes (`dynos config set learning_enabled false`) |
+| **Memory** | `memory/` | EMA policy engine, postmortem analysis, agent generation, Q-learning repair. | Yes (`dynos config set learning_enabled false`) |
 | **Telemetry** | `telemetry/` | Dashboards, reports, lineage. Read-only. | Yes (delete the layer, nothing breaks) |
 
 ## CLI
 
 ```bash
-dynos init                              # set up a project
-dynos dashboard                         # start the dashboard server
-dynos config set learning_enabled false # foundry-only mode (no memory/calibration)
-dynos config get                        # show all policy
-dynos stats dora                        # DORA metrics from retrospectives
-dynos stats usage                       # module usage telemetry
-dynos calibration                       # manage calibrated agents
-dynos memory                            # view project memory
+dynos init                               # set up a project
+dynos dashboard                          # start the dashboard server
+dynos config set learning_enabled false  # foundry-only mode (no memory/calibration)
+dynos config get                         # show all policy
+dynos stats dora                         # DORA metrics from retrospectives
+dynos stats usage                        # module usage telemetry
+dynos calibration status                 # show learned agents, modes, scores
+dynos calibration history                # benchmark evaluation history
+dynos bus handlers                       # list registered event handlers
+dynos bus status                         # show pending events
+dynos bus emit task-completed            # manually trigger post-completion pipeline
+dynos bus drain                          # process all pending events
 ```
 
 [Full CLI reference](INTERNALS.md#cli)
@@ -93,6 +97,14 @@ Execute                 --> parallel agents build it
 Audit                   --> independent auditors verify it
 Repair                  --> automatic (hard cap: 3 retries then escalate)
 Retrospective           --> DORA metrics, reward scores, agent attribution
+    |
+    v
+Post-completion (automatic, event-driven):
+    Postmortem          --> deterministic anomaly detection + LLM root cause analysis (opus)
+    Improve             --> auto-applies: budget tuning, fast-track, prevention rules
+    Agent Generator     --> creates shadow specialist agents from task patterns
+    Benchmark           --> tests shadow agents, promotes winners to production routing
+    Policy Engine       --> EMA effectiveness scores, model/skip/route policies
 ```
 
 ## Requirements
