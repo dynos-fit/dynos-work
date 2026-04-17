@@ -7,8 +7,8 @@
   "plugins": [
     {
       "name": "dynos-work",
-      "description": "Autonomous Software Foundry. Self-learning, human-directed. Uses RL trajectory memory and MCTS dreaming to surface better choices, then plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.",
-      "version": "6.0.0",
+      "description": "Autonomous Software Foundry. Human-directed, tool-grounded, self-improving. Plans, executes, audits, repairs — calibrates to your project over time.",
+      "version": "7.0.0",
       "source": "./",
       "author": {
         "name": "dynos.fit",

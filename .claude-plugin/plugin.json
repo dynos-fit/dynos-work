@@ -1,12 +1,12 @@
 {
   "name": "dynos-work",
-  "description": "Autonomous Software Foundry. Self-learning, human-directed. Uses RL trajectory memory and MCTS dreaming to surface better choices, then plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.",
-  "version": "6.0.0",
+  "description": "Autonomous Software Foundry. Human-directed, tool-grounded, self-improving. Plans, executes, audits, repairs — calibrates to your project over time.",
+  "version": "7.0.0",
   "author": {
     "name": "dynos.fit",
     "url": "https://dynos.fit"
   },
-  "homepage": "https://github.com/HassamSheikh/dynos-work",
+  "homepage": "https://github.com/dynos-fit/dynos-work",
   "license": "MIT",
   "keywords": ["audit", "autonomous", "engineering", "agents", "planning", "repair", "self-learning", "reinforcement-learning", "mcts", "decision-transformer", "foundry", "human-in-the-loop"],
   "skills": "./skills/",
