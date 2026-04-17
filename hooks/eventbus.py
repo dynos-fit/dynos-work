@@ -52,7 +52,7 @@ def _run(cmd: list[str], root: Path) -> bool:
         return False
 
 
-def run_learn(root: Path, _payload: dict) -> bool:
+def run_memory(root: Path, _payload: dict) -> bool:
     """Aggregate retrospectives into project memory (deterministic Python)."""
     # patterns.py does everything the learn skill does:
     # EMA effectiveness scores, model policy, skip policy, baseline policy,
@@ -71,8 +71,8 @@ def run_trajectory(root: Path, _payload: dict) -> bool:
     )
 
 
-def run_evolve(root: Path, _payload: dict) -> bool:
-    """Deterministic learned agent generation."""
+def run_calibration(root: Path, _payload: dict) -> bool:
+    """Deterministic project-specific agent generation."""
     return _run(
         ["python3", str(SCRIPT_DIR / "evolve.py"), "auto", "--root", str(root)],
         root,
@@ -137,14 +137,14 @@ HandlerEntry = tuple[str, Callable[[Path, dict], bool]]
 
 HANDLERS: dict[str, list[HandlerEntry]] = {
     "task-completed": [
-        ("learn", run_learn),
+        ("memory", run_memory),
         ("trajectory", run_trajectory),
     ],
-    "learn-completed": [
-        ("evolve", run_evolve),
+    "memory-completed": [
+        ("calibration", run_calibration),
         ("patterns", run_patterns),
     ],
-    "evolve-completed": [
+    "calibration-completed": [
         ("postmortem", run_postmortem),
         ("improve", run_improve),
         ("benchmark", run_benchmark),
@@ -157,9 +157,9 @@ HANDLERS: dict[str, list[HandlerEntry]] = {
 
 # Maps event type to the follow-on event emitted when handlers complete
 FOLLOW_ON: dict[str, str] = {
-    "task-completed": "learn-completed",
-    "learn-completed": "evolve-completed",
-    "evolve-completed": "benchmark-completed",
+    "task-completed": "memory-completed",
+    "memory-completed": "calibration-completed",
+    "calibration-completed": "benchmark-completed",
 }
 
 
@@ -180,7 +180,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
     # Handlers that are part of the learning layer — skipped when learning is disabled.
-    _LEARNING_HANDLERS = {"learn", "trajectory", "evolve", "patterns", "improve", "benchmark"}
+    _LEARNING_HANDLERS = {"memory", "trajectory", "calibration", "patterns", "improve", "benchmark"}
 
     while iteration < max_iterations:
         iteration += 1
@@ -263,8 +263,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
             for r in results:
                 name, status = r.split(":", 1)
                 handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
-        postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("evolve-completed", []))
-        patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("learn-completed", []))
+        postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("calibration-completed", []))
+        patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("memory-completed", []))
         for td in completed_task_dirs:
             try:
                 from lib_receipts import receipt_post_completion
