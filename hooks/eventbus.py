@@ -185,9 +185,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
-        # Track per-iteration: which event types had at least one successful handler
-        succeeded_this_iteration: set[str] = set()
-        processed_this_iteration: set[str] = set()
+        # Track per-event-type: which handlers ran and whether each succeeded
+        handler_results: dict[str, dict[str, bool]] = {}  # {event_type: {consumer: success}}
 
         for event_type, handlers in HANDLERS.items():
             for consumer_name, handler_fn in handlers:
@@ -200,7 +199,6 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     continue
                 for event_path, event_data in events:
                     processed_any = True
-                    processed_this_iteration.add(event_type)
                     payload = event_data.get("payload", {})
 
                     # Capture task identity from task-completed events
@@ -219,8 +217,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                         print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
                         success = False
 
-                    if success:
-                        succeeded_this_iteration.add(event_type)
+                    handler_results.setdefault(event_type, {})[consumer_name] = success
 
                     log_event(
                         root,
@@ -239,13 +236,19 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     status = "ok" if success else "failed"
                     summary.setdefault(event_type, []).append(f"{consumer_name}:{status}")
 
-            # Emit follow-on only when: (a) event type was processed THIS iteration,
-            # (b) at least one handler succeeded, (c) follow-on not already emitted
-            if event_type in succeeded_this_iteration and event_type in FOLLOW_ON:
-                follow_on = FOLLOW_ON[event_type]
-                if follow_on not in emitted_follow_ons:
-                    emit_event(root, follow_on, "eventbus")
-                    emitted_follow_ons.add(follow_on)
+            # Emit follow-on only when ALL handlers for this event type succeeded.
+            # If learn fails but trajectory succeeds, learn-completed must NOT fire.
+            if event_type in handler_results and event_type in FOLLOW_ON:
+                results = handler_results[event_type]
+                all_succeeded = all(results.values())
+                if all_succeeded:
+                    follow_on = FOLLOW_ON[event_type]
+                    if follow_on not in emitted_follow_ons:
+                        emit_event(root, follow_on, "eventbus")
+                        emitted_follow_ons.add(follow_on)
+                else:
+                    failed = [k for k, v in results.items() if not v]
+                    print(f"  [gate] {event_type} follow-on blocked — failed: {', '.join(failed)}", file=sys.stderr)
 
         if not processed_any:
             break

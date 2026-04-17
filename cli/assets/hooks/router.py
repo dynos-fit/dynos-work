@@ -680,7 +680,11 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
         route_decision = resolve_route(root, executor, task_type)
 
         # Filter prevention rules relevant to this executor
-        executor_rules = [r["rule"] for r in all_rules if r.get("rule")]
+        executor_rules = [
+            r["rule"] for r in all_rules
+            if isinstance(r, dict) and r.get("rule")
+            and (not r.get("executor") or r.get("executor") == executor)
+        ]
 
         plan["segments"].append({
             "segment_id": seg_id,

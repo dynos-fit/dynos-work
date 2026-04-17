@@ -174,6 +174,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     """
     summary: dict[str, list[str]] = {}
     iteration = 0
+    emitted_follow_ons: set[str] = set()  # track across ALL iterations to prevent duplicates
+    completed_task_dirs: list[str] = []  # ALL task dirs from task-completed events
 
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
@@ -183,7 +185,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
-        emitted_this_iteration: set[str] = set()
+        # Track per-event-type: which handlers ran and whether each succeeded
+        handler_results: dict[str, dict[str, bool]] = {}  # {event_type: {consumer: success}}
 
         for event_type, handlers in HANDLERS.items():
             for consumer_name, handler_fn in handlers:
@@ -198,7 +201,13 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     processed_any = True
                     payload = event_data.get("payload", {})
 
-                    # Run handler, swallow errors (|| true semantics)
+                    # Capture task identity from task-completed events
+                    if event_type == "task-completed" and isinstance(payload, dict):
+                        td = payload.get("task_dir")
+                        if td and td not in completed_task_dirs:
+                            completed_task_dirs.append(td)
+
+                    # Run handler
                     err_msg = None
                     t0 = time.monotonic()
                     try:
@@ -207,6 +216,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                         err_msg = str(e)
                         print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
                         success = False
+
+                    handler_results.setdefault(event_type, {})[consumer_name] = success
 
                     log_event(
                         root,
@@ -225,13 +236,19 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     status = "ok" if success else "failed"
                     summary.setdefault(event_type, []).append(f"{consumer_name}:{status}")
 
-            # After all handlers for this event type complete, emit follow-on
-            # (only if events were processed and follow-on not already emitted)
-            if event_type in summary and event_type in FOLLOW_ON:
-                follow_on = FOLLOW_ON[event_type]
-                if follow_on not in emitted_this_iteration:
-                    emit_event(root, follow_on, "eventbus")
-                    emitted_this_iteration.add(follow_on)
+            # Emit follow-on only when ALL handlers for this event type succeeded.
+            # If learn fails but trajectory succeeds, learn-completed must NOT fire.
+            if event_type in handler_results and event_type in FOLLOW_ON:
+                results = handler_results[event_type]
+                all_succeeded = all(results.values())
+                if all_succeeded:
+                    follow_on = FOLLOW_ON[event_type]
+                    if follow_on not in emitted_follow_ons:
+                        emit_event(root, follow_on, "eventbus")
+                        emitted_follow_ons.add(follow_on)
+                else:
+                    failed = [k for k, v in results.items() if not v]
+                    print(f"  [gate] {event_type} follow-on blocked — failed: {', '.join(failed)}", file=sys.stderr)
 
         if not processed_any:
             break
@@ -239,34 +256,28 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     # Cleanup old events
     cleanup_old_events(root)
 
-    # Write post-completion receipt if task-completed was processed
-    if "task-completed" in summary:
-        try:
-            from lib_receipts import receipt_post_completion
-            from lib_core import find_active_tasks, load_json
-            # Find the most recently completed task to write the receipt to
-            dynos_dir = root / ".dynos"
-            task_dirs = sorted(dynos_dir.glob("task-*/manifest.json"), reverse=True)
-            for mp in task_dirs:
-                m = load_json(mp)
-                if m.get("stage") in ("CHECKPOINT_AUDIT", "DONE"):
-                    task_dir = mp.parent
-                    handlers_run = []
-                    for evt_type, results in summary.items():
-                        for r in results:
-                            name, status = r.split(":", 1)
-                            handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
-                    postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("evolve-completed", []))
-                    patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("learn-completed", []))
+    # Write post-completion receipt for EACH completed task
+    if "task-completed" in summary and completed_task_dirs:
+        handlers_run = []
+        for evt_type, results in summary.items():
+            for r in results:
+                name, status = r.split(":", 1)
+                handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
+        postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("evolve-completed", []))
+        patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("learn-completed", []))
+        for td in completed_task_dirs:
+            try:
+                from lib_receipts import receipt_post_completion
+                task_dir = Path(td)
+                if task_dir.exists():
                     receipt_post_completion(
                         task_dir,
                         handlers_run=handlers_run,
                         postmortem_written=postmortem_ok,
                         patterns_updated=patterns_ok,
                     )
-                    break
-        except Exception as exc:
-            print(f"  [warn] post-completion receipt failed: {exc}", file=sys.stderr)
+            except Exception as exc:
+                print(f"  [warn] post-completion receipt failed for {td}: {exc}", file=sys.stderr)
 
     return summary
 
