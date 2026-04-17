@@ -68,10 +68,6 @@ def registry_path() -> Path:
     return global_home() / "registry.json"
 
 
-def global_policy_path() -> Path:
-    return global_home() / "policy" / "global-policy.json"
-
-
 def patterns_dir() -> Path:
     return global_home() / "patterns"
 

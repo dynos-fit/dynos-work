@@ -37,23 +37,6 @@ def load_contract(skill_name: str) -> dict:
     return load_json(contract_path)
 
 
-def list_contracts() -> list[dict]:
-    """Load all contract.json files from all skills."""
-    contracts = []
-    skills_dir = _PLUGIN_ROOT / "skills"
-    if not skills_dir.exists():
-        return contracts
-    for skill_dir in sorted(skills_dir.iterdir()):
-        contract_path = skill_dir / "contract.json"
-        if contract_path.exists():
-            try:
-                contract = load_json(contract_path)
-                contract["_skill_dir"] = str(skill_dir)
-                contracts.append(contract)
-            except (json.JSONDecodeError, OSError):
-                continue
-    return contracts
-
 
 # ---------------------------------------------------------------------------
 # Source resolution

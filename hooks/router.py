@@ -790,48 +790,6 @@ def build_executor_prompt(
     return "\n".join(parts)
 
 
-def build_auditor_prompt(
-    root: Path,
-    plan_entry: dict,
-    base_prompt: str,
-) -> str:
-    """Build the complete auditor prompt with learned agent rules injected.
-
-    Same pattern as build_executor_prompt but for auditors.
-    """
-    agent_path = plan_entry.get("agent_path")
-    route_mode = plan_entry.get("route_mode", "generic")
-    agent_name = plan_entry.get("agent_name")
-
-    parts = [base_prompt]
-
-    if route_mode in ("replace", "alongside") and agent_path:
-        try:
-            p = Path(agent_path)
-            if not p.is_absolute():
-                p = root / p
-            if p.exists():
-                agent_content = p.read_text().strip()
-                if agent_content.startswith("---"):
-                    end = agent_content.find("---", 3)
-                    if end != -1:
-                        agent_content = agent_content[end + 3:].strip()
-                parts.append(
-                    f"\n\n## Learned Auditor Instructions ({agent_name})\n"
-                    f"{agent_content}"
-                )
-                log_event(
-                    root,
-                    "learned_agent_injected",
-                    agent_name=agent_name,
-                    agent_path=str(agent_path),
-                    route_mode=route_mode,
-                )
-        except Exception:
-            pass
-
-    return "\n".join(parts)
-
 
 # ---------------------------------------------------------------------------
 # CLI

@@ -7,9 +7,7 @@ The next step refuses to proceed unless the prior receipt exists.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -166,13 +164,6 @@ def require_receipt(task_dir: Path, step_name: str) -> dict:
     return receipt
 
 
-def require_receipts(task_dir: Path, step_names: list[str]) -> dict[str, dict]:
-    """Validate multiple receipts exist. Returns all receipts or raises on first missing."""
-    results = {}
-    for name in step_names:
-        results[name] = require_receipt(task_dir, name)
-    return results
-
 
 def validate_chain(task_dir: Path) -> list[str]:
     """Validate the entire receipt chain for a task. Returns list of gaps.
@@ -240,13 +231,6 @@ def validate_chain(task_dir: Path) -> list[str]:
 
     return gaps
 
-
-def hash_file(path: Path) -> str | None:
-    """SHA256 hash of a file's contents. Returns None if file doesn't exist."""
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-    except (OSError, FileNotFoundError):
-        return None
 
 
 # ---------------------------------------------------------------------------
