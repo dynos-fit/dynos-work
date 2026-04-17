@@ -224,6 +224,12 @@ def build_analysis_prompt(task_dir: Path) -> dict:
     findings = _collect_audit_findings(task_dir)
     manifest = _read_artifact(task_dir / "manifest.json") or {}
 
+    # Read deterministic postmortem (Step 5a runs before us)
+    root = task_dir.parent.parent
+    persistent = _persistent_project_dir(root)
+    task_id_for_pm = retro.get("task_id", manifest.get("task_id", ""))
+    postmortem = _read_artifact(persistent / "postmortems" / f"{task_id_for_pm}.json") if task_id_for_pm else None
+
     task_id = retro.get("task_id", manifest.get("task_id", "unknown"))
     repair_count = int(retro.get("repair_cycle_count", 0))
     quality = retro.get("quality_score", 1.0)
@@ -332,6 +338,38 @@ def build_analysis_prompt(task_dir: Path) -> dict:
         for agent, model in sorted(model_used.items()):
             sections.append(f"- {agent}: {model}")
         sections.append("")
+
+    # Include deterministic postmortem insights (anomalies, patterns, similar tasks)
+    if postmortem and isinstance(postmortem, dict):
+        anomalies = postmortem.get("anomalies", [])
+        if anomalies:
+            sections.append(f"## Detected Anomalies ({len(anomalies)})")
+            for a in anomalies[:10]:
+                if isinstance(a, dict):
+                    sections.append(f"- [{a.get('type', '?')}] {a.get('description', a.get('message', '?'))}")
+                else:
+                    sections.append(f"- {a}")
+            sections.append("")
+
+        patterns = postmortem.get("recurring_patterns", [])
+        if patterns:
+            sections.append(f"## Recurring Patterns ({len(patterns)})")
+            for p in patterns[:10]:
+                if isinstance(p, dict):
+                    sections.append(f"- [{p.get('type', '?')}] {p.get('description', p.get('message', '?'))} (seen in {p.get('task_count', '?')} tasks)")
+                else:
+                    sections.append(f"- {p}")
+            sections.append("")
+
+        similar = postmortem.get("similar_tasks", [])
+        if similar:
+            sections.append(f"## Similar Past Tasks ({len(similar)})")
+            for s in similar[:5]:
+                if isinstance(s, dict):
+                    sections.append(f"- {s.get('task_id', '?')} (similarity={s.get('similarity', '?')}, quality={s.get('quality_score', '?')})")
+                else:
+                    sections.append(f"- {s}")
+            sections.append("")
 
     context = "\n".join(sections)
 

@@ -14,6 +14,8 @@ Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 - Cosmetic fixes do not count as repairs.
 - If a path is unverified, treat it as suspect.
 - Prefer surfacing a real risk over preserving a comforting narrative.
+- If two interpretations exist, audit the harsher one until disproved.
+- Do not let a clean summary hide a dirty edge case.
 
 ## What you do
 
@@ -52,6 +54,8 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/router.py"
 ```
 
 This returns a JSON plan with each auditor's action (spawn/skip), model, and route mode. **Use this plan directly.** Do not re-derive model, skip, or routing decisions from markdown tables.
+
+When spawning auditors, tell them to attack the implementation, not narrate it. Favor findings with proof over summaries with tone.
 
 For each auditor in the plan:
 - If `action: "skip"`: log `{timestamp} [SKIP] {name} — {reason}` and do not spawn
@@ -152,6 +156,8 @@ Collect all blocking findings available at the time of the eager trigger (Step 3
 
 Update stage to `REPAIR_PLANNING`. Append to log:
 ```
+
+Do not downgrade a finding because it is inconvenient, late, or expensive to fix.
 {timestamp} [REPAIR-P1] {N} findings — {list of finding IDs}
 {timestamp} [STAGE] → REPAIR_PLANNING
 ```
@@ -313,7 +319,18 @@ Append to log:
 {timestamp} [DONE] reflect — task-retrospective.json written
 ```
 
-**LLM Postmortem Analysis (Step 5b):** After writing the retrospective, run LLM-powered failure analysis to generate prevention rules. This step is skipped for clean tasks (no findings, no repairs, quality >= 0.8).
+**Deterministic Postmortem (Step 5a):** Generate the deterministic postmortem report before the LLM analysis so the LLM has access to anomaly detection, recurring patterns, and similar task comparisons.
+
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem.py" generate --root . --task-id {task-id}
+```
+
+This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the persistent project directory. Append to log:
+```
+{timestamp} [DONE] postmortem — anomalies={N}, recurring_patterns={N}
+```
+
+**LLM Postmortem Analysis (Step 5b):** After the deterministic postmortem, run LLM-powered failure analysis. This step is skipped for clean tasks (no findings, no repairs, quality >= 0.8).
 
 1. Build the analysis prompt:
 ```bash
@@ -339,7 +356,7 @@ If `has_findings` is false, skip this step and append:
 {timestamp} [SKIP] postmortem-analysis — clean task, nothing to analyze
 ```
 
-**Post-completion processing:** Learn, trajectory rebuild, evolve, postmortems, and dashboard refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
+**Post-completion processing:** Improve, policy engine, dashboard, and registry refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
 
 Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `lib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
 ```
