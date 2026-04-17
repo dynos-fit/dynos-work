@@ -294,6 +294,60 @@ def cmd_stats_dora(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bus(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    root = Path(args.root).resolve()
+
+    if args.bus_action == "emit":
+        from lib_events import emit_event
+        import json as _json
+        payload = _json.loads(args.payload) if args.payload else {}
+        path = emit_event(root, args.event_type, "cli", payload=payload)
+        print(f"  Emitted {args.event_type} → {path.name}")
+        return 0
+
+    if args.bus_action == "drain":
+        from eventbus import drain
+        summary = drain(root, max_iterations=args.max_iterations)
+        if summary:
+            for event_type, results in summary.items():
+                for result in results:
+                    print(f"  {event_type}: {result}")
+        else:
+            print("  No events to process")
+        return 0
+
+    if args.bus_action == "status":
+        from lib_events import _events_dir
+        events_dir = _events_dir(root)
+        pending = sorted(events_dir.glob("*.json"))
+        if not pending:
+            print("  No pending events")
+            return 0
+        import json as _json
+        for p in pending:
+            try:
+                data = _json.loads(p.read_text())
+                et = data.get("event_type", "?")
+                ts = data.get("emitted_at", "?")
+                pb = data.get("processed_by", {})
+                consumers = list(pb.keys()) if isinstance(pb, dict) else list(pb) if isinstance(pb, list) else []
+                print(f"  {p.name}  type={et}  emitted={ts}  processed_by={consumers or 'none'}")
+            except Exception:
+                print(f"  {p.name}  (unreadable)")
+        return 0
+
+    if args.bus_action == "handlers":
+        from eventbus import HANDLERS
+        for event_type, entries in sorted(HANDLERS.items()):
+            print(f"  {event_type}:")
+            for name, _ in entries:
+                print(f"    - {name}")
+        return 0
+
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -370,6 +424,21 @@ def build_parser() -> argparse.ArgumentParser:
     usage_parser = subparsers.add_parser("stats-usage", help="Module usage telemetry for dormancy detection")
     usage_parser.add_argument("--json", action="store_true", help="Output as JSON")
     usage_parser.set_defaults(func=cmd_stats_usage)
+
+    bus_parser = subparsers.add_parser("bus", help="Event bus: emit, drain, status, handlers")
+    bus_sub = bus_parser.add_subparsers(dest="bus_action", required=True)
+    bus_emit = bus_sub.add_parser("emit", help="Emit an event")
+    bus_emit.add_argument("event_type", help="Event type (e.g. task-completed)")
+    bus_emit.add_argument("--payload", default=None, help="JSON payload string")
+    bus_emit.add_argument("--root", default=".")
+    bus_drain = bus_sub.add_parser("drain", help="Process all pending events")
+    bus_drain.add_argument("--root", default=".")
+    bus_drain.add_argument("--max-iterations", type=int, default=10)
+    bus_status = bus_sub.add_parser("status", help="Show pending events")
+    bus_status.add_argument("--root", default=".")
+    bus_handlers = bus_sub.add_parser("handlers", help="List registered handlers")
+    bus_handlers.add_argument("--root", default=".")
+    bus_parser.set_defaults(func=cmd_bus)
 
     config_parser = subparsers.add_parser("config", help="Get or set project policy values")
     config_parser.add_argument("action", choices=["get", "set"], help="Action: get or set")
