@@ -33,6 +33,26 @@ You are the Code Quality Auditor. You verify that implementations are maintainab
 
 **Cleanliness:** No dead code. No debug logs. No unused imports. No magic numbers.
 
+### Category: typecheck-lint
+
+**Always runs.** Run the deterministic typecheck and lint hook:
+
+```bash
+python3 "${PLUGIN_HOOKS}/typecheck_lint.py" --root . --changed-files {comma-separated changed files}
+```
+
+The hook auto-detects project ecosystems and runs the appropriate tools:
+- **Python:** mypy (type checking) + ruff/flake8 (linting)
+- **TypeScript/JavaScript:** tsc --noEmit (type checking) + eslint (linting)
+- **Go:** go vet (type checking) + golangci-lint (linting)
+
+For each failed check, emit a finding with:
+- ID prefix: `cq-`
+- Category: `typecheck-lint`
+- Severity: `major` for type errors (fabricated function signatures, wrong argument types). `minor` for lint warnings.
+- Blocking: `true` for type errors, `false` for lint warnings
+- If no tools are available for the detected ecosystem, note this in the report but do not emit false findings.
+
 ### Category: doc-accuracy
 
 **Only runs when the diff includes `.md` files.** If no markdown files were changed by this task, skip this category entirely.

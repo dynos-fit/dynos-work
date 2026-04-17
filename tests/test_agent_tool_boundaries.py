@@ -38,6 +38,7 @@ READ_ONLY_AUDITORS = {
     "code-quality-auditor",
     "db-schema-auditor",
     "dead-code-auditor",
+    "performance-auditor",
     "security-auditor",
     "spec-completion-auditor",
     "ui-auditor",
@@ -98,7 +99,7 @@ class TestAllAgentsHaveTools:
         assert len(fm["tools"]) > 0, f"{agent_file.name} tools: must not be empty"
 
     def test_all_17_agents_found(self):
-        assert len(AGENT_FILES) == 17, f"Expected 17 agents, found {len(AGENT_FILES)}"
+        assert len(AGENT_FILES) == 18, f"Expected 18 agents, found {len(AGENT_FILES)}"
 
 
 # ---------------------------------------------------------------------------

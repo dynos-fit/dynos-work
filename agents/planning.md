@@ -116,6 +116,17 @@ Write to `.dynos/task-{id}/plan.md`:
 ## Technical Approach
 [2-3 paragraphs describing the overall approach. Start with the WHY — why this approach over alternatives. Then the WHAT — the high-level architecture. Then the HOW — the key technical decisions. Name the existing patterns in the codebase that this work should follow.]
 
+## Architecture Decisions
+*(Required when risk_level is high or critical. Omit for low/medium-risk tasks.)*
+
+[For every significant technical decision in this task, document it as a typed ADR:
+
+| ID | Decision | Rationale | Alternatives considered | Tradeoffs |
+|---|---|---|---|---|
+| ADR-1 | Use REST over GraphQL | CRUD-heavy data; simpler client caching | GraphQL (flexible queries), gRPC (perf) | Less flexible queries, but simpler error handling |
+
+Each ADR is a constraint that downstream executors must follow. If an executor encounters a gray area not covered by an ADR, they should stop and ask rather than guess.]
+
 ## Reference Code
 [List 2-5 existing files in the codebase that executors should read before implementing, with a one-sentence note on what pattern each demonstrates. This prevents executors from inventing new patterns when existing ones work.]
 

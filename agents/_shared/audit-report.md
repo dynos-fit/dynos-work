@@ -44,7 +44,8 @@ All auditors write their report as a JSON file to `.dynos/task-{id}/audit-report
 Auditor-specific notes:
 - `spec-completion-auditor`: `requirement_coverage` is mandatory and must cover every numbered criterion. Finding IDs use prefix `sc-`. Severity is always `critical`.
 - `security-auditor`: `severity` meanings: `critical` = direct exploitability, `major` = significant risk, `minor` = defense-in-depth. Finding IDs use prefix `sec-` (category `security`) or `comp-` (category `compliance`).
-- `code-quality-auditor`: Distinguish blocking from warning in the `blocking` field. Finding IDs use prefix `cq-`. Categories: `code-quality` (default) or `doc-accuracy` (only when `.md` files are in the diff — uses deterministic `validate_docs_accuracy.py` hook).
+- `code-quality-auditor`: Distinguish blocking from warning in the `blocking` field. Finding IDs use prefix `cq-`. Categories: `code-quality` (default), `doc-accuracy` (when `.md` files in diff), or `typecheck-lint` (always runs — uses deterministic `typecheck_lint.py` hook).
 - `ui-auditor`: Every UI state must have specific file evidence. Finding IDs use prefix `ui-`.
 - `db-schema-auditor`: `severity` meanings: `critical` = data loss risk or broken referential integrity, `major` = missing index or N+1, `minor` = naming or minor optimization. Finding IDs use prefix `db-`.
 - `dead-code-auditor`: `severity` meanings: `critical` = unreferenced files or unused exports from core modules, `major` = dead functions or unused imports in multiple files, `minor` = single unused import or isolated commented-out block. Finding IDs use prefix `dc-`.
+- `performance-auditor`: `severity` meanings: `critical` = will cause outage at scale (connection leak, unbounded query), `major` = significant latency risk (N+1, missing index, missing timeout), `minor` = optimization opportunity. Finding IDs use prefix `perf-`. Category: `performance`.

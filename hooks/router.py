@@ -608,6 +608,8 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
             eligible.append("ui-auditor")
         if "db" in domains:
             eligible.append("db-schema-auditor")
+        if "backend" in domains or "db" in domains:
+            eligible.append("performance-auditor")
 
     for auditor in eligible:
         # Skip check
