@@ -74,7 +74,7 @@ def run_trajectory(root: Path, _payload: dict) -> bool:
 def run_calibration(root: Path, _payload: dict) -> bool:
     """Deterministic project-specific agent generation."""
     return _run(
-        ["python3", str(SCRIPT_DIR / "evolve.py"), "auto", "--root", str(root)],
+        ["python3", str(SCRIPT_DIR / "calibrate.py"), "auto", "--root", str(root)],
         root,
     )
 

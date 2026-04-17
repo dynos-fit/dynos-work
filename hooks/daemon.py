@@ -131,7 +131,7 @@ def maintenance_cycle(root: Path) -> dict:
         for script_name, args in (
             ("trajectory.py", ("rebuild", "--root", str(root))),
             ("patterns.py", ("--root", str(root))),
-            ("evolve.py", ("auto", "--root", str(root))),
+            ("calibrate.py", ("auto", "--root", str(root))),
             ("postmortem.py", ("generate-all", "--root", str(root))),
             ("postmortem.py", ("improve", "--root", str(root))),
             ("fixture.py", ("sync", "--root", str(root))),

@@ -5,10 +5,10 @@ _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.pa
 _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 _is_main = __name__ == "__main__"
 from memory import evolve as _real
-# Make the real module importable under the old name too
-_sys.modules[__name__ if not _is_main else "evolve"] = _real
+_sys.modules[__name__ if not _is_main else "calibrate"] = _real
 if not _is_main:
-    _sys.modules["evolve"] = _real
+    _sys.modules["calibrate"] = _real
+    _sys.modules["evolve"] = _real  # backwards compat
 if _is_main:
     from cli_base import cli_main
     raise SystemExit(cli_main(_real.build_parser))

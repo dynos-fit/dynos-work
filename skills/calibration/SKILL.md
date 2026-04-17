@@ -10,8 +10,8 @@ Calibrates the system's agents to your project. Generates project-specific speci
 If available in this repo, the deterministic runtime for registry, routing, promotion, and automatic challenger execution is:
 
 ```text
-python3 hooks/evolve.py init-registry --root .
-python3 hooks/evolve.py register-agent <agent_name> <role> <task_type> <path> <generated_from> --root .
+python3 hooks/calibrate.py init-registry --root .
+python3 hooks/calibrate.py register-agent <agent_name> <role> <task_type> <path> <generated_from> --root .
 python3 hooks/eval.py evaluate candidate.json baseline.json
 python3 hooks/eval.py promote <agent_name> <role> <task_type> candidate.json baseline.json --root .
 python3 hooks/bench.py run benchmarks/fixtures/<fixture>.json --root . --update-registry

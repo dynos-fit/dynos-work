@@ -119,10 +119,10 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(results[0]["trajectory"]["source_task_id"], "task-20260401-001")
 
     def test_register_and_promote_learned_agent(self) -> None:
-        init = self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        init = self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         self.assertEqual(init.returncode, 0)
         register = self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-sharp",
             "backend-executor",
@@ -176,9 +176,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(agent["last_evaluation"]["recommendation"], "promote_replace")
 
     def test_skill_shadow_mode_and_benchmark_runner(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "plan-tightener",
             "plan-skill",
@@ -440,9 +440,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["cases"][0]["baseline_observed"]["tests_passed"], 1)
 
     def test_must_pass_category_blocks_promotion_and_demotes_active_component(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "security-hardener",
             "security-auditor",
@@ -553,9 +553,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertFalse(agent["route_allowed"])
 
     def test_route_resolution_prefers_allowed_highest_composite(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-sharp",
             "backend-executor",
@@ -566,7 +566,7 @@ class LearningRuntimeTests(unittest.TestCase):
             str(self.root),
         )
         self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-steady",
             "backend-executor",
@@ -641,9 +641,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(payload["route_allowed"])
 
     def test_auto_runner_executes_matching_shadow_fixture_and_promotes(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-shadow",
             "backend-executor",
@@ -739,9 +739,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(queue["items"], [])
 
     def test_fixture_synthesis_and_auto_sync_create_generated_fixture(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-synth",
             "backend-executor",
@@ -822,9 +822,9 @@ class LearningRuntimeTests(unittest.TestCase):
                 },
             )
         (self.root / ".dynos" / "policy.json").write_text(json.dumps({"freshness_task_window": 1}, indent=2) + "\n")
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-stale",
             "backend-executor",
@@ -856,9 +856,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(payload["freshness_blocked"])
 
     def test_dashboard_and_lineage_generation(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-lineage",
             "backend-executor",
@@ -881,9 +881,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(any(node["kind"] == "component" for node in graph["nodes"]))
 
     def test_patterns_generation_writes_policy_tables(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-patterned",
             "backend-executor",
@@ -904,9 +904,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertIn("| backend-executor | feature |", content)
 
     def test_task_artifact_challenge_rollout_runs(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-runner",
             "backend-executor",
@@ -955,9 +955,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["cases"][0]["winner"], "candidate")
 
     def test_maintainer_run_once_executes_cycle_and_writes_status(self) -> None:
-        self.run_py("evolve.py", "init-registry", "--root", str(self.root))
+        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "evolve.py",
+            "calibrate.py",
             "register-agent",
             "backend-maintainer",
             "backend-executor",

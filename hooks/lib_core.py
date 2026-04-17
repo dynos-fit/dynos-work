@@ -424,7 +424,7 @@ def _auto_log(task_dir: Path, from_stage: str, to_stage: str, forced: bool) -> N
 
 
 def _fire_task_completed(task_dir: Path) -> None:
-    """Run the post-completion pipeline: event emit → drain (learn, postmortem, evolve, etc).
+    """Run the post-completion pipeline: event emit → drain (memory, postmortem, calibration, etc).
 
     This is the ONLY place that fires the pipeline. Never swallow errors silently
     — print them but don't block the transition.
@@ -449,7 +449,7 @@ def _fire_task_completed(task_dir: Path) -> None:
     except Exception as exc:
         print(f"[dynos] event emit failed: {exc}")
 
-    # Step 2: Drain all events (learn → trajectory → evolve → postmortem → improve)
+    # Step 2: Drain all events (memory → trajectory → calibration → postmortem → improve)
     try:
         result = subprocess.run(
             ["python3", str(hooks_dir / "eventbus.py"), "drain",
