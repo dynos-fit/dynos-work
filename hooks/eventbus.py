@@ -215,6 +215,10 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
     iteration = 0
     emitted_follow_ons: set[str] = set()  # track across ALL iterations to prevent duplicates
     completed_task_dirs: list[str] = []  # ALL task dirs from task-completed events
+    # Per-handler duration tracking for telemetry (#M3): each entry is a list
+    # of seconds across every invocation in this drain. Aggregated into
+    # summary["_durations"] before return.
+    handler_durations: dict[str, list[float]] = {}
 
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
@@ -229,6 +233,7 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
+        emitted_count_at_iter_start = len(emitted_follow_ons)
         # Track per-event-type: whether ALL handlers succeeded across ALL events
         # Uses AND semantics: any failure for a consumer sticks (later success doesn't override)
         handler_all_ok: dict[str, dict[str, bool]] = {}  # {event_type: {consumer: all_succeeded}}
@@ -277,6 +282,8 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
                             err_msg = str(e)
                             print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
                             success = False
+                        duration = round(time.monotonic() - t0, 3)
+                        handler_durations.setdefault(consumer_name, []).append(duration)
 
                         log_event(
                             root,
@@ -284,7 +291,7 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
                             handler=consumer_name,
                             trigger_event=event_type,
                             success=success,
-                            duration_s=round(time.monotonic() - t0, 3),
+                            duration_s=duration,
                             error=err_msg if not success else None,
                         )
 
@@ -318,6 +325,36 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
 
         if not processed_any:
             break
+        # M1: short-circuit further iterations when no new events were
+        # emitted during this iteration. Iteration N processes existing
+        # events; iteration N+1 only matters if N emitted follow-on events
+        # for N+1 to consume. With FOLLOW_ON currently empty, the second
+        # iteration is pure overhead — N globs + N event reads to confirm
+        # there's nothing left. Break out as soon as the iteration was a
+        # no-op for the future.
+        if len(emitted_follow_ons) == emitted_count_at_iter_start:
+            break
+
+    # M3: aggregate per-handler durations so callers can see actual cost
+    # without scraping events.jsonl. Lightweight stats (count/min/median/max)
+    # — full distribution lives in the per-handler log_event records.
+    if handler_durations:
+        durations_summary: dict[str, dict[str, float | int]] = {}
+        for handler, samples in handler_durations.items():
+            samples_sorted = sorted(samples)
+            mid = len(samples_sorted) // 2
+            median = (
+                samples_sorted[mid] if len(samples_sorted) % 2
+                else (samples_sorted[mid - 1] + samples_sorted[mid]) / 2
+            )
+            durations_summary[handler] = {
+                "count": len(samples),
+                "min_s": round(samples_sorted[0], 3),
+                "median_s": round(median, 3),
+                "max_s": round(samples_sorted[-1], 3),
+                "total_s": round(sum(samples), 3),
+            }
+        summary["_durations"] = durations_summary  # type: ignore[assignment]
 
     # Cleanup old events
     cleanup_old_events(root)
@@ -339,6 +376,9 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
     if "task-completed" in summary and completed_task_dirs:
         handlers_run = []
         for evt_type, results in summary.items():
+            if evt_type.startswith("_"):
+                # Reserved keys for non-event metadata (e.g. _durations).
+                continue
             for r in results:
                 name, status = r.split(":", 1)
                 handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
