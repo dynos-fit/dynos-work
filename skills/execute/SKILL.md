@@ -72,10 +72,15 @@ Update `manifest.json` stage to `EXECUTION` (transition_task auto-appends the `[
 python3 hooks/ctl.py transition .dynos/task-{id} EXECUTION
 ```
 
-Read `execution-graph.json`. Before spawning any executor, perform deterministic preflight validation. If available in this repo, run:
+Read `execution-graph.json`. Before spawning any executor, perform deterministic preflight validation. The validator supports two flags that prevent redundant work:
+
+- `--use-receipt` short-circuits the entire validation when the `plan-validated` receipt's captured artifact hashes (spec.md, plan.md, execution-graph.json) match the current files. Planning already validated these exact artifacts; if nothing has drifted, redoing the work is pure waste.
+- `--no-gap` keeps the cheap structural checks but skips `plan_gap_analysis` (an unbounded repo walk).
+
+Default: pass `--use-receipt` first; the validator falls through to a full check if the receipt is stale.
 
 ```text
-python3 hooks/validate_task_artifacts.py .dynos/task-{id}
+python3 hooks/validate_task_artifacts.py .dynos/task-{id} --use-receipt
 ```
 
 Then enforce the following checks:
