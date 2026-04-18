@@ -275,8 +275,11 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
         domains = classification.get("domains", [])
         risk_level = classification.get("risk_level", "medium")
         all_required = REQUIRED_PLAN_HEADINGS + conditional_plan_headings(domains, risk_level)
+        # Hoisted out of the inner loop — collect_headings is a regex scan
+        # over plan_text and was being re-executed on every required heading.
+        plan_headings = collect_headings(plan_text)
         for heading in all_required:
-            if heading not in collect_headings(plan_text):
+            if heading not in plan_headings:
                 errors.append(f"plan missing heading: {heading}")
         in_ref_section = False
         for line in plan_text.splitlines():
