@@ -25,7 +25,7 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
 
 ```python
-from lib_receipts import receipt_planner_spawn, receipt_plan_audit
+from lib_receipts import receipt_planner_spawn, receipt_plan_audit, receipt_plan_validated
 
 # After planner spawn (discovery/design/classification):
 receipt_planner_spawn(task_dir, "discovery", tokens_used=TOTAL_TOKENS)
@@ -33,10 +33,18 @@ receipt_planner_spawn(task_dir, "discovery", tokens_used=TOTAL_TOKENS)
 # After planner spawn (spec normalization):
 receipt_planner_spawn(task_dir, "spec", tokens_used=TOTAL_TOKENS)
 
-# After planner spawn (plan generation):
+# After planner spawn (plan generation OR combined Spec + Plan):
 receipt_planner_spawn(task_dir, "plan", tokens_used=TOTAL_TOKENS)
 
-# After spec-completion auditor (plan audit):
+# After validate_task_artifacts passes — REQUIRED before execute skill can run:
+receipt_plan_validated(
+    task_dir,
+    segment_count=N,                # from execution-graph.json segments length
+    criteria_coverage=[1, 2, ...],  # sorted unique criteria_ids covered
+    validation_passed=True,
+)
+
+# After spec-completion auditor (plan audit; only invoked for high/critical risk):
 receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS, finding_count=N)
 
 ```
@@ -345,6 +353,26 @@ For `execution-graph.json`:
 8. Every acceptance criterion in `spec.md` must be covered by at least one segment.
 
 If any validation fails, respawn planning and fix the artifacts before continuing.
+
+**Receipt: plan-validated (MANDATORY).** Once `validate_task_artifacts` passes, write the plan-validated receipt. Without this receipt the eventual transition to `EXECUTION` (in the execute skill) will be blocked by the state machine:
+
+```python
+from pathlib import Path
+from lib_receipts import receipt_plan_validated
+
+# Read segment count and criteria coverage from execution-graph.json
+import json
+graph = json.loads(Path(".dynos/task-{id}/execution-graph.json").read_text())
+segments = graph["segments"]
+criteria = sorted({c for s in segments for c in s.get("criteria_ids", [])})
+
+receipt_plan_validated(
+    task_dir=Path(".dynos/task-{id}"),
+    segment_count=len(segments),
+    criteria_coverage=criteria,
+    validation_passed=True,
+)
+```
 
 Append to the execution log:
 
