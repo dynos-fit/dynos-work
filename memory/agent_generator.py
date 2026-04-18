@@ -195,11 +195,18 @@ def cmd_auto(args: argparse.Namespace) -> int:
         for a in registry.get("agents", [])
     }
 
-    candidates = [(r, t, c) for (r, t), c in role_type_counts.items() if c >= 3 and (r, t) not in existing]
-    result["steps"].append({"step": "discover_slots", "total_slots": len(role_type_counts), "uncovered": len(candidates), "existing": len(existing)})
-    log_event(root, "agent_generator_step", step="discover_slots", total_slots=len(role_type_counts), uncovered=len(candidates), existing=len(existing))
+    candidates = [(r, t, c) for (r, t), c in role_type_counts.items() if c >= 3]
+    new_count = sum(1 for (r, t, _) in candidates if (r, t) not in existing)
+    refresh_count = len(candidates) - new_count
+    result["steps"].append({"step": "discover_slots", "total_slots": len(role_type_counts), "new": new_count, "refresh": refresh_count, "existing": len(existing)})
+    log_event(root, "agent_generator_step", step="discover_slots", total_slots=len(role_type_counts), new=new_count, refresh=refresh_count, existing=len(existing))
 
-    # Step 3: Generate agents for uncovered slots
+    result.setdefault("refreshed", [])
+
+    # Step 3: Generate (new) or refresh (existing) agents for all role/type pairs with enough samples.
+    # Refresh rewrites the .md file from current retros + prevention rules but does NOT touch the
+    # registry entry — preserving accumulated mode (alongside/replace), benchmark_summary, and
+    # last_evaluation. The .md content is a derived artifact; the registry holds promotion state.
     for role, task_type, count in candidates:
         matched_retros = _matching_retrospectives(retrospectives, role, task_type, root)
 
@@ -217,24 +224,29 @@ def cmd_auto(args: argparse.Namespace) -> int:
         # Provenance: use latest matched retro, not global latest
         latest_task = matched_retros[-1].get("task_id", "unknown")
 
-        if not agent_path.exists():
-            content = _build_agent_content(
-                agent_name, role, task_type, matched_retros, latest_task, root
-            )
-            agent_path.write_text(content)
-        register_learned_agent(
-            root,
-            agent_name=agent_name,
-            role=role,
-            task_type=task_type,
-            path=str(agent_path),
-            generated_from=latest_task,
+        content = _build_agent_content(
+            agent_name, role, task_type, matched_retros, latest_task, root
         )
-        result["generated"].append({"agent_name": agent_name, "role": role, "task_type": task_type})
-        log_event(root, "agent_generator_step", step="agent_generated", agent_name=agent_name, role=role, task_type=task_type, sample_count=count)
+        agent_path.write_text(content)
 
-    result["steps"].append({"step": "generate", "generated_count": len(result["generated"])})
-    log_event(root, "agent_generator_auto", generated_count=len(result.get("generated", [])), skipped_reasons=result.get("skipped_reasons", []), retrospective_count=len(retrospectives), steps=result["steps"])
+        is_new = (role, task_type) not in existing
+        if is_new:
+            register_learned_agent(
+                root,
+                agent_name=agent_name,
+                role=role,
+                task_type=task_type,
+                path=str(agent_path),
+                generated_from=latest_task,
+            )
+            result["generated"].append({"agent_name": agent_name, "role": role, "task_type": task_type})
+            log_event(root, "agent_generator_step", step="agent_generated", agent_name=agent_name, role=role, task_type=task_type, sample_count=count)
+        else:
+            result["refreshed"].append({"agent_name": agent_name, "role": role, "task_type": task_type, "sample_count": count})
+            log_event(root, "agent_generator_step", step="agent_refreshed", agent_name=agent_name, role=role, task_type=task_type, sample_count=count)
+
+    result["steps"].append({"step": "generate", "generated_count": len(result["generated"]), "refreshed_count": len(result["refreshed"])})
+    log_event(root, "agent_generator_auto", generated_count=len(result.get("generated", [])), refreshed_count=len(result.get("refreshed", [])), skipped_reasons=result.get("skipped_reasons", []), retrospective_count=len(retrospectives), steps=result["steps"])
     print(json.dumps(result, indent=2))
     return 0
 
