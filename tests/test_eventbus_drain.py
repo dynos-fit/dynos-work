@@ -197,3 +197,96 @@ class TestMultiTaskReceipts:
         call_dirs = [str(call.args[0]) for call in mock_receipt.call_args_list]
         assert str(task1) in call_dirs
         assert str(task2) in call_dirs
+
+
+class TestPostCompletionReceiptFidelity:
+    """Regression tests for the eventbus:295 bug where postmortem_written and
+    patterns_updated were derived from `calibration-completed` and
+    `memory-completed` summary buckets that no longer exist after the chain
+    was flattened to task-completed only. Both fields were silently False
+    even when the underlying handlers ran successfully.
+    """
+
+    def test_patterns_updated_true_when_policy_engine_succeeds(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("DYNOS_HOME", str(tmp_path))
+        root = _setup(tmp_path)
+        task = tmp_path / ".dynos" / "task-1"
+        task.mkdir(parents=True)
+        _emit(root, "task-completed", {"task_id": "task-1", "task_dir": str(task)})
+
+        handlers = _make_handlers({"policy_engine": True, "improve": True,
+                                    "dashboard": True, "register": True,
+                                    "agent_generator": True,
+                                    "benchmark_scheduler": True})
+        with mock.patch("eventbus.HANDLERS", handlers), \
+             mock.patch("lib_core.is_learning_enabled", return_value=True), \
+             mock.patch("eventbus.log_event"), \
+             mock.patch("lib_receipts.receipt_post_completion") as mock_receipt:
+            from eventbus import drain
+            drain(root, max_iterations=5)
+
+        assert mock_receipt.call_count == 1
+        kwargs = mock_receipt.call_args.kwargs
+        assert kwargs["patterns_updated"] is True, \
+            "patterns_updated should be True when policy_engine handler returns ok"
+
+    def test_patterns_updated_false_when_policy_engine_fails(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("DYNOS_HOME", str(tmp_path))
+        root = _setup(tmp_path)
+        task = tmp_path / ".dynos" / "task-1"
+        task.mkdir(parents=True)
+        _emit(root, "task-completed", {"task_id": "task-1", "task_dir": str(task)})
+
+        handlers = _make_handlers({"policy_engine": False, "improve": True,
+                                    "dashboard": True, "register": True,
+                                    "agent_generator": True,
+                                    "benchmark_scheduler": True})
+        with mock.patch("eventbus.HANDLERS", handlers), \
+             mock.patch("lib_core.is_learning_enabled", return_value=True), \
+             mock.patch("eventbus.log_event"), \
+             mock.patch("lib_receipts.receipt_post_completion") as mock_receipt:
+            from eventbus import drain
+            drain(root, max_iterations=5)
+
+        kwargs = mock_receipt.call_args.kwargs
+        assert kwargs["patterns_updated"] is False, \
+            "patterns_updated should be False when policy_engine returns failure"
+
+    def test_postmortem_written_reflects_disk_state_per_task(self, tmp_path: Path, monkeypatch):
+        """postmortem_written must check the persistent project dir per task,
+        since the postmortem now runs in the audit skill (not as an eventbus
+        handler) and writes per-task .json under postmortems/."""
+        monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
+        root = _setup(tmp_path)
+
+        task_with_pm = tmp_path / ".dynos" / "task-WITH"
+        task_without_pm = tmp_path / ".dynos" / "task-WITHOUT"
+        task_with_pm.mkdir(parents=True)
+        task_without_pm.mkdir(parents=True)
+
+        # Seed only one of the two tasks' postmortems on disk in the
+        # persistent project dir for `root`.
+        from lib_core import _persistent_project_dir
+        pm_dir = _persistent_project_dir(root) / "postmortems"
+        pm_dir.mkdir(parents=True, exist_ok=True)
+        (pm_dir / "task-WITH.json").write_text("{}")
+
+        _emit(root, "task-completed", {"task_id": "task-WITH", "task_dir": str(task_with_pm)})
+        _emit(root, "task-completed", {"task_id": "task-WITHOUT", "task_dir": str(task_without_pm)})
+
+        handlers = _make_handlers({})
+        with mock.patch("eventbus.HANDLERS", handlers), \
+             mock.patch("lib_core.is_learning_enabled", return_value=True), \
+             mock.patch("eventbus.log_event"), \
+             mock.patch("lib_receipts.receipt_post_completion") as mock_receipt:
+            from eventbus import drain
+            drain(root, max_iterations=5)
+
+        per_task = {
+            str(call.args[0]): call.kwargs["postmortem_written"]
+            for call in mock_receipt.call_args_list
+        }
+        assert per_task[str(task_with_pm)] is True, \
+            "task with on-disk postmortem must report postmortem_written=True"
+        assert per_task[str(task_without_pm)] is False, \
+            "task without on-disk postmortem must report postmortem_written=False"

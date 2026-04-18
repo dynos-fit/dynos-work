@@ -285,20 +285,36 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     # Cleanup old events
     cleanup_old_events(root)
 
-    # Write post-completion receipt for EACH completed task
+    # Write post-completion receipt for EACH completed task.
+    #
+    # The receipt records which handlers ran and whether two specific outcomes
+    # were achieved: the project's pattern store was updated, and a postmortem
+    # was written for this task. The previous derivation read these from
+    # `calibration-completed` and `memory-completed` summary buckets that no
+    # longer exist (the eventbus chain was flattened to task-completed only,
+    # and postmortem moved to the audit skill). The values were silently False.
+    #
+    # Current derivation:
+    # - patterns_updated: from policy_engine handler in the task-completed
+    #   bucket (the renamed equivalent of the old patterns handler).
+    # - postmortem_written: per-task disk check, since postmortem now runs in
+    #   the audit skill (Step 5a) and writes to the persistent project dir.
     if "task-completed" in summary and completed_task_dirs:
         handlers_run = []
         for evt_type, results in summary.items():
             for r in results:
                 name, status = r.split(":", 1)
                 handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
-        postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("calibration-completed", []))
-        patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("memory-completed", []))
+        patterns_ok = any(r.startswith("policy_engine:ok") for r in summary.get("task-completed", []))
+        from lib_core import _persistent_project_dir
+        postmortems_dir = _persistent_project_dir(root) / "postmortems"
         for td in completed_task_dirs:
             try:
                 from lib_receipts import receipt_post_completion
                 task_dir = Path(td)
                 if task_dir.exists():
+                    task_id = task_dir.name
+                    postmortem_ok = (postmortems_dir / f"{task_id}.json").exists()
                     receipt_post_completion(
                         task_dir,
                         handlers_run=handlers_run,
