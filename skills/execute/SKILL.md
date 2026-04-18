@@ -207,20 +207,13 @@ This proves the segment completed with the correct routing. The receipt is check
 
 After each batch (or cached resolution) completes, record events and verify:
 
-- **Token capture (executor spawn):** After each executor returns:
-  ```bash
-  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
-    --task-dir .dynos/task-{id} \
-    --agent "{executor_name}-{segment-id}" \
-    --model "{model_name}" \
-    --input-tokens {input_tokens} \
-    --output-tokens {output_tokens} \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type spawn \
-    --segment "{segment-id}" \
-    --detail "{what the executor implemented}"
-  ```
+- **Token capture (executor spawn):** automatic. The `SubagentStop` hook
+  (wired in `hooks.json`) parses the subagent's transcript and writes the
+  spawn record to the active task's `token-usage.json` via
+  `hooks/lib_tokens_hook.py`. Do NOT also emit a manual `--type spawn`
+  `lib_tokens.py record` call here — it would double-count the tokens.
+  (The `--type deterministic` records below are NOT covered by SubagentStop
+  and remain the orchestrator's responsibility.)
 - **Token capture (deterministic checks):** After file ownership and evidence verification:
   ```bash
   PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
