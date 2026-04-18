@@ -490,3 +490,255 @@ def test_policy_packet_curiosity_targets_default_empty(dynos_home) -> None:
 
     data = json.loads(packet_path.read_text())
     assert data["curiosity_targets"] == []
+
+
+# ---------------------------------------------------------------------------
+# TDD: shared RouterContext threading through planner.py
+# (task-20260417-015 — tests written BEFORE the refactor; must fail now.)
+# ---------------------------------------------------------------------------
+
+
+def _ensure_hooks_on_path() -> None:
+    """Ensure hooks/ is importable for direct module-level tests."""
+    import sys
+    hooks_dir = str(HOOKS)
+    if hooks_dir not in sys.path:
+        sys.path.insert(0, hooks_dir)
+
+
+def test_policy_packet_reuses_single_router_context(
+    dynos_home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_build_policy_packet must construct exactly one RouterContext and thread
+    it through every downstream resolve_* / build_audit_plan call, so that
+    project_policy(root) is executed exactly once per packet build.
+
+    Covers AC 5 (shared ctx) and AC 7 (cached reads not repeated).
+    """
+    _ensure_hooks_on_path()
+
+    root = dynos_home.root
+    task_id = "task-20260417-015-a"
+    _setup_project(root, task_id=task_id)
+
+    # Import after path insertion so router/planner are resolvable.
+    import router as router_mod  # type: ignore[import-not-found]
+    import planner as planner_mod  # type: ignore[import-not-found]
+
+    call_count = {"n": 0}
+    real_project_policy = router_mod.project_policy
+
+    def counting_project_policy(r):
+        call_count["n"] += 1
+        return real_project_policy(r)
+
+    # Patch the name that RouterContext.policy resolves at call time.
+    monkeypatch.setattr(router_mod, "project_policy", counting_project_policy)
+
+    packet = planner_mod._build_policy_packet(root, task_id)
+
+    # Basic sanity: output shape preserved.
+    assert isinstance(packet, dict)
+    assert packet.get("task_id") == task_id
+    assert "models" in packet
+    assert "route_decisions" in packet
+    assert "audit_plan" in packet
+
+    # The refactor's invariant: exactly one project_policy read per packet.
+    # Not 0 (ctx.policy must actually load), not 2+ (no redundant re-reads).
+    assert call_count["n"] == 1, (
+        f"project_policy should be invoked exactly once when a shared "
+        f"RouterContext is threaded through _build_policy_packet; "
+        f"got {call_count['n']} invocations. Each extra invocation "
+        f"indicates a resolve_* or build_audit_plan call that is missing "
+        f"the ctx= kwarg, forcing a fresh policy read."
+    )
+
+
+def test_planner_resolve_calls_thread_shared_ctx() -> None:
+    """Every resolve_model / resolve_skip / resolve_route call inside
+    _build_policy_packet and cmd_start_plan must pass ctx= as a keyword
+    argument. Enforced via AST inspection of hooks/planner.py source.
+
+    Covers AC 8.
+    """
+    import ast
+
+    source = PLANNER.read_text()
+    tree = ast.parse(source)
+
+    target_funcs = {"_build_policy_packet", "cmd_start_plan"}
+    resolve_names = {"resolve_model", "resolve_skip", "resolve_route"}
+
+    found_funcs: set[str] = set()
+    violations: list[str] = []
+    checked_calls = 0
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name not in target_funcs:
+            continue
+        found_funcs.add(node.name)
+
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+
+            # Resolve callee name for bare-name calls like resolve_model(...).
+            callee_name: str | None = None
+            if isinstance(child.func, ast.Name):
+                callee_name = child.func.id
+            elif isinstance(child.func, ast.Attribute):
+                callee_name = child.func.attr
+
+            if callee_name not in resolve_names:
+                continue
+
+            checked_calls += 1
+            kwarg_names = {kw.arg for kw in child.keywords if kw.arg is not None}
+            if "ctx" not in kwarg_names:
+                violations.append(
+                    f"{node.name}:{child.lineno} — "
+                    f"{callee_name}(...) missing ctx= kwarg; "
+                    f"saw keywords={sorted(kwarg_names)}"
+                )
+
+    # Sanity: both target functions must exist in the source being audited.
+    assert found_funcs == target_funcs, (
+        f"Expected to audit {target_funcs} in hooks/planner.py; "
+        f"only located {found_funcs}"
+    )
+    # Sanity: the audit must actually find resolve_* call sites — if not,
+    # something reshaped planner.py in an unexpected way and the test is
+    # silently passing on zero calls. Refuse to pass vacuously.
+    assert checked_calls > 0, (
+        "AST audit found zero resolve_model/resolve_skip/resolve_route calls "
+        "inside _build_policy_packet / cmd_start_plan — test would pass "
+        "vacuously. Inspect hooks/planner.py."
+    )
+    assert not violations, (
+        "Every resolve_model/resolve_skip/resolve_route call in "
+        "_build_policy_packet and cmd_start_plan must pass ctx= as a "
+        "keyword argument (AC 8). Violations:\n  - "
+        + "\n  - ".join(violations)
+    )
+
+
+def test_build_audit_plan_accepts_optional_ctx(dynos_home) -> None:
+    """build_audit_plan(root, task_type, domains, fast_track=False) must work
+    both without ctx (existing CLI/external callers) and with a caller-
+    supplied ctx=RouterContext(root) (new planner callsite).
+
+    Covers AC 2.
+    """
+    _ensure_hooks_on_path()
+
+    root = dynos_home.root
+    _setup_project(root, task_id="task-20260417-015-b")
+
+    import router as router_mod  # type: ignore[import-not-found]
+
+    # 1. No-ctx call — preserves current CLI/external contract.
+    plan_no_ctx = router_mod.build_audit_plan(
+        root, "feature", ["backend"], fast_track=False
+    )
+    assert isinstance(plan_no_ctx, dict)
+    assert "auditors" in plan_no_ctx, (
+        f"build_audit_plan(no-ctx) must return a dict with 'auditors' key; "
+        f"got keys={sorted(plan_no_ctx.keys())}"
+    )
+    assert isinstance(plan_no_ctx["auditors"], list)
+
+    # 2. With-ctx call — must accept the new keyword-only parameter.
+    ctx = router_mod.RouterContext(root)
+    try:
+        plan_with_ctx = router_mod.build_audit_plan(
+            root, "feature", ["backend"], fast_track=False, ctx=ctx
+        )
+    except TypeError as exc:
+        pytest.fail(
+            "build_audit_plan must accept ctx=RouterContext as a keyword "
+            f"argument (AC 2). Got TypeError: {exc}"
+        )
+
+    assert isinstance(plan_with_ctx, dict)
+    assert "auditors" in plan_with_ctx
+    assert isinstance(plan_with_ctx["auditors"], list)
+
+    # Same inputs, same observable shape: keys match.
+    assert set(plan_no_ctx.keys()) == set(plan_with_ctx.keys()), (
+        "With-ctx and without-ctx calls must return dicts with identical "
+        "top-level keys. No-ctx="
+        f"{sorted(plan_no_ctx.keys())} vs with-ctx="
+        f"{sorted(plan_with_ctx.keys())}"
+    )
+
+
+def test_build_executor_plan_accepts_optional_ctx(dynos_home) -> None:
+    """build_executor_plan(root, task_type, segments) must work both without
+    ctx and with a caller-supplied ctx=RouterContext(root).
+
+    Covers AC 3.
+    """
+    _ensure_hooks_on_path()
+
+    root = dynos_home.root
+    _setup_project(root, task_id="task-20260417-015-c")
+
+    import router as router_mod  # type: ignore[import-not-found]
+
+    segments = [
+        {
+            "id": "seg-1",
+            "executor": "backend-executor",
+            "description": "Build backend",
+            "files_expected": ["src/a.py"],
+            "depends_on": [],
+            "parallelizable": True,
+            "criteria_ids": [1],
+        }
+    ]
+
+    # 1. No-ctx call — preserves current CLI/external contract.
+    plan_no_ctx = router_mod.build_executor_plan(root, "feature", segments)
+    assert isinstance(plan_no_ctx, dict)
+    assert "segments" in plan_no_ctx, (
+        f"build_executor_plan(no-ctx) must return a dict with 'segments' "
+        f"key; got keys={sorted(plan_no_ctx.keys())}"
+    )
+    assert isinstance(plan_no_ctx["segments"], list)
+    assert len(plan_no_ctx["segments"]) == 1
+
+    # 2. With-ctx call — must accept the new keyword-only parameter.
+    ctx = router_mod.RouterContext(root)
+    try:
+        plan_with_ctx = router_mod.build_executor_plan(
+            root, "feature", segments, ctx=ctx
+        )
+    except TypeError as exc:
+        pytest.fail(
+            "build_executor_plan must accept ctx=RouterContext as a keyword "
+            f"argument (AC 3). Got TypeError: {exc}"
+        )
+
+    assert isinstance(plan_with_ctx, dict)
+    assert "segments" in plan_with_ctx
+    assert isinstance(plan_with_ctx["segments"], list)
+    assert len(plan_with_ctx["segments"]) == 1
+
+    # Same inputs, same observable shape: keys match.
+    assert set(plan_no_ctx.keys()) == set(plan_with_ctx.keys()), (
+        "With-ctx and without-ctx calls must return dicts with identical "
+        "top-level keys. No-ctx="
+        f"{sorted(plan_no_ctx.keys())} vs with-ctx="
+        f"{sorted(plan_with_ctx.keys())}"
+    )
+    # Segment-level shape must also match (same executor, same keys).
+    no_ctx_seg_keys = set(plan_no_ctx["segments"][0].keys())
+    with_ctx_seg_keys = set(plan_with_ctx["segments"][0].keys())
+    assert no_ctx_seg_keys == with_ctx_seg_keys, (
+        f"Per-segment dict shape must be identical regardless of ctx. "
+        f"No-ctx={sorted(no_ctx_seg_keys)} vs "
+        f"with-ctx={sorted(with_ctx_seg_keys)}"
+    )
