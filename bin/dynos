@@ -12,6 +12,7 @@
 
 set -euo pipefail
 HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
+MEMORY_DIR="$(cd "$(dirname "$0")/../memory" && pwd)"
 export PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}"
 
 usage() {
@@ -259,7 +260,7 @@ print('no')
   patterns)   exec python3 "${HOOKS_DIR}/patterns.py" "$@" ;;
   ctl)        exec python3 "${HOOKS_DIR}/ctl.py" "$@" ;;
   postmortem) exec python3 "${HOOKS_DIR}/postmortem.py" "$@" ;;
-  calibration|evolve) exec python3 "${HOOKS_DIR}/calibrate.py" "$@" ;;
+  calibration|evolve) exec python3 "${MEMORY_DIR}/agent_generator.py" "$@" ;;
   memory)     exec python3 "${HOOKS_DIR}/patterns.py" "$@" ;;
   trajectory) exec python3 "${HOOKS_DIR}/trajectory.py" "$@" ;;
   bench)      exec python3 "${HOOKS_DIR}/bench.py" "$@" ;;

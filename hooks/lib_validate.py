@@ -222,11 +222,22 @@ _PLAN_REQUIRED_AFTER = {"PLANNING", "PLAN_REVIEW", "PLAN_AUDIT", "EXECUTION_GRAP
                          "REPAIR_EXECUTION", "DONE"}
 
 
-def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
+def validate_task_artifacts(
+    task_dir: Path,
+    strict: bool = False,
+    *,
+    run_gap: bool = True,
+) -> list[str]:
     """Validate all task artifacts in a task directory.
 
     Stage-aware: only checks artifacts that should exist at the current stage.
     At FOUNDRY_INITIALIZED, only manifest is required.
+
+    The plan gap analysis (`run_gap_analysis`) is the heaviest part of this
+    function — it walks up to 2000 source files in the repo. Callers that
+    have already validated the same plan (e.g., execute preflight after
+    planning ran gap analysis successfully) can pass `run_gap=False` to skip
+    it. The default stays True so existing callers see no behavior change.
     """
     errors: list[str] = []
     manifest_path = task_dir / "manifest.json"
@@ -275,8 +286,11 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
         domains = classification.get("domains", [])
         risk_level = classification.get("risk_level", "medium")
         all_required = REQUIRED_PLAN_HEADINGS + conditional_plan_headings(domains, risk_level)
+        # Hoisted out of the inner loop — collect_headings is a regex scan
+        # over plan_text and was being re-executed on every required heading.
+        plan_headings = collect_headings(plan_text)
         for heading in all_required:
-            if heading not in collect_headings(plan_text):
+            if heading not in plan_headings:
                 errors.append(f"plan missing heading: {heading}")
         in_ref_section = False
         for line in plan_text.splitlines():
@@ -293,11 +307,14 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
                 if not full.exists():
                     errors.append(f"plan Reference Code path does not exist: {ref_path}")
 
-        # Gap analysis: verify API Contracts / Data Model claims against code
-        from plan_gap_analysis import findings_from_report, run_gap_analysis
-        project_root = task_dir.parent.parent
-        gap_report = run_gap_analysis(project_root, task_dir)
-        errors.extend(findings_from_report(gap_report))
+        # Gap analysis: verify API Contracts / Data Model claims against code.
+        # Skipped when caller passes run_gap=False (e.g., execute preflight
+        # after planning has already validated the same plan).
+        if run_gap:
+            from plan_gap_analysis import findings_from_report, run_gap_analysis
+            project_root = task_dir.parent.parent
+            gap_report = run_gap_analysis(project_root, task_dir)
+            errors.extend(findings_from_report(gap_report))
     elif strict or stage in _PLAN_REQUIRED_AFTER:
         if not plan_path.exists():
             errors.append(f"missing required file: {plan_path}")

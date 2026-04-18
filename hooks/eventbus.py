@@ -32,7 +32,30 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Handler functions
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list[str], root: Path) -> bool:
+# Per-handler timeout budget (seconds). The blanket 300s value covered every
+# handler regardless of expected runtime, so a hung lightweight handler could
+# block the drain for 5 minutes before a TimeoutExpired surfaced.
+#
+# Budget rationale (informed by drain telemetry — see _drain_locked's
+# summary["_durations"] aggregate):
+# - register / dashboard: pure file I/O, p99 well under 5s; tight cap
+# - policy_engine: reads retrospectives, computes EMA scores; ~30s headroom
+# - improve / agent_generator / postmortem: scan retrospectives + write artifacts;
+#   medium-weight learning passes
+# - DEFAULT: applied to handlers not explicitly classified
+_HANDLER_TIMEOUTS: dict[str, int] = {
+    "register": 15,
+    "dashboard": 30,
+    "policy_engine": 60,
+    "postmortem": 60,
+    "improve": 90,
+    "agent_generator": 90,
+    "benchmark_scheduler": 120,
+}
+_DEFAULT_HANDLER_TIMEOUT = 60
+
+
+def _run(cmd: list[str], root: Path, timeout: int = _DEFAULT_HANDLER_TIMEOUT) -> bool:
     """Run a subprocess. Returns True on success, False on failure.
 
     Non-zero exit: raise RuntimeError with stderr snippet so the drain loop
@@ -48,7 +71,7 @@ def _run(cmd: list[str], root: Path) -> bool:
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
         raise RuntimeError(f"{cmd[0]}: {e}") from e
@@ -63,6 +86,7 @@ def run_policy_engine(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "patterns.py"), "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["policy_engine"],
     )
 
 
@@ -71,14 +95,34 @@ def run_postmortem(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "postmortem.py"), "generate", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["postmortem"],
     )
 
 
+_DASHBOARD_DEBOUNCE_SECONDS = 30
+
+
 def run_dashboard(root: Path, _payload: dict) -> bool:
-    """Refresh live dashboard artifacts."""
+    """Refresh live dashboard artifacts.
+
+    Debounced: dashboard freshness within ~30s is indistinguishable to a
+    human refreshing the page. Bursty completions (e.g., a batch of
+    related tasks finishing back-to-back) used to regenerate the
+    dashboard once per task — pure waste. Skip if the output file was
+    modified within _DASHBOARD_DEBOUNCE_SECONDS.
+    """
+    data_path = root / ".dynos" / "dashboard-data.json"
+    if data_path.exists():
+        try:
+            age = time.time() - data_path.stat().st_mtime
+            if age < _DASHBOARD_DEBOUNCE_SECONDS:
+                return True  # Skip — recent enough
+        except OSError:
+            pass
     return _run(
         ["python3", str(SCRIPT_DIR / "dashboard.py"), "generate", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["dashboard"],
     )
 
 
@@ -87,14 +131,35 @@ def run_register(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "registry.py"), "set-active", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["register"],
     )
 
 
-def run_improve(root: Path, _payload: dict) -> bool:
-    """Run the auto-improvement engine on postmortem data."""
+def run_improve(root: Path, payload: dict) -> bool:
+    """Run the auto-improvement engine on postmortem data.
+
+    Payload-aware skip: the improvement engine derives prevention rules
+    from finding categories and repair patterns. A task with zero findings
+    AND zero repair cycles offers no signal to learn from; skip the
+    subprocess spawn entirely. Saves ~50-300ms of Python interpreter
+    startup + import on the common clean-task path.
+    """
+    task_dir_str = (payload or {}).get("task_dir") if isinstance(payload, dict) else None
+    if task_dir_str:
+        try:
+            from lib_core import load_json
+            retro = load_json(Path(task_dir_str) / "task-retrospective.json")
+            findings_total = sum(retro.get("findings_by_auditor", {}).values())
+            if findings_total == 0 and retro.get("repair_cycle_count", 0) == 0:
+                return True  # Nothing to learn from
+        except (FileNotFoundError, OSError, Exception):
+            # Any error — fall through to the actual handler. Better to
+            # spend the 300ms than silently skip improvement.
+            pass
     return _run(
         ["python3", str(SCRIPT_DIR / "postmortem_improve.py"), "improve", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["improve"],
     )
 
 
@@ -103,6 +168,7 @@ def run_agent_generator(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "agent_generator.py"), "auto", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["agent_generator"],
     )
 
 
@@ -173,11 +239,52 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     """Process all pending events until the queue is drained.
 
     Returns a summary dict of what ran.
+
+    Concurrency: protected by an exclusive fcntl lock on
+    .dynos/events/drain.lock. If another drain process holds the lock,
+    this call exits immediately with summary {"skipped": ["lock held"]}.
+    The running drain will pick up any events emitted before this call
+    on its next iteration. This prevents the duplicate-handler-invocation
+    race introduced when _fire_task_completed() became async — without
+    the lock, two near-simultaneous DONE transitions would spawn two
+    parallel drain processes, both consume_events() the same unprocessed
+    event, both invoke the handler, then both mark_processed (which is
+    idempotent on the field but the handler still ran twice).
     """
+    import fcntl
+
+    lock_dir = root / ".dynos" / "events"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "drain.lock"
+    lock_fh = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_fh.close()
+            return {"skipped": ["another drain is already running; new events will be picked up on its next iteration"]}
+        return _drain_locked(root, max_iterations)
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except (OSError, ValueError):
+            pass
+        try:
+            lock_fh.close()
+        except OSError:
+            pass
+
+
+def _drain_locked(root: Path, max_iterations: int) -> dict:
+    """Drain implementation; runs only when the drain.lock is held."""
     summary: dict[str, list[str]] = {}
     iteration = 0
     emitted_follow_ons: set[str] = set()  # track across ALL iterations to prevent duplicates
     completed_task_dirs: list[str] = []  # ALL task dirs from task-completed events
+    # Per-handler duration tracking for telemetry (#M3): each entry is a list
+    # of seconds across every invocation in this drain. Aggregated into
+    # summary["_durations"] before return.
+    handler_durations: dict[str, list[float]] = {}
 
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
@@ -192,6 +299,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     while iteration < max_iterations:
         iteration += 1
         processed_any = False
+        emitted_count_at_iter_start = len(emitted_follow_ons)
         # Track per-event-type: whether ALL handlers succeeded across ALL events
         # Uses AND semantics: any failure for a consumer sticks (later success doesn't override)
         handler_all_ok: dict[str, dict[str, bool]] = {}  # {event_type: {consumer: all_succeeded}}
@@ -240,6 +348,8 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                             err_msg = str(e)
                             print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
                             success = False
+                        duration = round(time.monotonic() - t0, 3)
+                        handler_durations.setdefault(consumer_name, []).append(duration)
 
                         log_event(
                             root,
@@ -247,7 +357,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                             handler=consumer_name,
                             trigger_event=event_type,
                             success=success,
-                            duration_s=round(time.monotonic() - t0, 3),
+                            duration_s=duration,
                             error=err_msg if not success else None,
                         )
 
@@ -281,6 +391,36 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
 
         if not processed_any:
             break
+        # M1: short-circuit further iterations when no new events were
+        # emitted during this iteration. Iteration N processes existing
+        # events; iteration N+1 only matters if N emitted follow-on events
+        # for N+1 to consume. With FOLLOW_ON currently empty, the second
+        # iteration is pure overhead — N globs + N event reads to confirm
+        # there's nothing left. Break out as soon as the iteration was a
+        # no-op for the future.
+        if len(emitted_follow_ons) == emitted_count_at_iter_start:
+            break
+
+    # M3: aggregate per-handler durations so callers can see actual cost
+    # without scraping events.jsonl. Lightweight stats (count/min/median/max)
+    # — full distribution lives in the per-handler log_event records.
+    if handler_durations:
+        durations_summary: dict[str, dict[str, float | int]] = {}
+        for handler, samples in handler_durations.items():
+            samples_sorted = sorted(samples)
+            mid = len(samples_sorted) // 2
+            median = (
+                samples_sorted[mid] if len(samples_sorted) % 2
+                else (samples_sorted[mid - 1] + samples_sorted[mid]) / 2
+            )
+            durations_summary[handler] = {
+                "count": len(samples),
+                "min_s": round(samples_sorted[0], 3),
+                "median_s": round(median, 3),
+                "max_s": round(samples_sorted[-1], 3),
+                "total_s": round(sum(samples), 3),
+            }
+        summary["_durations"] = durations_summary  # type: ignore[assignment]
 
     # Cleanup old events
     cleanup_old_events(root)
@@ -302,6 +442,9 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     if "task-completed" in summary and completed_task_dirs:
         handlers_run = []
         for evt_type, results in summary.items():
+            if evt_type.startswith("_"):
+                # Reserved keys for non-event metadata (e.g. _durations).
+                continue
             for r in results:
                 name, status = r.split(":", 1)
                 handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})

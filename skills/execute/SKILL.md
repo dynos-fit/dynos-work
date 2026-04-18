@@ -52,13 +52,11 @@ Append to log:
 3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
 4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
 5. Log the routing decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
-6. **Transition the manifest stage `PRE_EXECUTION_SNAPSHOT → EXECUTION`** (mandatory — without this the Step 4 transition to `TEST_EXECUTION` is illegal per `ALLOWED_STAGE_TRANSITIONS`):
+6. **Transition the manifest stage `PRE_EXECUTION_SNAPSHOT → EXECUTION`** (mandatory — without this the Step 4 transition to `TEST_EXECUTION` is illegal per `ALLOWED_STAGE_TRANSITIONS`). `transition_task` auto-appends the `[STAGE] → EXECUTION` log line; do not write it manually:
 
 ```text
 python3 hooks/ctl.py transition .dynos/task-{id} EXECUTION
 ```
-
-   Append `{timestamp} [STAGE] → EXECUTION` to the log.
 
 Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
 
@@ -68,21 +66,21 @@ Skipping the router in inline mode silently ignores learned agents and breaks th
 
 **Normal execution (fast_track is false or >1 segment):**
 
-Update `manifest.json` stage to `EXECUTION`. If available in this repo, use:
+Update `manifest.json` stage to `EXECUTION` (transition_task auto-appends the `[STAGE] → EXECUTION` log line):
 
 ```text
 python3 hooks/ctl.py transition .dynos/task-{id} EXECUTION
 ```
 
-Append to log:
-```
-{timestamp} [STAGE] → EXECUTION
-```
+Read `execution-graph.json`. Before spawning any executor, perform deterministic preflight validation. The validator supports two flags that prevent redundant work:
 
-Read `execution-graph.json`. Before spawning any executor, perform deterministic preflight validation. If available in this repo, run:
+- `--use-receipt` short-circuits the entire validation when the `plan-validated` receipt's captured artifact hashes (spec.md, plan.md, execution-graph.json) match the current files. Planning already validated these exact artifacts; if nothing has drifted, redoing the work is pure waste.
+- `--no-gap` keeps the cheap structural checks but skips `plan_gap_analysis` (an unbounded repo walk).
+
+Default: pass `--use-receipt` first; the validator falls through to a full check if the receipt is stale.
 
 ```text
-python3 hooks/validate_task_artifacts.py .dynos/task-{id}
+python3 hooks/validate_task_artifacts.py .dynos/task-{id} --use-receipt
 ```
 
 Then enforce the following checks:
@@ -209,20 +207,13 @@ This proves the segment completed with the correct routing. The receipt is check
 
 After each batch (or cached resolution) completes, record events and verify:
 
-- **Token capture (executor spawn):** After each executor returns:
-  ```bash
-  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
-    --task-dir .dynos/task-{id} \
-    --agent "{executor_name}-{segment-id}" \
-    --model "{model_name}" \
-    --input-tokens {input_tokens} \
-    --output-tokens {output_tokens} \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type spawn \
-    --segment "{segment-id}" \
-    --detail "{what the executor implemented}"
-  ```
+- **Token capture (executor spawn):** automatic. The `SubagentStop` hook
+  (wired in `hooks.json`) parses the subagent's transcript and writes the
+  spawn record to the active task's `token-usage.json` via
+  `hooks/lib_tokens_hook.py`. Do NOT also emit a manual `--type spawn`
+  `lib_tokens.py record` call here — it would double-count the tokens.
+  (The `--type deterministic` records below are NOT covered by SubagentStop
+  and remain the orchestrator's responsibility.)
 - **Token capture (deterministic checks):** After file ownership and evidence verification:
   ```bash
   PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
@@ -282,15 +273,10 @@ Append to log:
 
 ### Step 4 — Run tests
 
-Update `manifest.json` stage to `TEST_EXECUTION`. If available in this repo, use:
+Update `manifest.json` stage to `TEST_EXECUTION` (transition_task auto-appends the `[STAGE] → TEST_EXECUTION` log line):
 
 ```text
 python3 hooks/ctl.py transition .dynos/task-{id} TEST_EXECUTION
-```
-
-Append to log:
-```
-{timestamp} [STAGE] → TEST_EXECUTION
 ```
 
 Read `plan.md` Test Strategy. Run the specified tests. Use incremental testing if the framework supports it (e.g. `jest --onlyChanged`).

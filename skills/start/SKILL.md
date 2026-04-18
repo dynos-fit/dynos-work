@@ -306,11 +306,7 @@ python3 hooks/ctl.py transition .dynos/task-{id} PLANNING
 
 ## Step 5 — Generate Plan + Execution Graph
 
-Append to the execution log:
-
-```text
-{timestamp} [STAGE] → PLANNING
-```
+(`transition_task` auto-appends the `[STAGE] → PLANNING` log line; do not write it manually.)
 
 Choose planning mode deterministically:
 - Use hierarchical planning if `risk_level` is `high` or `critical`, or if `spec.md` contains more than 10 acceptance criteria.
@@ -376,11 +372,10 @@ receipt_plan_validated(
 )
 ```
 
-Append to the execution log:
+Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
 
 ```text
 {timestamp} [DONE] planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})
-{timestamp} [STAGE] → PLAN_REVIEW
 ```
 
 Update `manifest.json` stage to `PLAN_REVIEW`. If available in this repo, use:

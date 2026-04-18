@@ -7,12 +7,25 @@ The next step refuses to proceed unless the prior receipt exists.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from lib_core import now_iso, append_execution_log
 from lib_log import log_event
+
+
+def hash_file(path: Path) -> str:
+    """Return sha256 hex digest of a file's contents.
+
+    Raises FileNotFoundError if path does not exist.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 __all__ = [
     "write_receipt",
@@ -21,6 +34,7 @@ __all__ = [
     "require_receipts",
     "validate_chain",
     "hash_file",
+    "plan_validated_receipt_matches",
     "receipt_plan_routing",
     "receipt_spec_validated",
     "receipt_plan_validated",
@@ -256,20 +270,61 @@ def receipt_plan_routing(
     )
 
 
+def _hash_artifact(path: Path) -> str | None:
+    """Return sha256 hex of file content, or None if the file is missing."""
+    try:
+        return hash_file(path)
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def receipt_plan_validated(
     task_dir: Path,
     segment_count: int,
     criteria_coverage: list[int],
     validation_passed: bool = True,
 ) -> Path:
-    """Write receipt proving plan + execution graph passed validation."""
+    """Write receipt proving plan + execution graph passed validation.
+
+    Captures content hashes of spec.md, plan.md, and execution-graph.json
+    so downstream consumers (e.g. execute preflight) can short-circuit
+    re-validation when none of the artifacts have changed since the
+    receipt was written.
+    """
+    artifact_hashes = {
+        "spec.md": _hash_artifact(task_dir / "spec.md"),
+        "plan.md": _hash_artifact(task_dir / "plan.md"),
+        "execution-graph.json": _hash_artifact(task_dir / "execution-graph.json"),
+    }
     return write_receipt(
         task_dir,
         "plan-validated",
         segment_count=segment_count,
         criteria_coverage=criteria_coverage,
         validation_passed=validation_passed,
+        artifact_hashes=artifact_hashes,
     )
+
+
+def plan_validated_receipt_matches(task_dir: Path) -> bool:
+    """Return True if a plan-validated receipt exists AND its captured
+    artifact hashes match the current spec.md, plan.md, and
+    execution-graph.json content. Callers (e.g. execute preflight) can
+    use this to skip a full re-validation when nothing has drifted.
+    """
+    receipt = read_receipt(task_dir, "plan-validated")
+    if receipt is None or not receipt.get("validation_passed", False):
+        return False
+    captured = receipt.get("artifact_hashes")
+    if not isinstance(captured, dict):
+        # Old receipts written before hashes existed — treat as drift,
+        # forcing re-validation. Safer than assuming they match.
+        return False
+    for name in ("spec.md", "plan.md", "execution-graph.json"):
+        current = _hash_artifact(task_dir / name)
+        if current != captured.get(name):
+            return False
+    return True
 
 
 def receipt_executor_routing(

@@ -36,9 +36,8 @@ Update `manifest.json` stage to `PLANNING`. If available in this repo, use:
 python3 hooks/ctl.py transition .dynos/task-{id} PLANNING
 ```
 
-Append to execution log:
+Append to execution log (transition_task already auto-logged the `[STAGE] → PLANNING` line; only emit the `[SPAWN]` line):
 ```
-{timestamp} [STAGE] → PLANNING
 {timestamp} [SPAWN] planning — generate implementation plan
 ```
 
@@ -50,10 +49,9 @@ Wait for completion. Run deterministic artifact validation before human review. 
 python3 hooks/ctl.py validate-task .dynos/task-{id} --strict
 ```
 
-Append to log:
+Append to log (transition_task will auto-log the `[STAGE] → PLAN_REVIEW` line on the transition call below; only emit the `[DONE]` line):
 ```
 {timestamp} [DONE] planning — plan.md written
-{timestamp} [STAGE] → PLAN_REVIEW
 ```
 
 Update `manifest.json` stage to `PLAN_REVIEW`. If available in this repo, use:
@@ -87,9 +85,8 @@ Update `manifest.json` stage to `PLAN_AUDIT`. If available in this repo, use:
 python3 hooks/ctl.py transition .dynos/task-{id} PLAN_AUDIT
 ```
 
-Append to log:
+Append to log (transition_task already auto-logged the `[STAGE] → PLAN_AUDIT` line; only emit the `[SPAWN]` line):
 ```
-{timestamp} [STAGE] → PLAN_AUDIT
 {timestamp} [SPAWN] spec-completion-auditor — verify plan covers all acceptance criteria
 ```
 

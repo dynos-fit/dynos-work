@@ -10,19 +10,21 @@ Calibrates the system's agents to your project. Generates project-specific speci
 If available in this repo, the deterministic runtime for registry, routing, promotion, and automatic challenger execution is:
 
 ```text
-python3 hooks/calibrate.py init-registry --root .
-python3 hooks/calibrate.py register-agent <agent_name> <role> <task_type> <path> <generated_from> --root .
+python3 memory/agent_generator.py init-registry --root .
+python3 memory/agent_generator.py register-agent <agent_name> <role> <task_type> <path> <generated_from> --root .
+python3 memory/agent_generator.py auto --root .
 python3 hooks/eval.py evaluate candidate.json baseline.json
 python3 hooks/eval.py promote <agent_name> <role> <task_type> candidate.json baseline.json --root .
 python3 hooks/bench.py run benchmarks/fixtures/<fixture>.json --root . --update-registry
 python3 hooks/rollout.py benchmarks/fixtures/<rollout-fixture>.json --root . --update-registry
 python3 hooks/route.py <role> <task_type> --root .
 python3 hooks/fixture.py sync --root .
-python3 hooks/generate.py <agent_name> <role> <task_type> <output_path> <generated_from> --root .
 python3 hooks/report.py --root .
 python3 hooks/auto.py sync --root .
 python3 hooks/auto.py run --root .
 ```
+
+Note: the older `hooks/calibrate.py` and `hooks/generate.py` wrappers were removed in commit `ae237ec`; their functionality lives in `memory/agent_generator.py` (which exposes `auto`, `init-registry`, and `register-agent` subcommands directly). The `dynos calibration` and `dynos evolve` shell aliases route to it via `bin/dynos`.
 
 ## What you do
 
