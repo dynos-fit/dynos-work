@@ -22,6 +22,7 @@ from lib_core import (
     write_json,
 )
 from router import (
+    RouterContext,
     build_audit_plan,
     load_prevention_rules,
     resolve_model,
@@ -181,16 +182,21 @@ def _build_policy_packet(root: Path, task_id: str) -> dict:
     similar = _find_similar_trajectories(task_type, domains, risk_level, root)
     hints = _trajectory_adjustments(similar)
 
+    # Single RouterContext shared across every resolve_* / build_audit_plan
+    # call below — eliminates ~20 redundant reads of policy, retrospectives,
+    # effectiveness scores, registry, and benchmark history per packet build.
+    ctx = RouterContext(root)
+
     # Model decisions
     models: dict[str, dict] = {}
     for role in _KEY_ROLES:
-        decision = resolve_model(root, role, task_type)
+        decision = resolve_model(root, role, task_type, ctx=ctx)
         models[role] = {"model": decision.get("model"), "source": decision.get("source", "default")}
 
     # Skip decisions
     skip_decisions: dict[str, dict] = {}
     for auditor in _AUDITORS:
-        decision = resolve_skip(root, auditor, task_type)
+        decision = resolve_skip(root, auditor, task_type, ctx=ctx)
         skip_decisions[auditor] = {
             "skip": decision.get("skip", False),
             "reason": decision.get("reason", ""),
@@ -206,7 +212,7 @@ def _build_policy_packet(root: Path, task_id: str) -> dict:
         if not role:
             continue
         key = f"{role}:{task_type}"
-        decision = resolve_route(root, role, task_type)
+        decision = resolve_route(root, role, task_type, ctx=ctx)
         route_decisions[key] = {
             "mode": decision.get("mode", "generic"),
             "agent_path": decision.get("agent_path"),
@@ -214,7 +220,7 @@ def _build_policy_packet(root: Path, task_id: str) -> dict:
         }
 
     # Audit plan
-    audit_plan = build_audit_plan(root, task_type, domains, fast_track=fast_track)
+    audit_plan = build_audit_plan(root, task_type, domains, fast_track=fast_track, ctx=ctx)
 
     # Prevention rules
     prevention_rules = load_prevention_rules(root)
@@ -288,8 +294,13 @@ def cmd_start_plan(args: argparse.Namespace) -> int:
     # Planning mode
     planning = _resolve_planning_mode(risk_level)
 
+    # Shared RouterContext (consistency with _build_policy_packet; a single
+    # resolve_model call here gets no perf win but keeps the threading pattern
+    # uniform across every planner.py callsite).
+    ctx = RouterContext(root)
+
     # Planner model
-    planner_model_decision = resolve_model(root, "planner", task_type)
+    planner_model_decision = resolve_model(root, "planner", task_type, ctx=ctx)
     planner_model = planner_model_decision.get("model")
 
     # Discovery skip: true if well-scoped (low risk, single domain, not full-stack)

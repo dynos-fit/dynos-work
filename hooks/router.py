@@ -755,14 +755,26 @@ def _load_ensemble_config(config: dict) -> tuple[set[str], list[str], str]:
     return auditors, models, escalation
 
 
-def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track: bool = False) -> dict:
+def build_audit_plan(
+    root: Path,
+    task_type: str,
+    domains: list[str],
+    fast_track: bool = False,
+    *,
+    ctx: RouterContext | None = None,
+) -> dict:
     """Build a complete, deterministic audit spawn plan.
 
     Reads .dynos/config/auditors.json for the auditor registry and
     .dynos/config/policy.json for ensemble voting config. Falls back
     to hardcoded defaults when config files are missing.
+
+    When *ctx* is provided, its cached reads (policy, retrospectives,
+    registry, effectiveness scores, benchmark history) are reused.
+    When *ctx* is None, a fresh RouterContext is constructed locally
+    so external callers keep working unchanged.
     """
-    ctx = RouterContext(root)
+    ctx = ctx or RouterContext(root)
     registry = _load_auditor_registry(root)
 
     # Load user config from .dynos/config/policy.json
@@ -842,12 +854,22 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
     return plan
 
 
-def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dict:
+def build_executor_plan(
+    root: Path,
+    task_type: str,
+    segments: list[dict],
+    *,
+    ctx: RouterContext | None = None,
+) -> dict:
     """Build a complete, deterministic execution spawn plan.
 
     Returns structured decisions for each segment's executor.
+
+    When *ctx* is provided, its cached reads are reused. When *ctx* is None,
+    a fresh RouterContext is constructed locally so external callers keep
+    working unchanged.
     """
-    ctx = RouterContext(root)
+    ctx = ctx or RouterContext(root)
     all_rules = load_prevention_rules(root)
     plan = {
         "generated_at": now_iso(),
