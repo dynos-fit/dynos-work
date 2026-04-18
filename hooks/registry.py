@@ -9,10 +9,20 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from lib_core import load_json, now_iso, write_json
+
+
+class RegistryCorruptError(RuntimeError):
+    """Raised when the on-disk registry fails its checksum and cannot be quarantined.
+
+    The caller should treat this as a hard refusal to operate — propagating it
+    is preferable to silently overwriting the corrupt file with an empty one
+    and wiping every registered project on the next mutation.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -113,11 +123,33 @@ def load_registry() -> dict:
     stored = reg.get("checksum", "")
     expected = _compute_checksum(reg)
     if stored != expected:
+        # The previous behavior was to silently return _empty_registry(), which
+        # let the next register_project() call overwrite the on-disk file with
+        # a single-entry registry — wiping every other registered project.
+        # Quarantine the corrupt file (preserving its data for recovery) before
+        # returning the empty registry. If quarantine fails, refuse the load
+        # entirely rather than risk losing the corrupt copy too.
+        quarantine = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+        try:
+            path.rename(quarantine)
+        except OSError as exc:
+            log_global(
+                f"registry checksum mismatch: stored={stored[:12]}... "
+                f"expected={expected[:12]}... — quarantine to {quarantine.name} "
+                f"failed ({exc}); refusing to operate"
+            )
+            raise RegistryCorruptError(
+                f"registry at {path} failed checksum and could not be "
+                f"quarantined ({exc}); refusing to mutate"
+            ) from exc
         log_global(
             f"registry checksum mismatch: stored={stored[:12]}... "
-            f"expected={expected[:12]}... — refusing to operate on corrupted registry"
+            f"expected={expected[:12]}... — quarantined to {quarantine.name}; "
+            f"continuing with empty registry (run inspect on quarantine to recover)"
         )
-        return _empty_registry()
+        reg = _empty_registry()
+        reg["checksum"] = _compute_checksum(reg)
+        return reg
     return reg
 
 
