@@ -173,7 +173,44 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     """Process all pending events until the queue is drained.
 
     Returns a summary dict of what ran.
+
+    Concurrency: protected by an exclusive fcntl lock on
+    .dynos/events/drain.lock. If another drain process holds the lock,
+    this call exits immediately with summary {"skipped": ["lock held"]}.
+    The running drain will pick up any events emitted before this call
+    on its next iteration. This prevents the duplicate-handler-invocation
+    race introduced when _fire_task_completed() became async — without
+    the lock, two near-simultaneous DONE transitions would spawn two
+    parallel drain processes, both consume_events() the same unprocessed
+    event, both invoke the handler, then both mark_processed (which is
+    idempotent on the field but the handler still ran twice).
     """
+    import fcntl
+
+    lock_dir = root / ".dynos" / "events"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "drain.lock"
+    lock_fh = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_fh.close()
+            return {"skipped": ["another drain is already running; new events will be picked up on its next iteration"]}
+        return _drain_locked(root, max_iterations)
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except (OSError, ValueError):
+            pass
+        try:
+            lock_fh.close()
+        except OSError:
+            pass
+
+
+def _drain_locked(root: Path, max_iterations: int) -> dict:
+    """Drain implementation; runs only when the drain.lock is held."""
     summary: dict[str, list[str]] = {}
     iteration = 0
     emitted_follow_ons: set[str] = set()  # track across ALL iterations to prevent duplicates
