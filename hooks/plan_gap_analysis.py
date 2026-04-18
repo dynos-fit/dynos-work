@@ -160,6 +160,71 @@ def _iter_code_files(root: Path, extensions: set[str], limit: int = 2000) -> lis
     return files
 
 
+def _extract_plan_paths(plan_text: str) -> set[str]:
+    """Extract repo-relative file paths and directories named in the plan's
+    Reference Code and Components/Modules sections.
+
+    Used to narrow gap-analysis scans before falling back to the full repo
+    walk. Pulls anything that looks like a file path inside backticks
+    (`some/path.py`, `dir/`, etc.) from the relevant sections.
+    """
+    paths: set[str] = set()
+    for section_name in ("Reference Code", "Components / Modules", "Data Model"):
+        section = extract_section(plan_text, section_name)
+        if not section:
+            continue
+        # Pull anything in backticks that contains a slash or has a known code extension.
+        for match in re.finditer(r"`([^`\n]+)`", section):
+            candidate = match.group(1).strip()
+            # Filter to plausible paths: must contain a slash or a code extension
+            if not ("/" in candidate or any(candidate.endswith(ext) for ext in _CODE_EXTENSIONS)):
+                continue
+            # Reject path traversal BEFORE any stripping (a leading "../"
+            # must not be silently stripped to "etc/passwd").
+            parts = candidate.split("/")
+            if any(p == ".." for p in parts):
+                continue
+            # Strip exactly one leading "./" if present, plus trailing slash.
+            if candidate.startswith("./"):
+                candidate = candidate[2:]
+            candidate = candidate.rstrip("/")
+            if candidate:
+                paths.add(candidate)
+    return paths
+
+
+def _iter_plan_implied_files(
+    root: Path, plan_paths: set[str], extensions: set[str]
+) -> list[Path]:
+    """Resolve the plan-implied paths against the repo, expanding directories.
+
+    For each plan-mentioned path:
+    - if it's a file with a matching extension, include it.
+    - if it's a directory, walk its contents (depth-1 by default — most plans
+      reference modules, not deep trees).
+    """
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for rel in plan_paths:
+        target = (root / rel).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            continue  # outside repo
+        if target.is_file() and target.suffix in extensions:
+            if target not in seen:
+                seen.add(target)
+                files.append(target)
+        elif target.is_dir():
+            for f in target.rglob("*"):
+                if any(d in f.parts for d in _SKIP_DIRS):
+                    continue
+                if f.suffix in extensions and f.is_file() and f not in seen:
+                    seen.add(f)
+                    files.append(f)
+    return files
+
+
 def _read_safe(path: Path) -> str:
     """Read file, ignoring encoding errors."""
     try:
@@ -213,20 +278,55 @@ def analyze_api_contracts(plan_text: str, root: Path) -> dict[str, Any]:
     if not claimed:
         return {"skipped": True, "reason": "no endpoints found in API Contracts table"}
 
-    # Scan codebase for actual route definitions
-    code_files = _iter_code_files(root, _CODE_EXTENSIONS)
-    found_routes: set[str] = set()
+    # Two-pass scan: try plan-implied paths first (cheap), fall back to the
+    # full repo walk only if at least one claim was unmatched. The full-scan
+    # behavior is preserved as a strict superset — same correctness, less
+    # work in the common case.
+    plan_paths = _extract_plan_paths(plan_text)
 
-    for fpath in code_files:
-        content = _read_safe(fpath)
-        if not content:
-            continue
-        for pattern, _ in _ROUTE_PATTERNS:
-            for match in pattern.finditer(content):
-                # Extract the path from whichever group has it
-                for g in match.groups():
-                    if g and g.startswith("/"):
-                        found_routes.add(_normalize_path(g))
+    def _scan_files(files: list[Path]) -> set[str]:
+        found: set[str] = set()
+        for fpath in files:
+            content = _read_safe(fpath)
+            if not content:
+                continue
+            for pattern, _ in _ROUTE_PATTERNS:
+                for match in pattern.finditer(content):
+                    for g in match.groups():
+                        if g and g.startswith("/"):
+                            found.add(_normalize_path(g))
+        return found
+
+    found_routes: set[str] = set()
+    narrow_files: list[Path] = []
+    if plan_paths:
+        narrow_files = _iter_plan_implied_files(root, plan_paths, _CODE_EXTENSIONS)
+        found_routes = _scan_files(narrow_files)
+
+    def _all_claims_matched(claimed_list: list[dict[str, str]], routes: set[str]) -> bool:
+        for c in claimed_list:
+            norm = _normalize_path(c["endpoint"])
+            norm_parts = [p for p in norm.split("/") if p]
+            matched = False
+            for fr in routes:
+                if norm == fr:
+                    matched = True
+                    break
+                fr_parts = [p for p in fr.split("/") if p]
+                if len(norm_parts) == len(fr_parts) and all(
+                    np == fp or np == ":param" or fp == ":param"
+                    for np, fp in zip(norm_parts, fr_parts)
+                ):
+                    matched = True
+                    break
+            if not matched:
+                return False
+        return True
+
+    if not narrow_files or not _all_claims_matched(claimed, found_routes):
+        # Fall back to full repo scan
+        code_files = _iter_code_files(root, _CODE_EXTENSIONS)
+        found_routes = _scan_files(code_files)
 
     # Cross-reference — match by path segments, not string prefix
     claimed_not_found: list[dict[str, str]] = []
@@ -289,19 +389,34 @@ def analyze_data_model(plan_text: str, root: Path) -> dict[str, Any]:
     if not claimed_tables:
         return {"skipped": True, "reason": "no tables found in Data Model table"}
 
-    # Scan for actual model/schema definitions
-    all_files = _iter_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
-    found_models: set[str] = set()
+    # Two-pass scan: plan-implied paths first, full repo only on fallback.
+    plan_paths = _extract_plan_paths(plan_text)
 
-    for fpath in all_files:
-        content = _read_safe(fpath)
-        if not content:
-            continue
-        for pattern, _ in _MODEL_PATTERNS:
-            for match in pattern.finditer(content):
-                name = match.group(1)
-                if name:
-                    found_models.add(name.lower())
+    def _scan_files(files: list[Path]) -> set[str]:
+        found: set[str] = set()
+        for fpath in files:
+            content = _read_safe(fpath)
+            if not content:
+                continue
+            for pattern, _ in _MODEL_PATTERNS:
+                for match in pattern.finditer(content):
+                    name = match.group(1)
+                    if name:
+                        found.add(name.lower())
+        return found
+
+    found_models: set[str] = set()
+    narrow_files: list[Path] = []
+    if plan_paths:
+        narrow_files = _iter_plan_implied_files(
+            root, plan_paths, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS
+        )
+        found_models = _scan_files(narrow_files)
+
+    if not narrow_files or not claimed_tables.issubset(found_models):
+        # Fall back to full repo scan
+        all_files = _iter_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
+        found_models = _scan_files(all_files)
 
     # Cross-reference
     verified = claimed_tables & found_models
