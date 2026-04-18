@@ -48,7 +48,7 @@ def _run(cmd: list[str], root: Path) -> bool:
             env=env,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=300,
         )
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
         raise RuntimeError(f"{cmd[0]}: {e}") from e
