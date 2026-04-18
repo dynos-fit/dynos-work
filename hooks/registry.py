@@ -24,29 +24,49 @@ _VALID_STATUSES = {"active", "paused", "archived"}
 _GLOBAL_DIRS = ("registry", "patterns", "policy", "logs", "projects")
 
 
-def _global_home() -> Path:
+def global_home() -> Path:
     env = os.environ.get("DYNOS_HOME")
     if env:
         return Path(env).expanduser().resolve()
     return Path.home() / ".dynos"
 
 
-def _ensure_global_dirs() -> None:
-    home = _global_home()
+def ensure_global_dirs() -> None:
+    home = global_home()
     for name in _GLOBAL_DIRS:
         (home / name).mkdir(parents=True, exist_ok=True)
 
 
 def _registry_path() -> Path:
-    return _global_home() / "registry.json"
+    return global_home() / "registry.json"
 
 
 def _logs_dir() -> Path:
-    return _global_home() / "logs"
+    return global_home() / "logs"
+
+
+def sweeps_log_path() -> Path:
+    return global_home() / "sweeps.jsonl"
+
+
+def current_daemon_pid() -> int | None:
+    """Return the PID of the global daemon if running, else None."""
+    pid_file = global_home() / "daemon.pid"
+    if not pid_file.exists():
+        return None
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return pid
 
 
 def log_global(message: str) -> None:
-    _ensure_global_dirs()
+    ensure_global_dirs()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     log_file = _logs_dir() / f"{today}.log"
     line = f"[{now_iso()}] {message}\n"
@@ -73,7 +93,7 @@ def _empty_registry() -> dict:
 
 
 def load_registry() -> dict:
-    _ensure_global_dirs()
+    ensure_global_dirs()
     path = _registry_path()
     if not path.exists():
         reg = _empty_registry()
@@ -102,7 +122,7 @@ def load_registry() -> dict:
 
 
 def save_registry(data: dict) -> None:
-    _ensure_global_dirs()
+    ensure_global_dirs()
     data["version"] = data.get("version", 0) + 1
     data["checksum"] = _compute_checksum(data)
     write_json(_registry_path(), data)

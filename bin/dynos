@@ -27,8 +27,7 @@ Project commands:
   autofix       Autofix scanner (status, scan, list, clear)
 
 Global commands:
-  global        Cross-project sweeper: start, stop, status, logs, run-once
-  dashboard     Global dashboard: serve, stop, restart
+  dashboard     Global dashboard: generate, serve, kill, restart
   list          List all registered projects
   remove        Unregister a project (default: current dir)
   pause         Pause maintenance for a project
@@ -151,7 +150,7 @@ print(len([f for f in findings if f.get('status') != 'suppressed']))
         projects=$(python3 -c "
 import sys, json
 sys.path.insert(0, '${HOOKS_DIR}')
-from sweeper import load_registry
+from registry import load_registry
 reg = load_registry()
 for p in reg.get('projects', []):
     if p.get('status') == 'active':
@@ -174,7 +173,7 @@ for p in reg.get('projects', []):
         is_registered=$(python3 -c "
 import sys, json
 sys.path.insert(0, '${HOOKS_DIR}')
-from sweeper import load_registry
+from registry import load_registry
 reg = load_registry()
 for p in reg.get('projects', []):
     if p['path'] == '$resolved':
@@ -194,7 +193,6 @@ print('no')
     ;;
 
   # --- Global commands ---
-  global) exec python3 "${HOOKS_DIR}/sweeper.py" "$@" ;;
   registry) exec python3 "${HOOKS_DIR}/registry.py" "$@" ;;
   list) exec python3 "${HOOKS_DIR}/registry.py" list "$@" ;;
   remove)
@@ -243,15 +241,15 @@ print('no')
   dashboard)
     # Default to serve if no subcommand given
     if [ $# -eq 0 ]; then
-      exec python3 "${HOOKS_DIR}/sweeper.py" dashboard serve
+      exec python3 "${HOOKS_DIR}/global_dashboard.py" serve
     fi
     subcmd="$1"
     case "$subcmd" in
-      serve)   shift; exec python3 "${HOOKS_DIR}/sweeper.py" dashboard serve "$@" ;;
-      stop)    exec python3 "${HOOKS_DIR}/sweeper.py" dashboard kill ;;
-      restart) shift; exec python3 "${HOOKS_DIR}/sweeper.py" dashboard restart "$@" ;;
-      generate) shift; exec python3 "${HOOKS_DIR}/sweeper.py" dashboard generate "$@" ;;
-      *)       exec python3 "${HOOKS_DIR}/sweeper.py" dashboard "$subcmd" "$@" ;;
+      serve)    shift; exec python3 "${HOOKS_DIR}/global_dashboard.py" serve "$@" ;;
+      stop|kill) exec python3 "${HOOKS_DIR}/global_dashboard.py" kill ;;
+      restart)  shift; exec python3 "${HOOKS_DIR}/global_dashboard.py" restart "$@" ;;
+      generate) shift; exec python3 "${HOOKS_DIR}/global_dashboard.py" generate "$@" ;;
+      *)        exec python3 "${HOOKS_DIR}/global_dashboard.py" "$subcmd" "$@" ;;
     esac
     ;;
 

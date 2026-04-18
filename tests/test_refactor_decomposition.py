@@ -594,7 +594,6 @@ class TestBinDynosUnchanged:
         "ctl",
         "postmortem",
         "registry",
-        "global",
         "calibration",
         "evolve",
         "memory",
@@ -630,7 +629,7 @@ class TestBinDynosUnchanged:
             "patterns": "patterns.py",
             "ctl": "ctl.py",
             "postmortem": "postmortem.py",
-            "global": "sweeper.py",
+            "dashboard": "global_dashboard.py",
             "maintain": "daemon.py",
         }
         for subcmd, hook_file in expected_routes.items():

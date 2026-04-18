@@ -13,7 +13,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from dashboard import build_dashboard_payload
-from sweeper import (
+from registry import (
     current_daemon_pid,
     load_registry,
     log_global,
@@ -2022,7 +2022,7 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
 
 def write_global_dashboard(payload: dict) -> dict:
     """Render HTML from template, validate, write files. Return result with paths."""
-    from sweeper import global_home, ensure_global_dirs
+    from registry import global_home, ensure_global_dirs
     ensure_global_dirs()
 
     home = global_home()
@@ -2103,7 +2103,7 @@ def cmd_dashboard(args: object) -> int:
 
 def _dashboard_pid_path() -> Path:
     """Path to the dashboard server PID file."""
-    from sweeper import global_home
+    from registry import global_home
     return global_home() / "dashboard.pid"
 
 
@@ -2138,7 +2138,7 @@ def cmd_serve(args: object) -> int:
 
     write_global_dashboard(payload)
 
-    from sweeper import global_home
+    from registry import global_home
     serve_dir = str(global_home())
     handler_cls = _make_restricted_handler(serve_dir)
 
@@ -2213,3 +2213,36 @@ def cmd_restart(args: object) -> int:
             pass
     time.sleep(0.5)
     return cmd_serve(args)
+
+
+# ---------------------------------------------------------------------------
+# CLI parser
+# ---------------------------------------------------------------------------
+
+def build_parser() -> "argparse.ArgumentParser":
+    import argparse
+    parser = argparse.ArgumentParser(description="Global dashboard CLI for dynos-work")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    generate_p = sub.add_parser("generate", help="Build global dashboard HTML + JSON")
+    generate_p.set_defaults(func=cmd_dashboard)
+
+    serve_p = sub.add_parser("serve", help="Generate and serve dashboard over HTTP")
+    serve_p.add_argument("--port", type=int, default=8766, help="HTTP port (default: 8766)")
+    serve_p.set_defaults(func=cmd_serve)
+
+    kill_p = sub.add_parser("kill", help="Stop the running dashboard server")
+    kill_p.set_defaults(func=cmd_kill)
+
+    restart_p = sub.add_parser("restart", help="Restart the dashboard server")
+    restart_p.add_argument("--port", type=int, default=8766, help="HTTP port (default: 8766)")
+    restart_p.set_defaults(func=cmd_restart)
+
+    # "dashboard" is a prefix some callers use before the actual subcommand;
+    # accept it as an alias that dispatches to the named subcommand.
+    return parser
+
+
+if __name__ == "__main__":
+    from cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))
