@@ -8,6 +8,8 @@ import json
 import os
 import signal
 import sys
+import threading
+import time
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2011,6 +2013,61 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
       document.body.classList.add('loaded');
     }})();
   </script>
+  <script>
+    /* Live-update poller: refetch data JSON every 5s and re-render data-bearing
+       sections in place. Plain ES2017; no libraries. Graceful degradation: if
+       JS is disabled or fetch fails, the server-rendered snapshot remains.
+       Wrapped in try/catch so a render error keeps the prior good DOM. */
+    (function () {{
+      const POLL_INTERVAL_MS = 5000;
+      const ENDPOINT = '/global-dashboard-data.json';
+
+      function fmtCount(v) {{ return (v == null) ? '—' : String(v); }}
+
+      function renderUpdated(data) {{
+        const el = document.getElementById('updated');
+        if (el && data && data.generated_at) {{
+          el.textContent = data.generated_at;
+        }}
+      }}
+
+      function renderStats(data) {{
+        const el = document.getElementById('stats');
+        if (!el || !data) return;
+        const agg = data.aggregates || {{}};
+        const parts = [
+          'tasks: ' + fmtCount(agg.total_tasks),
+          'avg_quality: ' + fmtCount(agg.avg_quality),
+          'learned routes: ' + fmtCount(agg.total_learned_routes),
+          'active: ' + fmtCount(agg.active_count),
+          'benchmarks: ' + fmtCount(agg.total_benchmark_runs),
+          'findings: ' + fmtCount(agg.total_findings),
+          'cost USD: ' + fmtCount(agg.total_autofix_cost_usd),
+        ];
+        el.textContent = parts.join('  •  ');
+      }}
+
+      async function refresh() {{
+        try {{
+          const r = await fetch(ENDPOINT, {{ cache: 'no-store' }});
+          if (!r.ok) return;
+          const data = await r.json();
+          renderUpdated(data);
+          renderStats(data);
+        }} catch (err) {{
+          /* Network blip or render error — keep the existing DOM. */
+          if (window && window.console) console.warn('dashboard refresh failed', err);
+        }}
+      }}
+
+      /* Kick off polling once the DOM is ready. */
+      if (document.readyState === 'loading') {{
+        document.addEventListener('DOMContentLoaded', () => setInterval(refresh, POLL_INTERVAL_MS));
+      }} else {{
+        setInterval(refresh, POLL_INTERVAL_MS);
+      }}
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -2066,6 +2123,60 @@ def write_global_dashboard(payload: dict) -> dict:
 
 _ALLOWED_SERVE_FILES = {"global-dashboard.html", "global-dashboard-data.json"}
 
+# --- Live-update throttle ---
+# The dashboard regenerates its payload on each fetch of the data JSON,
+# capped at one ATTEMPT per _REGEN_TTL_SECONDS. The lock makes it safe
+# under ThreadingHTTPServer (concurrent requests). The mutable list
+# wrapper lets the inner handler update the timestamp without a `global`
+# declaration.
+#
+# Two timestamps for two purposes:
+# - _LAST_REGEN_ATTEMPT_AT bounds CPU. Advanced UNCONDITIONALLY whether
+#   the regen succeeded or failed. This prevents a DoS amplifier where a
+#   persistent registry-walk failure would otherwise let every concurrent
+#   request pay the full failing cost, since the prior "don't advance on
+#   failure" policy effectively disabled the throttle in exactly the
+#   failure mode the throttle is meant to defend against.
+# - _LAST_SUCCESS_AT records when a fresh artifact was last produced.
+#   Currently informational; future code (e.g., a "stale data" warning
+#   in the served HTML) can read it.
+#
+# write_json (lib_core) is atomic (tempfile + os.rename + fsync), so a
+# concurrent reader cannot observe a torn file even mid-regen.
+_REGEN_TTL_SECONDS = 2.0
+_LAST_REGEN_ATTEMPT_AT = [0.0]
+_LAST_SUCCESS_AT = [0.0]
+_REGEN_LOCK = threading.Lock()
+_DATA_FILES = {"global-dashboard-data.json"}
+
+
+def _maybe_regen() -> None:
+    """Regenerate the global dashboard JSON+HTML if the throttle TTL has
+    elapsed since the last regen ATTEMPT. Safe to call from concurrent
+    request threads — the lock serializes the check-and-regen window.
+    Failures are swallowed (logged to stderr); the prior on-disk
+    snapshot remains served as a fallback so a transient registry read
+    failure does not break the live page. The throttle still advances
+    on failure so that DoS protection is preserved."""
+    now = time.time()
+    if (now - _LAST_REGEN_ATTEMPT_AT[0]) < _REGEN_TTL_SECONDS:
+        return
+    with _REGEN_LOCK:
+        # Re-check inside the lock — another thread may have just regen'd.
+        now = time.time()
+        if (now - _LAST_REGEN_ATTEMPT_AT[0]) < _REGEN_TTL_SECONDS:
+            return
+        # Advance the attempt timestamp BEFORE the work so subsequent
+        # concurrent requests see the throttle even if this attempt
+        # raises midway. This is the load-bearing DoS protection.
+        _LAST_REGEN_ATTEMPT_AT[0] = now
+        try:
+            payload = build_global_payload()
+            write_global_dashboard(payload)
+            _LAST_SUCCESS_AT[0] = now
+        except Exception as exc:
+            print(f"[dashboard] regen failed: {exc}", file=sys.stderr)
+
 
 def _make_restricted_handler(serve_dir: str) -> type:
     """Create a handler class bound to a specific directory."""
@@ -2079,6 +2190,11 @@ def _make_restricted_handler(serve_dir: str) -> type:
             if path not in _ALLOWED_SERVE_FILES:
                 self.send_error(HTTPStatus.FORBIDDEN, "Access denied")
                 return
+            # Throttled regen on data-JSON fetch so the polling page sees fresh
+            # data without restarting the server. Regen for HTML too so the
+            # initial load also reflects current state.
+            if path in _DATA_FILES or path == "global-dashboard.html":
+                _maybe_regen()
             super().do_GET()
 
         def log_message(self, format: str, *args: object) -> None:
