@@ -15,7 +15,9 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent)); _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hooks"))
 
 import argparse
+import fcntl
 import json
+import os
 from pathlib import Path
 
 from lib_core import (
@@ -481,37 +483,56 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
         return {"task_id": task_id, "rules_added": 0, "analysis_written": True}
 
     rules_path = persistent / "prevention-rules.json"
-    existing: dict = {}
-    try:
-        existing = load_json(rules_path)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        existing = {}
-
-    current_rules = existing.get("rules", [])
-    existing_rule_texts = {r.get("rule", "").lower() for r in current_rules}
-
+    # Lost-update protection: two processes (e.g., two worktrees, or one
+    # task completing while another is mid-analysis) can both call
+    # apply_analysis concurrently. write_json is atomic (tempfile + rename)
+    # so neither reader observes a torn file, but without this lock the
+    # read-modify-write window can drop rules — reader A and reader B both
+    # see the same pre-merge state, each appends its rules, and the later
+    # writer overwrites the earlier one with only its own additions.
+    #
+    # fcntl.LOCK_EX on the rules file (or a sibling .lock if the file
+    # doesn't exist yet) serializes the RMW. Unix-only; dynos is
+    # Unix-only throughout.
+    persistent.mkdir(parents=True, exist_ok=True)
+    lock_path = rules_path.with_suffix(rules_path.suffix + ".lock")
     added = 0
-    for rule in new_rules:
-        if not isinstance(rule, dict):
-            continue
-        text = rule.get("rule", "").strip()
-        if not text or text.lower() in existing_rule_texts:
-            continue
-        current_rules.append({
-            "executor": rule.get("executor", "all"),
-            "category": rule.get("category", "unknown"),
-            "rule": text,
-            "source_task": task_id,
-            "source_finding": rule.get("source_finding", ""),
-            "rationale": rule.get("rationale", ""),
-            "enforcement": rule.get("enforcement", "prompt-constraint"),
-            "added_at": now_iso(),
-        })
-        existing_rule_texts.add(text.lower())
-        added += 1
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_fd, "w") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            existing: dict = {}
+            try:
+                existing = load_json(rules_path)
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                existing = {}
 
-    if added:
-        write_json(rules_path, {"rules": current_rules, "updated_at": now_iso()})
+            current_rules = existing.get("rules", [])
+            existing_rule_texts = {r.get("rule", "").lower() for r in current_rules}
+
+            for rule in new_rules:
+                if not isinstance(rule, dict):
+                    continue
+                text = rule.get("rule", "").strip()
+                if not text or text.lower() in existing_rule_texts:
+                    continue
+                current_rules.append({
+                    "executor": rule.get("executor", "all"),
+                    "category": rule.get("category", "unknown"),
+                    "rule": text,
+                    "source_task": task_id,
+                    "source_finding": rule.get("source_finding", ""),
+                    "rationale": rule.get("rationale", ""),
+                    "enforcement": rule.get("enforcement", "prompt-constraint"),
+                    "added_at": now_iso(),
+                })
+                existing_rule_texts.add(text.lower())
+                added += 1
+
+            if added:
+                write_json(rules_path, {"rules": current_rules, "updated_at": now_iso()})
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
     return {"task_id": task_id, "rules_added": added, "analysis_written": True}
 

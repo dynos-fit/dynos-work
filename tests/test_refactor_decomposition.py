@@ -608,6 +608,10 @@ class TestBinDynosUnchanged:
         "remove",
         "pause",
         "resume",
+        "autofix",
+        "proactive",
+        "daemon",
+        "worktree",
     ]
 
     def test_bin_dynos_exists(self) -> None:

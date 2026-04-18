@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -166,16 +168,78 @@ def require(path: Path) -> str:
 # Persistent project directory
 # ---------------------------------------------------------------------------
 
+@functools.lru_cache(maxsize=256)
+def _resolve_git_toplevel(root_str: str) -> Optional[str]:
+    """Return the absolute path of the main working tree if `root_str` is
+    inside a git repository — otherwise None.
+
+    For git worktrees, `git rev-parse --show-toplevel` returns the WORKTREE's
+    toplevel (not the main repo). That's the wrong target for us; we want all
+    worktrees to fold back to ONE canonical slug. We get that by asking for
+    `--git-common-dir` (the `.git/` directory shared across worktrees) and
+    taking its parent: the path that directory lives in is the main working
+    tree.
+
+    Cached per-process on the input string so repeated _persistent_project_dir
+    calls don't re-shell-out. The cache key is the raw input path (not the
+    resolved toplevel) because different input paths can legitimately map to
+    different toplevels if the process crosses repo boundaries.
+
+    Returns None on any of: git not installed, path not inside a repo,
+    git command returns non-zero, output is empty. Callers fall back to the
+    legacy slug-from-absolute-path behavior.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", root_str, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    common_dir = result.stdout.strip()
+    if not common_dir:
+        return None
+    # --git-common-dir returns a path that may be relative to root_str.
+    # Resolve it to absolute, then take its parent (the main working tree).
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        common_path = (Path(root_str) / common_path).resolve()
+    else:
+        common_path = common_path.resolve()
+    # Bare repos (no working tree) return `.git` or the repo root itself as
+    # --git-common-dir. If we're in a bare repo there's no "main working
+    # tree" to canonicalize to; fall back.
+    if common_path.name != ".git":
+        return None
+    main_worktree = common_path.parent
+    return str(main_worktree)
+
+
 def _persistent_project_dir(root: Path) -> Path:
     """Returns ~/.dynos/projects/{slug}/ for persistent project state.
 
     Pure path resolution — NO side effects. Does NOT create directories.
     Callers that need the directory to exist should call
     ensure_persistent_project_dir() instead.
+
+    Slug derivation:
+    - If `root` is inside a git repository, the slug is derived from the MAIN
+      working tree (via `git rev-parse --git-common-dir`). All git worktrees
+      for the same repo therefore share one persistent dir with main —
+      learning state doesn't fragment per-branch.
+    - Otherwise (not a git repo, git not installed, bare repo) the slug is
+      derived from `str(root.resolve())` as it was historically.
     """
-    resolved = str(root.resolve())
     dynos_home = Path(os.environ.get("DYNOS_HOME", str(Path.home() / ".dynos")))
-    slug = resolved.strip("/").replace("/", "-")
+    resolved_str = str(root.resolve())
+    canonical = _resolve_git_toplevel(resolved_str)
+    base = canonical if canonical is not None else resolved_str
+    slug = base.strip("/").replace("/", "-")
     return dynos_home / "projects" / slug
 
 

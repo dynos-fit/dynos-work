@@ -4,6 +4,8 @@
 from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent)); _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent.parent / "hooks"))
 
+import fcntl
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -56,40 +58,57 @@ def register_learned_agent(
     source: str = "learned",
     item_kind: str = "agent",
 ) -> dict:
-    """Register a new learned agent in the registry."""
-    registry = ensure_learned_registry(root)
-    agents = registry.setdefault("agents", [])
-    existing = next(
-        (
-            agent
-            for agent in agents
-            if agent.get("agent_name") == agent_name
-            and agent.get("role") == role
-            and agent.get("task_type") == task_type
-            and agent.get("item_kind", "agent") == item_kind
-        ),
-        None,
-    )
-    record = {
-        "item_kind": item_kind,
-        "agent_name": agent_name,
-        "role": role,
-        "task_type": task_type,
-        "source": source,
-        "path": path,
-        "generated_from": generated_from,
-        "generated_at": now_iso(),
-        "mode": "shadow",
-        "status": "active",
-        "benchmark_summary": dict(_EMPTY_BENCHMARK_SUMMARY),
-    }
-    if existing:
-        existing.update(record)
-    else:
-        agents.append(record)
-    registry["updated_at"] = now_iso()
-    write_json(learned_registry_path(root), registry)
-    return registry
+    """Register a new learned agent in the registry.
+
+    Serialized with fcntl.LOCK_EX to prevent lost updates when two concurrent
+    processes register different agents at the same instant (e.g. two task
+    completions for different shadow agents firing agent_generator in
+    parallel drains). Without the lock, both readers see the same pre-merge
+    registry, each appends its entry, and the later writer's atomic write
+    loses the first writer's entry.
+    """
+    reg_path = learned_registry_path(root)
+    reg_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = reg_path.with_suffix(reg_path.suffix + ".lock")
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock_fd, "w") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            registry = ensure_learned_registry(root)
+            agents = registry.setdefault("agents", [])
+            existing = next(
+                (
+                    agent
+                    for agent in agents
+                    if agent.get("agent_name") == agent_name
+                    and agent.get("role") == role
+                    and agent.get("task_type") == task_type
+                    and agent.get("item_kind", "agent") == item_kind
+                ),
+                None,
+            )
+            record = {
+                "item_kind": item_kind,
+                "agent_name": agent_name,
+                "role": role,
+                "task_type": task_type,
+                "source": source,
+                "path": path,
+                "generated_from": generated_from,
+                "generated_at": now_iso(),
+                "mode": "shadow",
+                "status": "active",
+                "benchmark_summary": dict(_EMPTY_BENCHMARK_SUMMARY),
+            }
+            if existing:
+                existing.update(record)
+            else:
+                agents.append(record)
+            registry["updated_at"] = now_iso()
+            write_json(reg_path, registry)
+            return registry
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
 def apply_evaluation_to_registry(
