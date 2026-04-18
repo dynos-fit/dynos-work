@@ -19,20 +19,57 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from lib_tokens import record_tokens
 
 
+# Default window for treating a task as "actively receiving work."
+# A task whose manifest hasn't been touched in this many seconds is considered
+# stalled and will NOT be auto-attributed for SubagentStop tokens. Configurable
+# via DYNOS_TASK_ATTRIBUTION_WINDOW_SECONDS for very long-running stages.
+_DEFAULT_ATTRIBUTION_WINDOW_SECONDS = 3600  # 1 hour
+
+
+def _attribution_window_seconds() -> float:
+    """Return the active-task freshness window from env or default."""
+    raw = os.environ.get("DYNOS_TASK_ATTRIBUTION_WINDOW_SECONDS")
+    if raw:
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            pass
+    return float(_DEFAULT_ATTRIBUTION_WINDOW_SECONDS)
+
+
 def _find_active_task(root: Path) -> Path | None:
-    """Find the most recent active task directory."""
+    """Find the active task that should receive SubagentStop token attribution.
+
+    Selection rules (in order):
+    1. Skip tasks whose manifest is in a terminal stage (DONE, FAILED, CANCELLED).
+    2. Among the remaining, pick the task whose manifest.json was most
+       recently modified. Manifest mtime is the right signal because
+       transition_task() rewrites the manifest atomically on every stage
+       advance — so an actively-progressing task always has a fresh mtime.
+    3. If even the freshest manifest is older than the attribution window
+       (default 1h, override via DYNOS_TASK_ATTRIBUTION_WINDOW_SECONDS),
+       return None. The previous behavior of returning the most-recent
+       non-terminal task by lexicographic ID would silently mis-attribute
+       every subsequent unrelated subagent (including manual
+       /dynos-work:investigate runs) to a stalled task whose manifest had
+       not advanced in hours — inflating its token-usage.json with
+       phantom costs and bleeding post-completion log entries from
+       unrelated tasks into its execution-log.md.
+    """
     dynos = root / ".dynos"
     if not dynos.exists():
         return None
 
-    candidates = []
+    candidates: list[tuple[float, Path]] = []
     for td in dynos.iterdir():
         if not td.is_dir() or not re.match(r"task-\d{8}-\d{3}$", td.name):
             continue
@@ -42,17 +79,23 @@ def _find_active_task(root: Path) -> Path | None:
         try:
             manifest = json.loads(manifest_path.read_text())
             stage = manifest.get("stage", "")
-            if stage not in ("DONE", "FAILED"):
-                candidates.append((td.name, td, stage))
+            if stage in ("DONE", "FAILED", "CANCELLED"):
+                continue
+            mtime = manifest_path.stat().st_mtime
+            candidates.append((mtime, td))
         except (json.JSONDecodeError, OSError):
             continue
 
     if not candidates:
         return None
 
-    # Return the most recent by task ID (lexicographic sort)
+    # Most recently touched manifest wins (not most recent task ID).
     candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
+    newest_mtime, newest_dir = candidates[0]
+    age_seconds = time.time() - newest_mtime
+    if age_seconds > _attribution_window_seconds():
+        return None  # All active tasks are stale; refuse attribution.
+    return newest_dir
 
 
 def _parse_transcript(transcript_path: Path) -> dict:
@@ -149,6 +192,47 @@ def _detect_segment(agent_type: str, agent_desc: str) -> str | None:
     return None
 
 
+def _record_orphan_tokens(
+    root: Path,
+    *,
+    agent_name: str,
+    agent_desc: str,
+    result: dict,
+    transcript_path: Path,
+    reason: str,
+) -> None:
+    """Append a token record to .dynos/orphan-tokens.jsonl when no fresh
+    active task is available for attribution.
+
+    This is the safety net for the freshness gate in _find_active_task:
+    instead of silently dropping legitimate token usage from long-running
+    subagents (or subagents that finished after a long manual pause), the
+    record is preserved in a visible orphan ledger. Operators can
+    reconcile manually, and a future improvement could attribute orphans
+    back to the right task by matching agent_id / transcript_path.
+    """
+    orphan_dir = root / ".dynos"
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    orphan_path = orphan_dir / "orphan-tokens.jsonl"
+    record = {
+        "recorded_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "agent": agent_name,
+        "agent_desc": agent_desc[:200] if agent_desc else "",
+        "model": result.get("model", "unknown"),
+        "input_tokens": result.get("input_tokens", 0),
+        "output_tokens": result.get("output_tokens", 0),
+        "agent_id": result.get("agent_id", ""),
+        "transcript_path": str(transcript_path),
+        "reason": reason,
+    }
+    try:
+        with open(orphan_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        # Last resort: don't crash the SubagentStop hook if disk write fails.
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record subagent token usage")
     parser.add_argument("--transcript", required=True, help="Path to subagent transcript JSONL")
@@ -163,9 +247,26 @@ def main() -> int:
     if not transcript_path.exists():
         return 0
 
-    # Find active task
+    # Build agent name from type (used in both happy path and orphan path)
+    agent_name = args.agent_type
+    if agent_name.startswith("dynos-work:"):
+        agent_name = agent_name[len("dynos-work:"):]
+
+    # Find active task. If no fresh non-terminal task exists, the tokens
+    # would otherwise be silently dropped — record to orphan-tokens.jsonl
+    # so the data is preserved for reconciliation.
     task_dir = _find_active_task(root)
     if task_dir is None:
+        result = _parse_transcript(transcript_path)
+        if result["input_tokens"] > 0 or result["output_tokens"] > 0:
+            _record_orphan_tokens(
+                root,
+                agent_name=agent_name,
+                agent_desc=args.agent_desc,
+                result=result,
+                transcript_path=transcript_path,
+                reason="no fresh active task at SubagentStop time",
+            )
         return 0
 
     # Parse transcript
@@ -174,12 +275,6 @@ def main() -> int:
     # Skip if no tokens recorded (empty transcript)
     if result["input_tokens"] == 0 and result["output_tokens"] == 0:
         return 0
-
-    # Build agent name from type
-    agent_name = args.agent_type
-    # Strip "dynos-work:" prefix for cleaner names
-    if agent_name.startswith("dynos-work:"):
-        agent_name = agent_name[len("dynos-work:"):]
 
     # Detect phase, stage, segment
     phase, stage = _detect_phase_and_stage(args.agent_type, task_dir)

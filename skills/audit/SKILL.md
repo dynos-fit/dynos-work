@@ -78,9 +78,8 @@ If `"ensemble": false`, spawn normally with the single model from the plan.
 
 **Alongside mode deduplication:** When generic and learned auditors both produce findings for the same role, deduplicate by key `{file}:{line}:{category}`. Count duplicates once, preferring the learned version. The deduplicated set feeds into repair and retrospective counts. Track whether learned findings are a superset of generic findings (for promotion decisions by the learn step).
 
-Append to log:
+Append to log (transition_task already auto-logged the `[STAGE] → CHECKPOINT_AUDIT` line; only emit the `[SPAWN]` line):
 ```
-{timestamp} [STAGE] → CHECKPOINT_AUDIT
 {timestamp} [SPAWN] {N} auditors in parallel ({list of names})
 ```
 
@@ -156,12 +155,11 @@ This step runs only when blocking findings exist. It uses a two-phase model: pha
 
 Collect all blocking findings available at the time of the eager trigger (Step 3). These are the phase 1 findings.
 
-Update stage to `REPAIR_PLANNING`. Append to log:
+Update stage to `REPAIR_PLANNING` (transition_task auto-appends the `[STAGE] → REPAIR_PLANNING` log line). Append to log:
 ```
 
 Do not downgrade a finding because it is inconvenient, late, or expensive to fix.
 {timestamp} [REPAIR-P1] {N} findings — {list of finding IDs}
-{timestamp} [STAGE] → REPAIR_PLANNING
 ```
 
 **Q-learning repair plan (deterministic):** Before spawning the repair coordinator, get executor and model assignments from the Q-learning planner:
@@ -178,10 +176,7 @@ Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
 
 Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
 
-Wait for completion. Update stage to `REPAIR_EXECUTION`. Append to log:
-```
-{timestamp} [STAGE] → REPAIR_EXECUTION
-```
+Wait for completion. Update stage to `REPAIR_EXECUTION` (transition_task auto-appends the `[STAGE] → REPAIR_EXECUTION` log line; the call alone is sufficient).
 
 **Parallel batch spawning:**
 

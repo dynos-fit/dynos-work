@@ -93,3 +93,83 @@ def test_extractor_ignores_non_stage_uppercase_tokens():
     """
     refs = _extract_stage_references(sample)
     assert refs == set(), f"expected no stage refs, got {refs}"
+
+
+# Detects the duplicate-stage-write pattern that polluted execution-log.md
+# with double entries and out-of-order timestamps (root cause: skills told
+# the orchestrator to manually append `[STAGE] → X` AND called transition_task,
+# which already auto-appends the same line via _auto_log).
+_FENCE_OPEN_OR_CLOSE = re.compile(r"^```")
+_STAGE_LINE = re.compile(r"\[STAGE\]\s*→\s*([A-Z_]+)")
+
+
+def _stage_lines_inside_fences(text: str) -> list[tuple[int, str]]:
+    """Return (line_no, stage_name) for every `[STAGE] → X` that appears
+    inside a fenced code block.
+
+    Uses a line-based state machine instead of a regex pair-match so that
+    closing fences can never be mistaken for openings. Toggles in_fence on
+    each line whose first three chars are ```.
+    """
+    found: list[tuple[int, str]] = []
+    in_fence = False
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if _FENCE_OPEN_OR_CLOSE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            continue
+        m = _STAGE_LINE.search(line)
+        if m:
+            found.append((line_no, m.group(1)))
+    return found
+
+
+def test_no_skill_prose_writes_stage_lines_inside_fenced_blocks():
+    """Skill prose must not instruct the orchestrator to manually append
+    `[STAGE] → X` lines inside fenced code blocks. transition_task() in
+    hooks/lib_core.py:_auto_log is the single authoritative writer of
+    those lines. Duplicate writers caused doubled and out-of-order log
+    entries (see .dynos/task-20260417-014/execution-log.md for the
+    historical evidence).
+
+    Inline references like `[STAGE] → PLANNING` inside backticks (i.e.,
+    OUTSIDE a fenced block) are allowed — those are descriptive
+    meta-comments about what auto-log does, not instructions to write.
+    """
+    failures: list[str] = []
+    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        text = skill_md.read_text()
+        for line_no, stage in _stage_lines_inside_fences(text):
+            relpath = skill_md.relative_to(REPO_ROOT)
+            failures.append(
+                f"{relpath}:{line_no}: '[STAGE] → {stage}' inside a fenced code block "
+                f"(would be a duplicate write — transition_task auto-logs it)"
+            )
+
+    assert not failures, (
+        "Found duplicate-stage-write instructions in skill prose:\n"
+        + "\n".join(f"  - {f}" for f in failures)
+        + "\n\nIf you need a literal '[STAGE]' line in a fenced block as "
+        "documentation, move it to inline backticks (e.g. `[STAGE] → X`) "
+        "instead — that signals 'auto-log writes this' rather than "
+        "'agent should write this'."
+    )
+
+
+def test_state_machine_distinguishes_inline_from_fenced():
+    """Inline backticks should NOT trigger; only true in-fence lines should."""
+    sample = """
+Some prose with `[STAGE] → PLANNING` in inline backticks (descriptive).
+
+```text
+{timestamp} [STAGE] → CHECKPOINT_AUDIT
+```
+
+More prose with `[STAGE] → DONE` inline (descriptive).
+"""
+    found = _stage_lines_inside_fences(sample)
+    stages = [s for _, s in found]
+    assert stages == ["CHECKPOINT_AUDIT"], (
+        f"only the in-fence stage should be reported, got {stages}"
+    )
