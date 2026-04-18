@@ -52,6 +52,13 @@ Append to log:
 3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
 4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
 5. Log the routing decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
+6. **Transition the manifest stage `PRE_EXECUTION_SNAPSHOT → EXECUTION`** (mandatory — without this the Step 4 transition to `TEST_EXECUTION` is illegal per `ALLOWED_STAGE_TRANSITIONS`):
+
+```text
+python3 hooks/ctl.py transition .dynos/task-{id} EXECUTION
+```
+
+   Append `{timestamp} [STAGE] → EXECUTION` to the log.
 
 Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
 
@@ -296,8 +303,8 @@ If tests pass:
 
 If tests fail:
 - Append to log: `{timestamp} [FAIL] tests — failed. Repairs required.`
-- Update `manifest.json` stage to `REPAIR`
-- Trigger the `repair` skill
+- Update `manifest.json` stage to `REPAIR_PLANNING` (legal per `ALLOWED_STAGE_TRANSITIONS["TEST_EXECUTION"]`; the older single `REPAIR` stage no longer exists)
+- Hand off to `/dynos-work:audit` — its Step 4 owns the two-phase repair loop. There is no standalone `repair` skill.
 
 ### Step 5 — Verify completion
 
