@@ -32,7 +32,30 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Handler functions
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list[str], root: Path) -> bool:
+# Per-handler timeout budget (seconds). The blanket 300s value covered every
+# handler regardless of expected runtime, so a hung lightweight handler could
+# block the drain for 5 minutes before a TimeoutExpired surfaced.
+#
+# Budget rationale (informed by drain telemetry — see _drain_locked's
+# summary["_durations"] aggregate):
+# - register / dashboard: pure file I/O, p99 well under 5s; tight cap
+# - policy_engine: reads retrospectives, computes EMA scores; ~30s headroom
+# - improve / agent_generator / postmortem: scan retrospectives + write artifacts;
+#   medium-weight learning passes
+# - DEFAULT: applied to handlers not explicitly classified
+_HANDLER_TIMEOUTS: dict[str, int] = {
+    "register": 15,
+    "dashboard": 30,
+    "policy_engine": 60,
+    "postmortem": 60,
+    "improve": 90,
+    "agent_generator": 90,
+    "benchmark_scheduler": 120,
+}
+_DEFAULT_HANDLER_TIMEOUT = 60
+
+
+def _run(cmd: list[str], root: Path, timeout: int = _DEFAULT_HANDLER_TIMEOUT) -> bool:
     """Run a subprocess. Returns True on success, False on failure.
 
     Non-zero exit: raise RuntimeError with stderr snippet so the drain loop
@@ -48,7 +71,7 @@ def _run(cmd: list[str], root: Path) -> bool:
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout,
         )
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
         raise RuntimeError(f"{cmd[0]}: {e}") from e
@@ -63,6 +86,7 @@ def run_policy_engine(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "patterns.py"), "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["policy_engine"],
     )
 
 
@@ -71,6 +95,7 @@ def run_postmortem(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "postmortem.py"), "generate", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["postmortem"],
     )
 
 
@@ -79,6 +104,7 @@ def run_dashboard(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "dashboard.py"), "generate", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["dashboard"],
     )
 
 
@@ -87,6 +113,7 @@ def run_register(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "registry.py"), "set-active", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["register"],
     )
 
 
@@ -95,6 +122,7 @@ def run_improve(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "postmortem_improve.py"), "improve", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["improve"],
     )
 
 
@@ -103,6 +131,7 @@ def run_agent_generator(root: Path, _payload: dict) -> bool:
     return _run(
         ["python3", str(SCRIPT_DIR / "agent_generator.py"), "auto", "--root", str(root)],
         root,
+        timeout=_HANDLER_TIMEOUTS["agent_generator"],
     )
 
 
