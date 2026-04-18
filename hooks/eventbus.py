@@ -33,7 +33,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # ---------------------------------------------------------------------------
 
 def _run(cmd: list[str], root: Path) -> bool:
-    """Run a subprocess. Returns True on success, False on failure."""
+    """Run a subprocess. Returns True on success, False on failure.
+
+    Non-zero exit: raise RuntimeError with stderr snippet so the drain loop
+    captures a real error message in its log_event call, instead of the
+    silent success=False / error=null rows that masked the broken
+    registry.py import in 2026-04.
+    """
     env = {**os.environ, "PYTHONPATH": f"{SCRIPT_DIR}:{os.environ.get('PYTHONPATH', '')}"}
     try:
         result = subprocess.run(
@@ -42,14 +48,14 @@ def _run(cmd: list[str], root: Path) -> bool:
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,  # 5 minute timeout per handler
+            timeout=300,
         )
-        if result.returncode != 0 and result.stderr:
-            print(f"  [warn] {cmd[0]}: {result.stderr[:200]}", file=sys.stderr)
-        return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
-        print(f"  [warn] {cmd[0]}: {e}", file=sys.stderr)
-        return False
+        raise RuntimeError(f"{cmd[0]}: {e}") from e
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise RuntimeError(f"{cmd[0]} exit={result.returncode}: {stderr[:300]}" if stderr else f"{cmd[0]} exit={result.returncode}")
+    return True
 
 
 def run_policy_engine(root: Path, _payload: dict) -> bool:
@@ -213,6 +219,13 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                         td = payload.get("task_dir")
                         if td and td not in completed_task_dirs:
                             completed_task_dirs.append(td)
+
+                    # If this (event_type, consumer) already failed on an
+                    # earlier event in this drain, don't re-invoke the handler
+                    # for remaining backlog events — same failure mode, same
+                    # failed_this_drain entry, just N amplified log rows.
+                    if (event_type, consumer_name) in failed_this_drain:
+                        break
 
                     # Run handler (or skip if learning disabled)
                     if skip_execution:
