@@ -86,6 +86,50 @@ class TestPerformanceCheck:
         patterns = [f["pattern"] for f in result["findings"]]
         assert "quadratic_loop" in patterns
 
+    def test_no_quadratic_on_sibling_loops(self, tmp_path: Path):
+        """Two sibling (sequential) for-loops are flat, not nested."""
+        from performance_check import scan_files
+        (tmp_path / "sibs.py").write_text(
+            "def run(items):\n"
+            "    for a in items:\n"
+            "        use(a)\n"
+            "    for b in items:\n"
+            "        use(b)\n"
+        )
+        result = scan_files(tmp_path)
+        quad = [f for f in result["findings"] if f["pattern"] == "quadratic_loop"]
+        assert len(quad) == 0
+
+    def test_no_quadratic_on_js_array_methods(self, tmp_path: Path):
+        """Chains like .filter().map() are flat method calls, not nested loops."""
+        from performance_check import scan_files
+        (tmp_path / "app.ts").write_text(
+            "function run(items) {\n"
+            "  const out = items.filter((x) => x > 0).map((x) => x * 2);\n"
+            "  return out;\n"
+            "}\n"
+        )
+        result = scan_files(tmp_path)
+        quad = [f for f in result["findings"] if f["pattern"] == "quadratic_loop"]
+        assert len(quad) == 0
+
+    def test_no_quadratic_across_sibling_js_handlers(self, tmp_path: Path):
+        """Two sibling route handlers in one exported function are not nested."""
+        from performance_check import scan_files
+        (tmp_path / "app.ts").write_text(
+            "export function api() {\n"
+            "  function handlerA() {\n"
+            "    for (const a of as) { use(a); }\n"
+            "  }\n"
+            "  function handlerB() {\n"
+            "    for (const b of bs) { use(b); }\n"
+            "  }\n"
+            "}\n"
+        )
+        result = scan_files(tmp_path)
+        quad = [f for f in result["findings"] if f["pattern"] == "quadratic_loop"]
+        assert len(quad) == 0
+
     def test_detects_connection_leak(self, tmp_path: Path):
         from performance_check import scan_files
         (tmp_path / "db.py").write_text("conn = psycopg2.connect(db_url)\ncursor = conn.cursor()\ncursor.execute(query)\n")

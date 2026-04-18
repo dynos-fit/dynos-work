@@ -180,35 +180,46 @@ def _detect_unbounded_query(content: str, filepath: str) -> list[dict[str, Any]]
 
 
 def _detect_quadratic(content: str, filepath: str) -> list[dict[str, Any]]:
-    """Detect O(n^2) nested loop patterns."""
+    """Detect O(n^2) nested loop patterns via an indentation stack.
+
+    Tracks each open loop as (indent, line_number). Before considering
+    a new line, pops entries whose indent is >= the current line's indent
+    (i.e. the loop body has ended). A loop is "nested" only when the
+    stack is non-empty at the moment of match.
+
+    JS array methods (.forEach / .map / .filter / .some / .every) are not
+    counted as loops — they are method calls, not syntactic blocks.
+    Sequential chains like `.filter(...).map(...)` are flat, not nested.
+    If a callback inside such a chain contains a real for/while, the
+    stack-based detector catches that on its own.
+    """
     findings: list[dict[str, Any]] = []
     lines = content.splitlines()
-    loop_re = re.compile(r"^\s*(for |while |\.forEach|\.map\(|\.filter\(|\.some\(|\.every\()")
+    loop_re = re.compile(r"^\s*(for |while )")
 
-    loop_depth = 0
-    loop_lines: list[int] = []
+    loop_stack: list[tuple[int, int]] = []  # (indent, line_number)
 
     for i, line in enumerate(lines, 1):
-        if loop_re.search(line):
-            loop_depth += 1
-            loop_lines.append(i)
-            if loop_depth >= 2:
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith(("#", "//", "*", "/*")):
+            continue
+        indent = len(line) - len(stripped)
+
+        # Pop any loops whose body has ended (indent no longer inside them).
+        while loop_stack and indent <= loop_stack[-1][0]:
+            loop_stack.pop()
+
+        if loop_re.match(line):
+            depth = len(loop_stack) + 1
+            if depth >= 2:
                 findings.append({
                     "pattern": "quadratic_loop",
                     "location": f"{filepath}:{i}",
                     "line": line.strip()[:120],
                     "severity": "major",
-                    "description": f"Nested loop (depth {loop_depth}) — potential O(n^2) or worse. Outer loop at line {loop_lines[0]}",
+                    "description": f"Nested loop (depth {depth}) — potential O(n^2) or worse. Outer loop at line {loop_stack[0][1]}",
                 })
-        # Very rough scope tracking — reset on dedent to function level
-        if line.strip() and not line.strip().startswith(("#", "//", "*", "/*")):
-            stripped = line.lstrip()
-            indent = len(line) - len(stripped)
-            if indent == 0 and (stripped.startswith("def ") or stripped.startswith("func ") or
-                                stripped.startswith("function ") or stripped.startswith("class ") or
-                                stripped.startswith("export ")):
-                loop_depth = 0
-                loop_lines = []
+            loop_stack.append((indent, i))
 
     return findings
 
