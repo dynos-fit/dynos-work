@@ -207,7 +207,7 @@ python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
 After classification, determine fast-track eligibility **deterministically** by running:
 
 ```text
-python3 -c "from dynoslib import apply_fast_track; from pathlib import Path; print(apply_fast_track(Path('.dynos/task-{id}')))"
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 -c "from lib import apply_fast_track; from pathlib import Path; print(apply_fast_track(Path('.dynos/task-{id}')))"
 ```
 
 This checks: `risk_level == "low"` AND exactly 1 domain. It writes `"fast_track": true` or `"fast_track": false` to `manifest.json`. If the command is not available, manually check the conditions and write the field.
