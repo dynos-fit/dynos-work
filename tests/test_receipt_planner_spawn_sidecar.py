@@ -95,3 +95,12 @@ def test_injected_prompt_sha256_none_writes_receipt(tmp_path: Path):
     assert payload["phase"] == "plan"
     # Legacy receipts carry an explicit null for the injected digest.
     assert payload.get("injected_prompt_sha256") is None
+
+
+def test_omitted_kwarg_raises_typeerror(tmp_path: Path):
+    """SEC-004 hardening: callers MUST pass `injected_prompt_sha256`
+    explicitly. Omitting the kwarg is a caller bug — a forgotten sidecar
+    assertion cannot silently ship."""
+    td = _task_dir(tmp_path)
+    with pytest.raises(TypeError, match="injected_prompt_sha256 is required"):
+        receipt_planner_spawn(td, "plan", tokens_used=10, model_used="sonnet")

@@ -36,7 +36,11 @@ from lib_defaults import (
     UCB_EXPLORATION_CONSTANT,
 )
 from lib_log import log_event
-from lib_receipts import INJECTED_PLANNER_PROMPTS_DIR
+from lib_receipts import (
+    INJECTED_AUDITOR_PROMPTS_DIR,
+    INJECTED_PLANNER_PROMPTS_DIR,
+    INJECTED_PROMPTS_DIR,
+)
 from lib_registry import ensure_learned_registry
 
 
@@ -1338,7 +1342,7 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
     # task_id (graph path under .dynos/task-{id}/). Without a task_id
     # there is nowhere to write a per-task receipt sidecar.
     if task_id:
-        sidecar_dir = root / ".dynos" / task_id / "receipts" / "_injected-prompts"
+        sidecar_dir = root / ".dynos" / task_id / "receipts" / INJECTED_PROMPTS_DIR
         try:
             digest = _write_prompt_sidecar(sidecar_dir, args.segment_id, printed_bytes)
             log_event(
@@ -1475,7 +1479,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     model_label = args.model if args.model else "default"
     base_name = f"{auditor_name}-{model_label}"
 
-    sidecar_dir = task_dir / "receipts" / "_injected-auditor-prompts"
+    sidecar_dir = task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
     try:
         digest = _write_prompt_sidecar(sidecar_dir, base_name, printed_bytes)
     except OSError as exc:

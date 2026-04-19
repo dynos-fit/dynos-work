@@ -182,11 +182,6 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-def _skip_sidecar_assert() -> bool:
-    """Honor DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1 env var."""
-    return os.environ.get("DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT") == "1"
-
-
 def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     """Write a receipt proving a pipeline step completed.
 
@@ -493,48 +488,32 @@ def receipt_executor_done(
     - ``ValueError("... injected_prompt_sha256 mismatch ...")`` if the
       sidecar contents do not match the supplied digest.
 
-    Honors ``DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1`` to skip assertion (logs
-    ``sidecar_assert_skipped`` to events.jsonl). The bootstrap branch
-    relies on this escape hatch between landing and seg-7's prose update.
-
     Also records token usage to token-usage.json — the only reliable path
     for token recording since receipts are gated.
     """
     if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
         raise ValueError("injected_prompt_sha256 must be a non-empty string")
 
-    sidecar_dir = task_dir / "receipts" / "_injected-prompts"
+    sidecar_dir = task_dir / "receipts" / INJECTED_PROMPTS_DIR
     sidecar_file = sidecar_dir / f"{segment_id}.sha256"
-    root = task_dir.parent.parent
-    task_id = task_dir.name
 
-    if _skip_sidecar_assert():
-        log_event(
-            root,
-            "sidecar_assert_skipped",
-            task=task_id,
-            step=f"executor-{segment_id}",
-            sidecar=str(sidecar_file),
-            reason="DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1",
+    if not sidecar_file.exists():
+        raise ValueError(
+            f"executor-{segment_id}: injected_prompt_sha256 sidecar missing "
+            f"at {sidecar_file}"
         )
-    else:
-        if not sidecar_file.exists():
-            raise ValueError(
-                f"executor-{segment_id}: injected_prompt_sha256 sidecar missing "
-                f"at {sidecar_file}"
-            )
-        try:
-            on_disk = sidecar_file.read_text().strip()
-        except OSError as e:
-            raise ValueError(
-                f"executor-{segment_id}: injected_prompt_sha256 sidecar missing "
-                f"(unreadable {sidecar_file}: {e})"
-            ) from e
-        if on_disk != injected_prompt_sha256:
-            raise ValueError(
-                f"executor-{segment_id}: injected_prompt_sha256 mismatch "
-                f"(sidecar={on_disk!r}, payload={injected_prompt_sha256!r})"
-            )
+    try:
+        on_disk = sidecar_file.read_text().strip()
+    except OSError as e:
+        raise ValueError(
+            f"executor-{segment_id}: injected_prompt_sha256 sidecar missing "
+            f"(unreadable {sidecar_file}: {e})"
+        ) from e
+    if on_disk != injected_prompt_sha256:
+        raise ValueError(
+            f"executor-{segment_id}: injected_prompt_sha256 mismatch "
+            f"(sidecar={on_disk!r}, payload={injected_prompt_sha256!r})"
+        )
 
     # Record tokens deterministically
     if tokens_used and tokens_used > 0:
@@ -627,10 +606,8 @@ def receipt_audit_done(
     `injected_agent_sha256` when non-null. Per-model disambiguation lets
     ensemble voting compare distinct injected prompts per model.
 
-    Honors ``DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1`` to skip assertion (logs
-    ``sidecar_assert_skipped``).
-
-    Raises ValueError on sidecar mismatch.
+    Raises ValueError on sidecar mismatch or missing. There is no env
+    bypass — sidecar enforcement is unconditional.
 
     Also records token usage — same enforcement path as executor receipts.
     """
@@ -646,41 +623,28 @@ def receipt_audit_done(
     if agent_path is not None and not isinstance(agent_path, str):
         raise ValueError("agent_path must be str or None")
 
-    root = task_dir.parent.parent
-    task_id = task_dir.name
-
     if injected_agent_sha256 is not None:
         sidecar_file = (
-            task_dir / "receipts" / "_injected-auditor-prompts"
+            task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
             / f"{auditor_name}-{model_used}.sha256"
         )
-        if _skip_sidecar_assert():
-            log_event(
-                root,
-                "sidecar_assert_skipped",
-                task=task_id,
-                step=f"audit-{auditor_name}",
-                sidecar=str(sidecar_file),
-                reason="DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1",
+        if not sidecar_file.exists():
+            raise ValueError(
+                f"audit-{auditor_name}: injected auditor prompt sidecar "
+                f"missing at {sidecar_file}"
             )
-        else:
-            if not sidecar_file.exists():
-                raise ValueError(
-                    f"audit-{auditor_name}: injected auditor prompt sidecar "
-                    f"missing at {sidecar_file}"
-                )
-            try:
-                on_disk = sidecar_file.read_text().strip()
-            except OSError as e:
-                raise ValueError(
-                    f"audit-{auditor_name}: injected auditor prompt sidecar "
-                    f"unreadable at {sidecar_file}: {e}"
-                ) from e
-            if on_disk != injected_agent_sha256:
-                raise ValueError(
-                    f"audit-{auditor_name}: injected_agent_sha256 mismatch "
-                    f"(sidecar={on_disk!r}, payload={injected_agent_sha256!r})"
-                )
+        try:
+            on_disk = sidecar_file.read_text().strip()
+        except OSError as e:
+            raise ValueError(
+                f"audit-{auditor_name}: injected auditor prompt sidecar "
+                f"unreadable at {sidecar_file}: {e}"
+            ) from e
+        if on_disk != injected_agent_sha256:
+            raise ValueError(
+                f"audit-{auditor_name}: injected_agent_sha256 mismatch "
+                f"(sidecar={on_disk!r}, payload={injected_agent_sha256!r})"
+            )
 
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
@@ -741,30 +705,41 @@ def receipt_post_completion(
 # ---------------------------------------------------------------------------
 
 
+_INJECTED_PROMPT_SHA256_MISSING = object()
+
+
 def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     task_dir: Path,
     phase: str,  # "discovery", "spec", or "plan"
     tokens_used: int | None,
     model_used: str | None = None,
     agent_name: str | None = None,
-    injected_prompt_sha256: str | None = None,
+    injected_prompt_sha256: str | None = _INJECTED_PROMPT_SHA256_MISSING,  # type: ignore[assignment]
 ) -> Path:
     """Write receipt proving a planner subagent completed. Also records tokens.
 
-    When ``injected_prompt_sha256`` is non-None, asserts that the per-phase
-    planner injected-prompt sidecar at
-    ``task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR / f"{phase}.sha256"``
-    exists AND its contents (after stripping trailing whitespace) match the
+    SEC-004 hardening: ``injected_prompt_sha256`` is required at the call
+    site — callers MUST pass it explicitly (either a non-empty digest or
+    literal ``None`` for the legacy/no-sidecar path). Omitting the kwarg
+    is a caller bug and raises ``TypeError`` so a forgotten sidecar
+    assertion cannot silently ship.
+
+    When ``injected_prompt_sha256`` is a non-empty string, asserts that
+    the per-phase planner injected-prompt sidecar at ``task_dir /
+    "receipts" / INJECTED_PLANNER_PROMPTS_DIR / f"{phase}.sha256"`` exists
+    AND its contents (after stripping trailing whitespace) match the
     supplied digest. On missing file or mismatch this function raises
     ``ValueError`` naming the phase. The mismatch message contains the
     literal substring ``hash mismatch`` so downstream tests can pin it.
 
-    When ``injected_prompt_sha256`` is ``None`` (the legacy path), no
-    assertion is performed and no sidecar file is required. This legacy
-    call mode is accepted but will be removed once all call sites are
-    migrated to invoke ``hooks/router.py planner-inject-prompt`` before the
-    receipt write. Put plainly: legacy call (no ``injected_prompt_sha256``)
-    is accepted but will be removed once all call sites are migrated.
+    When ``injected_prompt_sha256`` is ``None`` (the legacy path —
+    explicitly requested by the caller), no assertion is performed and no
+    sidecar file is required. This legacy call mode is accepted but will
+    be removed once all call sites are migrated to invoke
+    ``hooks/router.py planner-inject-prompt`` before the receipt write.
+    Put plainly: legacy call (``injected_prompt_sha256=None`` must be
+    explicit) is accepted but will be removed once all call sites are
+    migrated.
 
     The sidecar path is
     ``task_dir/receipts/_injected-planner-prompts/{phase}.sha256`` — both
@@ -773,6 +748,14 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     one place. The sidecar itself is written by the
     ``planner-inject-prompt`` CLI subcommand in ``hooks/router.py``.
     """
+    if injected_prompt_sha256 is _INJECTED_PROMPT_SHA256_MISSING:
+        raise TypeError(
+            "receipt_planner_spawn: injected_prompt_sha256 is required. "
+            "Pass a non-empty sha256 hex digest (after running "
+            "`hooks/router.py planner-inject-prompt --task-id <id> "
+            "--phase <phase>`) OR pass `injected_prompt_sha256=None` "
+            "explicitly for the legacy no-sidecar path."
+        )
     step_name = f"planner-{phase}"
 
     # Sidecar assertion — only active when the caller opted in by passing

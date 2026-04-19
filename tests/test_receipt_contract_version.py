@@ -101,7 +101,7 @@ def _exercise_writer(name: str, td: Path):
     if name == "receipt_post_completion":
         return receipt_post_completion(td, [])
     if name == "receipt_planner_spawn":
-        return receipt_planner_spawn(td, "spec", 0)
+        return receipt_planner_spawn(td, "spec", 0, injected_prompt_sha256=None)
     if name == "receipt_plan_audit":
         return receipt_plan_audit(td, tokens_used=0, finding_count=0)
     return None

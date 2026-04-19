@@ -118,6 +118,48 @@ def test_empty_segments_list_passes(tmp_path: Path):
     assert json.loads((td / "manifest.json").read_text())["stage"] == "CHECKPOINT_AUDIT"
 
 
+def test_truncated_routing_cannot_bypass_graph_required_segments(tmp_path: Path):
+    """SEC-002 regression: execution-graph.json is authoritative. A
+    tampered/truncated executor-routing receipt listing FEWER segments
+    than the graph MUST NOT satisfy the gate — the union of both sources
+    is enforced."""
+    td = _setup_task(tmp_path, "TEST_EXECUTION")
+    # The authoritative plan has two segments.
+    (td / "execution-graph.json").write_text(json.dumps({
+        "task_id": "task-20260418-GX",
+        "segments": [
+            {"id": "seg-1", "executor": "backend-executor"},
+            {"id": "seg-2", "executor": "backend-executor"},
+        ],
+    }))
+    # But the routing receipt only records ONE segment (simulating
+    # tampered/buggy routing state).
+    receipt_executor_routing(td, [
+        {"segment_id": "seg-1", "executor": "backend-executor"},
+    ])
+    _write_exec_receipt(td, "seg-1")
+    # seg-2 has no receipt AND is not in the routing receipt — but the
+    # graph still requires it. Gate must refuse.
+    with pytest.raises(ValueError) as excinfo:
+        transition_task(td, "CHECKPOINT_AUDIT")
+    assert "executor-seg-2" in str(excinfo.value)
+
+
+def test_graph_absent_falls_back_to_routing(tmp_path: Path):
+    """If execution-graph.json is missing (legacy task dir), the gate
+    falls back to the routing-receipt segments list alone — existing
+    behavior is preserved."""
+    td = _setup_task(tmp_path, "TEST_EXECUTION")
+    # No execution-graph.json on disk.
+    receipt_executor_routing(td, [
+        {"segment_id": "seg-1", "executor": "backend-executor"},
+    ])
+    _write_exec_receipt(td, "seg-1")
+
+    transition_task(td, "CHECKPOINT_AUDIT")
+    assert json.loads((td / "manifest.json").read_text())["stage"] == "CHECKPOINT_AUDIT"
+
+
 def test_missing_executor_routing_does_not_double_complain(tmp_path: Path):
     """When executor-routing itself is missing, only the single
     routing-missing error is emitted — no per-segment errors piggyback."""

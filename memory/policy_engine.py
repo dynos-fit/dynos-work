@@ -138,14 +138,26 @@ def _mean(values: list[float]) -> float:
 QuadKey = tuple[str, str, str, str]  # (role, model, task_type, source)
 
 
-def _build_events_by_task(root: Path) -> dict[str, list[dict]]:
+def _build_events_by_task(
+    root: Path,
+    task_ids: set[str] | None = None,
+) -> dict[str, list[dict]]:
     """Build {task_id -> [event, ...]} by streaming `.dynos/events.jsonl`.
 
-    Malformed lines are silently skipped. Entries without a string `task_id`
-    key are skipped. When the file does not exist, returns an EMPTY DICT —
-    callers that want the legacy (no-cross-check) path should pass
-    ``events_by_task=None`` to :func:`_extract_quads` explicitly. Passing
-    ``{}`` means "cross-check opted-in; no events present; everything
+    When ``task_ids`` is provided, events whose ``task_id`` is NOT in the
+    set are dropped during streaming. This caps memory at O(events-for-
+    needed-tasks) instead of O(all-events) — essential on long-lived
+    projects where events.jsonl grows unbounded (PERF-001).
+
+    When ``task_ids`` is None, all events with a string task_id are
+    retained (legacy behavior). Callers that know their retrospective set
+    should always pass the filter.
+
+    Malformed lines are silently skipped. Entries without a string
+    ``task_id`` key are skipped. When the file does not exist, returns an
+    empty dict — callers that want the legacy (no-cross-check) path of
+    :func:`_extract_quads` should pass ``events_by_task=None`` explicitly;
+    passing ``{}`` means "cross-check opted-in; no events; everything
     unmatched."
     """
     events_by_task: dict[str, list[dict]] = {}
@@ -166,6 +178,8 @@ def _build_events_by_task(root: Path) -> dict[str, list[dict]]:
                     continue
                 task_id = entry.get("task_id")
                 if not isinstance(task_id, str) or not task_id:
+                    continue
+                if task_ids is not None and task_id not in task_ids:
                     continue
                 events_by_task.setdefault(task_id, []).append(entry)
     except OSError:
@@ -195,6 +209,12 @@ def _extract_quads(
     :func:`log_event` per rewritten quad. When ``events_by_task is None``,
     the cross-check is skipped entirely (legacy path).
     """
+    # PERF-002: collect reclassification events during extraction and
+    # flush them once after the loop completes. Prevents the synchronous
+    # open+append+close per reclassified quad inside the hot path — which
+    # at N retros * M roles (all learned-unmatched) would fire N*M serial
+    # file writes before any quad is returned.
+    _reclass_events: list[dict] = []
     # Filter and validate
     valid = []
     for retro in retrospectives:
@@ -260,17 +280,20 @@ def _extract_quads(
                     original_source = source
                     source = "generic"
                     if root is not None:
-                        log_event(
-                            root,
-                            "agent_source_reclassified",
-                            task_id=task_id,
-                            role=role,
-                            original_source=original_source,
-                            reclassified_to="generic",
-                            reason="no_matching_learned_agent_applied_event",
-                        )
+                        _reclass_events.append({
+                            "task_id": task_id,
+                            "role": role,
+                            "original_source": original_source,
+                            "reclassified_to": "generic",
+                            "reason": "no_matching_learned_agent_applied_event",
+                        })
 
             quads.append(((role, model, task_type, source), q, c, e))
+
+    # Flush batched reclassification events after the extraction loop.
+    if root is not None and _reclass_events:
+        for ev in _reclass_events:
+            log_event(root, "agent_source_reclassified", **ev)
 
     return quads
 
@@ -296,7 +319,17 @@ def compute_effectiveness_scores(
     entirely.
     """
     if root is not None:
-        events_by_task: dict[str, list[dict]] | None = _build_events_by_task(root)
+        # PERF-001: pre-filter events.jsonl to only the task_ids that
+        # appear in this retrospective set. Bounds memory at O(events-
+        # for-retros) instead of O(all-events-ever-emitted-by-project).
+        needed_ids: set[str] = {
+            r["task_id"]
+            for r in retrospectives
+            if isinstance(r, dict) and isinstance(r.get("task_id"), str)
+        }
+        events_by_task: dict[str, list[dict]] | None = _build_events_by_task(
+            root, task_ids=needed_ids
+        )
     else:
         events_by_task = None
     quads = _extract_quads(retrospectives, events_by_task=events_by_task, root=root)

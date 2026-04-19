@@ -63,16 +63,18 @@ def test_missing_sidecar_raises(tmp_path: Path):
         )
 
 
-def test_env_var_skips_assertion(tmp_path: Path, monkeypatch):
+def test_env_var_no_longer_bypasses_assertion(tmp_path: Path, monkeypatch):
+    """Regression: DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1 was removed (SEC-003).
+    Even with the env var set, sidecar enforcement must still fire."""
     td = _task_dir(tmp_path)
     # No sidecar at all on disk
     monkeypatch.setenv("DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT", "1")
-    out = receipt_audit_done(
-        td, "sec", "haiku", 0, 0, None, 100,
-        route_mode="replace", agent_path="learned/x.md",
-        injected_agent_sha256="a" * 64,
-    )
-    assert out.exists()
+    with pytest.raises(ValueError, match="sidecar"):
+        receipt_audit_done(
+            td, "sec", "haiku", 0, 0, None, 100,
+            route_mode="replace", agent_path="learned/x.md",
+            injected_agent_sha256="a" * 64,
+        )
 
 
 def test_generic_mode_allows_none_injected(tmp_path: Path):
