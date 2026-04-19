@@ -1159,6 +1159,112 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 + "\n".join(f"  - {e}" for e in gate_errors)
             )
 
+        # ---- task-20260419-002 G4: deferred-findings TTL gate on DONE ----
+        # Fire AFTER every other gate has passed. If ANY deferred finding
+        # whose `files` intersects THIS task's changed files has exceeded
+        # its TTL without re-acknowledgment, refuse the transition. The
+        # check module is imported inline (not subprocess) for test
+        # determinism; a missing module (broken install) is fail-open so
+        # a busted framework does not wedge unrelated DONE transitions.
+        if next_stage == "DONE":
+            try:
+                from check_deferred_findings import (
+                    check_deferred_findings as _check_deferred,
+                )
+            except ImportError:
+                _check_deferred = None  # type: ignore
+
+            if _check_deferred is not None:
+                # Build the changed-files list. Primary source: the
+                # executor-{seg} receipts' files_expected payloads (the
+                # routing receipt names the segments that actually ran).
+                # Fallback source: execution-graph.json's segments — so
+                # the gate still fires when the executor receipt schema
+                # did not yet carry files_expected at the time those
+                # segments ran.
+                changed_files: list[str] = []
+                seen_files: set[str] = set()
+
+                def _add_files(paths: object) -> None:
+                    if not isinstance(paths, list):
+                        return
+                    for p in paths:
+                        if isinstance(p, str) and p and p not in seen_files:
+                            seen_files.add(p)
+                            changed_files.append(p)
+
+                # (1) Walk executor-routing → executor-{seg} receipts.
+                try:
+                    _exec_routing = read_receipt(task_dir, "executor-routing")
+                except Exception:
+                    _exec_routing = None
+                if isinstance(_exec_routing, dict):
+                    _routing_segments = _exec_routing.get("segments")
+                    if isinstance(_routing_segments, list):
+                        # SEC-002 hardening: seg_id is interpolated into the
+                        # receipt step_name. Validate against a strict slug
+                        # regex so a crafted routing payload cannot inject
+                        # path separators or unexpected chars into the
+                        # receipt filename construction.
+                        import re as _re_seg
+                        _SEG_RE = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+                        for _entry in _routing_segments:
+                            if not isinstance(_entry, dict):
+                                continue
+                            _seg_id = _entry.get("segment_id")
+                            if not isinstance(_seg_id, str) or not _seg_id:
+                                continue
+                            if not _re_seg.match(_SEG_RE, _seg_id):
+                                # Crafted / invalid seg_id — skip silently.
+                                # A legitimate segment follows the slug rule.
+                                continue
+                            try:
+                                _seg_receipt = read_receipt(
+                                    task_dir, f"executor-{_seg_id}"
+                                )
+                            except Exception:
+                                _seg_receipt = None
+                            if isinstance(_seg_receipt, dict):
+                                _add_files(_seg_receipt.get("files_expected"))
+
+                # (2) Fallback: execution-graph.json segments.
+                _graph_path = task_dir / "execution-graph.json"
+                if _graph_path.exists():
+                    try:
+                        _graph = load_json(_graph_path)
+                    except (OSError, ValueError):
+                        _graph = None
+                    if isinstance(_graph, dict):
+                        _graph_segments = _graph.get("segments")
+                        if isinstance(_graph_segments, list):
+                            for _entry in _graph_segments:
+                                if isinstance(_entry, dict):
+                                    _add_files(_entry.get("files_expected"))
+
+                try:
+                    _expired = _check_deferred(
+                        task_dir.parent.parent, changed_files
+                    )
+                except Exception:
+                    # check_deferred_findings is designed to never raise;
+                    # if it does (unforeseen bug), treat as no signal and
+                    # fail open rather than wedge the DONE gate.
+                    _expired = []
+
+                if _expired:
+                    _ids = [
+                        str(e.get("id", ""))
+                        for e in _expired
+                        if isinstance(e, dict)
+                    ]
+                    _refuse(
+                        f"Cannot transition {current_stage} -> {next_stage}: "
+                        f"deferred findings expired: {_ids}. "
+                        f"Close them, re-acknowledge via "
+                        f".dynos/deferred-findings.json, or use --force "
+                        f"(which writes a force_override receipt)."
+                    )
+
     # ---- F7: force_override observability ----
     # When force=True, compute what gate errors WOULD have fired had
     # force been False, emit a dedicated `force_override` event, and
@@ -1423,6 +1529,250 @@ def find_active_tasks(root: Path) -> list[Path]:
 # Retrospective helpers
 # ---------------------------------------------------------------------------
 
+def _flushed_sha_by_task_id(root: Path) -> dict[str, str]:
+    """Parse ``.dynos/events.jsonl`` once and return
+    ``{task_id: last_flushed_sha256}`` from ``retrospective_flushed``
+    events. LAST event wins — re-plays overwrite.
+
+    Malformed lines are skipped silently. Missing file → empty dict.
+    Used by SEC-003 cross-check on persistent retrospectives.
+    """
+    out: dict[str, str] = {}
+    events_path = root / ".dynos" / "events.jsonl"
+    if not events_path.exists():
+        return out
+    try:
+        with events_path.open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                if ev.get("event") != "retrospective_flushed":
+                    continue
+                tid = ev.get("task_id")
+                sha = ev.get("sha256")
+                if isinstance(tid, str) and tid and isinstance(sha, str) and sha:
+                    out[tid] = sha
+    except OSError:
+        return {}
+    return out
+
+
+# PERF-003: per-process memo for collect_retrospectives. Key is a stat
+# fingerprint of the two source dirs + events.jsonl so any mutation
+# invalidates. Small dict — at most one entry per unique root path.
+_COLLECT_RETRO_CACHE: dict[Path, tuple[tuple, list[dict]]] = {}
+
+
+def _retros_stat_fingerprint(root: Path) -> tuple:
+    """Return a tuple summarizing the current on-disk state of the three
+    inputs to collect_retrospectives. Any change (new file, edit, delete)
+    changes the tuple, invalidating the cache.
+
+    The fingerprint is cheap — stat() calls only, no reads.
+    """
+    def _dir_sig(d: Path) -> tuple:
+        if not d.exists():
+            return ("MISSING",)
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            return ("UNREADABLE",)
+        parts: list[tuple] = []
+        for p in entries:
+            try:
+                st = p.stat()
+                parts.append((p.name, st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue
+        return tuple(parts)
+
+    worktree = _dir_sig(root / ".dynos")
+    # Also fingerprint every task-* subdir's retrospective file.
+    try:
+        worktree_retros = tuple(
+            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            for p in sorted((root / ".dynos").glob("task-*/task-retrospective.json"))
+        )
+    except OSError:
+        worktree_retros = ()
+
+    try:
+        pd = _persistent_project_dir(root) / "retrospectives"
+        persistent = _dir_sig(pd)
+    except OSError:
+        persistent = ("ERROR",)
+
+    events_path = root / ".dynos" / "events.jsonl"
+    try:
+        if events_path.exists():
+            est = events_path.stat()
+            events_sig = (est.st_mtime_ns, est.st_size)
+        else:
+            events_sig = ("MISSING",)
+    except OSError:
+        events_sig = ("UNREADABLE",)
+
+    return (worktree, worktree_retros, persistent, events_sig)
+
+
+def append_deferred_findings(
+    root: Path,
+    task_id: str,
+    findings: list[dict],
+) -> None:
+    """Append non-blocking findings to ``root/.dynos/deferred-findings.json``.
+
+    task-20260419-002 G4: this is the persistence path for the deferred-
+    findings registry. Each entry in ``findings`` must be a dict shaped as:
+
+        {"id": <non-empty str>,
+         "category": <non-empty str>,
+         "files": [<non-empty str>, ...]}  # non-empty list of non-empty strs
+
+    The writer augments every entry with:
+      - ``task_id``            (from the ``task_id`` arg)
+      - ``first_seen_at``      (ISO-8601 UTC from ``now_iso()``)
+      - ``first_seen_at_task_count``
+            (count of ``_persistent_project_dir(root)/retrospectives/*.json``
+             files at append time)
+      - ``acknowledged_until_task_count``  (constant ``3``)
+
+    Validation is all-or-nothing: every entry is validated BEFORE any write
+    happens. The FIRST invalid entry raises ``ValueError`` and the registry
+    file on disk is unchanged (no partial mutation). The four validation
+    rules fire in order: (a) top-level ``findings`` must be a list;
+    (b) each entry must be a dict; (c) each entry must carry the required
+    keys with the correct types; (d) registry file, if present, must parse.
+
+    Missing registry file (cold start) is treated as ``{"findings": []}``
+    and a new registry is created. Malformed existing registry raises
+    ``ValueError`` — operator must repair; dropping entries silently would
+    erase prior work.
+
+    Atomic write via ``_atomic_write_text`` so a crash mid-write cannot
+    tear the registry file. The read→mutate→write sequence itself is NOT
+    locked; in the single-orchestrator invariant model this is fine.
+    """
+    # Import _atomic_write_text lazily — lib_receipts imports lib_core at
+    # module load time (circular otherwise).
+    from lib_receipts import _atomic_write_text
+
+    # SEC-003 hardening: task_id is used to tag every appended entry.
+    # A malicious caller supplying "../../evil" or "" would poison the
+    # registry with entries that reference invalid task ids. Validate
+    # against the same slug regex used for F10 / SEC-001 / planner-
+    # inject-prompt.
+    import re as _re_tid
+    if not isinstance(task_id, str) or not _re_tid.match(
+        r"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$", task_id
+    ):
+        raise ValueError(
+            f"task_id must match ^task-[A-Za-z0-9][A-Za-z0-9_.-]*$ (got {task_id!r})"
+        )
+
+    # Rule (a): findings must be a list.
+    if not isinstance(findings, list):
+        raise ValueError("findings must be a list")
+
+    # Rules (b) + (c): validate every entry up front — no partial write.
+    for i, entry in enumerate(findings):
+        if not isinstance(entry, dict):
+            raise ValueError(f"findings[{i}] must be a dict")
+        # Required-key presence check — raise with the first missing key.
+        for key in ("id", "category", "files"):
+            if key not in entry:
+                raise ValueError(
+                    f"findings[{i}] missing required key: {key!r}"
+                )
+        # Type + non-empty checks.
+        id_val = entry["id"]
+        if not isinstance(id_val, str) or not id_val:
+            raise ValueError(f"findings[{i}].id must be a non-empty str")
+        cat_val = entry["category"]
+        if not isinstance(cat_val, str) or not cat_val:
+            raise ValueError(
+                f"findings[{i}].category must be a non-empty str"
+            )
+        files_val = entry["files"]
+        if not isinstance(files_val, list) or not files_val:
+            raise ValueError(
+                f"findings[{i}].files must be a non-empty list"
+            )
+        for j, f in enumerate(files_val):
+            if not isinstance(f, str) or not f:
+                raise ValueError(
+                    f"findings[{i}].files[{j}] must be a non-empty str"
+                )
+
+    registry_path = Path(root) / ".dynos" / "deferred-findings.json"
+
+    # Load existing registry (or cold-start). Parse failure → hard error
+    # per spec (operator repairs; silent drop would erase prior entries).
+    if registry_path.exists():
+        try:
+            registry_text = registry_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(
+                f"cannot parse .dynos/deferred-findings.json: {exc}"
+            ) from exc
+        try:
+            registry = json.loads(registry_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"cannot parse .dynos/deferred-findings.json: {exc}"
+            ) from exc
+        if not isinstance(registry, dict):
+            raise ValueError(
+                "cannot parse .dynos/deferred-findings.json: "
+                "root value must be an object"
+            )
+        existing = registry.get("findings")
+        if not isinstance(existing, list):
+            # Cold-start-ish: missing or malformed `findings` key. We
+            # treat this as an empty list rather than a hard error so a
+            # file with other keys but no findings can still be appended.
+            registry["findings"] = []
+    else:
+        registry = {"findings": []}
+
+    # Count retrospectives AT append time — the snapshot anchors the TTL
+    # baseline for every entry added in this call.
+    try:
+        retro_dir = _persistent_project_dir(Path(root)) / "retrospectives"
+        first_seen_at_task_count = (
+            len(list(retro_dir.glob("*.json"))) if retro_dir.exists() else 0
+        )
+    except OSError:
+        first_seen_at_task_count = 0
+
+    first_seen_at = now_iso()
+
+    for entry in findings:
+        # Copy + augment so the caller's dict is NOT mutated (safer for
+        # callers that reuse the list).
+        registry["findings"].append({
+            "id": entry["id"],
+            "category": entry["category"],
+            "files": list(entry["files"]),
+            "task_id": task_id,
+            "first_seen_at": first_seen_at,
+            "first_seen_at_task_count": first_seen_at_task_count,
+            "acknowledged_until_task_count": 3,
+        })
+
+    _atomic_write_text(
+        registry_path,
+        json.dumps(registry, indent=2) + "\n",
+    )
+
+
 def collect_retrospectives(root: Path) -> list[dict]:
     """Collect all task retrospective JSON files from both the worktree
     and the project-persistent directory.
@@ -1440,11 +1790,34 @@ def collect_retrospectives(root: Path) -> list[dict]:
     worktree copy may have been edited post-DONE (not supposed to
     happen, but possible).
 
+    SEC-003 hardening: for each persistent retro, the content sha256 is
+    re-computed and compared to the ``retrospective_flushed`` event
+    recorded in ``.dynos/events.jsonl`` at DONE time. A mismatch means
+    someone tampered with the persistent file after flush; that retro
+    is SKIPPED (the worktree copy, if present, is used instead). Absence
+    of a flush event for a given task_id is NOT a rejection — cold-
+    start / pre-SEC-003-code retros are trusted by default.
+
+    PERF-003 hardening: results are memoized per-root, keyed by a stat
+    fingerprint of the two source dirs and events.jsonl. Any mutation
+    of any file in those paths invalidates the cache on the next call.
+
     Missing persistent dir (new project, no DONE tasks yet) is treated
     as empty. Malformed JSON is skipped silently on either side. Entries
     without a string ``task_id`` are kept under synthetic keys so a
     malformed registry cannot drop a legitimate worktree entry.
     """
+    root = Path(root)
+    fingerprint = _retros_stat_fingerprint(root)
+    cached = _COLLECT_RETRO_CACHE.get(root)
+    if cached is not None and cached[0] == fingerprint:
+        return list(cached[1])
+
+    flushed_shas = _flushed_sha_by_task_id(root)
+
+    # Import locally to avoid hashlib-at-top-level cost on import
+    from lib_receipts import hash_file
+
     by_task_id: dict[str, dict] = {}
     synth_counter = 0
 
@@ -1456,10 +1829,27 @@ def collect_retrospectives(root: Path) -> list[dict]:
             return
         if not isinstance(data, dict):
             return
+
+        tid = data.get("task_id")
+
+        # SEC-003: verify persistent retros against the flushed-event
+        # sha256. Tampered content (content-hash != event-hash) →
+        # skip. No-event-known → trust (cold-start compat).
+        if persistent and isinstance(tid, str) and tid:
+            expected = flushed_shas.get(tid)
+            if expected:
+                try:
+                    actual = hash_file(path)
+                except OSError:
+                    actual = ""
+                if actual != expected:
+                    # Skip this persistent copy entirely — the worktree
+                    # copy (if present) will stand.
+                    return
+
         data["_path"] = str(path)
         data["_source"] = "persistent" if persistent else "worktree"
 
-        tid = data.get("task_id")
         if isinstance(tid, str) and tid:
             key = tid
         else:
@@ -1502,7 +1892,9 @@ def collect_retrospectives(root: Path) -> list[dict]:
     except OSError:
         pass
 
-    return list(by_task_id.values())
+    result = list(by_task_id.values())
+    _COLLECT_RETRO_CACHE[root] = (fingerprint, result)
+    return list(result)
 
 
 def retrospective_task_ids(root: Path) -> list[str]:

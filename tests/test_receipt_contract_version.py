@@ -71,7 +71,9 @@ def _exercise_writer(name: str, td: Path):
     if name == "receipt_postmortem_analysis":
         return receipt_postmortem_analysis(td, "a" * 64, 0, "b" * 64)
     if name == "receipt_postmortem_skipped":
-        return receipt_postmortem_skipped(td, "no-findings", "a" * 64)
+        # task-20260419-002 G2: subsumed_by is required; empty list is
+        # valid because reason is `no-findings`.
+        return receipt_postmortem_skipped(td, "no-findings", "a" * 64, subsumed_by=[])
     if name == "receipt_calibration_applied":
         return receipt_calibration_applied(td, 0, 0, "a" * 64, "b" * 64)
     if name == "receipt_plan_routing":

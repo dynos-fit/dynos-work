@@ -607,8 +607,11 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
         if retro_path.exists() and task_dir.is_dir():
             try:
                 retro_sha = hash_file(retro_path)
-                receipt_postmortem_skipped(task_dir, "no-findings", retro_sha)
-            except (FileNotFoundError, OSError, ValueError) as exc:
+                # G2: subsumed_by=[] is valid for no-findings reason.
+                receipt_postmortem_skipped(
+                    task_dir, "no-findings", retro_sha, subsumed_by=[]
+                )
+            except (FileNotFoundError, OSError, ValueError, TypeError) as exc:
                 log_event(root, "postmortem_analysis_skip_receipt_failed", task=task_id, error=str(exc))
         return {"task_id": task_id, "rules_added": 0, "analysis_written": False, "skipped": True, "skip_reason": "no-findings"}
 

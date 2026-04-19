@@ -342,23 +342,49 @@ def write_postmortem(root: Path, task_id: str) -> dict:
     quality_score = float(postmortem.get("quality_summary", {}).get("quality_score", 0) or 0)
     total_findings = int(postmortem.get("quality_summary", {}).get("total_findings", 0) or 0)
 
-    # SKIP branch: a task that produced no findings, no anomalies, no recurring
-    # patterns, AND scored at/above the quality threshold cannot teach us
-    # anything new. Emit the skipped receipt against the task dir and return
-    # without writing postmortem files.
+    # SKIP branch: a task that produced literally zero findings, zero anomalies,
+    # and zero recurring patterns cannot teach us anything new. G1 removed
+    # `quality-above-threshold` as a valid skip reason — tasks with findings
+    # but high quality score NOW run the LLM postmortem (exactly the
+    # "skip-postmortem, rationalize-later" pattern this task was created to
+    # stop). Only two skip reasons remain:
+    #   - clean-task: ≥2 auditors ran, all zero findings (counted via
+    #     audit-reports/*.json per spec criterion 5; NOT based on quality_score)
+    #   - no-findings: exactly 1 auditor ran, zero findings
+    # CQ-001 fix: discriminator is auditor count (per spec criterion 5), not
+    # quality_score. quality_score alone is not a sufficient signal — a task
+    # can score 0.9 with findings, or score 0.7 with none.
     skip_reason: str | None = None
-    if quality_score >= 0.8 and anomaly_count == 0 and pattern_count == 0 and total_findings == 0:
-        skip_reason = "clean-task"
-    elif total_findings == 0 and anomaly_count == 0 and pattern_count == 0:
-        skip_reason = "no-findings"
-    elif quality_score >= 0.8 and anomaly_count == 0 and pattern_count == 0:
-        skip_reason = "quality-above-threshold"
+    is_zero_findings = (
+        total_findings == 0
+        and anomaly_count == 0
+        and pattern_count == 0
+    )
+    if is_zero_findings:
+        audit_reports_dir = task_dir / "audit-reports"
+        auditor_count = (
+            len(list(audit_reports_dir.glob("*.json")))
+            if audit_reports_dir.is_dir()
+            else 0
+        )
+        if auditor_count >= 2:
+            skip_reason = "clean-task"
+        elif auditor_count == 1:
+            skip_reason = "no-findings"
+        # auditor_count == 0 → no audit ran; do NOT skip. Falling through
+        # lets the LLM postmortem run (or errors downstream if that's also
+        # unavailable — better signal than a silent claim of cleanliness).
+    # No elif for quality-above-threshold — removed by G1. If a task has
+    # anomalies, recurring patterns, or findings (even non-blocking), the
+    # LLM postmortem MUST run.
 
     if skip_reason is not None and retro_path.exists() and task_dir.is_dir():
         try:
             retro_sha = hash_file(retro_path)
-            receipt_postmortem_skipped(task_dir, skip_reason, retro_sha)
-        except (FileNotFoundError, OSError, ValueError) as exc:
+            # G2: subsumed_by=[] is valid for clean-task / no-findings
+            # (there's nothing to subsume — nothing was found).
+            receipt_postmortem_skipped(task_dir, skip_reason, retro_sha, subsumed_by=[])
+        except (FileNotFoundError, OSError, ValueError, TypeError) as exc:
             log_event(root, "postmortem_skip_receipt_failed", task=task_id, error=str(exc))
         return {
             "task_id": task_id,

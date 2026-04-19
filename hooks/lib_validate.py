@@ -581,10 +581,30 @@ def compute_reward(task_dir: Path) -> dict:
     # (e.g. `human-approval-SPEC_REVIEW-002.json`). No fallback to
     # `execution-log.md` scanning — the log-line scanner was deprecated
     # because log lines are not a hash-bound audit record.
+    #
+    # SEC-005 hardening: plain `touch human-approval-SPEC_REVIEW-fake.json`
+    # (empty file, no content) no longer inflates the count. Each
+    # candidate must parse as a JSON object AND carry the expected
+    # `step == "human-approval-SPEC_REVIEW"` field (and non-empty
+    # `artifact_sha256`). Receipts written by `receipt_human_approval`
+    # satisfy this automatically; planted files do not.
     receipts_dir = task_dir / "receipts"
     spec_review_iterations = 0
     if receipts_dir.is_dir():
-        spec_review_iterations = len(list(receipts_dir.glob("human-approval-SPEC_REVIEW*.json")))
+        for candidate in receipts_dir.glob("human-approval-SPEC_REVIEW*.json"):
+            try:
+                payload = json.loads(candidate.read_text("utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            step = payload.get("step")
+            if not isinstance(step, str) or not step.startswith("human-approval-SPEC_REVIEW"):
+                continue
+            art_hash = payload.get("artifact_sha256")
+            if not isinstance(art_hash, str) or not art_hash:
+                continue
+            spec_review_iterations += 1
 
     # execution-log.md path is still needed below for DORA recovery-time
     # tracking and subagent-spawn counting (sections 4b and 6).

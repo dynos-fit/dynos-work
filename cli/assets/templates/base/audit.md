@@ -302,6 +302,14 @@ Append to log:
 {timestamp} [DONE] reflect — task-retrospective.json written
 ```
 
+**Postmortem skip decision (deterministic):** Before the LLM postmortem runs, the deterministic engine decides whether a skip receipt may be written. The decision is:
+
+- ≥2 auditors ran AND every auditor reported `findings: []` → emit `receipt_postmortem_skipped(task_dir, reason="clean-task", retrospective_sha256=..., subsumed_by=[])`.
+- Exactly 1 auditor ran AND it reported `findings: []` → emit `receipt_postmortem_skipped(task_dir, reason="no-findings", retrospective_sha256=..., subsumed_by=[])`.
+- Any auditor reported ≥1 finding → do NOT skip; run the LLM postmortem and write `receipt_postmortem_generated(...)`.
+
+If ANY auditor reports ≥1 finding (blocking or not), the LLM postmortem runs — no "quality-above-threshold" bypass. The `subsumed_by` argument is required on every skip receipt write; the empty list `[]` is valid only for `reason="clean-task"` or `reason="no-findings"`.
+
 **Post-completion processing:** Learn, trajectory rebuild, evolve, postmortems, and dashboard refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
 
 Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `dynoslib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:

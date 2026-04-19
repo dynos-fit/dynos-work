@@ -43,7 +43,9 @@ def _setup(tmp_path: Path) -> Path:
 
 
 def _write_postmortem_skipped(td: Path):
-    receipt_postmortem_skipped(td, "no-findings", "deadbeef" * 8)
+    # task-20260419-002 G2: subsumed_by is required; empty list is
+    # valid because reason is `no-findings`.
+    receipt_postmortem_skipped(td, "no-findings", "deadbeef" * 8, subsumed_by=[])
 
 
 def test_missing_audit_routing_refuses(tmp_path: Path):

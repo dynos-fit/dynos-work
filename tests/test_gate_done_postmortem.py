@@ -38,7 +38,9 @@ def test_neither_generated_nor_skipped_is_gap(tmp_path: Path):
 
 def test_skipped_alone_passes(tmp_path: Path):
     td = _setup(tmp_path, quality=0.95)
-    receipt_postmortem_skipped(td, "no-findings", "f" * 64)
+    # task-20260419-002 G2: subsumed_by required; empty list is valid
+    # because reason is `no-findings`.
+    receipt_postmortem_skipped(td, "no-findings", "f" * 64, subsumed_by=[])
     gaps = require_receipts_for_done(td)
     assert gaps == []
 
@@ -81,7 +83,9 @@ def test_generated_with_anomalies_plus_skipped_passes(tmp_path: Path):
     td = _setup(tmp_path, quality=0.95)
     receipt_postmortem_generated(td, "a" * 64, "b" * 64,
                                  anomaly_count=4, pattern_count=0)
-    receipt_postmortem_skipped(td, "clean-task", "f" * 64)
+    # task-20260419-002 G2: subsumed_by required; empty list is valid
+    # because reason is `clean-task`.
+    receipt_postmortem_skipped(td, "clean-task", "f" * 64, subsumed_by=[])
     gaps = require_receipts_for_done(td)
     assert gaps == []
 
@@ -91,6 +95,8 @@ def test_skipped_variant_short_circuits_anomaly_branch(tmp_path: Path):
     td = _setup(tmp_path, quality=0.4)
     receipt_postmortem_generated(td, "a" * 64, "b" * 64,
                                  anomaly_count=99, pattern_count=0)
-    receipt_postmortem_skipped(td, "no-findings", "f" * 64)
+    # task-20260419-002 G2: subsumed_by required; empty list is valid
+    # because reason is `no-findings`.
+    receipt_postmortem_skipped(td, "no-findings", "f" * 64, subsumed_by=[])
     gaps = require_receipts_for_done(td)
     assert gaps == []

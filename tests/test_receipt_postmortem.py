@@ -72,22 +72,25 @@ def test_postmortem_analysis_rejects_invalid(tmp_path: Path):
 
 def test_postmortem_skipped_happy(tmp_path: Path):
     td = _task_dir(tmp_path)
-    for reason in ("clean-task", "no-findings", "quality-above-threshold"):
-        out = receipt_postmortem_skipped(td, reason, "e" * 64)
+    # After task-20260419-002 G1 the enum is reduced to two reasons;
+    # `quality-above-threshold` is no longer valid.
+    for reason in ("clean-task", "no-findings"):
+        out = receipt_postmortem_skipped(td, reason, "e" * 64, subsumed_by=[])
         payload = json.loads(out.read_text())
         assert payload["reason"] == reason
         assert payload["retrospective_sha256"] == "e" * 64
+        assert payload["subsumed_by"] == []
 
 
 def test_postmortem_skipped_rejects_invalid_reason(tmp_path: Path):
     td = _task_dir(tmp_path)
     with pytest.raises(ValueError, match="invalid postmortem skip reason"):
-        receipt_postmortem_skipped(td, "made-up-reason", "e" * 64)
+        receipt_postmortem_skipped(td, "made-up-reason", "e" * 64, subsumed_by=[])
     with pytest.raises(ValueError, match="invalid postmortem skip reason"):
-        receipt_postmortem_skipped(td, "", "e" * 64)
+        receipt_postmortem_skipped(td, "", "e" * 64, subsumed_by=[])
 
 
 def test_postmortem_skipped_rejects_empty_retro_sha(tmp_path: Path):
     td = _task_dir(tmp_path)
     with pytest.raises(ValueError, match="retrospective_sha256"):
-        receipt_postmortem_skipped(td, "no-findings", "")
+        receipt_postmortem_skipped(td, "no-findings", "", subsumed_by=[])

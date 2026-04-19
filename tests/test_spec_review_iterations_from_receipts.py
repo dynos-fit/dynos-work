@@ -60,6 +60,15 @@ def _write_approval_receipt(td: Path, filename: str) -> None:
     (receipts / filename).write_text(json.dumps(payload, indent=2))
 
 
+def _write_empty_planted_receipt(td: Path, filename: str) -> None:
+    """Write an EMPTY file (or JSON-invalid content) matching the glob —
+    simulating a SEC-005 attack where someone plants bare files to
+    inflate the counter without a real approval. Should NOT count."""
+    receipts = td / "receipts"
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / filename).write_text("")
+
+
 def _iterations(td: Path) -> int:
     """Return the `spec_review_iterations` value computed by
     `compute_reward` for the given task dir."""
@@ -93,6 +102,31 @@ def test_counts_two_with_rotation_suffix(tmp_path: Path) -> None:
     _write_approval_receipt(td, "human-approval-SPEC_REVIEW.json")
     _write_approval_receipt(td, "human-approval-SPEC_REVIEW-002.json")
     assert _iterations(td) == 2
+
+
+def test_empty_planted_files_do_not_inflate_count(tmp_path: Path) -> None:
+    """SEC-005 regression: `touch human-approval-SPEC_REVIEW-fake.json`
+    (empty file, no JSON content) must NOT inflate the counter.
+    Receipts must parse as JSON objects carrying a matching
+    `step == "human-approval-SPEC_REVIEW*"` field AND non-empty
+    `artifact_sha256`."""
+    td = _make_task_dir(tmp_path, slug="SEC5")
+    # One legitimate receipt + three planted files of different shapes.
+    _write_approval_receipt(td, "human-approval-SPEC_REVIEW.json")
+    _write_empty_planted_receipt(td, "human-approval-SPEC_REVIEW-empty.json")
+    # Valid JSON but not a dict.
+    (td / "receipts" / "human-approval-SPEC_REVIEW-list.json").write_text("[]")
+    # Valid JSON object but wrong step field.
+    (td / "receipts" / "human-approval-SPEC_REVIEW-wrong.json").write_text(
+        json.dumps({"step": "something-else", "artifact_sha256": "a" * 64})
+    )
+    # Valid JSON object with empty artifact_sha256.
+    (td / "receipts" / "human-approval-SPEC_REVIEW-noart.json").write_text(
+        json.dumps({"step": "human-approval-SPEC_REVIEW", "artifact_sha256": ""})
+    )
+    assert _iterations(td) == 1, (
+        f"only the legitimate receipt should count; planted files must be rejected"
+    )
 
 
 def test_log_lines_no_longer_counted(tmp_path: Path) -> None:

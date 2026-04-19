@@ -10,11 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from lib_core import now_iso, append_execution_log
+from lib_core import now_iso, append_execution_log, _persistent_project_dir
 from lib_log import log_event
 
 
@@ -43,11 +44,24 @@ CALIBRATION_POLICY_FILES = [
 
 # Allowed reasons for receipt_postmortem_skipped. Enum-validated at write
 # time so callers cannot silently drift the skip taxonomy.
+#
+# A prior "quality-over-gate" skip reason was removed
+# (task-20260419-002 G1): it was being used to silently skip LLM
+# postmortems on tasks that had real non-blocking findings. The
+# remaining two reasons ONLY permit a skip when there is literally
+# nothing to learn (clean-task) or nothing the auditors found
+# (no-findings). Every other skip path must cite prior postmortem work
+# via the required `subsumed_by` argument on
+# `receipt_postmortem_skipped` (see G2).
 _POSTMORTEM_SKIP_REASONS = frozenset({
     "clean-task",
     "no-findings",
-    "quality-above-threshold",
 })
+
+# Regex for the task_id slug shape — matches SEC-001's regex from PR #126.
+# Used to validate entries in the `subsumed_by` list on
+# `receipt_postmortem_skipped`.
+_SUBSUMED_BY_TASK_ID_RE = re.compile(r"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 # Sidecar directory names. These names are the filename schema for the
@@ -1085,24 +1099,104 @@ def receipt_postmortem_skipped(
     task_dir: Path,
     reason: str,
     retrospective_sha256: str,
+    subsumed_by: list[str],
 ) -> Path:
     """Write receipt proving postmortem was deliberately skipped.
 
-    `reason` is enum-validated against {"clean-task", "no-findings",
-    "quality-above-threshold"}.
+    `reason` is enum-validated against {"clean-task", "no-findings"}.
+    A prior quality-over-gate skip reason has been removed
+    (task-20260419-002 G1) — callers that previously used it must
+    either (a) pass `"clean-task"` when the task genuinely had zero
+    findings, or (b) stop skipping and let the LLM postmortem run.
+
+    `subsumed_by` is REQUIRED (task-20260419-002 G2): every skip must
+    cite specific prior postmortem task_ids whose derived rules cover
+    this task's finding categories. Empty list `[]` is valid ONLY when
+    `reason` is `"clean-task"` or `"no-findings"`.
+
+    Validation rules, applied IN ORDER; the first failure short-circuits:
+
+      (a) `subsumed_by` must be a list of strings (any non-list shape
+          raises `ValueError("subsumed_by must be a list of task_id
+          strings")`).
+      (b) Each entry MUST match the task_id regex
+          `^task-[A-Za-z0-9][A-Za-z0-9_.-]*$`; failures raise
+          `ValueError` whose message contains `subsumed_by[<i>]` and
+          `must match`.
+      (c) If `reason` is NOT in `{"clean-task", "no-findings"}`, the
+          list MUST be non-empty; empty raises `ValueError` whose
+          message contains `subsumed_by must be non-empty when reason=`.
+          After G1 this case is unreachable via the `reason` enum check
+          above, but the rule is retained for defensive coverage.
+      (d) For each entry in a non-empty list, the expected postmortem
+          file at `_persistent_project_dir(root) / "postmortems" /
+          f"{entry}.json"` (where `root = task_dir.parent.parent`) MUST
+          exist; missing files raise `ValueError` whose message contains
+          `missing postmortem file for` and the offending task_id.
+
+    `subsumed_by` is written verbatim into the receipt payload
+    alongside `reason` so downstream consumers can audit which prior
+    work the skip rests on.
     """
     if reason not in _POSTMORTEM_SKIP_REASONS:
         raise ValueError(
             f"invalid postmortem skip reason: {reason!r} "
-            f"(allowed: {sorted(_POSTMORTEM_SKIP_REASONS)})"
+            f"(allowed: {', '.join(sorted(_POSTMORTEM_SKIP_REASONS))})"
         )
     if not isinstance(retrospective_sha256, str) or not retrospective_sha256:
         raise ValueError("retrospective_sha256 must be a non-empty string")
+
+    # Rule (a): subsumed_by must be a list. `isinstance(..., list)`
+    # rejects tuples, sets, dicts, strings, None, ints, etc. — the
+    # message pins the expected shape so callers know the contract.
+    if not isinstance(subsumed_by, list):
+        raise ValueError("subsumed_by must be a list of task_id strings")
+
+    # Rule (b): every entry must match the task_id slug regex. We
+    # iterate with index so the failure message can cite the specific
+    # offending position. Non-string entries fail the regex match
+    # (re.match rejects non-str input via TypeError, which we preempt
+    # by coercing to the regex-based check — `re.match` called on
+    # non-str raises TypeError; convert that to ValueError with the
+    # same bracket+must-match shape so the test pattern still holds).
+    for i, entry in enumerate(subsumed_by):
+        if not isinstance(entry, str) or not _SUBSUMED_BY_TASK_ID_RE.match(entry):
+            raise ValueError(
+                f"subsumed_by[{i}] must match "
+                f"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$ (got {entry!r})"
+            )
+
+    # Rule (c): non-empty required when reason is not one of the
+    # "nothing to cite" reasons. After G1 this branch is effectively
+    # unreachable because the reason enum above rejects any other
+    # value, but the defensive rule stays — if the enum grows back we
+    # want subsumed_by enforcement to follow immediately.
+    if reason not in {"clean-task", "no-findings"} and not subsumed_by:
+        raise ValueError(
+            f"subsumed_by must be non-empty when reason={reason!r}"
+        )
+
+    # Rule (d): every cited task_id must have a corresponding
+    # postmortem file on disk under the project-persistent postmortems
+    # directory. This is the "cite something real" rule — callers
+    # cannot hand-wave arbitrary task_ids. The path resolution mirrors
+    # `receipt_postmortem_generated`'s write path (see lib_core.py).
+    if subsumed_by:
+        root = task_dir.parent.parent
+        postmortems_dir = _persistent_project_dir(root) / "postmortems"
+        for entry in subsumed_by:
+            pm_path = postmortems_dir / f"{entry}.json"
+            if not pm_path.exists():
+                raise ValueError(
+                    f"missing postmortem file for {entry!r} at {pm_path}"
+                )
+
     return write_receipt(
         task_dir,
         "postmortem-skipped",
         reason=reason,
         retrospective_sha256=retrospective_sha256,
+        subsumed_by=list(subsumed_by),
     )
 
 
