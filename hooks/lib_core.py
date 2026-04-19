@@ -630,7 +630,10 @@ def _compute_bypassed_gates_for_force(
             required_seg_ids: list[str] = []
             seen: set[str] = set()
 
-            def _add(seg_id: object) -> None:
+            # CQ-001: helper name matches the live gate's `_add_seg` in
+            # transition_task so drift between dry-run and live is
+            # mechanically obvious on review.
+            def _add_seg(seg_id: object) -> None:
                 if isinstance(seg_id, str) and seg_id and seg_id not in seen:
                     required_seg_ids.append(seg_id)
                     seen.add(seg_id)
@@ -646,12 +649,12 @@ def _compute_bypassed_gates_for_force(
                     if isinstance(graph_segments, list):
                         for entry in graph_segments:
                             if isinstance(entry, dict):
-                                _add(entry.get("id"))
+                                _add_seg(entry.get("id"))
             routing_segments = routing_payload.get("segments")
             if isinstance(routing_segments, list):
                 for entry in routing_segments:
                     if isinstance(entry, dict):
-                        _add(entry.get("segment_id"))
+                        _add_seg(entry.get("segment_id"))
             for seg_id in required_seg_ids:
                 if read_receipt(task_dir, f"executor-{seg_id}") is None:
                     errs.append(
@@ -750,14 +753,11 @@ def _flush_retrospective_on_done(*, task_dir: Path, manifest: dict) -> None:
         return
     root = task_dir.parent.parent
     task_id = manifest.get("task_id") or task_dir.name
-    # SEC-001 hardening: validate task_id as a safe slug BEFORE path join.
-    # A crafted manifest with "task_id": "../../evil" would otherwise escape
-    # the persistent retrospectives dir. Accepts current dynos format
-    # (task-YYYYMMDD-NNN) plus test-style ids (task-T, task-A).
-    import re as _re_slug
-    if not isinstance(task_id, str) or not _re_slug.match(
-        r"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$", task_id
-    ):
+
+    # CQ-002: single helper for the three identical failure-emit blocks
+    # below. Invariant: NEVER raises — best-effort log event with a
+    # swallow-all outer try/except.
+    def _log_flush_failed(destination: str, error: str) -> None:
         try:
             from lib_log import log_event as _log_flush
             _log_flush(
@@ -766,11 +766,21 @@ def _flush_retrospective_on_done(*, task_dir: Path, manifest: dict) -> None:
                 task=str(task_id),
                 task_id=str(task_id),
                 source=str(src),
-                destination="",
-                error=f"invalid task_id slug: {task_id!r}",
+                destination=destination,
+                error=error,
             )
         except Exception:
             pass
+
+    # SEC-001 hardening: validate task_id as a safe slug BEFORE path join.
+    # A crafted manifest with "task_id": "../../evil" would otherwise escape
+    # the persistent retrospectives dir. Accepts current dynos format
+    # (task-YYYYMMDD-NNN) plus test-style ids (task-T, task-A).
+    import re as _re_slug
+    if not isinstance(task_id, str) or not _re_slug.match(
+        r"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$", task_id
+    ):
+        _log_flush_failed(destination="", error=f"invalid task_id slug: {task_id!r}")
         return
     try:
         dst_dir = _persistent_project_dir(root) / "retrospectives"
@@ -783,53 +793,17 @@ def _flush_retrospective_on_done(*, task_dir: Path, manifest: dict) -> None:
             raise OSError(f"resolved dst escapes retrospectives dir: {dst}")
     except OSError as exc:
         # Can't even compute or create the destination dir — log and bail.
-        try:
-            from lib_log import log_event as _log_flush
-            _log_flush(
-                root,
-                "retrospective_flush_failed",
-                task=task_id,
-                task_id=task_id,
-                source=str(src),
-                destination="",
-                error=str(exc),
-            )
-        except Exception:
-            pass
+        _log_flush_failed(destination="", error=str(exc))
         return
     try:
         from lib_receipts import _atomic_write_text
         _atomic_write_text(dst, src.read_text("utf-8"))
     except OSError as exc:
-        try:
-            from lib_log import log_event as _log_flush
-            _log_flush(
-                root,
-                "retrospective_flush_failed",
-                task=task_id,
-                task_id=task_id,
-                source=str(src),
-                destination=str(dst),
-                error=str(exc),
-            )
-        except Exception:
-            pass
+        _log_flush_failed(destination=str(dst), error=str(exc))
         return
     except Exception as exc:
         # Non-OSError (unexpected) — still must not block DONE.
-        try:
-            from lib_log import log_event as _log_flush
-            _log_flush(
-                root,
-                "retrospective_flush_failed",
-                task=task_id,
-                task_id=task_id,
-                source=str(src),
-                destination=str(dst),
-                error=f"unexpected: {exc}",
-            )
-        except Exception:
-            pass
+        _log_flush_failed(destination=str(dst), error=f"unexpected: {exc}")
         return
     # Success path — hash the newly-written destination for the event.
     try:
@@ -1234,10 +1208,12 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 )
             except Exception:
                 pass
-        except Exception:
+        except Exception as _force_rcpt_unexpected:
             # Non-OSError receipt-write failures are ALSO non-blocking
             # (e.g. validation bugs should not lock out recovery) — we
-            # log best-effort and proceed.
+            # log best-effort and proceed. CQ-003: include str(exc) so
+            # the event payload carries the actual failure detail
+            # (the OSError branch above already does).
             try:
                 from lib_log import log_event as _log_force_fail
                 _log_force_fail(
@@ -1245,7 +1221,7 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     "force_override_receipt_write_failed",
                     task=_task_id_force,
                     task_id=_task_id_force,
-                    error="unexpected receipt writer failure",
+                    error=f"unexpected: {_force_rcpt_unexpected}",
                 )
             except Exception:
                 pass

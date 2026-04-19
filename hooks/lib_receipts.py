@@ -61,16 +61,51 @@ INJECTED_AUDITOR_PROMPTS_DIR = "_injected-auditor-prompts"
 INJECTED_PLANNER_PROMPTS_DIR = "_injected-planner-prompts"
 
 
+# PERF-001: per-process memo for hash_file keyed by (abs_path, mtime_ns,
+# size). Repeated hashes of the same unchanged file in one Python process
+# (e.g. receipt_plan_audit write + plan_audit_matches gate check) now
+# share one disk read. Invalidated automatically when mtime or size
+# change, so writes between hashes are picked up. Bounded to 128 entries
+# to keep the cache small.
+_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+_HASH_CACHE_MAX = 128
+
+
 def hash_file(path: Path) -> str:
     """Return sha256 hex digest of a file's contents.
 
     Raises FileNotFoundError if path does not exist.
+
+    Cached per (absolute-path, mtime_ns, size) within the Python process.
+    Any mutation changes mtime_ns or size and invalidates the entry on
+    the next call — no stale-hash risk.
     """
+    try:
+        st = path.stat()
+    except OSError:
+        # File missing → let open() raise the canonical error below.
+        st = None
+    if st is not None:
+        key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+        cached = _HASH_CACHE.get(key)
+        if cached is not None:
+            return cached
+
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
-    return h.hexdigest()
+    digest = h.hexdigest()
+
+    if st is not None:
+        # Evict oldest if over cap (FIFO is fine; hot keys churn little).
+        if len(_HASH_CACHE) >= _HASH_CACHE_MAX:
+            try:
+                _HASH_CACHE.pop(next(iter(_HASH_CACHE)))
+            except StopIteration:
+                pass
+        _HASH_CACHE[(str(path.resolve()), st.st_mtime_ns, st.st_size)] = digest
+    return digest
 
 
 __all__ = [
@@ -877,30 +912,39 @@ def receipt_plan_audit(
     tokens_used: int | None,
     finding_count: int = 0,
     model_used: str | None = None,
-    *,
-    spec_sha256: str,
-    plan_sha256: str,
-    graph_sha256: str,
 ) -> Path:
     """Write receipt proving plan audit (spec-completion check) ran.
 
-    Hash-binding (F2): the three keyword-only arguments ``spec_sha256``,
-    ``plan_sha256``, and ``graph_sha256`` are REQUIRED. Each must be a
-    non-empty string (typically a sha256 hex digest of the corresponding
-    artifact at audit time). These hashes are embedded in the receipt
+    Hash-binding (SEC-004 + F2): the writer re-hashes ``spec.md``,
+    ``plan.md``, and ``execution-graph.json`` from the task directory at
+    write time. Those sha256 hex digests are embedded in the receipt
     payload so the PLAN_AUDIT exit gate can detect artifact drift via
     ``plan_audit_matches(task_dir)`` and refuse to advance when the audit
     was computed over a stale version of the artifacts.
 
+    Callers no longer supply the three hashes (breaking change vs. the
+    initial F2 signature). Closes the TOCTOU between a caller's
+    hash-read and the receipt write — the writer's own read is the
+    authoritative source. Missing artifact files land the literal
+    string ``missing`` in the corresponding payload slot, which always
+    fails ``plan_audit_matches`` downstream with a distinctive drift
+    reason.
+
     Also records token usage to ``token-usage.json`` when ``tokens_used``
     is positive.
     """
-    if not isinstance(spec_sha256, str) or not spec_sha256:
-        raise ValueError("spec_sha256 must be a non-empty string")
-    if not isinstance(plan_sha256, str) or not plan_sha256:
-        raise ValueError("plan_sha256 must be a non-empty string")
-    if not isinstance(graph_sha256, str) or not graph_sha256:
-        raise ValueError("graph_sha256 must be a non-empty string")
+    def _hash_or_missing(rel: str) -> str:
+        p = task_dir / rel
+        if not p.exists():
+            return "missing"
+        try:
+            return hash_file(p)
+        except OSError:
+            return "missing"
+
+    spec_sha256 = _hash_or_missing("spec.md")
+    plan_sha256 = _hash_or_missing("plan.md")
+    graph_sha256 = _hash_or_missing("execution-graph.json")
 
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, "plan-audit-check", model_used or "default", tokens_used)

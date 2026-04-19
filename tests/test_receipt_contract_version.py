@@ -111,14 +111,8 @@ def _exercise_writer(name: str, td: Path):
             td, "spec", 0, injected_prompt_sha256=digest
         )
     if name == "receipt_plan_audit":
-        return receipt_plan_audit(
-            td,
-            tokens_used=0,
-            finding_count=0,
-            spec_sha256="a" * 64,
-            plan_sha256="b" * 64,
-            graph_sha256="c" * 64,
-        )
+        # SEC-004: writer re-hashes disk; no caller-supplied hashes.
+        return receipt_plan_audit(td, tokens_used=0, finding_count=0)
     if name == "receipt_force_override":
         from lib_receipts import receipt_force_override
         return receipt_force_override(

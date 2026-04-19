@@ -1,11 +1,13 @@
-"""Tests for receipt_plan_audit hash payload (F2) and plan_audit_matches
-helper (F3). CRITERIA 2 and 3.
+"""Tests for receipt_plan_audit hash payload and plan_audit_matches
+helper. CRITERIA 2 and 3 (F2/F3), with SEC-004 hardening applied.
 
-F2: `receipt_plan_audit(...)` now requires three kw-only string kwargs:
-`spec_sha256`, `plan_sha256`, `graph_sha256`. Each must be non-empty.
-The written payload carries all three.
+SEC-004 hardening: the writer no longer accepts caller-supplied hashes.
+It re-hashes `spec.md`, `plan.md`, and `execution-graph.json` from the
+task directory at write time. This closes the TOCTOU between a caller's
+hash read and the receipt write — the writer's own read is the
+authoritative source.
 
-F3: `plan_audit_matches(task_dir)` returns:
+F3: `plan_audit_matches(task_dir)` still returns:
   - True  when the receipt exists AND all three hashes match disk
   - a descriptive string (e.g. "plan.md hash drift") when the receipt
     is present but one of the artifacts drifted on disk
@@ -40,107 +42,58 @@ def _setup_artifacts(tmp_path: Path) -> Path:
 
 
 def _write_fresh_receipt(td: Path) -> None:
-    """Write a plan-audit-check receipt whose hashes match current disk."""
-    receipt_plan_audit(
-        td,
-        tokens_used=100,
-        finding_count=0,
-        spec_sha256=hash_file(td / "spec.md"),
-        plan_sha256=hash_file(td / "plan.md"),
-        graph_sha256=hash_file(td / "execution-graph.json"),
-    )
+    """Write a plan-audit-check receipt — the writer re-hashes current
+    disk contents (SEC-004: no caller-supplied hashes)."""
+    receipt_plan_audit(td, tokens_used=100, finding_count=0)
 
 
 # ---------------------------------------------------------------------------
-# F2: receipt_plan_audit payload / signature
+# Payload / signature
 # ---------------------------------------------------------------------------
 
 
 def test_payload_contains_three_hashes(tmp_path: Path) -> None:
-    """Write a receipt with known hex digests; read the JSON back; assert
-    the three keys are present and match exactly what we passed in."""
+    """Write a receipt; read the JSON back; assert the three hash keys
+    are present AND match what `hash_file` says about the same files.
+
+    SEC-004: writer re-hashes internally — callers no longer supply
+    hashes — so the only way for the payload to be right is for the
+    writer to read the artifacts itself."""
     td = _setup_artifacts(tmp_path)
-    spec_h = "a" * 64
-    plan_h = "b" * 64
-    graph_h = "c" * 64
-    receipt_path = receipt_plan_audit(
-        td,
-        tokens_used=0,
-        finding_count=0,
-        spec_sha256=spec_h,
-        plan_sha256=plan_h,
-        graph_sha256=graph_h,
-    )
+    receipt_path = receipt_plan_audit(td, tokens_used=0, finding_count=0)
     payload = json.loads(receipt_path.read_text())
-    assert payload["spec_sha256"] == spec_h
-    assert payload["plan_sha256"] == plan_h
-    assert payload["graph_sha256"] == graph_h
+    assert payload["spec_sha256"] == hash_file(td / "spec.md")
+    assert payload["plan_sha256"] == hash_file(td / "plan.md")
+    assert payload["graph_sha256"] == hash_file(td / "execution-graph.json")
 
 
-def test_requires_spec_sha256(tmp_path: Path) -> None:
-    """Missing kwarg → TypeError (kw-only required argument).
-    Empty string → ValueError (explicit rejection of blank)."""
+def test_missing_artifact_writes_literal_missing(tmp_path: Path) -> None:
+    """When an artifact file is absent at write time, the corresponding
+    payload slot carries the literal string `missing`. Downstream
+    `plan_audit_matches` interprets that as a drift condition because it
+    never equals a real sha256 hex digest."""
     td = _setup_artifacts(tmp_path)
-    # Omission — kw-only required → TypeError.
-    with pytest.raises(TypeError):
-        receipt_plan_audit(
-            td,
-            tokens_used=0,
-            finding_count=0,
-            plan_sha256="b" * 64,
-            graph_sha256="c" * 64,
-        )
-    # Empty string — explicit ValueError naming the arg.
-    with pytest.raises(ValueError, match="spec_sha256"):
-        receipt_plan_audit(
-            td,
-            tokens_used=0,
-            finding_count=0,
-            spec_sha256="",
-            plan_sha256="b" * 64,
-            graph_sha256="c" * 64,
-        )
+    (td / "plan.md").unlink()
+    receipt_path = receipt_plan_audit(td, tokens_used=0, finding_count=0)
+    payload = json.loads(receipt_path.read_text())
+    assert payload["plan_sha256"] == "missing"
+    # Spec and graph are still real hashes.
+    assert payload["spec_sha256"] == hash_file(td / "spec.md")
+    assert payload["graph_sha256"] == hash_file(td / "execution-graph.json")
 
 
-def test_requires_plan_sha256(tmp_path: Path) -> None:
+def test_signature_rejects_caller_supplied_hashes(tmp_path: Path) -> None:
+    """SEC-004 regression: callers that still try to pass the old
+    kwargs (spec_sha256/plan_sha256/graph_sha256) hit a TypeError for
+    unexpected-kwarg. The three args are no longer part of the
+    public signature."""
     td = _setup_artifacts(tmp_path)
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="spec_sha256"):
         receipt_plan_audit(
             td,
             tokens_used=0,
             finding_count=0,
-            spec_sha256="a" * 64,
-            graph_sha256="c" * 64,
-        )
-    with pytest.raises(ValueError, match="plan_sha256"):
-        receipt_plan_audit(
-            td,
-            tokens_used=0,
-            finding_count=0,
-            spec_sha256="a" * 64,
-            plan_sha256="",
-            graph_sha256="c" * 64,
-        )
-
-
-def test_requires_graph_sha256(tmp_path: Path) -> None:
-    td = _setup_artifacts(tmp_path)
-    with pytest.raises(TypeError):
-        receipt_plan_audit(
-            td,
-            tokens_used=0,
-            finding_count=0,
-            spec_sha256="a" * 64,
-            plan_sha256="b" * 64,
-        )
-    with pytest.raises(ValueError, match="graph_sha256"):
-        receipt_plan_audit(
-            td,
-            tokens_used=0,
-            finding_count=0,
-            spec_sha256="a" * 64,
-            plan_sha256="b" * 64,
-            graph_sha256="",
+            spec_sha256="a" * 64,  # type: ignore[call-arg]
         )
 
 

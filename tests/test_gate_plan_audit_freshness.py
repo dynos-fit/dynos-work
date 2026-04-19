@@ -36,14 +36,8 @@ def _setup(tmp_path: Path, *, risk: str) -> Path:
 
 
 def _write_fresh_audit(td: Path) -> None:
-    receipt_plan_audit(
-        td,
-        tokens_used=100,
-        finding_count=0,
-        spec_sha256=hash_file(td / "spec.md"),
-        plan_sha256=hash_file(td / "plan.md"),
-        graph_sha256=hash_file(td / "execution-graph.json"),
-    )
+    # SEC-004: writer re-hashes artifacts from disk; no caller args.
+    receipt_plan_audit(td, tokens_used=100, finding_count=0)
 
 
 def test_refuses_when_plan_edited_after_audit(tmp_path: Path) -> None:

@@ -35,15 +35,9 @@ def _setup(tmp_path: Path, *, risk: str, tdd_required: bool | None = None) -> Pa
 
 
 def _write_plan_audit(td: Path) -> None:
-    """Write a plan-audit-check receipt bound to the current artifact hashes."""
-    receipt_plan_audit(
-        td,
-        tokens_used=100,
-        finding_count=0,
-        spec_sha256=hash_file(td / "spec.md"),
-        plan_sha256=hash_file(td / "plan.md"),
-        graph_sha256=hash_file(td / "execution-graph.json"),
-    )
+    """Write a plan-audit-check receipt — the writer re-hashes artifacts
+    from disk (SEC-004, no caller-supplied hashes)."""
+    receipt_plan_audit(td, tokens_used=100, finding_count=0)
 
 
 def test_critical_without_receipt_refuses(tmp_path: Path):
