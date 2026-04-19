@@ -1423,6 +1423,99 @@ def find_active_tasks(root: Path) -> list[Path]:
 # Retrospective helpers
 # ---------------------------------------------------------------------------
 
+def _flushed_sha_by_task_id(root: Path) -> dict[str, str]:
+    """Parse ``.dynos/events.jsonl`` once and return
+    ``{task_id: last_flushed_sha256}`` from ``retrospective_flushed``
+    events. LAST event wins — re-plays overwrite.
+
+    Malformed lines are skipped silently. Missing file → empty dict.
+    Used by SEC-003 cross-check on persistent retrospectives.
+    """
+    out: dict[str, str] = {}
+    events_path = root / ".dynos" / "events.jsonl"
+    if not events_path.exists():
+        return out
+    try:
+        with events_path.open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                if ev.get("event") != "retrospective_flushed":
+                    continue
+                tid = ev.get("task_id")
+                sha = ev.get("sha256")
+                if isinstance(tid, str) and tid and isinstance(sha, str) and sha:
+                    out[tid] = sha
+    except OSError:
+        return {}
+    return out
+
+
+# PERF-003: per-process memo for collect_retrospectives. Key is a stat
+# fingerprint of the two source dirs + events.jsonl so any mutation
+# invalidates. Small dict — at most one entry per unique root path.
+_COLLECT_RETRO_CACHE: dict[Path, tuple[tuple, list[dict]]] = {}
+
+
+def _retros_stat_fingerprint(root: Path) -> tuple:
+    """Return a tuple summarizing the current on-disk state of the three
+    inputs to collect_retrospectives. Any change (new file, edit, delete)
+    changes the tuple, invalidating the cache.
+
+    The fingerprint is cheap — stat() calls only, no reads.
+    """
+    def _dir_sig(d: Path) -> tuple:
+        if not d.exists():
+            return ("MISSING",)
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            return ("UNREADABLE",)
+        parts: list[tuple] = []
+        for p in entries:
+            try:
+                st = p.stat()
+                parts.append((p.name, st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue
+        return tuple(parts)
+
+    worktree = _dir_sig(root / ".dynos")
+    # Also fingerprint every task-* subdir's retrospective file.
+    try:
+        worktree_retros = tuple(
+            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            for p in sorted((root / ".dynos").glob("task-*/task-retrospective.json"))
+        )
+    except OSError:
+        worktree_retros = ()
+
+    try:
+        pd = _persistent_project_dir(root) / "retrospectives"
+        persistent = _dir_sig(pd)
+    except OSError:
+        persistent = ("ERROR",)
+
+    events_path = root / ".dynos" / "events.jsonl"
+    try:
+        if events_path.exists():
+            est = events_path.stat()
+            events_sig = (est.st_mtime_ns, est.st_size)
+        else:
+            events_sig = ("MISSING",)
+    except OSError:
+        events_sig = ("UNREADABLE",)
+
+    return (worktree, worktree_retros, persistent, events_sig)
+
+
 def collect_retrospectives(root: Path) -> list[dict]:
     """Collect all task retrospective JSON files from both the worktree
     and the project-persistent directory.
@@ -1440,11 +1533,34 @@ def collect_retrospectives(root: Path) -> list[dict]:
     worktree copy may have been edited post-DONE (not supposed to
     happen, but possible).
 
+    SEC-003 hardening: for each persistent retro, the content sha256 is
+    re-computed and compared to the ``retrospective_flushed`` event
+    recorded in ``.dynos/events.jsonl`` at DONE time. A mismatch means
+    someone tampered with the persistent file after flush; that retro
+    is SKIPPED (the worktree copy, if present, is used instead). Absence
+    of a flush event for a given task_id is NOT a rejection — cold-
+    start / pre-SEC-003-code retros are trusted by default.
+
+    PERF-003 hardening: results are memoized per-root, keyed by a stat
+    fingerprint of the two source dirs and events.jsonl. Any mutation
+    of any file in those paths invalidates the cache on the next call.
+
     Missing persistent dir (new project, no DONE tasks yet) is treated
     as empty. Malformed JSON is skipped silently on either side. Entries
     without a string ``task_id`` are kept under synthetic keys so a
     malformed registry cannot drop a legitimate worktree entry.
     """
+    root = Path(root)
+    fingerprint = _retros_stat_fingerprint(root)
+    cached = _COLLECT_RETRO_CACHE.get(root)
+    if cached is not None and cached[0] == fingerprint:
+        return list(cached[1])
+
+    flushed_shas = _flushed_sha_by_task_id(root)
+
+    # Import locally to avoid hashlib-at-top-level cost on import
+    from lib_receipts import hash_file
+
     by_task_id: dict[str, dict] = {}
     synth_counter = 0
 
@@ -1456,10 +1572,27 @@ def collect_retrospectives(root: Path) -> list[dict]:
             return
         if not isinstance(data, dict):
             return
+
+        tid = data.get("task_id")
+
+        # SEC-003: verify persistent retros against the flushed-event
+        # sha256. Tampered content (content-hash != event-hash) →
+        # skip. No-event-known → trust (cold-start compat).
+        if persistent and isinstance(tid, str) and tid:
+            expected = flushed_shas.get(tid)
+            if expected:
+                try:
+                    actual = hash_file(path)
+                except OSError:
+                    actual = ""
+                if actual != expected:
+                    # Skip this persistent copy entirely — the worktree
+                    # copy (if present) will stand.
+                    return
+
         data["_path"] = str(path)
         data["_source"] = "persistent" if persistent else "worktree"
 
-        tid = data.get("task_id")
         if isinstance(tid, str) and tid:
             key = tid
         else:
@@ -1502,7 +1635,9 @@ def collect_retrospectives(root: Path) -> list[dict]:
     except OSError:
         pass
 
-    return list(by_task_id.values())
+    result = list(by_task_id.values())
+    _COLLECT_RETRO_CACHE[root] = (fingerprint, result)
+    return list(result)
 
 
 def retrospective_task_ids(root: Path) -> list[str]:
