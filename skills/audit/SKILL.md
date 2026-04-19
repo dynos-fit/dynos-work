@@ -405,7 +405,7 @@ If `has_findings` is false, skip this step and append:
 
 **Post-completion processing:** Improve, policy engine, dashboard, and registry refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
 
-Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `lib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
+Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `lib.py` (this sets both `stage` and `completion_at`). Append to log:
 ```
 {timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE
 ```

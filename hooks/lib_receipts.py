@@ -376,6 +376,34 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
             f"[FORCE] {from_stage} → {to_stage} — bypassed {n_bypassed} gate(s)",
         )
 
+    # Synchronous in-process scheduler dispatch. Fires AFTER the atomic
+    # receipt write (durable on disk) AND AFTER the log_event observability
+    # record (captured in events.jsonl). Ordering is load-bearing: moving
+    # this call before _atomic_write_text would expose a window where the
+    # scheduler sees a non-existent receipt; moving it before log_event
+    # would let a scheduler-dispatch side effect (e.g. a refusal-receipt
+    # write) race the observability record.
+    #
+    # The dispatch is wrapped in a try/except Exception so a scheduler
+    # failure can NEVER roll back the already-committed atomic receipt
+    # write. All failures are printed to stderr and swallowed. Catch
+    # Exception (NOT BaseException) to let KeyboardInterrupt / SystemExit
+    # propagate normally.
+    #
+    # Lazy import (function-local) avoids the circular-import cycle
+    # scheduler → lib_receipts → scheduler that would fire at module load
+    # if the import sat at the top of this file.
+    try:
+        from scheduler import handle_receipt_written
+        receipt_sha256 = hash_file(receipt_path)
+        handle_receipt_written(task_dir, step_name, receipt_sha256)
+    except Exception as exc:
+        import sys as _sys
+        print(
+            f"[lib_receipts] scheduler dispatch failed: {exc}",
+            file=_sys.stderr,
+        )
+
     return receipt_path
 
 
@@ -1963,6 +1991,72 @@ def receipt_force_override(
         bypassed_gates=list(bypassed_gates),
         bypassed_count=len(bypassed_gates),
         forced_at=now_iso(),
+    )
+
+
+def receipt_scheduler_refused(
+    task_dir: Path,
+    current_stage: str,
+    proposed_stage: str,
+    missing_proofs: list[str],
+) -> Path:
+    """Write receipt proving the scheduler refused to transition.
+
+    Emitted by ``scheduler.handle_receipt_written`` when
+    ``compute_next_stage(task_dir)`` returns a non-None ``next_stage``
+    with a non-empty ``missing_proofs`` list. The receipt is purely
+    observational — no gate reads it; it parallels the
+    ``scheduler_transition_refused`` event and lets the audit trail
+    record refusal reasons on disk rather than only in events.jsonl.
+
+    Writes ``receipts/scheduler-refused.json``. Subsequent refusals
+    overwrite via the atomic write path — the most recent refusal wins.
+
+    Validation:
+      - ``current_stage`` and ``proposed_stage`` MUST be non-empty
+        strings matching ``^[A-Z][A-Z0-9_]*$``. The regex shape mirrors
+        ``receipt_force_override``'s ``_STAGE_RE`` hardening
+        (SEC-002): stage names become part of event payloads and log
+        lines, so crafted manifest values like ``"../../etc/x"`` must
+        be rejected at the writer boundary. Empty or non-matching
+        values raise ``ValueError`` naming the arg.
+      - ``missing_proofs`` MUST be a list (possibly empty). Every
+        entry MUST be a string. Any other container type or non-string
+        entry raises ``ValueError``.
+    """
+    if not isinstance(current_stage, str) or not current_stage:
+        raise ValueError("current_stage must be a non-empty string")
+    if not isinstance(proposed_stage, str) or not proposed_stage:
+        raise ValueError("proposed_stage must be a non-empty string")
+    # SEC-002 hardening: stage names MUST be strict uppercase identifier
+    # slugs. Prevents path traversal / event-payload injection via crafted
+    # manifest stage values reaching the receipt/event surface.
+    import re as _re_stage
+    _STAGE_RE = r"^[A-Z][A-Z0-9_]*$"
+    if not _re_stage.match(_STAGE_RE, current_stage):
+        raise ValueError(
+            f"current_stage must match {_STAGE_RE} (got {current_stage!r})"
+        )
+    if not _re_stage.match(_STAGE_RE, proposed_stage):
+        raise ValueError(
+            f"proposed_stage must match {_STAGE_RE} (got {proposed_stage!r})"
+        )
+    if not isinstance(missing_proofs, list):
+        raise ValueError("missing_proofs must be a list of strings")
+    for idx, entry in enumerate(missing_proofs):
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"missing_proofs[{idx}] must be a string "
+                f"(got {type(entry).__name__})"
+            )
+
+    return write_receipt(
+        task_dir,
+        "scheduler-refused",
+        current_stage=current_stage,
+        proposed_stage=proposed_stage,
+        missing_proofs=list(missing_proofs),
+        refused_at=now_iso(),
     )
 
 

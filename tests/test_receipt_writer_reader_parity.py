@@ -104,6 +104,17 @@ _INTENTIONALLY_WRITE_ONLY: dict[str, str] = {
         "usage and evidence path, but TDD_REVIEW exit gate reads "
         "human-approval-TDD_REVIEW not tdd-tests — no reader exists"
     ),
+    # Written by receipt_scheduler_refused (hooks/lib_receipts.py:
+    # receipt_scheduler_refused). Emitted from
+    # scheduler.handle_receipt_written when compute_next_stage returns a
+    # non-None next_stage with non-empty missing_proofs. Parallel to the
+    # scheduler_transition_refused event: pure observability with no
+    # runtime gate reading it. The stage transition is gated by
+    # transition_task + receipt_force_override, not by this receipt.
+    "scheduler-refused": (
+        "observability-only; no gate reads it; parallel to "
+        "scheduler_transition_refused event"
+    ),
 }
 
 

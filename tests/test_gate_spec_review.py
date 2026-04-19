@@ -26,6 +26,27 @@ def _setup(tmp_path: Path, *, spec_text: str = "spec content\n") -> Path:
     return td
 
 
+def _write_approval_direct(td: Path, artifact_sha256: str) -> None:
+    """Write a human-approval-SPEC_REVIEW receipt JSON directly.
+
+    Bypasses ``receipt_human_approval`` — which fires the synchronous
+    scheduler dispatch through ``write_receipt`` and auto-advances the
+    manifest to PLANNING. These tests exercise ``transition_task``'s own
+    gate logic in isolation; they must NOT let the scheduler race them.
+    """
+    receipts = td / "receipts"
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / "human-approval-SPEC_REVIEW.json").write_text(json.dumps({
+        "step": "human-approval-SPEC_REVIEW",
+        "ts": "2026-04-19T00:00:00Z",
+        "valid": True,
+        "contract_version": 4,
+        "stage": "SPEC_REVIEW",
+        "artifact_sha256": artifact_sha256,
+        "approver": "human",
+    }, indent=2))
+
+
 def test_missing_receipt_refuses(tmp_path: Path):
     td = _setup(tmp_path)
     with pytest.raises(ValueError, match="human-approval-SPEC_REVIEW"):
@@ -35,7 +56,7 @@ def test_missing_receipt_refuses(tmp_path: Path):
 def test_hash_drift_refuses(tmp_path: Path):
     td = _setup(tmp_path)
     sha = hash_file(td / "spec.md")
-    receipt_human_approval(td, "SPEC_REVIEW", sha)
+    _write_approval_direct(td, sha)
     # Drift the spec after approval
     (td / "spec.md").write_text("modified content\n")
     with pytest.raises(ValueError, match="hash mismatch"):
@@ -53,7 +74,7 @@ def test_force_bypass_succeeds(tmp_path: Path):
 def test_matching_hash_passes(tmp_path: Path):
     td = _setup(tmp_path)
     sha = hash_file(td / "spec.md")
-    receipt_human_approval(td, "SPEC_REVIEW", sha)
+    _write_approval_direct(td, sha)
     transition_task(td, "PLANNING")
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "PLANNING"

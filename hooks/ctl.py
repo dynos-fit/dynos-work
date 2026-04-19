@@ -107,12 +107,17 @@ def cmd_transition(args: argparse.Namespace) -> int:
 
 
 def cmd_approve_stage(args: argparse.Namespace) -> int:
-    """Record a human approval receipt for a review stage and advance the task.
+    """Record a human approval receipt for a review stage.
 
     stage must be one of SPEC_REVIEW / PLAN_REVIEW / TDD_REVIEW. Exits 1 on any
-    failure (unknown stage, missing artifact, receipt-write or transition
-    refusal); exits 0 only after the state machine has accepted the advance.
-    stderr carries the ValueError text; stdout is reserved for a success line.
+    failure that prevents the receipt write (unknown stage, missing artifact,
+    receipt-write refusal); exits 0 after the receipt is durably on disk.
+    The scheduler (hooks/scheduler.py) observes the receipt write via the
+    write_receipt chokepoint and drives any resulting stage advance
+    asynchronously in-process. Exit 0 therefore signals "receipt written";
+    it does NOT signal "stage advanced" — callers that need the latter must
+    re-read manifest.json after the call returns. stderr carries the
+    ValueError text; stdout is reserved for a success line.
     """
     stage = args.stage
     mapping = _APPROVE_STAGE_MAP.get(stage)
@@ -123,7 +128,7 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    artifact_rel, next_stage = mapping
+    artifact_rel, _ = mapping
 
     task_dir = Path(args.task_dir).resolve()
     artifact_path = task_dir / artifact_rel
@@ -146,16 +151,7 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    try:
-        previous, manifest = transition_task(task_dir, next_stage)
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-
-    print(
-        f"{manifest['task_id']}: approved {stage} ({sha256_hex[:12]}) "
-        f"and transitioned {previous} -> {manifest['stage']}"
-    )
+    print(f"{task_dir.name}: approved {stage} ({sha256_hex[:12]}) — receipt written, scheduler will advance")
     return 0
 
 

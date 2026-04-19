@@ -59,6 +59,8 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     "stage_transition",
     "eventbus_handler",
     "maintenance_cycle",
+    "scheduler_transition_refused",
+    "scheduler_transition_race",
 })
 
 

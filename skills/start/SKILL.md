@@ -430,11 +430,13 @@ python3 hooks/ctl.py transition .dynos/task-{id} SPEC_REVIEW
 
 ## Step 4 — Spec Review
 
+<!-- scheduler-owned: SPEC_REVIEW -> PLANNING -->
+
 **Fast-track skip:** If `manifest.json` has `"fast_track": true`, skip this step. Spec is reviewed together with the plan in Step 6 (combined approval gate). Log: `{timestamp} [SKIP] spec-review — fast_track combined gate`.
 
 **Normal path:** Present `spec.md` to the user and ask for approval.
 
-- If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, then transitions SPEC_REVIEW → PLANNING in one atomic step. Do NOT write a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
+- If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, the scheduler then observes the receipt write and advances the task to PLANNING asynchronously. Do NOT write a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
 - If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, write a new `receipt_spec_validated`, and present the updated spec again. Do NOT call `approve-stage` until the user re-approves the regenerated spec.
 - If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Spec rejected by user`, and stop.
 
@@ -444,7 +446,7 @@ When approved:
 python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW
 ```
 
-Exit code 0 means the receipt was written and the stage advanced to PLANNING. Exit code 1 means the gate refused — the stderr text identifies the cause (missing artifact, hash drift, illegal transition). Do not retry without addressing the reported cause; in particular, do not call `python3 hooks/ctl.py transition ... --force` to bypass — that would advance the stage without a receipt and break the audit chain.
+Exit code 0 means the receipt was written and the scheduler queued the advance to PLANNING (verify via manifest.stage after the in-process event dispatch completes). Exit code 1 means the gate refused — the stderr text identifies the cause (missing artifact, hash drift, illegal transition). Do not retry without addressing the reported cause; in particular, do not call `python3 hooks/ctl.py transition ... --force` to bypass — that would advance the stage without a receipt and break the audit chain.
 
 ---
 
