@@ -1,9 +1,17 @@
-"""Tests for DONE gate based on require_receipts_for_done (AC 10)."""
+"""Tests for DONE gate based on require_receipts_for_done (AC 10).
+
+Migrated for task-20260419-006: receipt_rules_check_passed has new signature
+(task_dir, mode) — counts are computed internally. Also AC 6 added a
+registry-eligible auditor cross-check; we mock the auditor registry to be
+empty for these tests so the cross-check is vacuous and we focus on the
+chain-of-receipts logic this file was originally written to exercise.
+"""
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +26,24 @@ from lib_receipts import (  # noqa: E402
     receipt_rules_check_passed,
     write_receipt,
 )
+
+
+@pytest.fixture(autouse=True)
+def _empty_auditor_registry(monkeypatch):
+    """Make the registry cross-check vacuous so these tests focus on the
+    classic DONE gate flow (auditor-presence + per-auditor receipts)."""
+    import router
+    monkeypatch.setattr(router, "_load_auditor_registry", lambda root: {
+        "always": [], "fast_track": [], "domain_conditional": {},
+    })
+
+
+@pytest.fixture(autouse=True)
+def _stub_run_checks(monkeypatch):
+    """receipt_rules_check_passed self-computes via rules_engine.run_checks.
+    Stub it to return [] so the writer always succeeds in these tests."""
+    import rules_engine
+    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode: [])
 
 
 def _setup(tmp_path: Path) -> Path:
@@ -36,9 +62,9 @@ def _setup(tmp_path: Path) -> Path:
     (audit_dir / "report.json").write_text(json.dumps({"findings": []}))
     # The legacy DONE gate wants a `retrospective` receipt as well
     receipt_retrospective(td, 0.95, 0.9, 0.9, 1000)
-    # Task-005's new gate (CHECKPOINT_AUDIT->DONE) requires rules-check-passed
-    receipt_rules_check_passed(td, rules_evaluated=0, violations_count=0,
-                                error_violations=0, mode="all")
+    # Task-005's new gate (CHECKPOINT_AUDIT->DONE) requires rules-check-passed.
+    # New signature (AC 1): (task_dir, mode) — counts computed internally.
+    receipt_rules_check_passed(td, "all")
     return td
 
 

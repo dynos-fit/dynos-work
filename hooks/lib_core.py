@@ -74,7 +74,7 @@ STAGE_ORDER: list[str] = [
 ]
 
 ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
-    "CLASSIFY_AND_SPEC": {"SPEC_REVIEW", "PLANNING", "FAILED", "CANCELLED"},
+    "CLASSIFY_AND_SPEC": {"SPEC_NORMALIZATION", "SPEC_REVIEW", "PLANNING", "FAILED", "CANCELLED"},
     "FOUNDRY_INITIALIZED": {"SPEC_NORMALIZATION", "FAILED"},
     "SPEC_NORMALIZATION": {"SPEC_REVIEW", "FAILED"},
     "SPEC_REVIEW": {"SPEC_NORMALIZATION", "PLANNING", "FAILED"},
@@ -386,15 +386,36 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
 
     Hard checks (in order):
       a) ``audit-routing`` receipt MUST be present.
-      b) For every entry in ``audit-routing.auditors`` whose ``action == "spawn"``,
-         the corresponding ``audit-{name}`` receipt MUST be present.
-         (Empty ``auditors: []`` passes.)
-      c) Either ``postmortem-generated`` OR ``postmortem-skipped`` MUST be
+      b) Re-derive the registry-eligible auditor set from
+         ``_load_auditor_registry(root)`` + ``manifest.classification.domains``
+         + ``manifest.fast_track`` (mirrors ``build_audit_plan`` logic):
+           * Every registry-eligible auditor MUST appear in
+             ``audit-routing.auditors``. Missing → gap error.
+           * Registry-eligible entries with ``action: "skip"`` require a
+             non-empty ``reason`` string; missing/empty reason → gap error.
+           * Registry-eligible entries with ``action: "spawn"`` require a
+             non-None ``read_receipt(task_dir, f"audit-{name}", min_version=2)``.
+         Routing entries that are NOT in the registry-eligible set are
+         accepted without error (treated as extras).
+      c) Ensemble voting (AC 7): when a routing entry has
+         ``ensemble: true``, look for per-model receipts
+         ``audit-{name}-{model}`` at min_version=2 for every model in
+         ``voting_models``. Fall back to single-receipt
+         ``audit-{name}`` with ``model_used == <model>`` for compat.
+         Accept iff EITHER every voting-model receipt reports
+         ``blocking_count == 0`` OR an escalation receipt exists whose
+         ``model_used == escalation_model``. Each found receipt's
+         ``model_used`` MUST be in ``voting_models ∪ {escalation_model}``;
+         otherwise a gap error.
+      d) Either ``postmortem-generated`` OR ``postmortem-skipped`` MUST be
          present.
-      d) When ``postmortem-generated`` is present AND
-         (``anomaly_count > 0`` OR ``task-retrospective.json`` quality_score
-         < 0.8), THEN ``postmortem-analysis`` OR ``postmortem-skipped`` is
-         required.
+      e) When ``postmortem-generated`` is present AND
+         (``anomaly_count != 0`` OR ``anomaly_count_unknown`` (coercion
+         failed or key missing) OR ``task-retrospective.json``
+         ``quality_score < 0.8``), THEN ``postmortem-analysis`` OR
+         ``postmortem-skipped`` is required. Fail-CLOSED anomaly_count
+         (AC 11): non-int / missing ``anomaly_count`` forces the
+         analysis/skipped requirement.
 
     Returns an empty list when all gates pass.
     """
@@ -402,39 +423,228 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
 
     gaps: list[str] = []
 
+    # Derive registry-eligible auditor set (AC 6) from authoritative sources.
+    manifest_path = task_dir / "manifest.json"
+    manifest: dict = {}
+    if manifest_path.exists():
+        try:
+            manifest = load_json(manifest_path)
+        except (json.JSONDecodeError, OSError, ValueError):
+            manifest = {}
+    classification = manifest.get("classification") if isinstance(manifest, dict) else {}
+    if not isinstance(classification, dict):
+        classification = {}
+    domains = classification.get("domains", [])
+    if not isinstance(domains, list):
+        domains = []
+    fast_track = bool(manifest.get("fast_track", False)) if isinstance(manifest, dict) else False
+
+    registry_eligible: set[str] = set()
+    try:
+        # Deferred import: hooks.router imports from lib_core transitively.
+        # Importing at call time keeps the module graph acyclic.
+        from router import _load_auditor_registry, _DEFAULT_AUDITOR_REGISTRY  # type: ignore
+    except Exception:
+        _load_auditor_registry = None  # type: ignore
+        _DEFAULT_AUDITOR_REGISTRY = {
+            "always": ["spec-completion-auditor", "security-auditor",
+                       "code-quality-auditor", "dead-code-auditor"],
+            "fast_track": ["spec-completion-auditor", "security-auditor"],
+            "domain_conditional": {
+                "ui": ["ui-auditor"],
+                "db": ["db-schema-auditor", "performance-auditor"],
+                "backend": ["performance-auditor"],
+            },
+        }
+    try:
+        root = task_dir.parent.parent
+        registry = _load_auditor_registry(root) if _load_auditor_registry else _DEFAULT_AUDITOR_REGISTRY
+        if not isinstance(registry, dict):
+            registry = _DEFAULT_AUDITOR_REGISTRY
+    except Exception:
+        registry = _DEFAULT_AUDITOR_REGISTRY
+
+    if fast_track:
+        eligible_list = list(registry.get("fast_track", _DEFAULT_AUDITOR_REGISTRY["fast_track"]))
+    else:
+        eligible_list = list(registry.get("always", _DEFAULT_AUDITOR_REGISTRY["always"]))
+        domain_map = registry.get("domain_conditional", _DEFAULT_AUDITOR_REGISTRY["domain_conditional"])
+        if not isinstance(domain_map, dict):
+            domain_map = _DEFAULT_AUDITOR_REGISTRY["domain_conditional"]
+        for domain in domains:
+            if not isinstance(domain, str):
+                continue
+            for auditor in domain_map.get(domain, []) or []:
+                if isinstance(auditor, str) and auditor and auditor not in eligible_list:
+                    eligible_list.append(auditor)
+    registry_eligible = {a for a in eligible_list if isinstance(a, str) and a}
+
     # (a) audit-routing must exist
     audit_routing = read_receipt(task_dir, "audit-routing")
     if audit_routing is None:
         gaps.append("audit-routing missing")
+        routing_entries: list[dict] = []
     else:
-        # (b) every spawned auditor must have a corresponding audit-{name} receipt
-        auditors = audit_routing.get("auditors")
-        if isinstance(auditors, list):
-            for auditor in auditors:
-                if not isinstance(auditor, dict):
-                    continue
-                if auditor.get("action") != "spawn":
-                    continue
-                name = auditor.get("name")
-                if not isinstance(name, str) or not name:
-                    gaps.append("audit-routing auditor missing name")
-                    continue
-                if read_receipt(task_dir, f"audit-{name}") is None:
-                    gaps.append(f"audit-{name} missing")
+        routing_raw = audit_routing.get("auditors")
+        routing_entries = [e for e in routing_raw if isinstance(e, dict)] if isinstance(routing_raw, list) else []
 
-    # (c) postmortem-generated OR postmortem-skipped required
+    # Index routing by auditor name for cross-check.
+    routing_by_name: dict[str, dict] = {}
+    for entry in routing_entries:
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            routing_by_name[name] = entry
+
+    # (b) registry-eligible cross-check. Only runs when audit-routing exists.
+    if audit_routing is not None:
+        for name in sorted(registry_eligible):
+            entry = routing_by_name.get(name)
+            if entry is None:
+                gaps.append(
+                    f"audit-routing missing registry-eligible auditor: {name}"
+                )
+                continue
+            action = entry.get("action")
+            if action == "skip":
+                reason = entry.get("reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    gaps.append(
+                        f"auditor {name} marked skip without reason"
+                    )
+                continue
+            if action == "spawn":
+                if entry.get("ensemble") is True:
+                    # Ensemble handled below — skip the single-receipt check here.
+                    continue
+                if read_receipt(task_dir, f"audit-{name}", min_version=2) is None:
+                    gaps.append(f"audit-{name} missing")
+                continue
+            # Unknown action on an eligible entry → treat as gap.
+            gaps.append(
+                f"auditor {name} has unknown action={action!r} on registry-eligible entry"
+            )
+
+    # (b') legacy spawn-without-registry check for non-eligible entries.
+    # Preserve existing behaviour for routing entries NOT in
+    # registry_eligible: accept them but still require an audit receipt
+    # for non-ensemble spawn entries (else a forged extra auditor name in
+    # routing could soak up no-receipt). We do NOT emit a "missing
+    # registry-eligible" gap for extras — they are accepted as extras.
+    for name, entry in routing_by_name.items():
+        if name in registry_eligible:
+            continue  # handled above
+        if entry.get("action") != "spawn":
+            continue
+        if entry.get("ensemble") is True:
+            continue  # handled by ensemble block below
+        if read_receipt(task_dir, f"audit-{name}", min_version=2) is None:
+            gaps.append(f"audit-{name} missing")
+
+    # (c) ensemble voting enforcement (AC 7). Runs across ALL spawn
+    # entries flagged ensemble=true, whether registry-eligible or not —
+    # the voting contract is identical.
+    for name, entry in routing_by_name.items():
+        if entry.get("action") != "spawn":
+            continue
+        if entry.get("ensemble") is not True:
+            continue
+        voting_raw = entry.get("ensemble_voting_models") or entry.get("voting_models") or []
+        voting_models = [m for m in voting_raw if isinstance(m, str) and m] if isinstance(voting_raw, list) else []
+        escalation_model = entry.get("ensemble_escalation_model") or entry.get("escalation_model")
+        if not isinstance(escalation_model, str) or not escalation_model:
+            escalation_model = ""
+        allowed_models: set[str] = set(voting_models)
+        if escalation_model:
+            allowed_models.add(escalation_model)
+
+        if not voting_models:
+            gaps.append(
+                f"auditor {name} ensemble=true but voting_models is empty"
+            )
+            continue
+
+        # Gather per-model receipts: prefer per-model shard receipts, fall
+        # back to single-receipt schema via model_used match.
+        single_receipt = read_receipt(task_dir, f"audit-{name}", min_version=2)
+        per_model: dict[str, dict] = {}
+        for model in voting_models:
+            shard = read_receipt(task_dir, f"audit-{name}-{model}", min_version=2)
+            if shard is not None:
+                per_model[model] = shard
+            elif single_receipt is not None and single_receipt.get("model_used") == model:
+                per_model[model] = single_receipt
+
+        # Escalation receipt lookup
+        escalation_receipt: dict | None = None
+        if escalation_model:
+            shard = read_receipt(task_dir, f"audit-{name}-{escalation_model}", min_version=2)
+            if shard is not None:
+                escalation_receipt = shard
+            elif single_receipt is not None and single_receipt.get("model_used") == escalation_model:
+                escalation_receipt = single_receipt
+
+        # Validate every receipt's model_used ∈ allowed_models.
+        all_receipts: list[tuple[str, dict]] = []
+        for m, r in per_model.items():
+            all_receipts.append((m, r))
+        if escalation_receipt is not None:
+            all_receipts.append((escalation_model, escalation_receipt))
+        for _label, r in all_receipts:
+            mu = r.get("model_used")
+            if isinstance(mu, str) and mu and mu not in allowed_models:
+                gaps.append(
+                    f"auditor {name} receipt model_used={mu} not in voting set"
+                )
+
+        # Acceptance rule: either every voting-model receipt is zero-blocking,
+        # or an escalation receipt exists.
+        all_voting_present = all(m in per_model for m in voting_models)
+        if all_voting_present:
+            all_zero_blocking = True
+            for m in voting_models:
+                r = per_model[m]
+                try:
+                    bc = int(r.get("blocking_count", -1))
+                except (TypeError, ValueError):
+                    bc = -1
+                if bc != 0:
+                    all_zero_blocking = False
+                    break
+            if all_zero_blocking:
+                continue  # ensemble accepted via zero-blocking consensus
+        # Fall through → need escalation receipt.
+        if escalation_receipt is None:
+            missing = [m for m in voting_models if m not in per_model]
+            if missing:
+                gaps.append(
+                    f"auditor {name} ensemble missing voting-model receipt(s): "
+                    f"{', '.join(missing)} and no escalation receipt for {escalation_model!r}"
+                )
+            else:
+                gaps.append(
+                    f"auditor {name} ensemble voting-model receipts disagree "
+                    f"(non-zero blocking) and no escalation receipt for {escalation_model!r}"
+                )
+
+    # (d) postmortem-generated OR postmortem-skipped required
     pm_generated = read_receipt(task_dir, "postmortem-generated")
     pm_skipped = read_receipt(task_dir, "postmortem-skipped")
     if pm_generated is None and pm_skipped is None:
         gaps.append("postmortem-generated or postmortem-skipped missing")
 
-    # (d) when postmortem-generated AND (anomaly>0 OR quality<0.8), require analysis or skip
+    # (e) AC 11 fail-CLOSED anomaly_count.
     if pm_generated is not None:
-        anomaly_count = pm_generated.get("anomaly_count", 0)
-        try:
-            anomaly_count = int(anomaly_count)
-        except (TypeError, ValueError):
-            anomaly_count = 0
+        anomaly_count_unknown = False
+        if "anomaly_count" not in pm_generated:
+            anomaly_count_unknown = True
+            anomaly_count = -1
+        else:
+            raw = pm_generated.get("anomaly_count")
+            try:
+                anomaly_count = int(raw)
+            except (TypeError, ValueError):
+                anomaly_count_unknown = True
+                anomaly_count = -1
 
         quality_score = 1.0
         retro_path = task_dir / "task-retrospective.json"
@@ -442,12 +652,19 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
             try:
                 retro = load_json(retro_path)
                 if isinstance(retro, dict):
-                    raw = retro.get("quality_score", 1.0)
-                    quality_score = float(raw) if isinstance(raw, (int, float)) else 1.0
+                    raw_q = retro.get("quality_score", 1.0)
+                    quality_score = float(raw_q) if isinstance(raw_q, (int, float)) else 1.0
             except (json.JSONDecodeError, OSError, ValueError):
                 quality_score = 1.0
 
-        if anomaly_count > 0 or quality_score < 0.8:
+        # Fail-CLOSED: anomaly_count_unknown OR anomaly_count != 0 OR low quality
+        # all require analysis/skipped receipt.
+        needs_analysis = (
+            anomaly_count_unknown
+            or anomaly_count != 0
+            or quality_score < 0.8
+        )
+        if needs_analysis:
             pm_analysis = read_receipt(task_dir, "postmortem-analysis")
             if pm_analysis is None and pm_skipped is None:
                 gaps.append("postmortem-analysis or postmortem-skipped missing")
@@ -826,6 +1043,68 @@ def _flush_retrospective_on_done(*, task_dir: Path, manifest: dict) -> None:
         pass
 
 
+def _write_pre_repair_blocking_snapshot(task_dir: Path) -> Path | None:
+    """Write the pre-repair blocking finding set to
+    ``task_dir / "repair" / "pre-repair-blocking.json"``.
+
+    Scans ``task_dir / "audit-reports" / "*.json"`` and extracts the set
+    of ``finding.id`` values where ``blocking=True``. The set is written
+    as a JSON array (sorted for determinism) via an atomic
+    tempfile+os.replace write.
+
+    Idempotent: when the target file already exists, this function
+    returns without writing — the first repair cycle's snapshot is
+    preserved as ground truth. Later repair cycles must NOT overwrite it
+    because compute_reward compares post-repair state against the
+    original pre-repair set to compute surviving_blocking.
+    """
+    target = task_dir / "repair" / "pre-repair-blocking.json"
+    if target.exists():
+        return None
+
+    audit_dir = task_dir / "audit-reports"
+    blocking_ids: list[str] = []
+    seen: set[str] = set()
+    if audit_dir.is_dir():
+        for report_path in sorted(audit_dir.glob("*.json")):
+            try:
+                payload = load_json(report_path)
+            except (json.JSONDecodeError, OSError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            findings = payload.get("findings") or []
+            if not isinstance(findings, list):
+                continue
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                if finding.get("blocking") is not True:
+                    continue
+                fid = finding.get("id")
+                if isinstance(fid, str) and fid and fid not in seen:
+                    seen.add(fid)
+                    blocking_ids.append(fid)
+
+    blocking_ids.sort()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic write: tempfile in same dir then os.replace.
+    fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".pre-repair-blocking.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(blocking_ids, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target
+
+
 def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> tuple[str, dict]:
     """Transition a task to a new stage, enforcing allowed transitions."""
     manifest_path = task_dir / "manifest.json"
@@ -893,6 +1172,70 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     f"expected={(expected or '')[:12]} actual={actual[:12]}"
                 )
 
+        def _check_tdd_tests(
+            task_dir: Path, current_stage: str, next_stage: str
+        ) -> None:
+            """Refuse the current transition unless — when the manifest says
+            ``classification.tdd_required == True`` — a ``tdd-tests`` receipt
+            exists at ``min_version=2`` AND its
+            ``tests_evidence_sha256`` matches the live sha256 of
+            ``evidence/tdd-tests.md``.
+
+            When ``tdd_required != True`` this check returns without
+            refusing (gate is inert). Mirrors the ``_check_human_approval``
+            pattern: missing receipt names the receipt path; hash drift
+            emits a message containing the literal substrings
+            ``tdd-tests`` and ``hash mismatch`` plus the 12-char prefixes
+            of expected / actual digests.
+            """
+            from lib_receipts import read_receipt, hash_file, _receipts_dir  # type: ignore
+
+            # Re-read manifest inline so downstream upstream edits to the
+            # classification dict are visible to this gate without leaking
+            # state through the outer closure.
+            try:
+                mf = load_json(task_dir / "manifest.json")
+            except (json.JSONDecodeError, OSError, ValueError):
+                mf = {}
+            cls = mf.get("classification") if isinstance(mf, dict) else None
+            if not isinstance(cls, dict):
+                return
+            if cls.get("tdd_required") is not True:
+                return
+
+            receipt_path = _receipts_dir(task_dir) / "tdd-tests.json"
+            receipt = read_receipt(task_dir, "tdd-tests", min_version=2)
+            if receipt is None:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"missing receipt tdd-tests at {receipt_path} "
+                    f"(classification.tdd_required=true requires tdd-tests receipt)"
+                )
+            evidence_path = task_dir / "evidence" / "tdd-tests.md"
+            if not evidence_path.exists():
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"receipt tdd-tests present at {receipt_path} but "
+                    f"evidence missing at {evidence_path}"
+                )
+            expected = receipt.get("tests_evidence_sha256") or ""
+            try:
+                actual = hash_file(evidence_path)
+            except (FileNotFoundError, OSError) as exc:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"receipt tdd-tests hash mismatch (unable to hash "
+                    f"{evidence_path}: {exc})"
+                )
+                return
+            if not isinstance(expected, str) or expected != actual:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"tdd-tests hash mismatch "
+                    f"(receipt: {receipt_path}, evidence: {evidence_path}) "
+                    f"expected={(expected or '')[:12]} actual={actual[:12]}"
+                )
+
         def _check_rules_check_passed(
             task_dir: Path, current_stage: str, next_stage: str
         ) -> None:
@@ -922,6 +1265,23 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     f"Cannot transition {current_stage} -> {next_stage}: "
                     f"missing or failed rules-check-passed receipt at "
                     f"{receipt_path} (error_violations={n})"
+                )
+
+        # ---- AC 9: CLASSIFY_AND_SPEC -> SPEC_NORMALIZATION requires
+        # classification.tdd_required to be explicitly set (True or False)
+        # when risk_level ∈ {"high", "critical"}. Absent tdd_required on a
+        # high-risk task is refused so the operator cannot accidentally
+        # skip the TDD decision. Low/medium risk: tdd_required is optional.
+        if current_stage == "CLASSIFY_AND_SPEC" and next_stage == "SPEC_NORMALIZATION":
+            classification = manifest.get("classification") or {}
+            if not isinstance(classification, dict):
+                classification = {}
+            risk_level = classification.get("risk_level")
+            if risk_level in {"high", "critical"} and classification.get("tdd_required") is None:
+                _refuse(
+                    f"CLASSIFY_AND_SPEC -> SPEC_NORMALIZATION refused: "
+                    f"classification.tdd_required must be set (True or False) "
+                    f"for risk_level={risk_level}; manifest={manifest_path}"
                 )
 
         # ---- AC 3: SPEC_REVIEW -> PLANNING requires human-approval-SPEC_REVIEW
@@ -1011,6 +1371,13 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     f"manifest.classification.tdd_required=true requires "
                     f"routing through TDD_REVIEW (manifest: {task_dir / 'manifest.json'})"
                 )
+
+        # AC 8 (task-006): PRE_EXECUTION_SNAPSHOT -> EXECUTION requires a
+        # tdd-tests receipt whose tests_evidence_sha256 matches the current
+        # evidence/tdd-tests.md, but ONLY when
+        # classification.tdd_required == true. Inert otherwise.
+        if current_stage == "PRE_EXECUTION_SNAPSHOT" and next_stage == "EXECUTION":
+            _check_tdd_tests(task_dir, current_stage, next_stage)
 
         # EXECUTION requires plan-validated receipt AND the captured artifact
         # hashes MUST match current disk. Presence alone is insufficient —
@@ -1135,14 +1502,74 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                         f"receipt gaps in {rd}: " + "; ".join(done_gaps)
                     )
 
-        # AC 23: DONE -> CALIBRATED requires calibration-applied receipt.
+        # AC 23 + AC 10: DONE -> CALIBRATED requires EITHER a
+        # calibration-applied OR calibration-noop receipt (whichever has
+        # the later ts wins), AND the receipt's policy hash
+        # (``policy_sha256_after`` for applied, ``policy_sha256`` for
+        # noop) must match a LIVE re-computation of the policy hash at
+        # transition time. A drift refuses the transition — this is the
+        # defence against stale/forged calibration receipts.
         if current_stage == "DONE" and next_stage == "CALIBRATED":
             from lib_receipts import _receipts_dir  # type: ignore
             ca_path = _receipts_dir(task_dir) / "calibration-applied.json"
-            if read_receipt(task_dir, "calibration-applied") is None:
+            cn_path = _receipts_dir(task_dir) / "calibration-noop.json"
+            applied = read_receipt(task_dir, "calibration-applied")
+            noop = read_receipt(task_dir, "calibration-noop")
+            if applied is None and noop is None:
                 _refuse(
                     f"Cannot transition {current_stage} -> {next_stage}: "
-                    f"missing receipt calibration-applied at {ca_path}"
+                    f"missing calibration receipt (expected one of "
+                    f"{ca_path} or {cn_path})"
+                )
+            # Pick the later-ts receipt. If tied (or ts missing), prefer
+            # calibration-noop per spec direction.
+            chosen = None
+            chosen_is_noop = False
+            if applied is not None and noop is not None:
+                ts_a = applied.get("ts") if isinstance(applied, dict) else None
+                ts_n = noop.get("ts") if isinstance(noop, dict) else None
+                if isinstance(ts_n, str) and isinstance(ts_a, str) and ts_n >= ts_a:
+                    chosen, chosen_is_noop = noop, True
+                elif isinstance(ts_n, str) and not isinstance(ts_a, str):
+                    chosen, chosen_is_noop = noop, True
+                else:
+                    chosen, chosen_is_noop = applied, False
+            elif noop is not None:
+                chosen, chosen_is_noop = noop, True
+            else:
+                chosen, chosen_is_noop = applied, False
+
+            # Extract the receipt-side hash.
+            if chosen_is_noop:
+                receipt_hash = chosen.get("policy_sha256") if isinstance(chosen, dict) else None
+            else:
+                receipt_hash = chosen.get("policy_sha256_after") if isinstance(chosen, dict) else None
+            if not isinstance(receipt_hash, str) or not receipt_hash:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"calibration receipt missing policy hash "
+                    f"(receipt: {cn_path if chosen_is_noop else ca_path})"
+                )
+
+            # Live-compute the policy hash.
+            try:
+                from eventbus import _compute_policy_hash  # type: ignore
+                live_hash = _compute_policy_hash(_root)
+            except Exception as exc:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"failed to compute live policy hash: {exc}"
+                )
+                live_hash = ""  # unreachable, but satisfies type checker
+
+            if receipt_hash != live_hash:
+                receipt_name = "calibration-noop" if chosen_is_noop else "calibration-applied"
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"{receipt_name} policy hash mismatch "
+                    f"(receipt={receipt_hash[:12]} live={live_hash[:12]}). "
+                    f"The persistent policy has drifted since the calibration "
+                    f"receipt was written — re-run calibration."
                 )
 
         # AC 19: rules-check-passed receipt required at two transition points.
@@ -1349,6 +1776,28 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
     if next_stage == "FAILED" and manifest.get("blocked_reason") is None:
         manifest["blocked_reason"] = "transitioned to FAILED"
     write_json(manifest_path, manifest)
+
+    # ---- AC 15 side-effect: pre-repair blocking snapshot ----
+    # On entry into REPAIR_PLANNING (the first repair cycle), capture the
+    # set of blocking finding ids from the current audit-reports so
+    # compute_reward can compute `surviving_blocking` as a set difference
+    # against the post-repair state. The file is written once per task —
+    # if it already exists we preserve the first-cycle snapshot (later
+    # repair cycles do NOT overwrite it).
+    if next_stage == "REPAIR_PLANNING":
+        try:
+            _write_pre_repair_blocking_snapshot(task_dir)
+        except Exception as exc:  # snapshot must never block transition
+            try:
+                from lib_log import log_event as _log_snapshot
+                _log_snapshot(
+                    task_dir.parent.parent,
+                    "pre_repair_snapshot_failed",
+                    task=task_dir.name,
+                    error=str(exc),
+                )
+            except Exception:
+                pass
 
     # ---- Auto-append to execution-log.md ----
     _auto_log(task_dir, current_stage, next_stage, force)

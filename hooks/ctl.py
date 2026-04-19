@@ -21,8 +21,71 @@ _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
 }
 
 
+def _rules_corrupt_sentinel(root: Path) -> Path:
+    """Return sentinel path co-located with daemon.py's writer.
+
+    Duplicates the path shape from ``daemon.rules_corrupt_sentinel_path``;
+    deliberately inlined here so ctl.py need not import daemon.py (and
+    pull in its subprocess/signal machinery) just to check one file.
+    """
+    return root / ".dynos" / ".rules_corrupt"
+
+
+def _refuse_if_rules_corrupt(root: Path) -> int | None:
+    """Block task-creation commands when prevention-rules.json is corrupt.
+
+    Returns an exit code (1) when the sentinel exists so the caller can
+    propagate it directly; returns None when there is no sentinel and
+    the command may proceed. Error goes to stderr and names the
+    persistent rules path so the operator knows which file to fix.
+
+    AC 18 scope: only task-creation entry-points call this. Existing-task
+    operations (transition, approve-stage, validate-receipts, etc.) MUST
+    NOT be blocked — the sentinel is a *bootstrap* gate, not a runtime
+    kill switch.
+    """
+    sentinel = _rules_corrupt_sentinel(root)
+    if not sentinel.exists():
+        return None
+    try:
+        from lib_core import _persistent_project_dir
+        persistent = _persistent_project_dir(root) / "prevention-rules.json"
+    except Exception:
+        persistent = Path("~/.dynos/projects/{slug}/prevention-rules.json")
+    print(
+        f"ERROR: prevention-rules.json is corrupt; "
+        f"fix {persistent} and retry "
+        f"(sentinel: {sentinel})",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _root_for_task_dir(task_dir: Path) -> Path:
+    """Resolve the project root that contains ``.dynos/task-<id>/``.
+
+    ``task_dir`` is expected to be ``<root>/.dynos/task-<id>``; the
+    grandparent is the project root. Falls back to the task_dir itself
+    if the structure is unexpected (defensive — the sentinel check will
+    then look in the wrong place, which is safer than crashing on a
+    path with <2 ancestors).
+    """
+    try:
+        return task_dir.parent.parent
+    except Exception:
+        return task_dir
+
+
 def cmd_validate_task(args: argparse.Namespace) -> int:
-    errors = validate_task_artifacts(Path(args.task_dir).resolve(), strict=args.strict)
+    task_dir = Path(args.task_dir).resolve()
+    # AC 18: validate-task is a task-creation entry-point — refuse when
+    # the corrupt-rules sentinel is present. Other ctl.py commands that
+    # operate on existing tasks do NOT call this gate.
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
+    errors = validate_task_artifacts(task_dir, strict=args.strict)
     if errors:
         print("Validation failed:")
         for error in errors:
@@ -199,13 +262,108 @@ def cmd_validate_contract(args: argparse.Namespace) -> int:
 
 
 def cmd_validate_receipts(args: argparse.Namespace) -> int:
-    import json
-    from lib_receipts import validate_chain as validate_receipt_chain
+    """Validate the receipt chain for a task.
+
+    AC 25 extensions:
+      * Each receipt row carries ``contract_version`` (read from payload
+        via ``read_receipt(..., min_version=1)`` which always returns the
+        raw receipt if present, bypassing the per-step floor).
+      * Floor violations (receipt exists but below
+        ``MIN_VERSION_PER_STEP[step]`` via ``_resolve_min_version``) are
+        flagged as ``FLOOR_VIOLATION: step=... version=... required=...``.
+      * Exit codes:
+            0 — all receipts present at or above floor
+            1 — chain gap (missing required receipts)
+            2 — floor violation on at least one receipt (distinct)
+        When BOTH a gap AND a floor violation exist, exit code 2 takes
+        precedence — a below-floor receipt is a structural defect the
+        operator must fix first before re-evaluating gaps.
+    """
+    import json as _json
+    from lib_receipts import (
+        MIN_VERSION_PER_STEP,
+        _resolve_min_version,
+        read_receipt,
+        validate_chain as validate_receipt_chain,
+    )
+
     task_dir = Path(args.task_dir).resolve()
     gaps = validate_receipt_chain(task_dir)
-    result = {"valid": len(gaps) == 0, "gaps": gaps, "task_dir": str(task_dir)}
-    print(json.dumps(result, indent=2))
-    return 1 if gaps else 0
+
+    receipts_dir = task_dir / "receipts"
+    receipt_rows: list[dict] = []
+    floor_violations: list[dict] = []
+
+    if receipts_dir.exists():
+        for rp in sorted(receipts_dir.glob("*.json")):
+            step_name = rp.stem
+            # Read raw receipt (min_version=1 disables the floor gate so
+            # we can inspect contract_version even for below-floor files).
+            raw = read_receipt(task_dir, step_name, min_version=1)
+            if raw is None:
+                # Receipt file exists but is unparseable/invalid=false.
+                receipt_rows.append({
+                    "step": step_name,
+                    "contract_version": None,
+                    "present": False,
+                    "error": "unparseable or valid=false",
+                })
+                continue
+            actual = raw.get("contract_version", 1)
+            try:
+                actual_int = int(actual)
+            except (TypeError, ValueError):
+                actual_int = None
+
+            required = _resolve_min_version(step_name)
+            row: dict = {
+                "step": step_name,
+                "contract_version": actual_int,
+                "required_floor": required,
+                "present": True,
+            }
+            if actual_int is None:
+                row["floor_violation"] = True
+                floor_violations.append({
+                    "step": step_name,
+                    "version": actual,
+                    "required": required,
+                })
+            elif actual_int < required:
+                row["floor_violation"] = True
+                floor_violations.append({
+                    "step": step_name,
+                    "version": actual_int,
+                    "required": required,
+                })
+            else:
+                row["floor_violation"] = False
+            receipt_rows.append(row)
+
+    result = {
+        "valid": len(gaps) == 0 and len(floor_violations) == 0,
+        "gaps": gaps,
+        "receipts": receipt_rows,
+        "floor_violations": floor_violations,
+        "task_dir": str(task_dir),
+    }
+    print(_json.dumps(result, indent=2))
+
+    # Human-readable floor-violation lines to stderr so shell consumers
+    # grepping for "FLOOR_VIOLATION:" do not need to JSON-parse stdout.
+    for fv in floor_violations:
+        print(
+            f"FLOOR_VIOLATION: step={fv['step']} "
+            f"version={fv['version']} required={fv['required']}",
+            file=sys.stderr,
+        )
+
+    # Exit-code precedence: floor violation (2) > gap (1) > clean (0).
+    if floor_violations:
+        return 2
+    if gaps:
+        return 1
+    return 0
 
 
 def cmd_validate_chain(args: argparse.Namespace) -> int:

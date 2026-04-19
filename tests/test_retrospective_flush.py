@@ -41,6 +41,18 @@ from lib_receipts import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _empty_auditor_registry(monkeypatch):
+    """PR #127 (task-006) AC 6 added a registry-eligible auditor cross-check
+    inside require_receipts_for_done. These flush tests pre-date that gate,
+    so we mock the registry to be empty — the gate becomes vacuous and the
+    test focuses on the flush behavior under test."""
+    import router
+    monkeypatch.setattr(router, "_load_auditor_registry", lambda root: {
+        "always": [], "fast_track": [], "domain_conditional": {},
+    })
+
+
 def _setup_done_ready(tmp_path: Path, slug: str = "RF",
                       quality: float = 0.95) -> Path:
     """Build a task at CHECKPOINT_AUDIT with every receipt/artifact the
@@ -68,10 +80,15 @@ def _setup_done_ready(tmp_path: Path, slug: str = "RF",
     (audit_dir / "report.json").write_text(json.dumps({"findings": []}))
 
     receipt_retrospective(td, quality, 0.9, 0.9, 1000)
-    receipt_rules_check_passed(
-        td, rules_evaluated=0, violations_count=0,
-        error_violations=0, mode="all",
-    )
+    # PR #127 (task-006) AC 1: receipt_rules_check_passed self-computes;
+    # callers pass only (task_dir, mode). Stub run_checks to a clean pass.
+    import rules_engine
+    _orig_run_checks = rules_engine.run_checks
+    rules_engine.run_checks = lambda root, mode: []
+    try:
+        receipt_rules_check_passed(td, "all")
+    finally:
+        rules_engine.run_checks = _orig_run_checks
     receipt_audit_routing(td, [])
     # task-20260419-002 G2: subsumed_by is required; empty list is
     # valid because reason is `no-findings`.

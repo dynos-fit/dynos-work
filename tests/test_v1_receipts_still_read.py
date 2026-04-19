@@ -40,11 +40,15 @@ def test_v1_receipt_read_returns_payload(tmp_path: Path):
 
 
 def test_v1_receipt_passes_validate_chain(tmp_path: Path):
+    """v1 receipts for LEGACY steps (not in MIN_VERSION_PER_STEP floor) remain
+    readable. plan-validated was bumped to v2-mandatory in task-006; legacy
+    steps like spec-validated stay backward-compatible.
+    """
     td = _setup(tmp_path, stage="EXECUTION")
-    _write_v1_receipt(td, "plan-validated", segment_count=1,
-                      criteria_coverage=[1], validation_passed=True)
+    _write_v1_receipt(td, "spec-validated", criteria_count=3,
+                      spec_sha256="x" * 64)
     gaps = validate_chain(td)
-    assert "plan-validated" not in gaps
+    assert "spec-validated" not in gaps
 
 
 def test_v1_receipt_with_valid_false_returns_none(tmp_path: Path):
@@ -56,16 +60,18 @@ def test_v1_receipt_with_valid_false_returns_none(tmp_path: Path):
     assert out is None
 
 
-def test_v1_audit_routing_passes_done_chain(tmp_path: Path):
-    """Mix v1 audit-routing + v2 dependent receipts; chain must accept it."""
+def test_v1_receipts_rejected_below_floor(tmp_path: Path):
+    """Task-006 contract bump: v1 receipts for v2-mandatory steps are rejected
+    (treated as missing by validate_chain). This is the INTENDED breaking
+    change for plan-validated, executor-*, audit-*, rules-check-passed,
+    calibration-*, and human-approval-*.
+    """
     td = _setup(tmp_path, stage="DONE")
-    # Audit routing without contract_version
-    _write_v1_receipt(td, "audit-routing", auditors=[])
-    # Other required receipts at DONE
     _write_v1_receipt(td, "plan-validated", segment_count=0, criteria_coverage=[])
     _write_v1_receipt(td, "executor-routing", segments=[])
-    _write_v1_receipt(td, "retrospective", quality_score=0.95,
-                      cost_score=0.9, efficiency_score=0.9, total_tokens=100)
-    _write_v1_receipt(td, "post-completion", handlers_run=[])
+    _write_v1_receipt(td, "audit-routing", auditors=[])
     gaps = validate_chain(td)
-    assert gaps == [], f"unexpected gaps: {gaps}"
+    # All three are floor=2; v1 entries are treated as missing → appear in gaps.
+    assert "plan-validated" in gaps
+    assert "executor-routing" in gaps
+    assert "audit-routing" in gaps

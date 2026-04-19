@@ -20,9 +20,16 @@ from lib_log import log_event
 
 
 # Receipt contract version. Receipts written by this module embed
-# `contract_version: 2`. Readers MUST treat receipts without this field
+# `contract_version: 3`. Readers MUST treat receipts without this field
 # as v1 and accept them when `valid=true`.
-RECEIPT_CONTRACT_VERSION = 2
+#
+# Bump rationale (v2 -> v3): new receipt semantics introduced —
+#   * receipt_calibration_noop writer added (no-op calibration path)
+#   * receipt_audit_done self-verifies blocking_count vs report.json
+#   * receipt_rules_check_passed derives counts internally from rules_engine
+# The bump signals "new semantics available"; it does NOT retroactively
+# invalidate v2 receipts (see MIN_VERSION_PER_STEP floors below).
+RECEIPT_CONTRACT_VERSION = 3
 
 
 # Files that compose the calibration policy snapshot used by the
@@ -40,6 +47,52 @@ CALIBRATION_POLICY_FILES = [
     "learned-agents/registry.json",
     "benchmarks/history.json",
 ]
+
+
+# Minimum contract_version floor per receipt step. Readers that call
+# ``read_receipt(..., min_version=None)`` trigger an auto-lookup against
+# this map — if a receipt's contract_version is below the matched floor,
+# ``read_receipt`` returns None (the receipt is treated as missing).
+#
+# Keys may be exact step names (e.g. ``"rules-check-passed"``) or
+# wildcards terminated by ``"*"`` (e.g. ``"executor-*"``). Match
+# precedence: exact > longest-prefix wildcard > default floor of 1.
+#
+# Floors sit at 2 (not 3) because the v2->v3 bump adds *new* semantics
+# (see RECEIPT_CONTRACT_VERSION docstring) without invalidating existing
+# v2 receipts. Bump individual floors only when the consuming pipeline
+# actually depends on v3-only fields.
+MIN_VERSION_PER_STEP: dict[str, int] = {
+    "executor-*": 2,
+    "audit-*": 2,
+    "plan-validated": 2,
+    "rules-check-passed": 2,
+    "calibration-applied": 2,
+    "calibration-noop": 2,
+    "human-approval-*": 2,
+}
+
+
+def _resolve_min_version(step_name: str) -> int:
+    """Return the minimum contract_version required for a given step name.
+
+    Lookup rules:
+      1. Exact key match in MIN_VERSION_PER_STEP wins outright.
+      2. Among wildcard keys (ending in ``*``), the longest prefix match wins.
+      3. Unknown step names default to floor 1 (accept v1+ receipts).
+    """
+    if step_name in MIN_VERSION_PER_STEP:
+        return MIN_VERSION_PER_STEP[step_name]
+    best_prefix_len = -1
+    best_floor = 1
+    for key, floor in MIN_VERSION_PER_STEP.items():
+        if not key.endswith("*"):
+            continue
+        prefix = key[:-1]
+        if step_name.startswith(prefix) and len(prefix) > best_prefix_len:
+            best_prefix_len = len(prefix)
+            best_floor = floor
+    return best_floor
 
 
 # Allowed reasons for receipt_postmortem_skipped. Enum-validated at write
@@ -147,9 +200,11 @@ __all__ = [
     "receipt_postmortem_analysis",
     "receipt_postmortem_skipped",
     "receipt_calibration_applied",
+    "receipt_calibration_noop",
     "receipt_rules_check_passed",
     "receipt_force_override",
     "RECEIPT_CONTRACT_VERSION",
+    "MIN_VERSION_PER_STEP",
     "CALIBRATION_POLICY_FILES",
     "INJECTED_PROMPTS_DIR",
     "INJECTED_AUDITOR_PROMPTS_DIR",
@@ -177,6 +232,7 @@ _LOG_MESSAGES: dict[str, str] = {
     "postmortem-analysis": "[DONE] postmortem analysis — rules_added={rules_added}",
     "postmortem-skipped": "[DONE] postmortem skipped — reason={reason}",
     "calibration-applied": "[DONE] calibration applied — retros={retros_consumed} scores={scores_updated}",
+    "calibration-noop": "[DONE] calibration noop — reason={reason}",
     "rules-check-passed": "[DONE] rules check — {rules_evaluated} rules evaluated, {violations_count} violations",
     # Prefix pattern: force-override-{from_stage}-{to_stage} — handled in
     # write_receipt() via the prefix branch below. The entry here documents
@@ -305,11 +361,24 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     return receipt_path
 
 
-def read_receipt(task_dir: Path, step_name: str) -> dict | None:
+def read_receipt(
+    task_dir: Path,
+    step_name: str,
+    *,
+    min_version: int | None = None,
+) -> dict | None:
     """Read a receipt. Returns None if missing or invalid.
 
     Backwards-compat: receipts without `contract_version` are treated as v1
-    and accepted as long as `valid=true`. Never crash on missing field.
+    (contract_version=1) and accepted as long as `valid=true`.
+
+    ``min_version`` enforces a minimum ``contract_version`` floor. When
+    ``None`` (the default), the floor is auto-resolved via
+    ``_resolve_min_version(step_name)`` against ``MIN_VERSION_PER_STEP``.
+    When the receipt's ``contract_version`` is below the floor, the
+    receipt is treated as missing and ``None`` is returned — this is how
+    callers opt into "refuse to trust stale schemas". Pass
+    ``min_version=1`` (or lower) to explicitly disable the check.
     """
     receipt_path = _receipts_dir(task_dir) / f"{step_name}.json"
     if not receipt_path.exists():
@@ -318,9 +387,20 @@ def read_receipt(task_dir: Path, step_name: str) -> dict | None:
         data = json.loads(receipt_path.read_text())
         if not isinstance(data, dict) or not data.get("valid"):
             return None
-        return data
     except (json.JSONDecodeError, OSError):
         return None
+
+    floor = _resolve_min_version(step_name) if min_version is None else min_version
+    # Legacy receipts without contract_version are treated as v1.
+    actual = data.get("contract_version", 1)
+    try:
+        actual_int = int(actual)
+    except (TypeError, ValueError):
+        # Malformed contract_version → treat as missing.
+        return None
+    if actual_int < floor:
+        return None
+    return data
 
 
 def require_receipt(task_dir: Path, step_name: str) -> dict:
@@ -359,9 +439,13 @@ def validate_chain(task_dir: Path) -> list[str]:
     manifest = json.loads(manifest_path.read_text())
     stage = manifest.get("stage", "")
 
-    # All possible receipts in order
+    # All possible receipts in order. ``plan-routing`` was pruned (AC 5):
+    # it is never a required gating receipt on any stage transition, and
+    # keeping it in this enumeration caused spurious DONE-gap reports
+    # against tasks that legitimately never wrote the receipt. The writer
+    # function ``receipt_plan_routing`` and its ``_LOG_MESSAGES`` entry
+    # remain in place for future reinstatement.
     all_receipts = [
-        "plan-routing",
         "spec-validated",
         "plan-validated",
         "executor-routing",
@@ -376,6 +460,7 @@ def validate_chain(task_dir: Path) -> list[str]:
     # `audit-routing` is required at DONE — without it we cannot enumerate
     # the dynamic audit receipts that should follow it.
     stage_requires: dict[str, list[str]] = {
+        "PRE_EXECUTION_SNAPSHOT": ["plan-validated"],
         "EXECUTION": ["plan-validated"],
         "TEST_EXECUTION": ["plan-validated", "executor-routing"],
         "CHECKPOINT_AUDIT": ["plan-validated", "executor-routing"],
@@ -389,6 +474,30 @@ def validate_chain(task_dir: Path) -> list[str]:
             "post-completion",
         ],
     }
+
+    # AC 8: conditionally add `tdd-tests` to PRE_EXECUTION_SNAPSHOT (and
+    # onwards, through EXECUTION et al) when the manifest declares
+    # ``classification.tdd_required == true``. The transition gate in
+    # lib_core.transition_task enforces the hash-match; validate_chain
+    # only reports it as a static-required receipt so stage-based
+    # diagnostics are accurate.
+    classification = manifest.get("classification") if isinstance(manifest, dict) else None
+    tdd_required = bool(
+        isinstance(classification, dict) and classification.get("tdd_required") is True
+    )
+    if tdd_required:
+        tdd_stages = {
+            "PRE_EXECUTION_SNAPSHOT",
+            "EXECUTION",
+            "TEST_EXECUTION",
+            "CHECKPOINT_AUDIT",
+            "REPAIR_PLANNING",
+            "REPAIR_EXECUTION",
+            "DONE",
+        }
+        for s in tdd_stages:
+            if s in stage_requires and "tdd-tests" not in stage_requires[s]:
+                stage_requires[s] = stage_requires[s] + ["tdd-tests"]
 
     required = stage_requires.get(stage, [])
     gaps = []
@@ -418,6 +527,15 @@ def validate_chain(task_dir: Path) -> list[str]:
                     name = auditor.get("name", "")
                     if name and read_receipt(task_dir, f"audit-{name}") is None:
                         gaps.append(f"audit-{name}")
+
+        # AC 24: calibration requirement at DONE is satisfied by EITHER
+        # ``calibration-applied`` OR ``calibration-noop``. If both are
+        # present the later ts wins (the DONE->CALIBRATED gate reads the
+        # later receipt); here we only report a gap when neither exists.
+        calib_applied = read_receipt(task_dir, "calibration-applied")
+        calib_noop = read_receipt(task_dir, "calibration-noop")
+        if calib_applied is None and calib_noop is None:
+            gaps.append("calibration (applied|noop)")
 
     return gaps
 
@@ -668,26 +786,42 @@ def receipt_audit_routing(
     """
     if not isinstance(auditors, list):
         raise ValueError("auditors must be a list")
+    # Normalize entries before write: skip entries don't need injection fields
+    # (they weren't injected), so we fill missing keys with None rather than
+    # forcing callers to pass boilerplate. Spawn entries still require the
+    # fields explicitly (so a missing key is a schema violation, not a typo).
+    normalized: list[dict] = []
     for idx, entry in enumerate(auditors):
         if not isinstance(entry, dict):
             raise ValueError(f"auditors[{idx}] must be a dict")
-        if "injected_agent_sha256" not in entry:
-            raise ValueError(
-                f"auditors[{idx}] missing required key 'injected_agent_sha256' "
-                f"(must be str or None)"
-            )
-        if "agent_path" not in entry:
-            raise ValueError(
-                f"auditors[{idx}] missing required key 'agent_path' "
-                f"(must be str or None)"
-            )
+        action = entry.get("action")
+        if action == "skip":
+            # Skip entries: default the injection fields to None if absent.
+            entry = {
+                **entry,
+                "injected_agent_sha256": entry.get("injected_agent_sha256"),
+                "agent_path": entry.get("agent_path"),
+            }
+        else:
+            # Spawn (or unknown) entries: require explicit keys (may be None).
+            if "injected_agent_sha256" not in entry:
+                raise ValueError(
+                    f"auditors[{idx}] missing required key 'injected_agent_sha256' "
+                    f"(must be str or None)"
+                )
+            if "agent_path" not in entry:
+                raise ValueError(
+                    f"auditors[{idx}] missing required key 'agent_path' "
+                    f"(must be str or None)"
+                )
         route_mode = entry.get("route_mode")
         injected = entry.get("injected_agent_sha256")
-        # injected_agent_sha256 may be None only when route_mode is generic.
-        if injected is None and route_mode != "generic":
+        # injected_agent_sha256 may be None only when route_mode is generic OR on skip.
+        if injected is None and route_mode != "generic" and action != "skip":
             raise ValueError(
                 f"auditors[{idx}] injected_agent_sha256 may be None only "
-                f"when route_mode=='generic' (got route_mode={route_mode!r})"
+                f"when route_mode=='generic' or action=='skip' "
+                f"(got route_mode={route_mode!r} action={action!r})"
             )
         if injected is not None and not isinstance(injected, str):
             raise ValueError(
@@ -698,11 +832,12 @@ def receipt_audit_routing(
             raise ValueError(
                 f"auditors[{idx}] agent_path must be str or None"
             )
+        normalized.append(entry)
 
     return write_receipt(
         task_dir,
         "audit-routing",
-        auditors=auditors,
+        auditors=normalized,
     )
 
 
@@ -770,6 +905,68 @@ def receipt_audit_done(
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
 
+    # AC 2 — self-verify block. When ``report_path`` is a non-null string
+    # referring to an existing JSON file, cross-check caller-supplied
+    # finding_count / blocking_count against the actual contents of the
+    # report and attach a sha256 of the file. Any mismatch aborts the
+    # write with ValueError naming the mismatched field and both values.
+    #
+    # When ``report_path`` is None OR the file does not exist, the
+    # self-verify block is skipped entirely. This preserves the pre-
+    # escalation ensemble-vote semantics (where the voting harness writes
+    # receipts before a report file has been materialised) AND the
+    # backward-compat path for callers that legitimately pass None.
+    report_sha256: str | None = None
+    if isinstance(report_path, str) and report_path:
+        report_file = Path(report_path)
+        # SEC-004 fix: reject report_path that escapes task_dir. A compromised
+        # orchestrator could otherwise point report_path at arbitrary files.
+        try:
+            resolved_report = report_file.resolve()
+            resolved_task = Path(task_dir).resolve()
+            resolved_report.relative_to(resolved_task)
+        except (ValueError, OSError) as exc:
+            raise ValueError(
+                f"audit-{auditor_name}: report_path must be inside task_dir "
+                f"({resolved_task}); got {report_path!r}"
+            ) from exc
+        if report_file.exists():
+            try:
+                with report_file.open("r", encoding="utf-8") as f:
+                    report_payload = json.load(f)
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"audit-{auditor_name}: cannot parse report at "
+                    f"{report_path}: {exc}"
+                ) from exc
+            findings = report_payload.get("findings", []) if isinstance(report_payload, dict) else []
+            if not isinstance(findings, list):
+                findings = []
+            actual_finding_count = len(findings)
+            actual_blocking_count = sum(
+                1 for f in findings
+                if isinstance(f, dict) and f.get("blocking") is True
+            )
+            if finding_count != actual_finding_count:
+                raise ValueError(
+                    f"audit-{auditor_name}: finding_count mismatch — "
+                    f"caller-supplied={finding_count}, "
+                    f"actual (from {report_path})={actual_finding_count}"
+                )
+            if blocking_count != actual_blocking_count:
+                raise ValueError(
+                    f"audit-{auditor_name}: blocking_count mismatch — "
+                    f"caller-supplied={blocking_count}, "
+                    f"actual (from {report_path})={actual_blocking_count}"
+                )
+            try:
+                report_sha256 = hash_file(report_file)
+            except (FileNotFoundError, OSError) as exc:
+                raise ValueError(
+                    f"audit-{auditor_name}: cannot hash report at "
+                    f"{report_path}: {exc}"
+                ) from exc
+
     return write_receipt(
         task_dir,
         f"audit-{auditor_name}",
@@ -778,6 +975,7 @@ def receipt_audit_done(
         finding_count=finding_count,
         blocking_count=blocking_count,
         report_path=report_path,
+        report_sha256=report_sha256,
         tokens_used=tokens_used,
         route_mode=route_mode,
         agent_path=agent_path,
@@ -1200,6 +1398,14 @@ def receipt_postmortem_skipped(
     )
 
 
+# Allowed reasons for receipt_calibration_noop. Enum-validated at write
+# time so callers cannot silently drift the no-op taxonomy.
+_CALIBRATION_NOOP_REASONS = frozenset({
+    "no-retros",
+    "all-handlers-zero-work",
+})
+
+
 def receipt_calibration_applied(
     task_dir: Path,
     retros_consumed: int,
@@ -1211,6 +1417,13 @@ def receipt_calibration_applied(
 
     Calibration is deterministic — this writer does NOT call
     ``_record_tokens``; no model invocation is involved.
+
+    AC 4 refusal: when ``retros_consumed > 0`` AND
+    ``policy_sha256_before == policy_sha256_after`` the writer refuses —
+    retros were consumed yet the policy did not move, which means the
+    calibration cycle was actually a no-op and the caller must use
+    ``receipt_calibration_noop`` instead. The refusal message names the
+    alternative writer so the diagnostic is self-evident.
     """
     if not isinstance(retros_consumed, int) or retros_consumed < 0:
         raise ValueError("retros_consumed must be a non-negative int")
@@ -1220,6 +1433,13 @@ def receipt_calibration_applied(
         raise ValueError("policy_sha256_before must be a non-empty string")
     if not isinstance(policy_sha256_after, str) or not policy_sha256_after:
         raise ValueError("policy_sha256_after must be a non-empty string")
+    if retros_consumed > 0 and policy_sha256_before == policy_sha256_after:
+        raise ValueError(
+            f"receipt_calibration_applied REFUSES to write: retros_consumed="
+            f"{retros_consumed} but policy_sha256_before == policy_sha256_after "
+            f"({policy_sha256_before!r}). This is a no-op calibration — use "
+            f"calibration-noop (receipt_calibration_noop) instead."
+        )
     return write_receipt(
         task_dir,
         "calibration-applied",
@@ -1230,57 +1450,115 @@ def receipt_calibration_applied(
     )
 
 
-def receipt_rules_check_passed(
+def receipt_calibration_noop(
     task_dir: Path,
-    rules_evaluated: int,
-    violations_count: int,
-    error_violations: int,
-    mode: str,
-    advisory_violations: int = 0,
-    rules_file_sha256: str = "none",
+    reason: str,
+    policy_sha256: str,
 ) -> Path:
+    """Write receipt proving calibration ran but was a deliberate no-op.
+
+    ``reason`` is enum-validated against
+    {"no-retros", "all-handlers-zero-work"} — any other value raises
+    ValueError. ``policy_sha256`` is the policy hash at the time of the
+    no-op (same before/after by construction).
+
+    Step name: ``"calibration-noop"`` — the DONE->CALIBRATED gate
+    accepts this OR ``"calibration-applied"`` as satisfying the
+    calibration requirement (see ``validate_chain``).
+    """
+    if reason not in _CALIBRATION_NOOP_REASONS:
+        raise ValueError(
+            f"invalid calibration-noop reason: {reason!r} "
+            f"(allowed: {sorted(_CALIBRATION_NOOP_REASONS)})"
+        )
+    if not isinstance(policy_sha256, str) or not policy_sha256:
+        raise ValueError("policy_sha256 must be a non-empty string")
+    return write_receipt(
+        task_dir,
+        "calibration-noop",
+        reason=reason,
+        policy_sha256=policy_sha256,
+    )
+
+
+def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     """Write receipt proving a rules-check pass (no error-severity violations).
 
-    This writer is a *passed-receipt by construction*: it REFUSES to write if
-    ``error_violations != 0``. The rules-check pipeline must take a different
-    path (failure path) when errors are present — this receipt proves the
-    clean outcome only.
+    Signature (AC 1): takes only ``(task_dir, mode)``. All counts and
+    hashes are computed internally from a fresh ``rules_engine.run_checks``
+    call — callers no longer supply (and therefore cannot falsify) the
+    violation totals.
 
-    Validates:
-      - All four counts are non-negative ints.
-      - ``error_violations <= violations_count``.
-      - ``error_violations == 0`` (else raises ValueError).
-      - ``mode`` is one of {"staged", "all"}.
+    Refuses with ValueError if the rules engine reports any
+    error-severity violation. Rules-check pipeline must branch to the
+    failure path in that case; this writer proves the clean outcome only.
 
-    ``engine_version`` is hardcoded to ``"1"`` to avoid importing rules_engine
-    (which may not exist yet during early bootstrap of this feature).
-    ``checked_at`` is stamped via ``now_iso()``.
+    Payload shape (every value computed here):
+      - rules_evaluated:    count of entries in ``rules`` list of
+                            prevention-rules.json
+      - violations_count:   len(violations) returned by run_checks
+      - error_violations:   count where Violation.severity == "error"
+      - advisory_violations: count where Violation.severity == "warn"
+      - engine_version:     "1" (bootstrap-safe hardcode)
+      - rules_file_sha256:  hash_file of the prevention-rules.json path
+                            (or "none" if the file does not exist)
+      - checked_at:         now_iso()
+      - mode:               pass-through
     """
-    if not isinstance(rules_evaluated, int) or isinstance(rules_evaluated, bool) or rules_evaluated < 0:
-        raise ValueError("rules_evaluated must be a non-negative int")
-    if not isinstance(violations_count, int) or isinstance(violations_count, bool) or violations_count < 0:
-        raise ValueError("violations_count must be a non-negative int")
-    if not isinstance(error_violations, int) or isinstance(error_violations, bool) or error_violations < 0:
-        raise ValueError("error_violations must be a non-negative int")
-    if not isinstance(advisory_violations, int) or isinstance(advisory_violations, bool) or advisory_violations < 0:
-        raise ValueError("advisory_violations must be a non-negative int")
-    if error_violations > violations_count:
-        raise ValueError(
-            f"error_violations ({error_violations}) must be <= violations_count "
-            f"({violations_count})"
-        )
-    if error_violations != 0:
-        raise ValueError(
-            f"receipt_rules_check_passed REFUSES to write: error_violations="
-            f"{error_violations} (must be 0 — this receipt is a passed-receipt "
-            f"by construction; use a failure-path receipt when errors exist)"
-        )
     if mode not in ("staged", "all"):
         raise ValueError(
             f"mode must be 'staged' or 'all' (got mode={mode!r})"
         )
-    if not isinstance(rules_file_sha256, str) or not rules_file_sha256:
-        raise ValueError("rules_file_sha256 must be a non-empty string")
+
+    # Deferred import: rules_engine imports lib_core, and lib_core is
+    # imported at module load of this file. Importing rules_engine here
+    # (at call time) keeps the import graph acyclic.
+    from rules_engine import run_checks  # noqa: PLC0415
+    from lib_core import _persistent_project_dir  # noqa: PLC0415
+
+    root = task_dir.parent.parent
+
+    # Run the engine. This is the source of truth for counts — callers
+    # cannot lie about what the engine found.
+    violations = run_checks(root, mode)
+    violations_count = len(violations)
+    error_violations = sum(1 for v in violations if getattr(v, "severity", None) == "error")
+    advisory_violations = sum(1 for v in violations if getattr(v, "severity", None) == "warn")
+
+    # Refuse-by-construction: this writer proves the clean outcome only.
+    if error_violations > 0:
+        raise ValueError(
+            f"receipt_rules_check_passed REFUSES to write: error_violations="
+            f"{error_violations} (must be 0 — this receipt is a passed-receipt "
+            f"by construction; use a failure-path receipt when errors exist). "
+            f"violations_count={violations_count}, mode={mode!r}"
+        )
+
+    # Count rules from the file. If the file is missing, count is 0 and
+    # the hash is the literal string "none" (matches legacy schema).
+    rules_file = _persistent_project_dir(root) / "prevention-rules.json"
+    rules_evaluated = 0
+    rules_file_sha256: str = "none"
+    if rules_file.exists():
+        try:
+            rules_file_sha256 = hash_file(rules_file)
+        except (FileNotFoundError, OSError) as exc:
+            raise ValueError(
+                f"receipt_rules_check_passed: cannot hash prevention-rules "
+                f"file at {rules_file}: {exc}"
+            ) from exc
+        try:
+            with rules_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"receipt_rules_check_passed: cannot parse prevention-rules "
+                f"at {rules_file}: {exc}"
+            ) from exc
+        if isinstance(data, dict):
+            rules = data.get("rules", [])
+            if isinstance(rules, list):
+                rules_evaluated = len(rules)
 
     return write_receipt(
         task_dir,

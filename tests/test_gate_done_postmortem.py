@@ -1,4 +1,9 @@
-"""Tests for require_receipts_for_done postmortem matrix (AC 19)."""
+"""Tests for require_receipts_for_done postmortem matrix (AC 19).
+
+Migrated for task-20260419-006: AC 6 added registry-eligible auditor
+crosscheck. We mock the auditor registry to be empty so the crosscheck
+is vacuous and these tests focus on the postmortem-receipt matrix.
+"""
 from __future__ import annotations
 
 import json
@@ -16,6 +21,16 @@ from lib_receipts import (  # noqa: E402
     receipt_postmortem_generated,
     receipt_postmortem_skipped,
 )
+
+
+@pytest.fixture(autouse=True)
+def _empty_auditor_registry(monkeypatch):
+    """Make the AC 6 registry cross-check vacuous so this test file focuses
+    on the postmortem receipt matrix (which it was originally written for)."""
+    import router
+    monkeypatch.setattr(router, "_load_auditor_registry", lambda root: {
+        "always": [], "fast_track": [], "domain_conditional": {},
+    })
 
 
 def _setup(tmp_path: Path, *, quality: float | None = None) -> Path:

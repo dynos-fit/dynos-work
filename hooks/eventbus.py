@@ -548,6 +548,7 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
                 from lib_receipts import (
                     receipt_post_completion,
                     receipt_calibration_applied,
+                    receipt_calibration_noop,
                 )
                 receipt_post_completion(
                     task_dir,
@@ -570,17 +571,88 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
             if policy_sha256_after is None:
                 # Hash compute failed earlier — don't fabricate a receipt.
                 continue
+
+            # AC 20: per-task retros_count from the task's retrospective.
+            # The handler return values are booleans today (they don't
+            # thread real consumption counts up), so we derive retros_count
+            # from the artifact that policy_engine/improve would actually
+            # read: task-retrospective.json under the task dir. This is
+            # the simplest signal with no plumbing changes.
+            #
+            # retros_count > 0  ⇔ retrospective exists with >=1 finding
+            #                     OR >=1 repair cycle — i.e. something
+            #                     learning handlers could have consumed.
+            # retros_count == 0 ⇔ retrospective missing, unreadable, or
+            #                     reports zero findings + zero repairs.
+            retros_count = 0
             try:
-                receipt_calibration_applied(
-                    task_dir,
-                    retros_consumed=retros_consumed,
-                    scores_updated=scores_updated,
-                    policy_sha256_before=policy_sha256_before,
-                    policy_sha256_after=policy_sha256_after,
+                from lib_core import load_json as _load_json
+                retro_path = task_dir / "task-retrospective.json"
+                if retro_path.is_file():
+                    retro = _load_json(retro_path)
+                    if isinstance(retro, dict):
+                        fba = retro.get("findings_by_auditor", {})
+                        findings_total = (
+                            sum(fba.values())
+                            if isinstance(fba, dict) else 0
+                        )
+                        repairs = retro.get("repair_cycle_count", 0)
+                        if not isinstance(repairs, int):
+                            repairs = 0
+                        if findings_total > 0 or repairs > 0:
+                            retros_count = 1
+            except Exception as exc:
+                # Unreadable retrospective — treat as zero signal.
+                # Never fabricate a non-zero count from uncertainty.
+                print(
+                    f"  [warn] retros_count derivation failed for {td}: {exc}",
+                    file=sys.stderr,
                 )
+                retros_count = 0
+
+            # AC 20: branch between no-op and applied.
+            # Preconditions already verified above:
+            #   - all learning handlers succeeded for THIS task
+            #   - policy_sha256_after was computed (non-None)
+            hash_unchanged = (policy_sha256_before == policy_sha256_after)
+
+            try:
+                if hash_unchanged and retros_count == 0:
+                    # No retros to consume AND policy unchanged — the
+                    # nominal "nothing to calibrate" path. Write a
+                    # calibration-noop receipt so the receipt chain still
+                    # proves the learning gate fired and made a decision.
+                    receipt_calibration_noop(
+                        task_dir,
+                        reason="no-retros",
+                        policy_sha256=policy_sha256_after,
+                    )
+                elif hash_unchanged and retros_count > 0:
+                    # Retros existed but handlers produced no policy
+                    # delta (all-handlers-zero-work). Still a no-op at
+                    # the policy level; distinguish the reason so audit
+                    # trails can see *why* no change landed.
+                    receipt_calibration_noop(
+                        task_dir,
+                        reason="all-handlers-zero-work",
+                        policy_sha256=policy_sha256_after,
+                    )
+                else:
+                    # Real policy delta (or, defensively, any case we
+                    # didn't classify as a no-op above). Write the
+                    # applied receipt. Seg-1 added refuse-on-no-op to
+                    # this writer; branching above guarantees we don't
+                    # trigger that refuse.
+                    receipt_calibration_applied(
+                        task_dir,
+                        retros_consumed=retros_consumed,
+                        scores_updated=scores_updated,
+                        policy_sha256_before=policy_sha256_before,
+                        policy_sha256_after=policy_sha256_after,
+                    )
             except Exception as exc:
                 print(
-                    f"  [warn] calibration-applied receipt failed for {td}: {exc}",
+                    f"  [warn] calibration receipt failed for {td}: {exc}",
                     file=sys.stderr,
                 )
                 continue
