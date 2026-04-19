@@ -33,17 +33,37 @@ def _write_report(task_dir: Path, findings: list[dict]) -> Path:
     return report
 
 
-def test_report_path_none_skips_selfverify(tmp_path: Path):
-    """AC 2 (None path): report_path=None → self-verify is skipped."""
+def test_report_path_none_allows_zero_counts(tmp_path: Path):
+    """MA-005 hardening: report_path=None is legal ONLY when finding_count
+    and blocking_count are both zero. The legit case is an auditor that
+    ran and found nothing. No report file is required for zero findings."""
     td = _make_task(tmp_path)
     out = receipt_audit_done(
-        td, "sec", "haiku", 5, 2, None, 100,
+        td, "sec", "haiku", 0, 0, None, 100,
         route_mode="generic", agent_path=None, injected_agent_sha256=None,
     )
     payload = json.loads(out.read_text())
-    assert payload["finding_count"] == 5
-    assert payload["blocking_count"] == 2
+    assert payload["finding_count"] == 0
+    assert payload["blocking_count"] == 0
     assert payload["report_sha256"] is None
+
+
+def test_report_path_none_with_nonzero_counts_rejected(tmp_path: Path):
+    """MA-005 regression: caller-attested non-zero counts without a
+    report file are forbidden. This closes the TOCTOU where a malicious
+    or careless caller could pass finding_count=5, blocking_count=0 and
+    skip writing a report that would contradict the claim."""
+    td = _make_task(tmp_path)
+    with pytest.raises(ValueError, match="Caller-attested non-zero counts are forbidden"):
+        receipt_audit_done(
+            td, "sec", "haiku", 5, 2, None, 100,
+            route_mode="generic", agent_path=None, injected_agent_sha256=None,
+        )
+    with pytest.raises(ValueError, match="Caller-attested non-zero counts are forbidden"):
+        receipt_audit_done(
+            td, "sec", "haiku", 0, 1, None, 100,
+            route_mode="generic", agent_path=None, injected_agent_sha256=None,
+        )
 
 
 def test_report_path_matching_counts_verifies(tmp_path: Path):
