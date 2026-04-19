@@ -9,9 +9,75 @@ and this project adheres to **Semantic Versioning**.
 
 ## [Unreleased]
 
+---
+
+## [7.1.0] - 2026-04-19
+### "Close the Anti-Pattern": Receipt-Driven State Machine, Trust-Me-Bro Elimination, Modular Runtime
+
+The theme of 7.1.0 is moving the state machine from pull-based (LLM decides when to advance) toward receipt-driven (scheduler advances when proofs are on disk), and closing the trust-me-bro anti-pattern across every control-plane surface. Receipt writers self-compute machine-derivable fields — callers can no longer supply counts, hashes, or scores. The contract version is bumped from 2 → 4 in two waves.
+
+### Added
+- **Receipt-driven scheduler POC**: new `hooks/scheduler.py` exports a pure `compute_next_stage(task_dir) -> (next_stage | None, list[missing_proofs])` and an I/O-capable `handle_receipt_written(...)` dispatcher. `write_receipt` in `lib_receipts.py` now synchronously invokes the scheduler after the atomic write, so writing the `human-approval-SPEC_REVIEW` receipt advances the task to `PLANNING` without any caller running `ctl.py transition`. Scope ceiling is explicit: `compute_next_stage` returns `(None, [])` for every non-SPEC_REVIEW stage. `<!-- scheduler-owned: X -> Y -->` marker in skill prose opts a transition out of the LLM-must-mention-the-ctl-command linter. New `receipt_scheduler_refused` writer + `scheduler_transition_refused` / `scheduler_transition_race` diagnostic events.
+- **Deterministic rules engine** (#125): 6 prevention-rule templates (`pattern_must_not_appear`, `co_modification_required`, `signature_lock`, `caller_count_required`, `import_constant_only`, `every_name_in_X_satisfies_Y`, `advisory`) with structured params. Rules from postmortem analysis are normalized to these templates and enforced by `run_checks` at `REPAIR_EXECUTION → TEST_EXECUTION` / pre-DONE gates via `receipt_rules_check_passed`.
+- **`rules-check-passed` receipt + transition gate**: error-severity violations refuse to write the pass receipt, blocking DONE transition. Prevention-rules file hash is pinned to the receipt; drift after the check forces a re-run.
+- **LLM-powered postmortem analysis**: `postmortem_analysis.py build-prompt` / `apply` pipeline. `opus` analyst reads deterministic postmortem + findings and returns structured JSON with root_causes, prevention_rules, repair_failures. Rules merge into `prevention-rules.json` via the template normalizer. `postmortem_rule_promoted`, `postmortem_rule_dropped`, `postmortem_rule_promotion_dropped` events.
+- **Hierarchical Q-learning**: per-category action spaces (3 Q-tables) replace the flat executor×model table. `ctl.py repair-plan` surfaces Q-derived assignments; `repair-update` writes outcomes back. No-op when learning is disabled.
+- **Auditor ensemble voting**: router-plan entries can set `ensemble: true` with `ensemble_voting_models` (haiku + sonnet) and `ensemble_escalation_model` (opus). Both voters zero → pass; either voter non-zero → escalate to opus (binding). Per-model injected-prompt sidecars disambiguate ensemble call paths.
+- **CI linters** (+5): `test_ci_event_emit_consume` (every `log_event` name must be consumed or in `DIAGNOSTIC_ONLY_EVENTS`), `test_ci_value_error_coverage` (every `raise ValueError` in production has an adversarial `pytest.raises(match=…)`), `test_ci_receipt_selfverify_parity` (every receipt writer self-verifies or is allowlisted), `test_skill_stage_references::test_no_skill_prose_advises_manual_stage_edit` (scans for `manually set` within 80 bytes of `"stage"` — catches DONE-escape-hatch regressions), `test_skill_stage_references::test_scheduler_owned_transitions_are_exempt_from_transition_prose_requirement` (caps scheduler-owned markers at `SPEC_REVIEW -> PLANNING`).
+- **Plug-and-play modularity**: auditor registry, executor discovery, action spaces, ensemble wiring, handler discovery — all opt-in via registry lookups rather than hardcoded lists.
+- **`bus` CLI subcommands** on `ctl.py`: `emit`, `drain`, `status`, `handlers`.
+- **`router-cache-status`**: reports freshness of the per-task executor-plan cache (see Performance).
+- **External-solution gate in start skill**: structured JSON artifact at `.dynos/task-{id}/external-solution-gate.json` captures when the planner consulted external docs and which candidate was chosen. Includes untrusted-content contract (paraphrase-not-quote, URL allowlist, instruction-shaped-content rejection, body caps).
+- **Global dashboard live updates** (#121): regen-on-fetch + JS polling. Dashboard reflects current task state without manual refresh.
+- **Stage-aware artifact validation**: `validate_task_artifacts` no longer false-fails on early stages (pre-spec, pre-plan) by conditioning required artifacts on current stage.
+- **Contract version 4** (#127, #132): receipts embed `contract_version: 4`. `MIN_VERSION_PER_STEP` enforces per-receipt minimums. Writers refuse to emit below-floor; readers refuse to consume below-floor.
+
+### Changed
+- **Receipt writers self-compute machine-derivable fields** (#123, #127, #130, #131, #132, #133): `receipt_retrospective`, `receipt_plan_validated`, `receipt_plan_audit`, `receipt_audit_done`, `receipt_postmortem_generated` no longer accept caller-supplied `quality_score`, `cost_score`, `efficiency_score`, `total_tokens`, `segment_count`, `criteria_coverage`, `validation_passed`, or `finding_count`. The writers re-read the artifacts themselves and raise `TypeError` on any legacy kwarg. Closes the trust-me-bro input-trust hole.
+- **`receipt_audit_done` TOCTOU fixed** (#133 / MA-005): when `report_path is None`, `finding_count` and `blocking_count` MUST both be zero. Auditors with real findings materialize a report file, and the writer re-reads and cross-checks.
+- **`receipt_planner_spawn` enforces sidecar**: `injected_prompt_sha256` is required (no-sidecar legacy path removed). The sidecar file at `receipts/_injected-planner-prompts/{phase}.{sha256,txt}` pins the exact prompt bytes.
+- **`receipt_executor_done` enforces sidecar**: per-segment injected prompt sidecar must exist and match the supplied digest.
+- **`write_receipt` chokepoint dispatch**: every receipt write triggers `scheduler.handle_receipt_written` after the atomic write + existing `log_event("receipt_written", ...)`. Exception in the scheduler dispatch is swallowed to stderr — never rolls back the durable receipt.
+- **`cmd_approve_stage` stops calling `transition_task`**: exits 0 after the receipt is durably on disk; the scheduler drives the resulting stage advance asynchronously in-process. Docstring updated to match.
+- **Post-completion drain is async** (#117): `task-completed` handler no longer blocks the execute skill's return. Improve / policy_engine / dashboard / registry refresh run after the skill completes.
+- **`evolve.py` → `calibrate.py`**: rename. The shell alias `dynos calibration` routes to `memory/agent_generator.py auto`. Old `hooks/calibrate.py` / `hooks/generate.py` wrappers removed; functionality lives in `agent_generator.py init-registry` / `register-agent` / `auto` subcommands.
+- **`patterns.py` → `policy_engine.py`**: rename. `patterns.md` table data split into JSON (`project_rules.json`) so the LLM-facing prose (`project_rules.md`) no longer drifts against the structured data.
+- **Eventbus flattened**: 4 handlers, 1 event (`task-completed`), 1 drain loop. `receipt_written` and `stage_transition` remain as orthogonal JSONL-only observability events.
+- **`agent_generator` refreshes existing learned agents** (#115): every run regenerates agent `.md` files from the latest retrospective patterns, not just new ones. Bias / format / rule-filtering fixes.
+- **Benchmark scheduler wired as auto-discovered eventbus handler**.
+- **Daemon stripped to trajectory-only**: removed duplicate seeding; calibration CLI added; dormant modules cleared.
+- **Test migration** (#108): 7 unittest files → pytest; 3 dyno-prefixed tests renamed.
+
 ### Performance / Determinism
-- **Router executor-plan cache**: `executor-plan` now writes a fingerprinted plan to `.dynos/task-{id}/router-cache/executor-plan.json`. Per-segment `inject-prompt` calls reuse the cached plan instead of rebuilding it from scratch, eliminating N redundant `RouterContext` rebuilds per task. Critically, this also eliminates re-rolled epsilon-greedy exploration dice between executor-plan and inject-prompt, guaranteeing the model the executor was spawned under matches the model the prompt was injected for. Cache fingerprint covers graph, policy, effectiveness scores, retrospectives, learned registry, benchmark history, and prevention rules — any drift forces a live rebuild. New `router-cache-status` subcommand reports cache freshness. New `router_cache_lookup` / `router_cache_write` events make cache hits/misses observable.
-- **`_benchmark_model_for_agent` honors `RouterContext`**: previously this helper always re-read the learned registry and benchmark history JSON files, even when called from inside a `resolve_model` path that already had both cached on its `RouterContext`. Now it accepts and uses the shared context.
+- **Router executor-plan cache** (#113, #114): `executor-plan` writes a fingerprinted plan to `.dynos/task-{id}/router-cache/executor-plan.json`. Per-segment `inject-prompt` calls reuse the cached plan instead of rebuilding it. Critically, this eliminates re-rolled epsilon-greedy exploration dice between executor-plan and inject-prompt, so the model the executor was spawned under matches the model the prompt was injected for. Cache fingerprint covers graph, policy, effectiveness scores, retrospectives, learned registry, benchmark history, and prevention rules — any drift forces a live rebuild. New `router-cache-status` subcommand. New `router_cache_lookup` / `router_cache_write` events.
+- **`_benchmark_model_for_agent` honors `RouterContext`**: helper no longer re-reads learned registry and benchmark history when called from a path that already has both on its context.
+- **Gap analysis cached + decoupled** (#119): `plan_gap_analysis` no longer runs inside `validate_task_artifacts`; callers invoke it explicitly. Handler work deduplicated.
+- **Worktree slug normalization** (#122): `~/.dynos/projects/{slug}/` derived from the main-repo path, not the worktree path — retrospectives, benchmarks, and learned agents now flow back to the same persistent dir regardless of which worktree executed the task. Safe `migrate` CLI consolidates legacy duplicate slugs.
+
+### Fixed
+- **27 silently-vacuous gates** (#132): receipt/transition gates that checked the wrong field or returned True on empty input. Contract v4 adds explicit non-empty constraints.
+- **10 remaining trust-me-bro LLM surfaces** (#127): contract v3 closes caller-supplied counts on auditor receipts and plan receipts.
+- **8 initial trust-me-bro control-plane gates** (#123): sha256-bound sidecars, hash-drift refusal, explicit kwarg requirements.
+- **6 framework enforcement gaps** (#126) + 4 non-blocking followups (#128): stage-transition + receipt-parity + auditor-registry cross-checks.
+- **G1–G4 postmortem-skip structural guardrails** (#130): `.dynos/deferred-findings.json` TTL registry + `check_deferred_findings` CLI. Removed `quality-above-threshold` from `_POSTMORTEM_SKIP_REASONS`.
+- **Postmortem rule-promotion parity** (#131): `postmortem_rule_promoted` event fires per rule added; `postmortem_rule_dropped` fires per rule dropped. Closes the PR-#130 silent-drop pattern.
+- **MA-005 / MA-007 meta-audit** (#133): `receipt_audit_done` rejects `report_path=None` with non-zero counts; `apply_analysis` emits `postmortem_rule_promoted` per rule on successful promotion (was silent).
+- **Three pipeline regressions** (#116): registry data loss, fast-track stage walk, post-completion receipt gap.
+- **`performance_check`** (#111, #112): stopped flagging `dict.get()` as N+1 queries; indent-stack-based quadratic-loop detection.
+- **Execute skill stage transitions** (#117): post-completion drain dispatched async so `/dynos-work:execute` returns promptly.
+- **Dead code removal** (#109): `cli/assets/hooks`, `cli/assets/memory`, `cli/assets/bin`, `cli/assets/telemetry` subtrees; dormant sandbox modules (`sweeper`, `dream`, `state`, `founder-skill`, stale copies).
+
+### Removed
+- **`no-sidecar legacy path` in `receipt_planner_spawn`**: the pre-#124 `injected_prompt_sha256=None` branch is gone.
+- **Caller-supplied score / count fields** on `receipt_retrospective` / `receipt_plan_validated` / `receipt_plan_audit` / `receipt_audit_done` (also listed under Changed for breaking-change discoverability — legacy kwargs raise `TypeError`).
+- **`quality-above-threshold`** as a valid value in `_POSTMORTEM_SKIP_REASONS` (#130).
+- **`hooks/calibrate.py`** / **`hooks/generate.py`** shell wrappers: functionality lives in `memory/agent_generator.py`.
+- **MCTS / dreamer modules**: extracted to `sandbox/` — out of the main pipeline.
+- **Optional learning modules**: sandboxed; `memory/` is now 1,318 lines. Q-learning / postmortem_improve / agent_generator restored from sandbox when needed.
+
+### Plugin / Distribution
+- Bump `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` to `7.1.0`.
+- Reinstall via `/plugin update dynos-work` to pick up updated skills. Cached-v7.0.0 installations will continue to serve stale skill prompts (notably a stale 5-arg `receipt_retrospective` signature from an intermediate commit) until the update runs.
 
 ---
 
