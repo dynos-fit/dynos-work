@@ -253,3 +253,93 @@ def test_successful_promotion_reports_parity_counts(tmp_path: Path):
     assert not any(
         e.get("event") == "postmortem_rule_promotion_dropped" for e in events
     )
+
+
+# ---------------------------------------------------------------------------
+# MA-007 — successful promotions emit events, one per rule
+# ---------------------------------------------------------------------------
+
+
+def test_successful_promotion_emits_event_per_rule(tmp_path: Path):
+    """MA-007 regression: `apply_analysis` was silent on successful
+    promotions. PR-131 added events for drops; parity demands the add
+    side be equally visible. One `postmortem_rule_promoted` event per
+    promoted rule, carrying category + executor + template +
+    enforcement + source_finding so a reviewer can trace each rule's
+    individual provenance without parsing a compound event."""
+    root = _project(tmp_path)
+    td = _task_dir(root)
+    analysis = {
+        "summary": "test",
+        "prevention_rules": [
+            _mk_rule("rule alpha", category="sec"),
+            _mk_rule("rule bravo", category="cq"),
+            _mk_rule("rule charlie", category="perf"),
+        ],
+    }
+    result = apply_analysis(td, analysis)
+    assert result["rules_added"] == 3
+
+    events = _read_events(root)
+    promoted = [e for e in events if e.get("event") == "postmortem_rule_promoted"]
+    assert len(promoted) == 3, f"expected 3 promotion events, got {promoted}"
+    categories = sorted(e.get("category") for e in promoted)
+    assert categories == ["cq", "perf", "sec"]
+    # Every event carries the full provenance schema.
+    for ev in promoted:
+        assert ev.get("executor") == "all"
+        assert ev.get("template") == "advisory"
+        # enforcement "advisory" is not in VALID_ENFORCEMENT on main;
+        # the normalizer rewrites to "prompt-constraint" as the
+        # fallback. The event carries the post-normalization value.
+        assert ev.get("enforcement") == "prompt-constraint"
+        assert ev.get("source_finding") == "TEST-001"
+        assert ev.get("task_id") == "task-20260419-TP"
+
+
+def test_no_promotion_event_when_rule_already_exists(tmp_path: Path):
+    """Dedup-by-existing-text path: a rule whose text already appears in
+    prevention-rules.json is NOT appended and therefore must NOT emit a
+    postmortem_rule_promoted event (the provenance was recorded on the
+    original add, not this one). Verifies `added` does not double-count
+    and parity events don't inflate on re-runs."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+    from lib_core import _persistent_project_dir  # noqa: E402
+
+    root = _project(tmp_path)
+    td = _task_dir(root)
+    # Pre-seed the rules file with an existing entry matching our rule text.
+    persistent = _persistent_project_dir(root)
+    persistent.mkdir(parents=True, exist_ok=True)
+    existing_rules_path = persistent / "prevention-rules.json"
+    existing_rules_path.write_text(json.dumps({
+        "rules": [{
+            "rule": "rule alpha",
+            "category": "sec",
+            "executor": "all",
+            "enforcement": "advisory",
+            "source_task": "task-prior",
+            "source_finding": "PRIOR-001",
+            "added_at": "2026-04-01T00:00:00Z",
+            "template": "advisory",
+            "params": {},
+        }],
+    }))
+
+    analysis = {
+        "summary": "test",
+        "prevention_rules": [
+            _mk_rule("rule alpha", category="sec"),  # dup → skip
+            _mk_rule("rule bravo", category="cq"),   # new → promote
+        ],
+    }
+    result = apply_analysis(td, analysis)
+    assert result["rules_added"] == 1
+
+    events = _read_events(root)
+    promoted = [e for e in events if e.get("event") == "postmortem_rule_promoted"]
+    assert len(promoted) == 1, (
+        f"expected 1 promotion event (only the new rule); got {promoted}"
+    )
+    assert promoted[0].get("category") == "cq"

@@ -1036,17 +1036,34 @@ def receipt_audit_done(
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
 
+    # MA-005 hardening: when report_path is None we have no way to verify
+    # caller-supplied finding_count / blocking_count. Any non-zero count
+    # supplied without a corresponding report file is caller-attested and
+    # exactly the TOCTOU pattern SEC-004 closed for receipt_plan_audit.
+    # Rule: `report_path=None` demands both counts be zero. If the auditor
+    # found anything, they must materialise a report file and pass its
+    # path. Learned / ensemble callers already hit the AC 17 guard above
+    # (report_path REQUIRED). This rule catches the remaining generic
+    # case and legacy voting-harness callers that pass None+counts>0.
+    if not (isinstance(report_path, str) and report_path):
+        if finding_count != 0 or blocking_count != 0:
+            raise ValueError(
+                f"audit-{auditor_name}: report_path is None but "
+                f"finding_count={finding_count}, blocking_count={blocking_count}. "
+                "Caller-attested non-zero counts are forbidden — "
+                "materialise a report file and pass its path, or pass "
+                "(0, 0) and None together."
+            )
+
     # AC 2 — self-verify block. When ``report_path`` is a non-null string
     # referring to an existing JSON file, cross-check caller-supplied
     # finding_count / blocking_count against the actual contents of the
     # report and attach a sha256 of the file. Any mismatch aborts the
     # write with ValueError naming the mismatched field and both values.
     #
-    # When ``report_path`` is None OR the file does not exist, the
-    # self-verify block is skipped entirely. This preserves the pre-
-    # escalation ensemble-vote semantics (where the voting harness writes
-    # receipts before a report file has been materialised) AND the
-    # backward-compat path for callers that legitimately pass None.
+    # When ``report_path`` is None OR the file does not exist, the MA-005
+    # rule above already demands counts=(0, 0). The skip below is now
+    # semantically: "no report means literal zero findings."
     report_sha256: str | None = None
     if isinstance(report_path, str) and report_path:
         report_file = Path(report_path)

@@ -773,6 +773,14 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
     persistent.mkdir(parents=True, exist_ok=True)
     lock_path = rules_path.with_suffix(rules_path.suffix + ".lock")
     added = 0
+    # MA-007: emit one event per successful rule promotion. The drop-
+    # side already emits `postmortem_rule_dropped` (stage=normalize
+    # and stage=schema); parity demands the add-side be equally visible.
+    # A reviewer grepping events.jsonl for `postmortem_rule_promoted`
+    # sees exactly which rules landed, from which task, under what
+    # category — the same chain-of-custody PR #131 established for
+    # the drop path but cut off before the promote path.
+    promoted_records: list[dict] = []
     lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(lock_fd, "w") as lock_fh:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
@@ -811,11 +819,35 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 current_rules.append(merged)
                 existing_rule_texts.add(text.lower())
                 added += 1
+                promoted_records.append({
+                    "category": merged["category"],
+                    "executor": merged["executor"],
+                    "template": merged["template"],
+                    "enforcement": merged["enforcement"],
+                    "source_finding": merged["source_finding"],
+                })
 
             if added:
                 write_json(rules_path, {"rules": current_rules, "updated_at": now_iso()})
         finally:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+    # MA-007: emit promotion events AFTER lock release so a failed log
+    # write doesn't hold the rules-file lock. One event per promoted
+    # rule — no batch aggregation — so a reviewer can trace each rule's
+    # individual provenance without parsing a compound event.
+    for record in promoted_records:
+        log_event(
+            root,
+            "postmortem_rule_promoted",
+            task=task_id,
+            task_id=task_id,
+            category=record["category"],
+            executor=record["executor"],
+            template=record["template"],
+            enforcement=record["enforcement"],
+            source_finding=record["source_finding"],
+        )
 
     # Hash analysis + rules POST-merge so the receipt records the on-disk
     # state that downstream verifiers will see. If any hashing or receipt
