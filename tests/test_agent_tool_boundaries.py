@@ -46,9 +46,14 @@ READ_ONLY_AUDITORS = {
 }
 
 READ_ONLY_OTHER = {
-    "planning",
     "repair-coordinator",
     "investigator",
+}
+
+# Planner is a writer: it produces spec.md, plan.md, execution-graph.json
+# under .dynos/task-{id}/ and validates them via Bash-invoked hooks scripts.
+WRITERS_OTHER = {
+    "planning",
 }
 
 WRITE_TOOLS = {"Write", "Edit"}
@@ -185,10 +190,12 @@ class TestReadOnlyOtherNoWriteTools:
 # ---------------------------------------------------------------------------
 
 class TestSpecificAssignments:
-    def test_planner_no_bash(self):
-        """Planner reads codebase, doesn't execute anything."""
+    def test_planner_has_write_edit_bash(self):
+        """Planner writes spec.md/plan.md/execution-graph.json and runs Bash validators."""
         fm = _parse_frontmatter(AGENTS_DIR / "planning.md")
-        assert "Bash" not in fm["tools"]
+        assert "Write" in fm["tools"], "planning must have Write to produce spec.md/plan.md"
+        assert "Edit" in fm["tools"], "planning must have Edit to iterate on its artifacts"
+        assert "Bash" in fm["tools"], "planning must have Bash for validate_task_artifacts etc."
 
     def test_spec_completion_auditor_no_bash(self):
         """Spec-completion auditor only reads specs and code."""
@@ -226,7 +233,7 @@ class TestClassificationCoverage:
     def test_all_agents_classified(self):
         """Every agent file is in exactly one category."""
         all_names = {f.stem for f in AGENT_FILES}
-        classified = EXECUTORS | READ_ONLY_AUDITORS | READ_ONLY_OTHER
+        classified = EXECUTORS | READ_ONLY_AUDITORS | READ_ONLY_OTHER | WRITERS_OTHER
         unclassified = all_names - classified
         assert not unclassified, f"Unclassified agents: {unclassified}"
 

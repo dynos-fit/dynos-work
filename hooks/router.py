@@ -36,6 +36,11 @@ from lib_defaults import (
     UCB_EXPLORATION_CONSTANT,
 )
 from lib_log import log_event
+from lib_receipts import (
+    INJECTED_AUDITOR_PROMPTS_DIR,
+    INJECTED_PLANNER_PROMPTS_DIR,
+    INJECTED_PROMPTS_DIR,
+)
 from lib_registry import ensure_learned_registry
 
 
@@ -1337,7 +1342,7 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
     # task_id (graph path under .dynos/task-{id}/). Without a task_id
     # there is nowhere to write a per-task receipt sidecar.
     if task_id:
-        sidecar_dir = root / ".dynos" / task_id / "receipts" / "_injected-prompts"
+        sidecar_dir = root / ".dynos" / task_id / "receipts" / INJECTED_PROMPTS_DIR
         try:
             digest = _write_prompt_sidecar(sidecar_dir, args.segment_id, printed_bytes)
             log_event(
@@ -1474,7 +1479,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     model_label = args.model if args.model else "default"
     base_name = f"{auditor_name}-{model_label}"
 
-    sidecar_dir = task_dir / "receipts" / "_injected-auditor-prompts"
+    sidecar_dir = task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
     try:
         digest = _write_prompt_sidecar(sidecar_dir, base_name, printed_bytes)
     except OSError as exc:
@@ -1494,6 +1499,84 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
 
     _sys.stdout.write(final_text + "\n")
     _sys.stdout.flush()
+    return 0
+
+
+def cmd_planner_inject_prompt(args: argparse.Namespace) -> int:
+    """Write a per-phase injected-prompt sidecar for a planner spawn.
+
+    Reads the prompt body from stdin as raw bytes, writes atomic sidecar
+    files at ``.dynos/task-{task_id}/receipts/_injected-planner-prompts/
+    {phase}.sha256`` and ``.txt`` via ``_write_prompt_sidecar`` (the same
+    atomic helper the executor and auditor sidecars use). Prints the
+    sha256 hex digest to stdout as a single line so the orchestrator can
+    capture it and pass it to ``receipt_planner_spawn(...,
+    injected_prompt_sha256=<digest>)``.
+
+    The sidecar directory name ``_injected-planner-prompts`` is imported
+    from ``lib_receipts.INJECTED_PLANNER_PROMPTS_DIR`` so writer and
+    reader share one source of truth for the filename schema.
+
+    The three recognized phases are ``discovery``, ``spec``, and ``plan``
+    — one sidecar per phase, matching the three planner spawn sites in
+    ``skills/start/SKILL.md``.
+    """
+    import sys as _sys
+    import re as _re
+    # Validate --task-id against a strict slug: task- prefix + alphanum +
+    # [A-Za-z0-9_.-]. Rejects absolute paths, ``..`` traversal, leading
+    # ``.``, and null bytes. Defense against SEC-001.
+    if not _re.match(r"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$", args.task_id):
+        print(
+            json.dumps({"error": f"invalid task-id (must match ^task-[A-Za-z0-9][A-Za-z0-9_.-]*$): {args.task_id!r}"}),
+            file=_sys.stderr,
+        )
+        return 1
+
+    try:
+        stdin_bytes = _sys.stdin.buffer.read()
+    except OSError as exc:
+        print(
+            json.dumps({"error": f"stdin read failed: {exc}"}),
+            file=_sys.stderr,
+        )
+        return 1
+
+    root = Path(args.root).resolve()
+    sidecar_dir = (
+        root / ".dynos" / args.task_id / "receipts"
+        / INJECTED_PLANNER_PROMPTS_DIR
+    ).resolve()
+    # Defense in depth: assert the resolved path is still under root/.dynos/.
+    dynos_root = (root / ".dynos").resolve()
+    try:
+        sidecar_dir.relative_to(dynos_root)
+    except ValueError:
+        print(
+            json.dumps({"error": f"resolved sidecar path escapes .dynos/: {sidecar_dir}"}),
+            file=_sys.stderr,
+        )
+        return 1
+
+    try:
+        digest = _write_prompt_sidecar(sidecar_dir, args.phase, stdin_bytes)
+    except OSError as exc:
+        print(
+            json.dumps({"error": f"sidecar write failed: {exc}"}),
+            file=_sys.stderr,
+        )
+        return 1
+
+    log_event(
+        root,
+        "planner_inject_prompt_sidecar_written",
+        task_id=args.task_id,
+        phase=args.phase,
+        sha256=digest,
+        sidecar_dir=str(sidecar_dir),
+    )
+
+    print(digest)
     return 0
 
 
@@ -1585,6 +1668,20 @@ def build_parser() -> argparse.ArgumentParser:
     aip.add_argument("--auditor-name", required=True)
     aip.add_argument("--model", default=None, help="Model label for sidecar disambiguation; 'default' if unset")
     aip.set_defaults(func=cmd_audit_inject_prompt)
+
+    pip = subparsers.add_parser(
+        "planner-inject-prompt",
+        help="Write per-phase planner injected-prompt sidecar (stdin) and print sha256 digest",
+    )
+    pip.add_argument("--root", default=".")
+    pip.add_argument("--task-id", required=True)
+    pip.add_argument(
+        "--phase",
+        required=True,
+        choices=("discovery", "spec", "plan"),
+        help="Planner phase this sidecar corresponds to",
+    )
+    pip.set_defaults(func=cmd_planner_inject_prompt)
 
     rc = subparsers.add_parser("router-cache-status", help="Inspect executor-plan cache freshness for a task")
     rc.add_argument("--root", default=".")

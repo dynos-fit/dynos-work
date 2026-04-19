@@ -62,16 +62,18 @@ def test_sidecar_match_passes(tmp_path: Path):
     assert payload["injected_prompt_sha256"] == digest
 
 
-def test_env_var_skip_bypasses_assertion(tmp_path: Path, monkeypatch):
+def test_env_var_no_longer_bypasses_assertion(tmp_path: Path, monkeypatch):
+    """Regression: DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1 was removed (SEC-003).
+    Setting the env var must NOT disable the sidecar check."""
     td = _task_dir(tmp_path)
     monkeypatch.setenv("DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT", "1")
-    # No sidecar file
-    out = receipt_executor_done(
-        td, "seg-99", "backend", "haiku",
-        injected_prompt_sha256="d" * 64,
-        agent_name=None, evidence_path=None, tokens_used=0,
-    )
-    assert out.exists()
+    # No sidecar file on disk.
+    with pytest.raises(ValueError, match="sidecar"):
+        receipt_executor_done(
+            td, "seg-99", "backend", "haiku",
+            injected_prompt_sha256="d" * 64,
+            agent_name=None, evidence_path=None, tokens_used=0,
+        )
 
 
 def test_writer_does_not_carry_learned_agent_injected(tmp_path: Path):

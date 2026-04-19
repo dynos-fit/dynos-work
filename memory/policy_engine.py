@@ -138,11 +138,83 @@ def _mean(values: list[float]) -> float:
 QuadKey = tuple[str, str, str, str]  # (role, model, task_type, source)
 
 
-def _extract_quads(retrospectives: list[dict]) -> list[tuple[QuadKey, float, float, float]]:
+def _build_events_by_task(
+    root: Path,
+    task_ids: set[str] | None = None,
+) -> dict[str, list[dict]]:
+    """Build {task_id -> [event, ...]} by streaming `.dynos/events.jsonl`.
+
+    When ``task_ids`` is provided, events whose ``task_id`` is NOT in the
+    set are dropped during streaming. This caps memory at O(events-for-
+    needed-tasks) instead of O(all-events) — essential on long-lived
+    projects where events.jsonl grows unbounded (PERF-001).
+
+    When ``task_ids`` is None, all events with a string task_id are
+    retained (legacy behavior). Callers that know their retrospective set
+    should always pass the filter.
+
+    Malformed lines are silently skipped. Entries without a string
+    ``task_id`` key are skipped. When the file does not exist, returns an
+    empty dict — callers that want the legacy (no-cross-check) path of
+    :func:`_extract_quads` should pass ``events_by_task=None`` explicitly;
+    passing ``{}`` means "cross-check opted-in; no events; everything
+    unmatched."
+    """
+    events_by_task: dict[str, list[dict]] = {}
+    events_path = root / ".dynos" / "events.jsonl"
+    if not events_path.exists():
+        return events_by_task
+    try:
+        with events_path.open("r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                task_id = entry.get("task_id")
+                if not isinstance(task_id, str) or not task_id:
+                    continue
+                if task_ids is not None and task_id not in task_ids:
+                    continue
+                events_by_task.setdefault(task_id, []).append(entry)
+    except OSError:
+        # File became unreadable after exists() — treat as "no events."
+        return {}
+    return events_by_task
+
+
+def _extract_quads(
+    retrospectives: list[dict],
+    events_by_task: dict[str, list[dict]] | None = None,
+    root: Path | None = None,
+) -> list[tuple[QuadKey, float, float, float]]:
     """Extract (quad_key, quality, cost, efficiency) from validated retrospectives.
 
     Sorted by task_id ascending for deterministic replay.
+
+    When ``events_by_task`` is not None, each quad whose
+    ``agent_source[role]`` starts with ``"learned:"`` is cross-checked
+    against the matching task's event stream. A quad is verified iff at
+    least one entry in ``events_by_task.get(retro["task_id"], [])`` has
+    ``event == "learned_agent_applied"`` AND ``agent_name == <claimed>``
+    AND (``segment_id == role`` OR
+    ``segment_id == role.removeprefix("audit-")``). Unmatched quads have
+    their ``source`` rewritten to ``"generic"``; when ``root`` is also
+    provided, a single ``agent_source_reclassified`` event is emitted via
+    :func:`log_event` per rewritten quad. When ``events_by_task is None``,
+    the cross-check is skipped entirely (legacy path).
     """
+    # PERF-002: collect reclassification events during extraction and
+    # flush them once after the loop completes. Prevents the synchronous
+    # open+append+close per reclassified quad inside the hot path — which
+    # at N retros * M roles (all learned-unmatched) would fire N*M serial
+    # file writes before any quad is returned.
+    _reclass_events: list[dict] = []
     # Filter and validate
     valid = []
     for retro in retrospectives:
@@ -171,12 +243,57 @@ def _extract_quads(retrospectives: list[dict]) -> list[tuple[QuadKey, float, flo
         task_type = retro["task_type"]
         models = retro.get("model_used_by_agent", {})
         sources = retro.get("agent_source", {})
+        task_id = retro.get("task_id")
+        task_events = (
+            events_by_task.get(task_id, [])
+            if events_by_task is not None and isinstance(task_id, str)
+            else []
+        )
 
         for role, model in models.items():
             if not isinstance(model, str) or model not in VALID_MODELS:
                 continue
             source = sources.get(role, "generic") if isinstance(sources, dict) else "generic"
+
+            # Cross-check learned:X claims against events.jsonl (fix E).
+            # Only active when caller opted in via events_by_task != None.
+            if (
+                events_by_task is not None
+                and isinstance(source, str)
+                and source.startswith("learned:")
+            ):
+                claimed_agent = source[len("learned:"):]
+                role_stripped = role[len("audit-"):] if role.startswith("audit-") else role
+                matched = False
+                for entry in task_events:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("event") != "learned_agent_applied":
+                        continue
+                    if entry.get("agent_name") != claimed_agent:
+                        continue
+                    seg_id = entry.get("segment_id")
+                    if seg_id == role or seg_id == role_stripped:
+                        matched = True
+                        break
+                if not matched:
+                    original_source = source
+                    source = "generic"
+                    if root is not None:
+                        _reclass_events.append({
+                            "task_id": task_id,
+                            "role": role,
+                            "original_source": original_source,
+                            "reclassified_to": "generic",
+                            "reason": "no_matching_learned_agent_applied_event",
+                        })
+
             quads.append(((role, model, task_type, source), q, c, e))
+
+    # Flush batched reclassification events after the extraction loop.
+    if root is not None and _reclass_events:
+        for ev in _reclass_events:
+            log_event(root, "agent_source_reclassified", **ev)
 
     return quads
 
@@ -184,13 +301,38 @@ def _extract_quads(retrospectives: list[dict]) -> list[tuple[QuadKey, float, flo
 def compute_effectiveness_scores(
     retrospectives: list[dict],
     baseline: dict[QuadKey, tuple[float, float, float]] | None = None,
+    root: Path | None = None,
 ) -> list[dict]:
     """Compute EMA effectiveness scores from retrospectives.
 
     Returns list of dicts with: role, model, task_type, source,
     quality_ema, cost_ema, efficiency_ema, sample_count, updated.
+
+    When ``root`` is provided, this function builds ``events_by_task`` once
+    from ``<root>/.dynos/events.jsonl`` and passes it to
+    :func:`_extract_quads` so that retrospective ``learned:X`` claims are
+    cross-checked against the event stream. Unmatched claims are
+    reclassified to ``"generic"`` with an ``agent_source_reclassified``
+    event. When ``events.jsonl`` does not exist, an empty dict is still
+    passed (cross-check runs with zero signal — every ``learned:X`` gets
+    reclassified). Legacy callers that omit ``root`` skip the cross-check
+    entirely.
     """
-    quads = _extract_quads(retrospectives)
+    if root is not None:
+        # PERF-001: pre-filter events.jsonl to only the task_ids that
+        # appear in this retrospective set. Bounds memory at O(events-
+        # for-retros) instead of O(all-events-ever-emitted-by-project).
+        needed_ids: set[str] = {
+            r["task_id"]
+            for r in retrospectives
+            if isinstance(r, dict) and isinstance(r.get("task_id"), str)
+        }
+        events_by_task: dict[str, list[dict]] | None = _build_events_by_task(
+            root, task_ids=needed_ids
+        )
+    else:
+        events_by_task = None
+    quads = _extract_quads(retrospectives, events_by_task=events_by_task, root=root)
 
     # EMA state per quad
     state: dict[QuadKey, dict] = {}
@@ -652,8 +794,10 @@ def write_patterns(root: Path) -> dict:
     log_event(root, "learn_step", step="collect", retrospective_count=len(retrospectives),
               task_types=list(task_types), executor_roles=list(executor_roles), auditor_roles=list(auditor_roles))
 
-    # Step 2: Compute effectiveness scores (EMA) and derive policies
-    effectiveness_scores = compute_effectiveness_scores(retrospectives)
+    # Step 2: Compute effectiveness scores (EMA) and derive policies.
+    # Pass `root` so the EMA ingest cross-checks retrospective
+    # `learned:X` agent_source claims against .dynos/events.jsonl.
+    effectiveness_scores = compute_effectiveness_scores(retrospectives, root=root)
     ema_model_policy = derive_model_policy(effectiveness_scores)
     ema_skip_policy = derive_skip_policy(effectiveness_scores)
 
@@ -729,7 +873,7 @@ def cmd_effectiveness(args: argparse.Namespace) -> int:
     """Compute and print effectiveness scores from retrospectives."""
     root = Path(args.root).resolve()
     retrospectives = collect_retrospectives(root)
-    scores = compute_effectiveness_scores(retrospectives)
+    scores = compute_effectiveness_scores(retrospectives, root=root)
     output = {
         "effectiveness_scores": scores,
         "model_policy": derive_model_policy(scores),

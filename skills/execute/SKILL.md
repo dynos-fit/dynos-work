@@ -45,12 +45,25 @@ Append to log:
 
 ### Step 3 — Execute segments (Optimized Scheduler)
 
-**Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. However, you MUST still run the router and apply learned agent rules before executing:
+**Inline vs spawn decision (authoritative):**
+
+The inline branch is permitted ONLY when every cell in row 1 of the table below is satisfied. Any deviation forces the spawn path. Read the executor plan router output first, then look up the row that matches `manifest.fast_track`, the number of segments in `execution-graph.json`, and the segment's `route_mode` + `agent_path` from the router's response.
+
+| fast_track | n_segments | route_mode | agent_path | path_taken |
+| --- | --- | --- | --- | --- |
+| true | 1 | generic | null | inline (no subagent spawn) |
+| true | 1 | replace | any non-null | spawn (inline FORBIDDEN) |
+| true | 1 | alongside | any non-null | spawn (inline FORBIDDEN) |
+| false OR n_segments > 1 | any | any | any | spawn |
+
+If any segment has route_mode in {replace, alongside} with non-null agent_path, the inline branch is FORBIDDEN — take the spawn path.
+
+**Inline execution procedure (only when the decision table row says `inline`):** Inline execution skips the executor subagent entirely and runs the segment in this thread. This avoids the ~30K token overhead of agent context setup, but it does NOT relax any other rule. Even in the inline branch, you MUST still run the router, write the executor-routing receipt, and apply the prompt-injection/prevention pipeline to your own work:
 
 1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/router.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
 2. Write the executor-routing receipt (required for stage transitions).
-3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
-4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
+3. Re-verify the decision table row. If the router's response contains any segment with `route_mode` in `{"replace", "alongside"}` with a non-null `agent_path`, STOP — the inline branch is FORBIDDEN for this task. Fall through to the spawn path below.
+4. Run `inject-prompt` with your base prompt to get the complete prompt with prevention rules. Apply those rules to your own work.
 5. Log the routing decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
 6. **Transition the manifest stage `PRE_EXECUTION_SNAPSHOT → EXECUTION`** (mandatory — without this the Step 4 transition to `TEST_EXECUTION` is illegal per `ALLOWED_STAGE_TRANSITIONS`). `transition_task` auto-appends the `[STAGE] → EXECUTION` log line; do not write it manually:
 

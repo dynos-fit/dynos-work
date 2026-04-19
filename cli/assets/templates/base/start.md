@@ -15,17 +15,44 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 
 After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
 
+Before EVERY planner receipt write, you MUST first write a per-phase injected-prompt sidecar by piping the planner prompt body into `hooks/router.py planner-inject-prompt`. Capture the printed sha256 digest and pass it back through as the `injected_prompt_sha256=<digest>` kwarg on the receipt call. The receipt will raise `ValueError` if the sidecar is missing or its contents do not match — that is the proof-of-injection gate.
+
+```bash
+# Discovery planner — write sidecar, capture digest:
+DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | python3 "{{HOOKS_PATH}}/dynorouter.py" planner-inject-prompt --task-id {id} --phase discovery)
+
+# Spec planner — write sidecar, capture digest:
+SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | python3 "{{HOOKS_PATH}}/dynorouter.py" planner-inject-prompt --task-id {id} --phase spec)
+
+# Plan planner — write sidecar, capture digest:
+PLAN_DIGEST=$(printf '%s' "$PLAN_PROMPT" | python3 "{{HOOKS_PATH}}/dynorouter.py" planner-inject-prompt --task-id {id} --phase plan)
+```
+
+Then, after each planner subagent returns, write the matching receipt with the captured digest:
+
 ```python
 from dynoslib_receipts import receipt_planner_spawn, receipt_plan_audit
 
 # After planner spawn (discovery/design/classification):
-receipt_planner_spawn(task_dir, "discovery", tokens_used=TOTAL_TOKENS)
+receipt_planner_spawn(
+    task_dir, "discovery",
+    tokens_used=TOTAL_TOKENS,
+    injected_prompt_sha256=DISCOVERY_DIGEST,
+)
 
 # After planner spawn (spec normalization):
-receipt_planner_spawn(task_dir, "spec", tokens_used=TOTAL_TOKENS)
+receipt_planner_spawn(
+    task_dir, "spec",
+    tokens_used=TOTAL_TOKENS,
+    injected_prompt_sha256=SPEC_DIGEST,
+)
 
 # After planner spawn (plan generation):
-receipt_planner_spawn(task_dir, "plan", tokens_used=TOTAL_TOKENS)
+receipt_planner_spawn(
+    task_dir, "plan",
+    tokens_used=TOTAL_TOKENS,
+    injected_prompt_sha256=PLAN_DIGEST,
+)
 
 # After spec-completion auditor (plan audit):
 receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS, finding_count=N)

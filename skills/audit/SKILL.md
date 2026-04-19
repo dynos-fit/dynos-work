@@ -349,6 +349,8 @@ Read the written `task-retrospective.json`, merge these fields into it, and writ
 
 If no audit reports or repair logs exist, write the same structure with zeroed-out counts (empty objects `{}`, zeros, and `1.0` for scores). Old retrospectives missing newer fields (`token_usage_by_agent`, `total_token_usage`, `model_used_by_agent`, `agent_source`, `alongside_overlap`, `quality_score`, `cost_score`, `efficiency_score`) are treated as `null`, not errors.
 
+**agent_source cross-check:** Retrospective claims of `agent_source[role] = "learned:X"` are cross-checked by `memory/policy_engine.py::_extract_quads` against `.dynos/events.jsonl`. Claims without a matching `learned_agent_applied` event (same `task_id`, same `agent_name`, same `segment_id` — or `segment_id` matching `role.removeprefix("audit-")` for auditor roles) are reclassified to `"generic"` and an `agent_source_reclassified` event is emitted. Auditors must continue to populate `agent_source` honestly — the cross-check is verification, not a substitute for honest reporting. Retrospectives are still accepted when unmatched; only the EMA attribution is downgraded, and the `agent_source_reclassified` events are the audit trail a reviewer can use to spot systemic drift.
+
 Append to log:
 ```
 {timestamp} [DONE] reflect — task-retrospective.json written
