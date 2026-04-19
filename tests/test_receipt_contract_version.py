@@ -101,9 +101,32 @@ def _exercise_writer(name: str, td: Path):
     if name == "receipt_post_completion":
         return receipt_post_completion(td, [])
     if name == "receipt_planner_spawn":
-        return receipt_planner_spawn(td, "spec", 0, injected_prompt_sha256=None)
+        # Post-F5: the None legacy path is rejected. Write the sidecar
+        # so the writer's unconditional hash-match assertion passes.
+        planner_sd = td / "receipts" / "_injected-planner-prompts"
+        planner_sd.mkdir(parents=True, exist_ok=True)
+        digest = "d" * 64
+        (planner_sd / "spec.sha256").write_text(digest)
+        return receipt_planner_spawn(
+            td, "spec", 0, injected_prompt_sha256=digest
+        )
     if name == "receipt_plan_audit":
-        return receipt_plan_audit(td, tokens_used=0, finding_count=0)
+        return receipt_plan_audit(
+            td,
+            tokens_used=0,
+            finding_count=0,
+            spec_sha256="a" * 64,
+            plan_sha256="b" * 64,
+            graph_sha256="c" * 64,
+        )
+    if name == "receipt_force_override":
+        from lib_receipts import receipt_force_override
+        return receipt_force_override(
+            td,
+            from_stage="PLANNING",
+            to_stage="PLAN_REVIEW",
+            bypassed_gates=[],
+        )
     return None
 
 

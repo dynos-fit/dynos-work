@@ -576,15 +576,19 @@ def compute_reward(task_dir: Path) -> dict:
             pass
 
     # --- 3. Spec review iterations ---
+    # Count approval receipts (not log lines): matches the current filename
+    # `human-approval-SPEC_REVIEW.json` and any future rotation suffix
+    # (e.g. `human-approval-SPEC_REVIEW-002.json`). No fallback to
+    # `execution-log.md` scanning — the log-line scanner was deprecated
+    # because log lines are not a hash-bound audit record.
+    receipts_dir = task_dir / "receipts"
     spec_review_iterations = 0
+    if receipts_dir.is_dir():
+        spec_review_iterations = len(list(receipts_dir.glob("human-approval-SPEC_REVIEW*.json")))
+
+    # execution-log.md path is still needed below for DORA recovery-time
+    # tracking and subagent-spawn counting (sections 4b and 6).
     log_path = task_dir / "execution-log.md"
-    if log_path.exists():
-        try:
-            for line in log_path.read_text().splitlines():
-                if "[HUMAN] SPEC_REVIEW" in line:
-                    spec_review_iterations += 1
-        except OSError:
-            pass
 
     # --- 4. Classification from manifest ---
     manifest = load_json(task_dir / "manifest.json")

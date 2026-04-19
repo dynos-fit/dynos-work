@@ -2,9 +2,10 @@
 receipt).
 
 `receipt_planner_spawn(task_dir, phase, ..., injected_prompt_sha256=...)`
-now asserts that `receipts/_injected-planner-prompts/{phase}.sha256`
-exists and matches the supplied digest when non-None. When None, the
-receipt is written without assertion (legacy path).
+asserts that `receipts/_injected-planner-prompts/{phase}.sha256` exists
+and matches the supplied digest. As of F5 the legacy None path is
+rejected — callers MUST supply a non-empty sha256 hex digest obtained
+from `hooks/router.py planner-inject-prompt`.
 """
 from __future__ import annotations
 
@@ -80,21 +81,20 @@ def test_sidecar_hash_mismatch_raises(tmp_path: Path):
         )
 
 
-def test_injected_prompt_sha256_none_writes_receipt(tmp_path: Path):
-    """Legacy path: injected_prompt_sha256=None → no sidecar required."""
+def test_none_injected_prompt_sha256_rejected(tmp_path: Path):
+    """F5: explicit `injected_prompt_sha256=None` raises ValueError whose
+    message contains `legacy None path removed`. The legacy no-sidecar
+    code path is gone — there is no way to write a planner-spawn receipt
+    without a matching sidecar digest."""
     td = _task_dir(tmp_path)
-    out = receipt_planner_spawn(
-        td,
-        "plan",
-        tokens_used=50,
-        model_used="sonnet",
-        injected_prompt_sha256=None,
-    )
-    assert out.exists()
-    payload = json.loads(out.read_text())
-    assert payload["phase"] == "plan"
-    # Legacy receipts carry an explicit null for the injected digest.
-    assert payload.get("injected_prompt_sha256") is None
+    with pytest.raises(ValueError, match="legacy None path removed"):
+        receipt_planner_spawn(
+            td,
+            "plan",
+            tokens_used=50,
+            model_used="sonnet",
+            injected_prompt_sha256=None,
+        )
 
 
 def test_omitted_kwarg_raises_typeerror(tmp_path: Path):

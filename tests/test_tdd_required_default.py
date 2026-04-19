@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 from lib_core import get_tdd_required, transition_task  # noqa: E402
-from lib_receipts import receipt_plan_audit  # noqa: E402
+from lib_receipts import receipt_plan_audit, hash_file  # noqa: E402
 
 
 def test_missing_classification_returns_false():
@@ -43,6 +43,11 @@ def _setup(tmp_path: Path, *, risk: str, tdd_required: bool | None = None) -> Pa
     project = tmp_path / "project"
     td = project / ".dynos" / "task-20260418-D"
     td.mkdir(parents=True)
+    # Create artifacts so the PLAN_AUDIT hash-bound freshness gate can
+    # match against them.
+    (td / "spec.md").write_text("# spec")
+    (td / "plan.md").write_text("# plan")
+    (td / "execution-graph.json").write_text('{"segments": []}')
     classification: dict = {"risk_level": risk}
     if tdd_required is not None:
         classification["tdd_required"] = tdd_required
@@ -56,7 +61,14 @@ def _setup(tmp_path: Path, *, risk: str, tdd_required: bool | None = None) -> Pa
 
 def test_plan_audit_to_pre_exec_permitted_when_tdd_required_absent_critical(tmp_path: Path):
     td = _setup(tmp_path, risk="critical")  # no tdd_required field
-    receipt_plan_audit(td, tokens_used=100, finding_count=0)
+    receipt_plan_audit(
+        td,
+        tokens_used=100,
+        finding_count=0,
+        spec_sha256=hash_file(td / "spec.md"),
+        plan_sha256=hash_file(td / "plan.md"),
+        graph_sha256=hash_file(td / "execution-graph.json"),
+    )
     # Must succeed: tdd_required absent, plan-audit-check is present.
     transition_task(td, "PRE_EXECUTION_SNAPSHOT")
     manifest = json.loads((td / "manifest.json").read_text())

@@ -45,22 +45,32 @@ class TestReceiptFreshness:
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
         receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
         (task_dir / "spec.md").write_text("# Spec\nv2 changed\n")
-        assert plan_validated_receipt_matches(task_dir) is False, \
-            "spec drift must invalidate the receipt"
+        # F1: drift now returns a descriptive string naming the artifact
+        # (used by the EXECUTION gate to surface drift-vs-missing
+        # distinctly). A bare `False` is reserved for "receipt missing".
+        result = plan_validated_receipt_matches(task_dir)
+        assert result is not True, "spec drift must invalidate the receipt"
+        assert result is not False, "drift must NOT return False (that's the missing-receipt signal)"
+        assert isinstance(result, str) and "spec.md" in result, \
+            f"expected drift string naming spec.md, got {result!r}"
 
     def test_plan_change_invalidates(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
         receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
         (task_dir / "plan.md").write_text("# Plan\nv2\n")
-        assert plan_validated_receipt_matches(task_dir) is False
+        result = plan_validated_receipt_matches(task_dir)
+        assert isinstance(result, str) and "plan.md" in result, \
+            f"expected drift string naming plan.md, got {result!r}"
 
     def test_graph_change_invalidates(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
         receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
         (task_dir / "execution-graph.json").write_text('{"task_id":"x","segments":[]}\n')
-        assert plan_validated_receipt_matches(task_dir) is False
+        result = plan_validated_receipt_matches(task_dir)
+        assert isinstance(result, str) and "execution-graph.json" in result, \
+            f"expected drift string naming execution-graph.json, got {result!r}"
 
     def test_legacy_receipt_without_hashes_treated_as_drift(self, tmp_path: Path):
         """Old receipts written before this commit don't have artifact_hashes.

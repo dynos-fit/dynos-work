@@ -80,6 +80,7 @@ __all__ = [
     "validate_chain",
     "hash_file",
     "plan_validated_receipt_matches",
+    "plan_audit_matches",
     "receipt_plan_routing",
     "receipt_spec_validated",
     "receipt_plan_validated",
@@ -98,6 +99,7 @@ __all__ = [
     "receipt_postmortem_skipped",
     "receipt_calibration_applied",
     "receipt_rules_check_passed",
+    "receipt_force_override",
     "RECEIPT_CONTRACT_VERSION",
     "CALIBRATION_POLICY_FILES",
     "INJECTED_PROMPTS_DIR",
@@ -127,6 +129,11 @@ _LOG_MESSAGES: dict[str, str] = {
     "postmortem-skipped": "[DONE] postmortem skipped — reason={reason}",
     "calibration-applied": "[DONE] calibration applied — retros={retros_consumed} scores={scores_updated}",
     "rules-check-passed": "[DONE] rules check — {rules_evaluated} rules evaluated, {violations_count} violations",
+    # Prefix pattern: force-override-{from_stage}-{to_stage} — handled in
+    # write_receipt() via the prefix branch below. The entry here documents
+    # the format string for reviewers; the {N} placeholder is filled in by
+    # the writer using len(bypassed_gates) at write time.
+    "force-override-*": "[FORCE] {from_stage} → {to_stage} — bypassed {N} gate(s)",
 }
 
 
@@ -234,6 +241,17 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
         append_execution_log(task_dir, f"[DONE] {step_name} — executor={payload.get('executor_type','')} agent={'learned:' + agent if injected else 'generic'} tokens={payload.get('tokens_used','?')}")
     elif step_name.startswith("audit-") and step_name != "audit-routing":
         append_execution_log(task_dir, f"[DONE] {step_name} — findings={payload.get('finding_count',0)} blocking={payload.get('blocking_count',0)}")
+    elif step_name.startswith("force-override-"):
+        # Dedicated log line for forced transitions. Format pinned by
+        # _LOG_MESSAGES["force-override-*"].
+        bypassed = payload.get("bypassed_gates", [])
+        n_bypassed = len(bypassed) if isinstance(bypassed, list) else 0
+        from_stage = payload.get("from_stage", "?")
+        to_stage = payload.get("to_stage", "?")
+        append_execution_log(
+            task_dir,
+            f"[FORCE] {from_stage} → {to_stage} — bypassed {n_bypassed} gate(s)",
+        )
 
     return receipt_path
 
@@ -436,11 +454,17 @@ def receipt_plan_validated(
     )
 
 
-def plan_validated_receipt_matches(task_dir: Path) -> bool:
+def plan_validated_receipt_matches(task_dir: Path) -> "bool | str":
     """Return True if a plan-validated receipt exists AND its captured
     artifact hashes match the current spec.md, plan.md, and
-    execution-graph.json content. Callers (e.g. execute preflight) can
-    use this to skip a full re-validation when nothing has drifted.
+    execution-graph.json content.
+
+    Returns ``False`` when the receipt is missing or malformed (e.g. an
+    older receipt without an ``artifact_hashes`` payload). Returns a
+    descriptive string naming the drifted artifact (e.g.
+    ``"plan.md hash drift"``) when the receipt is present but one of the
+    tracked artifacts has changed on disk. Callers distinguish these
+    three outcomes to surface drift-vs-missing distinctly.
     """
     receipt = read_receipt(task_dir, "plan-validated")
     if receipt is None or not receipt.get("validation_passed", False):
@@ -453,7 +477,53 @@ def plan_validated_receipt_matches(task_dir: Path) -> bool:
     for name in ("spec.md", "plan.md", "execution-graph.json"):
         current = _hash_artifact(task_dir / name)
         if current != captured.get(name):
-            return False
+            return f"{name} hash drift"
+    return True
+
+
+def plan_audit_matches(task_dir: Path) -> "bool | str":
+    """Return ``True`` if a ``plan-audit-check`` receipt exists AND its
+    captured artifact hashes match the current spec.md, plan.md, and
+    execution-graph.json content.
+
+    Returns ``False`` when the receipt is missing entirely. Returns a
+    descriptive string naming the drifted artifact (e.g.
+    ``"plan.md hash drift"``) when the receipt is present but one of the
+    tracked artifacts has changed on disk since the audit ran. Callers
+    distinguish the three outcomes to surface drift-vs-missing distinctly
+    at the PLAN_AUDIT exit gate.
+
+    Receipts written before the hash-binding landed (pre-F2) do not carry
+    ``spec_sha256``/``plan_sha256``/``graph_sha256`` fields. Such receipts
+    are treated as ``False`` (missing) so the gate forces a fresh audit
+    rather than silently trusting a legacy payload.
+    """
+    receipt = read_receipt(task_dir, "plan-audit-check")
+    if receipt is None:
+        return False
+    # Legacy receipts (pre-F2) lacked the three hash fields. Without
+    # hashes we cannot verify freshness — behave like missing.
+    expected_spec = receipt.get("spec_sha256")
+    expected_plan = receipt.get("plan_sha256")
+    expected_graph = receipt.get("graph_sha256")
+    if not (
+        isinstance(expected_spec, str) and expected_spec
+        and isinstance(expected_plan, str) and expected_plan
+        and isinstance(expected_graph, str) and expected_graph
+    ):
+        return False
+    # Hash each artifact on disk. Missing files count as drift with a
+    # descriptive string (the audit was computed over a file that is now
+    # absent — clearly not fresh).
+    current_spec = _hash_artifact(task_dir / "spec.md")
+    if current_spec != expected_spec:
+        return "spec.md hash drift"
+    current_plan = _hash_artifact(task_dir / "plan.md")
+    if current_plan != expected_plan:
+        return "plan.md hash drift"
+    current_graph = _hash_artifact(task_dir / "execution-graph.json")
+    if current_graph != expected_graph:
+        return "execution-graph.json hash drift"
     return True
 
 
@@ -716,32 +786,27 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     tokens_used: int | None,
     model_used: str | None = None,
     agent_name: str | None = None,
-    injected_prompt_sha256: str | None = _INJECTED_PROMPT_SHA256_MISSING,  # type: ignore[assignment]
+    injected_prompt_sha256: str = _INJECTED_PROMPT_SHA256_MISSING,  # type: ignore[assignment]
 ) -> Path:
     """Write receipt proving a planner subagent completed. Also records tokens.
 
-    SEC-004 hardening: ``injected_prompt_sha256`` is required at the call
-    site — callers MUST pass it explicitly (either a non-empty digest or
-    literal ``None`` for the legacy/no-sidecar path). Omitting the kwarg
-    is a caller bug and raises ``TypeError`` so a forgotten sidecar
-    assertion cannot silently ship.
+    SEC-004 hardening: ``injected_prompt_sha256`` is REQUIRED at the call
+    site. Omitting the kwarg entirely raises ``TypeError`` (the sentinel
+    default is a deliberate forced-kwarg pattern so a forgotten sidecar
+    assertion cannot silently ship). Passing ``injected_prompt_sha256=None``
+    explicitly is ALSO rejected — ``None`` is no longer a legal value and
+    raises ``ValueError`` with a message containing the substring
+    ``legacy None path removed``. The only valid value is a non-empty
+    sha256 hex digest captured from
+    ``hooks/router.py planner-inject-prompt --task-id <id> --phase <phase>``.
 
-    When ``injected_prompt_sha256`` is a non-empty string, asserts that
-    the per-phase planner injected-prompt sidecar at ``task_dir /
-    "receipts" / INJECTED_PLANNER_PROMPTS_DIR / f"{phase}.sha256"`` exists
-    AND its contents (after stripping trailing whitespace) match the
-    supplied digest. On missing file or mismatch this function raises
-    ``ValueError`` naming the phase. The mismatch message contains the
-    literal substring ``hash mismatch`` so downstream tests can pin it.
-
-    When ``injected_prompt_sha256`` is ``None`` (the legacy path —
-    explicitly requested by the caller), no assertion is performed and no
-    sidecar file is required. This legacy call mode is accepted but will
-    be removed once all call sites are migrated to invoke
-    ``hooks/router.py planner-inject-prompt`` before the receipt write.
-    Put plainly: legacy call (``injected_prompt_sha256=None`` must be
-    explicit) is accepted but will be removed once all call sites are
-    migrated.
+    The writer asserts that the per-phase planner injected-prompt sidecar
+    at ``task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR /
+    f"{phase}.sha256"`` exists AND its contents (after stripping trailing
+    whitespace) match the supplied digest. On missing file or mismatch
+    this function raises ``ValueError`` naming the phase. The mismatch
+    message contains the literal substring ``hash mismatch`` so
+    downstream tests can pin it.
 
     The sidecar path is
     ``task_dir/receipts/_injected-planner-prompts/{phase}.sha256`` — both
@@ -753,43 +818,46 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     if injected_prompt_sha256 is _INJECTED_PROMPT_SHA256_MISSING:
         raise TypeError(
             "receipt_planner_spawn: injected_prompt_sha256 is required. "
-            "Pass a non-empty sha256 hex digest (after running "
+            "Pass a non-empty sha256 hex digest obtained from "
             "`hooks/router.py planner-inject-prompt --task-id <id> "
-            "--phase <phase>`) OR pass `injected_prompt_sha256=None` "
-            "explicitly for the legacy no-sidecar path."
+            "--phase <phase>`. The None (no-sidecar) path has been removed."
+        )
+    if injected_prompt_sha256 is None:
+        raise ValueError(
+            "injected_prompt_sha256 must be a non-empty sha256 hex string; "
+            "legacy None path removed"
         )
     step_name = f"planner-{phase}"
 
-    # Sidecar assertion — only active when the caller opted in by passing
-    # a non-None digest. Legacy callers (None) skip this entirely.
-    if injected_prompt_sha256 is not None:
-        if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
-            raise ValueError(
-                "receipt_planner_spawn: injected_prompt_sha256 must be a "
-                "non-empty string when provided"
-            )
-        sidecar_file = (
-            task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR
-            / f"{phase}.sha256"
+    # Sidecar assertion — unconditional now. Every caller must first run
+    # `hooks/router.py planner-inject-prompt` and pass the captured digest.
+    if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
+        raise ValueError(
+            "receipt_planner_spawn: injected_prompt_sha256 must be a "
+            "non-empty string"
         )
-        if not sidecar_file.exists():
-            raise ValueError(
-                f"receipt_planner_spawn: planner sidecar missing for phase "
-                f"{phase!r} at {sidecar_file}. Run `hooks/router.py "
-                f"planner-inject-prompt --task-id <id> --phase {phase}` first."
-            )
-        try:
-            on_disk = sidecar_file.read_text().strip()
-        except OSError as e:
-            raise ValueError(
-                f"receipt_planner_spawn: planner sidecar unreadable for "
-                f"phase {phase!r} at {sidecar_file}: {e}"
-            ) from e
-        if on_disk != injected_prompt_sha256:
-            raise ValueError(
-                f"receipt_planner_spawn: hash mismatch for phase {phase!r} "
-                f"— sidecar={on_disk!r}, payload={injected_prompt_sha256!r}."
-            )
+    sidecar_file = (
+        task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR
+        / f"{phase}.sha256"
+    )
+    if not sidecar_file.exists():
+        raise ValueError(
+            f"receipt_planner_spawn: planner sidecar missing for phase "
+            f"{phase!r} at {sidecar_file}. Run `hooks/router.py "
+            f"planner-inject-prompt --task-id <id> --phase {phase}` first."
+        )
+    try:
+        on_disk = sidecar_file.read_text().strip()
+    except OSError as e:
+        raise ValueError(
+            f"receipt_planner_spawn: planner sidecar unreadable for "
+            f"phase {phase!r} at {sidecar_file}: {e}"
+        ) from e
+    if on_disk != injected_prompt_sha256:
+        raise ValueError(
+            f"receipt_planner_spawn: hash mismatch for phase {phase!r} "
+            f"— sidecar={on_disk!r}, payload={injected_prompt_sha256!r}."
+        )
 
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, f"planner-{phase}", model_used or "default", tokens_used)
@@ -809,8 +877,31 @@ def receipt_plan_audit(
     tokens_used: int | None,
     finding_count: int = 0,
     model_used: str | None = None,
+    *,
+    spec_sha256: str,
+    plan_sha256: str,
+    graph_sha256: str,
 ) -> Path:
-    """Write receipt proving plan audit (spec-completion check) ran. Also records tokens."""
+    """Write receipt proving plan audit (spec-completion check) ran.
+
+    Hash-binding (F2): the three keyword-only arguments ``spec_sha256``,
+    ``plan_sha256``, and ``graph_sha256`` are REQUIRED. Each must be a
+    non-empty string (typically a sha256 hex digest of the corresponding
+    artifact at audit time). These hashes are embedded in the receipt
+    payload so the PLAN_AUDIT exit gate can detect artifact drift via
+    ``plan_audit_matches(task_dir)`` and refuse to advance when the audit
+    was computed over a stale version of the artifacts.
+
+    Also records token usage to ``token-usage.json`` when ``tokens_used``
+    is positive.
+    """
+    if not isinstance(spec_sha256, str) or not spec_sha256:
+        raise ValueError("spec_sha256 must be a non-empty string")
+    if not isinstance(plan_sha256, str) or not plan_sha256:
+        raise ValueError("plan_sha256 must be a non-empty string")
+    if not isinstance(graph_sha256, str) or not graph_sha256:
+        raise ValueError("graph_sha256 must be a non-empty string")
+
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, "plan-audit-check", model_used or "default", tokens_used)
     return write_receipt(
@@ -819,6 +910,9 @@ def receipt_plan_audit(
         tokens_used=tokens_used,
         finding_count=finding_count,
         model_used=model_used,
+        spec_sha256=spec_sha256,
+        plan_sha256=plan_sha256,
+        graph_sha256=graph_sha256,
     )
 
 
@@ -1061,6 +1155,68 @@ def receipt_rules_check_passed(
         rules_file_sha256=rules_file_sha256,
         checked_at=now_iso(),
         mode=mode,
+    )
+
+
+def receipt_force_override(
+    task_dir: Path,
+    from_stage: str,
+    to_stage: str,
+    bypassed_gates: list[str],
+) -> Path:
+    """Write receipt proving a forced stage transition occurred.
+
+    Emitted by ``transition_task`` when invoked with ``force=True``. The
+    payload enumerates the gate errors that would have been raised if
+    ``force`` were ``False`` (``bypassed_gates``) so the audit chain
+    records not just that force was used but which guardrails it
+    bypassed.
+
+    Writes ``receipts/force-override-{from_stage}-{to_stage}.json``. One
+    force per edge — subsequent forced transitions over the same edge
+    overwrite via the atomic write path.
+
+    Validation:
+      - ``from_stage`` and ``to_stage`` MUST be non-empty strings; empty
+        or non-string values raise ``ValueError`` naming the arg.
+      - ``bypassed_gates`` MUST be a list (possibly empty). Every entry
+        MUST be a string. Any other container type or non-string entry
+        raises ``ValueError``.
+    """
+    if not isinstance(from_stage, str) or not from_stage:
+        raise ValueError("from_stage must be a non-empty string")
+    if not isinstance(to_stage, str) or not to_stage:
+        raise ValueError("to_stage must be a non-empty string")
+    # SEC-002 hardening: stage names MUST be strict uppercase identifier
+    # slugs. Prevents path traversal via crafted manifest["stage"] values
+    # like "../../etc/x" reaching the receipt filename.
+    import re as _re_stage
+    _STAGE_RE = r"^[A-Z][A-Z0-9_]*$"
+    if not _re_stage.match(_STAGE_RE, from_stage):
+        raise ValueError(
+            f"from_stage must match {_STAGE_RE} (got {from_stage!r})"
+        )
+    if not _re_stage.match(_STAGE_RE, to_stage):
+        raise ValueError(
+            f"to_stage must match {_STAGE_RE} (got {to_stage!r})"
+        )
+    if not isinstance(bypassed_gates, list):
+        raise ValueError("bypassed_gates must be a list of strings")
+    for idx, entry in enumerate(bypassed_gates):
+        if not isinstance(entry, str):
+            raise ValueError(
+                f"bypassed_gates[{idx}] must be a string (got {type(entry).__name__})"
+            )
+
+    step_name = f"force-override-{from_stage}-{to_stage}"
+    return write_receipt(
+        task_dir,
+        step_name,
+        from_stage=from_stage,
+        to_stage=to_stage,
+        bypassed_gates=list(bypassed_gates),
+        bypassed_count=len(bypassed_gates),
+        forced_at=now_iso(),
     )
 
 

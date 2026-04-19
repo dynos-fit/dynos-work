@@ -72,7 +72,22 @@ receipt_plan_validated(
 )
 
 # After spec-completion auditor (plan audit; only invoked for high/critical risk):
-receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS, finding_count=N)
+# spec_sha256 / plan_sha256 / graph_sha256 are REQUIRED keyword-only args —
+# compute them at audit time via:
+#   from lib_receipts import hash_file
+#   spec_sha256 = hash_file(task_dir / "spec.md")
+#   plan_sha256 = hash_file(task_dir / "plan.md")
+#   graph_sha256 = hash_file(task_dir / "execution-graph.json")
+# The PLAN_AUDIT exit gate re-hashes these artifacts and refuses to advance
+# when any has drifted since the audit was recorded.
+receipt_plan_audit(
+    task_dir,
+    tokens_used=TOTAL_TOKENS,
+    finding_count=N,
+    spec_sha256=SPEC_SHA256,
+    plan_sha256=PLAN_SHA256,
+    graph_sha256=GRAPH_SHA256,
+)
 
 ```
 

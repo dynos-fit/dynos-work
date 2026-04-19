@@ -40,9 +40,13 @@ def main() -> int:
 
     # Receipt short-circuit: if planning already validated these exact
     # artifacts and nothing has drifted, skip the redo entirely.
+    # plan_validated_receipt_matches returns True on a fresh match; a
+    # drift string or False means we must re-run validation. Use strict
+    # identity check because `str` is truthy and would otherwise
+    # short-circuit through a drifted receipt.
     if use_receipt:
         from lib_receipts import plan_validated_receipt_matches
-        if plan_validated_receipt_matches(task_dir):
+        if plan_validated_receipt_matches(task_dir) is True:
             print(f"Artifact validation skipped (plan-validated receipt fresh) for {task_dir}")
             return 0
 
