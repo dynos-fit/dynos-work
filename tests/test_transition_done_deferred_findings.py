@@ -49,6 +49,18 @@ from lib_receipts import (  # noqa: E402
 )
 
 
+@pytest.fixture(autouse=True)
+def _empty_auditor_registry(monkeypatch):
+    """PR #127 (task-006) AC 6 added a registry-eligible auditor cross-check.
+    These deferred-finding gate tests pre-date the registry check and focus
+    on the deferred-finding logic — mock the registry empty to keep the
+    cross-check vacuous."""
+    import router
+    monkeypatch.setattr(router, "_load_auditor_registry", lambda root: {
+        "always": [], "fast_track": [], "domain_conditional": {},
+    })
+
+
 def _setup_done_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Create a task dir whose manifest sits at CHECKPOINT_AUDIT and
     has EVERY receipt + artifact the DONE gate demands. Returns the
@@ -78,9 +90,15 @@ def _setup_done_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (audit_dir / "report.json").write_text(json.dumps({"findings": []}))
     # receipt_retrospective (proves reward was computed).
     receipt_retrospective(td, 0.95, 0.9, 0.9, 1000)
-    # receipt_rules_check_passed (error_violations=0 lets the gate pass).
-    receipt_rules_check_passed(td, rules_evaluated=0, violations_count=0,
-                                error_violations=0, mode="all")
+    # PR #127 (task-006) AC 1: receipt_rules_check_passed self-computes;
+    # callers pass only (task_dir, mode). Stub run_checks to a clean pass.
+    import rules_engine
+    _orig_run_checks = rules_engine.run_checks
+    rules_engine.run_checks = lambda root, mode: []
+    try:
+        receipt_rules_check_passed(td, "all")
+    finally:
+        rules_engine.run_checks = _orig_run_checks
     # audit-routing with empty auditors → no per-auditor receipts required.
     receipt_audit_routing(td, [])
     # postmortem-skipped (cheap path — reason=no-findings so subsumed_by

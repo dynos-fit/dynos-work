@@ -31,9 +31,15 @@ def test_missing_calibration_applied_refuses(tmp_path: Path):
         transition_task(td, "CALIBRATED")
 
 
-def test_calibration_receipt_present_passes(tmp_path: Path):
+def test_calibration_receipt_present_passes(tmp_path: Path, monkeypatch):
+    """Migrated for task-20260419-006: AC 10 added a live policy-hash
+    cross-check at this gate. Patch eventbus._compute_policy_hash to return
+    the same value embedded in the receipt so the gate accepts it."""
     td = _setup(tmp_path)
-    receipt_calibration_applied(td, 1, 1, "a" * 64, "b" * 64)
+    live_hash = "b" * 64
+    import eventbus
+    monkeypatch.setattr(eventbus, "_compute_policy_hash", lambda root: live_hash)
+    receipt_calibration_applied(td, 1, 1, "a" * 64, live_hash)
     transition_task(td, "CALIBRATED")
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "CALIBRATED"

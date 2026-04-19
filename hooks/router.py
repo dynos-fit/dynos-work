@@ -714,15 +714,55 @@ def resolve_route(root: Path, role: str, task_type: str, ctx: RouterContext | No
 # ---------------------------------------------------------------------------
 
 def load_prevention_rules(root: Path) -> list[dict]:
-    """Load project-local prevention rules from persistent storage."""
+    """Load project-local prevention rules from persistent storage.
+
+    Error semantics (AC 17):
+      - If the file is absent → return ``[]``. An un-configured project
+        legitimately has no prevention rules; this is not an error.
+      - If the file exists but is corrupt (``json.JSONDecodeError``) or
+        otherwise unreadable (``OSError`` other than ``FileNotFoundError``,
+        e.g. permission denied, I/O error) → emit a ``prevention_rules_corrupt``
+        event and RE-RAISE. Silently returning ``[]`` on corruption hides a
+        misconfiguration that would otherwise short-circuit every learned
+        rule for the session; a loud failure forces operator intervention.
+
+    Callers outside the CLI layer MUST NOT wrap this call in a swallow
+    ``try/except`` — the propagation is intentional. CLI dispatchers
+    (``cmd_executor_plan`` / ``cmd_inject_prompt``) catch at the top level
+    and exit 2 per the documented exit-code contract.
+    """
     rules_path = _persistent_project_dir(root) / "prevention-rules.json"
     if not rules_path.exists():
         return []
     try:
         data = load_json(rules_path)
-        return data.get("rules", [])
-    except (json.JSONDecodeError, FileNotFoundError, OSError):
+    except FileNotFoundError:
+        # Race between exists() and load — treat as absent. No event
+        # because this is the benign "file was removed mid-read" case.
         return []
+    except (json.JSONDecodeError, OSError) as exc:
+        log_event(
+            root,
+            "prevention_rules_corrupt",
+            path=str(rules_path),
+            error=str(exc),
+        )
+        raise
+    if not isinstance(data, dict):
+        # Malformed top-level shape (e.g. a bare list). Treat as corrupt:
+        # emit the event and raise so callers surface the misconfiguration
+        # the same way they would for JSONDecodeError.
+        exc = ValueError(
+            f"prevention-rules.json top-level must be an object (got {type(data).__name__})"
+        )
+        log_event(
+            root,
+            "prevention_rules_corrupt",
+            path=str(rules_path),
+            error=str(exc),
+        )
+        raise exc
+    return data.get("rules", [])
 
 
 # Ensemble voting defaults — overridable via .dynos/config/policy.json
@@ -1210,12 +1250,23 @@ def cmd_executor_plan(args: argparse.Namespace) -> int:
     # `inject-prompt` invocations can reuse it without rebuilding.
     # AC 13: --include-enforced overrides the template filter so audits
     # / debugging can see every rule, not just advisory ones.
-    plan = build_executor_plan(
-        root,
-        args.task_type,
-        graph.get("segments", []),
-        include_enforced=getattr(args, "include_enforced", False),
-    )
+    # AC 19: a corrupt prevention-rules.json raises from
+    # load_prevention_rules (via build_executor_plan). Catch at this top
+    # level, surface on stderr, and exit 2 — internal-config error.
+    try:
+        plan = build_executor_plan(
+            root,
+            args.task_type,
+            graph.get("segments", []),
+            include_enforced=getattr(args, "include_enforced", False),
+        )
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        import sys as _sys
+        print(
+            json.dumps({"error": f"prevention-rules corrupt: {exc}"}),
+            file=_sys.stderr,
+        )
+        return 2
 
     task_id = _task_id_from_graph_path(graph_path)
     if task_id:
@@ -1358,12 +1409,23 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
         # Fallback: live build for this single segment.
         # AC 13: respect --include-enforced so the fallback path agrees
         # with what `executor-plan` would have produced.
-        plan = build_executor_plan(
-            root,
-            args.task_type,
-            [target_seg],
-            include_enforced=getattr(args, "include_enforced", False),
-        )
+        # AC 19: a corrupt prevention-rules.json raises from
+        # load_prevention_rules (via build_executor_plan). Catch here,
+        # surface on stderr, and exit 2 — internal-config error.
+        try:
+            plan = build_executor_plan(
+                root,
+                args.task_type,
+                [target_seg],
+                include_enforced=getattr(args, "include_enforced", False),
+            )
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            import sys as _sys
+            print(
+                json.dumps({"error": f"prevention-rules corrupt: {exc}"}),
+                file=_sys.stderr,
+            )
+            return 2
         if not plan["segments"]:
             print(json.dumps({"error": "no plan entry for segment"}))
             return 1

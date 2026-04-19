@@ -42,15 +42,17 @@ def _td(tmp_path: Path) -> Path:
     return td
 
 
-def test_contract_version_constant_is_two():
-    assert RECEIPT_CONTRACT_VERSION == 2
+def test_contract_version_constant_is_three():
+    """Migrated for task-20260419-006 (AC 28): contract bumped 2->3."""
+    assert RECEIPT_CONTRACT_VERSION == 3
 
 
 def test_write_receipt_embeds_contract_version(tmp_path: Path):
+    """Migrated for task-20260419-006: every receipt embeds v3."""
     td = _td(tmp_path)
     p = write_receipt(td, "spec-validated", criteria_count=1)
     payload = json.loads(p.read_text())
-    assert payload["contract_version"] == 2
+    assert payload["contract_version"] == 3
 
 
 def _exercise_writer(name: str, td: Path):
@@ -127,6 +129,10 @@ def _exercise_writer(name: str, td: Path):
 
 
 def test_every_writer_in_all_embeds_contract_version_two(tmp_path: Path):
+    """Migrated for task-20260419-006: contract bumped 2->3.
+
+    Test name retained for git-blame continuity; assertion now verifies v3.
+    """
     td = _td(tmp_path)
     writer_names = [n for n in lib_receipts.__all__ if n.startswith("receipt_")]
     exercised = 0
@@ -136,8 +142,8 @@ def test_every_writer_in_all_embeds_contract_version_two(tmp_path: Path):
             continue  # writer not exercised; skip with a soft pass
         exercised += 1
         payload = json.loads(out.read_text())
-        assert payload["contract_version"] == 2, (
-            f"writer {name} did not embed contract_version=2"
+        assert payload["contract_version"] == 3, (
+            f"writer {name} did not embed contract_version=3"
         )
     assert exercised >= 12, f"expected at least 12 writers exercised, got {exercised}"
 
@@ -160,9 +166,12 @@ def test_v1_receipt_without_contract_version_is_readable(tmp_path: Path):
     assert "contract_version" not in out
 
 
-def test_v1_receipt_validate_chain_treats_as_valid(tmp_path: Path):
-    """An EXECUTION-stage manifest with a v1 plan-validated receipt
-    (no contract_version field) must show no gaps from validate_chain."""
+def test_v1_receipt_validate_chain_treats_as_missing(tmp_path: Path):
+    """Task-006 contract bump: v1 plan-validated receipts are rejected by
+    validate_chain (treated as missing) because plan-validated is now at
+    MIN_VERSION_PER_STEP floor=2. This enforces the PR-006 receipt hygiene.
+    Legacy steps WITHOUT a floor entry (e.g., spec-validated) still accept v1.
+    """
     td = _td(tmp_path)
     (td / "manifest.json").write_text(json.dumps({
         "task_id": td.name,
@@ -180,4 +189,5 @@ def test_v1_receipt_validate_chain_treats_as_valid(tmp_path: Path):
     }
     (receipts / "plan-validated.json").write_text(json.dumps(legacy))
     gaps = validate_chain(td)
-    assert "plan-validated" not in gaps
+    # Floor=2 for plan-validated → v1 treated as missing → appears in gaps.
+    assert "plan-validated" in gaps

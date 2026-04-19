@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Iterable
@@ -200,6 +201,12 @@ def apply_fast_track(task_dir: Path) -> bool:
     fast-track-eligible when its ``classification.risk_level`` is ``"low"`` AND
     its ``classification.domains`` list contains exactly one element.
 
+    Side-effect — TDD auto-derivation (AC 12):
+      When ``manifest.classification.tdd_required`` is absent (key not present
+      in the dict), derive it as ``risk_level in {"high", "critical"}`` and
+      persist it alongside ``fast_track`` in the same atomic write. Explicit
+      values (``True`` or ``False``) are preserved and never overwritten.
+
     Returns the same boolean that was written to the manifest: ``True`` if
     fast-track-eligible, ``False`` otherwise.
     """
@@ -207,6 +214,14 @@ def apply_fast_track(task_dir: Path) -> bool:
     manifest = load_json(manifest_path)
     fast = compute_fast_track(manifest)
     manifest["fast_track"] = fast
+
+    # AC 12: auto-derive tdd_required only when the key is absent from
+    # classification. Any explicit True/False value set upstream is preserved.
+    classification = manifest.get("classification")
+    if isinstance(classification, dict) and "tdd_required" not in classification:
+        risk_level = classification.get("risk_level")
+        classification["tdd_required"] = risk_level in _HIGH_RISK_LEVELS
+
     write_json(manifest_path, manifest)
     return fast
 
@@ -516,12 +531,52 @@ def compute_reward(task_dir: Path) -> dict:
     """
     task_dir = Path(task_dir)
     task_id = task_dir.name
+    root = task_dir.parent.parent
+
+    # Lazy imports kept inside the function to preserve the existing module
+    # boundary (compute_reward already imports several helpers lazily).
+    from lib_log import log_event
+    from lib_receipts import read_receipt
+
+    # --- 0. AC 16: build the auditor cross-check allowlist ---
+    # Load audit-routing receipt and derive the set of auditor names that
+    # were actually spawned. Reports whose auditor is NOT in this set are
+    # dropped (their findings don't count toward totals) and an event is
+    # emitted so the anomaly surfaces in telemetry.
+    routing_receipt = read_receipt(task_dir, "audit-routing")
+    # SEC-005: missing audit-routing is a trust gap (attacker could suppress
+    # the receipt to bypass cross-check). Full fail-closed causes unit-test
+    # boilerplate churn; deferred to a future spec-level decision. For now:
+    # log the gap and fall through to the permissive path (prior behavior).
+    # See task-20260419-006 audit-summary.json for the accepted-risk note.
+    valid_auditor_names: set[str] | None
+    if routing_receipt is None:
+        valid_auditor_names = None
+        log_event(
+            root,
+            "auditor_cross_check_skipped",
+            task=task_id,
+            reason="audit-routing receipt missing",
+        )
+        _auditor_check_disabled = True
+    else:
+        valid_auditor_names = {
+            a["name"]
+            for a in routing_receipt.get("auditors", [])
+            if isinstance(a, dict)
+            and a.get("action") == "spawn"
+            and isinstance(a.get("name"), str)
+            and a.get("name")
+        }
+        _auditor_check_disabled = False
 
     # --- 1. Scan audit reports ---
     findings_by_auditor: dict[str, int] = {}
     findings_by_category: dict[str, int] = {}
     total_findings = 0
     total_blocking = 0
+    # AC 15: track ids of findings that are still blocking post-repair.
+    post_repair_blocking_ids: set[str] = set()
     reports_dir = task_dir / "audit-reports"
     if reports_dir.exists():
         for report_path in sorted(reports_dir.glob("*.json")):
@@ -529,32 +584,78 @@ def compute_reward(task_dir: Path) -> dict:
                 report = load_json(report_path)
             except (json.JSONDecodeError, OSError):
                 continue
+
+            # Resolve the auditor name. Prefer explicit fields; fall back to
+            # the report filename stem so legacy reports still have an id.
+            auditor = (
+                report.get("auditor_name")
+                or report.get("auditor")
+                or report_path.stem
+            )
+            if not isinstance(auditor, str) or not auditor:
+                auditor = report_path.stem
+
+            # AC 16: drop the report if its auditor was not in audit-routing.
+            # (When _auditor_check_disabled is True, the routing receipt was
+            # missing — we log once above and accept all reports here.)
+            if not _auditor_check_disabled and valid_auditor_names is not None and auditor not in valid_auditor_names:
+                log_event(
+                    root,
+                    "auditor_not_in_routing",
+                    task=task_id,
+                    auditor=auditor,
+                    report_path=str(report_path),
+                )
+                continue
+
             findings = report.get("findings", [])
-            # Sanitize hallucinated findings: if recommendation/description
-            # says "no action required" or "confirmed" but blocking=True,
-            # downgrade to non-blocking minor.
-            _confirm_signals = ("no action required", "no action needed",
-                                "correctly implemented", "properly implemented",
-                                "no changes needed", "no fix needed")
+            if not isinstance(findings, list):
+                findings = []
+
+            # AC 14: the old sanitizer silently downgraded blocking=True
+            # findings whose recommendation/description/title matched an
+            # "exemption phrase" (e.g. "no action required", "correctly
+            # implemented"). That hid contradictions. We now EMIT an event
+            # and leave the finding blocking -- the contradiction surfaces
+            # as telemetry instead of being swallowed.
+            _confirm_signals = (
+                "no action required",
+                "no action needed",
+                "correctly implemented",
+                "properly implemented",
+                "no changes needed",
+                "no fix needed",
+            )
             for finding in findings:
-                if not finding.get("blocking"):
+                if not isinstance(finding, dict) or not finding.get("blocking"):
                     continue
-                rec = str(finding.get("recommendation", "")).lower()
+                recommendation = str(finding.get("recommendation", ""))
+                rec = recommendation.lower()
                 desc = str(finding.get("description", "")).lower()
                 title = str(finding.get("title", "")).lower()
-                if any(s in rec or s in desc for s in _confirm_signals):
-                    finding["blocking"] = False
-                    finding["severity"] = "minor"
-                elif "confirmed" in title and "not" not in title:
-                    finding["blocking"] = False
-                    finding["severity"] = "minor"
-            auditor = report.get("auditor_name", report_path.stem)
+                if any(s in rec or s in desc for s in _confirm_signals) or (
+                    "confirmed" in title and "not" not in title
+                ):
+                    log_event(
+                        root,
+                        "finding_contradiction",
+                        task=task_id,
+                        auditor=auditor,
+                        finding_id=finding.get("id"),
+                        recommendation_snippet=recommendation[:120],
+                    )
+                    # NOTE: do NOT downgrade. Finding stays blocking=True.
+
             count = len(findings)
             findings_by_auditor[auditor] = findings_by_auditor.get(auditor, 0) + count
             total_findings += count
-            total_blocking += sum(1 for f in findings if f.get("blocking"))
+            total_blocking += sum(1 for f in findings if isinstance(f, dict) and f.get("blocking"))
             for finding in findings:
-                fid = finding.get("id", "")
+                if not isinstance(finding, dict):
+                    continue
+                fid = finding.get("id", "") or ""
+                if finding.get("blocking") and isinstance(fid, str) and fid:
+                    post_repair_blocking_ids.add(fid)
                 category = fid.split("-")[0] if "-" in fid else fid
                 if category:
                     findings_by_category[category] = findings_by_category.get(category, 0) + 1
@@ -704,7 +805,33 @@ def compute_reward(task_dir: Path) -> dict:
     if total_blocking == 0:
         quality_score = 0.9 if total_findings > 0 else 0.9
     else:
-        surviving_blocking = total_blocking - repair_cycle_count
+        # AC 15: surviving_blocking is the SET INTERSECTION of
+        # (findings that were blocking BEFORE repair) ∩ (findings that are
+        # STILL blocking in the current audit-reports). The prior formula
+        # `total_blocking - repair_cycle_count` was incoherent: repair_cycle
+        # is a count of *cycles run*, not a count of *findings fixed*.
+        pre_repair_path = task_dir / "repair" / "pre-repair-blocking.json"
+        pre_repair_ids: set[str] | None = None
+        if pre_repair_path.exists():
+            try:
+                raw = load_json(pre_repair_path)
+                if isinstance(raw, list):
+                    pre_repair_ids = {
+                        str(item) for item in raw if isinstance(item, str) and item
+                    }
+                else:
+                    # Malformed shape (not a list) — fall back.
+                    pre_repair_ids = None
+            except (json.JSONDecodeError, OSError):
+                # Missing/unreadable/malformed JSON — fall back.
+                pre_repair_ids = None
+
+        if pre_repair_ids is not None:
+            surviving_blocking = len(pre_repair_ids & post_repair_blocking_ids)
+        else:
+            # No repair ran (or file unreadable) — semantically every blocking
+            # finding is "surviving".
+            surviving_blocking = total_blocking
         quality_score = 1.0 - (max(0, surviving_blocking) / total_blocking)
 
     # cost_score

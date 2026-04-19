@@ -59,13 +59,35 @@ def _setup(tmp_path: Path, *, risk: str, tdd_required: bool | None = None) -> Pa
     return td
 
 
-def test_plan_audit_to_pre_exec_permitted_when_tdd_required_absent_critical(tmp_path: Path):
-    td = _setup(tmp_path, risk="critical")  # no tdd_required field
-    receipt_plan_audit(td, tokens_used=100, finding_count=0)
-    # Must succeed: tdd_required absent, plan-audit-check is present.
-    transition_task(td, "PRE_EXECUTION_SNAPSHOT")
+def test_plan_audit_to_pre_exec_refused_when_tdd_required_absent_critical(tmp_path: Path):
+    """Test-006 investigator finding #4: critical risk without tdd_required
+    must REFUSE, not permit. The previous test asserted the inverse and was
+    rewritten as part of task-20260419-006 to enforce the proper
+    fail-CLOSED behavior.
+
+    The refusal is enforced at the CLASSIFY_AND_SPEC -> SPEC_NORMALIZATION
+    edge (AC 9): critical/high risk tasks MUST have classification.tdd_required
+    set explicitly (True or False) before they can leave the classification
+    stage. This test verifies that gate fires by setting up a critical-risk
+    manifest at CLASSIFY_AND_SPEC and confirming the transition refuses with
+    a message naming tdd_required.
+    """
+    project = tmp_path / "project"
+    td = project / ".dynos" / "task-20260418-D2"
+    td.mkdir(parents=True)
+    # critical risk + tdd_required missing → must refuse at the
+    # CLASSIFY_AND_SPEC -> SPEC_NORMALIZATION edge.
+    (td / "manifest.json").write_text(json.dumps({
+        "task_id": "task-20260418-D2",
+        "stage": "CLASSIFY_AND_SPEC",
+        "classification": {"risk_level": "critical"},
+    }))
+    with pytest.raises(ValueError, match="tdd_required"):
+        transition_task(td, "SPEC_NORMALIZATION")
+    # Confirm the manifest stage did NOT advance.
     manifest = json.loads((td / "manifest.json").read_text())
-    assert manifest["stage"] == "PRE_EXECUTION_SNAPSHOT"
+    assert manifest["stage"] == "CLASSIFY_AND_SPEC", \
+        "stage must remain CLASSIFY_AND_SPEC after refused transition"
 
 
 def test_plan_audit_to_pre_exec_blocked_when_tdd_required_true(tmp_path: Path):
