@@ -86,6 +86,27 @@ def test_report_path_matching_counts_verifies(tmp_path: Path):
     assert len(payload["report_sha256"]) == 64
 
 
+def test_report_path_derives_counts_when_omitted(tmp_path: Path):
+    """Regression: callers may omit finding/blocking counts entirely when
+    a real report file exists; the writer derives both from disk."""
+    td = _make_task(tmp_path)
+    findings = [
+        {"id": "F-1", "blocking": True},
+        {"id": "F-2", "blocking": False},
+        {"id": "F-3", "blocking": True},
+    ]
+    report = _write_report(td, findings)
+    out = receipt_audit_done(
+        td, "sec", "haiku", report_path=str(report), tokens_used=100,
+        route_mode="generic", agent_path=None, injected_agent_sha256=None,
+    )
+    payload = json.loads(out.read_text())
+    assert payload["finding_count"] == 3
+    assert payload["blocking_count"] == 2
+    assert isinstance(payload["report_sha256"], str)
+    assert len(payload["report_sha256"]) == 64
+
+
 def test_report_path_finding_count_mismatch_refuses(tmp_path: Path):
     """AC 2: caller claims 3 findings when file has 5 → ValueError."""
     td = _make_task(tmp_path)
@@ -137,3 +158,15 @@ def test_report_path_missing_file_skips_selfverify(tmp_path: Path):
     assert payload["finding_count"] == 99
     assert payload["blocking_count"] == 99
     assert payload["report_sha256"] is None
+
+
+def test_report_path_missing_file_refuses_when_counts_omitted(tmp_path: Path):
+    """Auto-derive mode requires a real report file; otherwise the caller
+    must explicitly pass zero counts with report_path=None."""
+    td = _make_task(tmp_path)
+    missing = str(td / "audit-reports" / "nonexistent.json")
+    with pytest.raises(ValueError, match="cannot derive finding_count/blocking_count automatically"):
+        receipt_audit_done(
+            td, "sec", "haiku", report_path=missing, tokens_used=100,
+            route_mode="generic", agent_path=None, injected_agent_sha256=None,
+        )
