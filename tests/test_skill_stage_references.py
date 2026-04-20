@@ -19,6 +19,27 @@ from lib_core import STAGE_ORDER
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "skills"
 
+# AC12 (task-20260419-009): shared source-glob constant consumed by every
+# lint below. Non-recursive per design-decision D9 — adding ``**`` would
+# sweep unrelated template subdirs. Tuple shape is (base_dir, glob_pattern);
+# tests iterate both slots and union the matches.
+SKILL_SOURCE_GLOBS: list[tuple[Path, str]] = [
+    (REPO_ROOT / "skills", "*/SKILL.md"),
+    (REPO_ROOT / "cli" / "assets" / "templates" / "base", "*.md"),
+]
+
+
+def _iter_skill_sources() -> list[Path]:
+    """Return every .md file named by SKILL_SOURCE_GLOBS, deterministically
+    sorted. Non-existent bases are silently skipped so a fresh checkout
+    without the templates dir does not spuriously pass."""
+    found: list[Path] = []
+    for base, pattern in SKILL_SOURCE_GLOBS:
+        if not base.exists():
+            continue
+        found.extend(sorted(base.glob(pattern)))
+    return found
+
 # Patterns that indicate a stage name is being referenced as a transition target.
 # These are the prose patterns the orchestrator follows literally.
 _TRANSITION_PATTERNS = [
@@ -137,7 +158,7 @@ def test_all_skill_stage_references_are_valid():
     valid_stages = set(STAGE_ORDER)
     failures: list[str] = []
 
-    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+    for skill_md in _iter_skill_sources():
         text = skill_md.read_text()
         refs = _extract_stage_references(text)
         unknown = refs - valid_stages
@@ -218,7 +239,7 @@ def test_no_skill_prose_writes_stage_lines_inside_fenced_blocks():
     meta-comments about what auto-log does, not instructions to write.
     """
     failures: list[str] = []
-    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+    for skill_md in _iter_skill_sources():
         text = skill_md.read_text()
         for line_no, stage in _stage_lines_inside_fences(text):
             relpath = skill_md.relative_to(REPO_ROOT)
@@ -268,7 +289,7 @@ def test_no_skill_prose_advises_manual_stage_edit():
     offending phrase can be pinpointed without re-reading the file.
     """
     failures: list[str] = []
-    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+    for skill_md in _iter_skill_sources():
         raw = skill_md.read_bytes()
         hit = find_manual_stage_advice(raw)
         if hit is not None:
@@ -321,7 +342,7 @@ def test_scheduler_owned_transitions_are_exempt_from_transition_prose_requiremen
     tasks extend it.
     """
     failures: list[str] = []
-    for skill_md in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+    for skill_md in _iter_skill_sources():
         text = skill_md.read_text()
         for match in _SCHEDULER_OWNED_RE.finditer(text):
             from_stage, to_stage = match.group(1), match.group(2)
@@ -335,3 +356,146 @@ def test_scheduler_owned_transitions_are_exempt_from_transition_prose_requiremen
                 )
 
     assert not failures, "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# AC10 (task-20260419-009): "If available in this repo" anti-pattern lint.
+#
+# Any co-occurrence of the literal substring ``If available in this repo``
+# within 20 lines (before OR after) of a fenced code block whose contents
+# include ``ctl.py transition `` (trailing space, avoids matching
+# ``transition_task``) or ``transition_task(`` is a transition-site escape
+# hatch and fails the lint.
+#
+# AC9 exempts the five read-only helper skills: ``skills/status``,
+# ``skills/resume``, ``skills/calibration``, ``skills/trajectory``,
+# ``skills/execute``. These skills carry fallback read-only commands
+# (``status``, ``resume``, ``validate-task``, etc.) whose anti-pattern is
+# benign; only transition-forging sites are flagged.
+# ---------------------------------------------------------------------------
+
+
+_AC10_PROSE_NEEDLE = "If available in this repo"
+
+# Transition-forging sub-strings inside a fenced block that trigger the
+# lint. Note the trailing space on "ctl.py transition " — it makes the
+# token distinct from ``transition_task`` so that helper-doc fences
+# referencing the transition_task function alone are still flagged while
+# ``ctl.py transition`` without arguments is not a false positive.
+_AC10_FENCE_SUBSTRINGS = ("ctl.py transition ", "transition_task(")
+
+_AC10_EXEMPT_SKILL_DIRS = {
+    "status",
+    "resume",
+    "calibration",
+    "trajectory",
+    "execute",
+}
+
+_AC10_CONTEXT_LINES = 20
+
+
+def _ac10_fenced_blocks(lines: list[str]) -> list[tuple[int, int, str]]:
+    """Return (start_line, end_line, body_text) for every fenced block.
+
+    Line numbers are 1-indexed, inclusive of fence markers. body_text is
+    the joined content between fences (fences excluded).
+    """
+    blocks: list[tuple[int, int, str]] = []
+    in_fence = False
+    fence_start = 0
+    body: list[str] = []
+    for i, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("```"):
+            if in_fence:
+                blocks.append((fence_start, i, "\n".join(body)))
+                in_fence = False
+                body = []
+            else:
+                in_fence = True
+                fence_start = i
+                body = []
+            continue
+        if in_fence:
+            body.append(line)
+    return blocks
+
+
+def _ac10_is_exempt(path: Path) -> bool:
+    """AC9: five read-only helper skills are exempt.
+
+    The exemption applies ONLY when ``path`` lives under one of those
+    ``skills/<exempt>/`` dirs. CLI templates under
+    ``cli/assets/templates/base/`` are NEVER exempt — a future task can
+    re-evaluate, but for this lint we enforce the full set.
+    """
+    try:
+        rel = path.relative_to(REPO_ROOT)
+    except ValueError:
+        return False
+    parts = rel.parts
+    if len(parts) >= 2 and parts[0] == "skills" and parts[1] in _AC10_EXEMPT_SKILL_DIRS:
+        return True
+    return False
+
+
+def test_no_skill_prose_makes_deterministic_path_optional():
+    """AC10: no "If available in this repo" prose within 20 lines of a
+    fenced block that forges a state-machine transition.
+
+    Scans every path under ``SKILL_SOURCE_GLOBS``. Reports every
+    co-occurrence as ``{path}:{line}`` where {line} is the prose line
+    and also the fenced-block start line. Exempts the five read-only
+    helper skills (AC9) — see ``_AC10_EXEMPT_SKILL_DIRS``.
+    """
+    failures: list[str] = []
+
+    for md in _iter_skill_sources():
+        if _ac10_is_exempt(md):
+            continue
+        text = md.read_text(encoding="utf-8")
+        lines = text.splitlines()
+
+        # 1) Find every prose line with the needle.
+        prose_lines = [
+            i + 1 for i, line in enumerate(lines)
+            if _AC10_PROSE_NEEDLE in line
+        ]
+        if not prose_lines:
+            continue
+
+        # 2) For each fenced block containing a transition-forging
+        # substring, record its start line.
+        fences = _ac10_fenced_blocks(lines)
+        bad_fences = [
+            (start, end) for (start, end, body) in fences
+            if any(sub in body for sub in _AC10_FENCE_SUBSTRINGS)
+        ]
+        if not bad_fences:
+            continue
+
+        # 3) Check proximity: prose within 20 lines (before OR after) of
+        # ANY bad fence is a failure.
+        relpath = md.relative_to(REPO_ROOT)
+        for prose_line in prose_lines:
+            for (fstart, fend) in bad_fences:
+                # Measure the shortest distance from prose_line to the
+                # fence span [fstart..fend] inclusive.
+                if fstart <= prose_line <= fend:
+                    distance = 0
+                elif prose_line < fstart:
+                    distance = fstart - prose_line
+                else:  # prose_line > fend
+                    distance = prose_line - fend
+                if distance <= _AC10_CONTEXT_LINES:
+                    failures.append(
+                        f"{relpath}:{prose_line}: 'If available in this repo' "
+                        f"within {distance} lines of transition-forging fence "
+                        f"at {relpath}:{fstart}"
+                    )
+
+    assert not failures, (
+        "AC10: transition-forging fences must not be guarded by "
+        "'If available in this repo' prose:\n"
+        + "\n".join(f"  - {f}" for f in failures)
+    )

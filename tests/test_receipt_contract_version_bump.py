@@ -1,7 +1,8 @@
-"""Tests for the v2->v3 contract version bump (AC 28).
+"""Tests for the contract version bump (was AC 28 v2->v3; migrated for
+task-20260419-009 AC 24 v4->v5 force-override reason/approver bump).
 
-RECEIPT_CONTRACT_VERSION is now 3. Every writer's output embeds
-contract_version=3.
+RECEIPT_CONTRACT_VERSION is now 5. Every writer's output embeds
+contract_version=5.
 """
 from __future__ import annotations
 
@@ -27,17 +28,19 @@ def _td(tmp_path: Path) -> Path:
     return td
 
 
-def test_contract_version_constant_is_four():
-    """AC 28: RECEIPT_CONTRACT_VERSION == 4."""
-    assert RECEIPT_CONTRACT_VERSION == 4
+def test_contract_version_constant_is_five():
+    """AC 24 (task-009): RECEIPT_CONTRACT_VERSION == 5. Renamed from
+    _is_four to _is_five so the current floor is obvious to future
+    readers rather than hidden behind a stale name."""
+    assert RECEIPT_CONTRACT_VERSION == 5
 
 
-def test_write_receipt_embeds_contract_version_four(tmp_path: Path):
-    """AC 28: write_receipt embeds 3 in the payload."""
+def test_write_receipt_embeds_contract_version_five(tmp_path: Path):
+    """AC 24 (task-009): write_receipt embeds 5 in the payload."""
     td = _td(tmp_path)
     p = write_receipt(td, "spec-validated", criteria_count=1, spec_sha256="x" * 64)
     payload = json.loads(p.read_text())
-    assert payload["contract_version"] == 4
+    assert payload["contract_version"] == 5
 
 
 def _exercise_writer(name: str, td: Path):
@@ -119,11 +122,21 @@ def _exercise_writer(name: str, td: Path):
         return lib_receipts.receipt_planner_spawn(td, "spec", 0, injected_prompt_sha256=digest)
     if name == "receipt_plan_audit":
         return lib_receipts.receipt_plan_audit(td, tokens_used=0)
+    if name == "receipt_force_override":
+        # v5 bump: reason + approver are required kwargs. Exercise with
+        # minimal valid args so the writer is included in the every-writer
+        # version-embed check (not silently skipped).
+        return lib_receipts.receipt_force_override(
+            td, "SPEC_REVIEW", "PLANNING", [],
+            reason="test: exercise for contract-version embed check",
+            approver="test-suite",
+        )
     return None
 
 
-def test_every_writer_in_all_embeds_contract_version_four(tmp_path: Path, monkeypatch):
-    """AC 28: every receipt_* writer in __all__ writes contract_version=3."""
+def test_every_writer_in_all_embeds_contract_version_five(tmp_path: Path, monkeypatch):
+    """AC 24 (task-009): every receipt_* writer in __all__ writes
+    contract_version=5."""
     td = _td(tmp_path)
     # receipt_rules_check_passed needs run_checks stubbed.
     import rules_engine
@@ -141,13 +154,13 @@ def test_every_writer_in_all_embeds_contract_version_four(tmp_path: Path, monkey
             continue
         exercised += 1
         payload = json.loads(out.read_text())
-        assert payload["contract_version"] == 4, (
-            f"writer {name} did not embed contract_version=3 (got {payload.get('contract_version')!r})"
+        assert payload["contract_version"] == 5, (
+            f"writer {name} did not embed contract_version=5 (got {payload.get('contract_version')!r})"
         )
     assert exercised >= 14, f"expected at least 14 writers exercised, got {exercised}"
 
 
 def test_every_required_writer_includes_calibration_noop():
-    """AC 28: receipt_calibration_noop is part of the v3 bump."""
+    """AC 24 (task-009): receipt_calibration_noop is part of the v5 writer set."""
     assert "receipt_calibration_noop" in lib_receipts.__all__
     assert callable(lib_receipts.receipt_calibration_noop)

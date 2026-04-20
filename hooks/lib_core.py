@@ -1122,8 +1122,43 @@ def _write_pre_repair_blocking_snapshot(task_dir: Path) -> Path | None:
     return target
 
 
-def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> tuple[str, dict]:
-    """Transition a task to a new stage, enforcing allowed transitions."""
+def transition_task(
+    task_dir: Path,
+    next_stage: str,
+    *,
+    force: bool = False,
+    force_reason: str | None = None,
+    force_approver: str | None = None,
+) -> tuple[str, dict]:
+    """Transition a task to a new stage, enforcing allowed transitions.
+
+    When ``force=True`` both ``force_reason`` and ``force_approver`` MUST
+    be non-empty ``str`` instances. ``None`` / empty / non-string values
+    raise ``ValueError`` whose message names the specific offending arg.
+    Validation runs BEFORE any gate-replay or receipt-write work so a
+    malformed break-glass call cannot ever reach the receipt writer.
+
+    When ``force=False`` the two justification kwargs are accepted for
+    call-site uniformity but ignored — the gate-replay path is the same
+    as the pre-F1 contract.
+    """
+    # F1: validate force-justification kwargs BEFORE any other work so
+    # a malformed break-glass call cannot race past early-returns or
+    # reach the receipt writer. Order matters: reason first, then
+    # approver, so the ValueError names the first missing arg.
+    if force:
+        if not isinstance(force_reason, str) or not force_reason.strip():
+            raise ValueError(
+                "force_reason must be a non-empty string when force=True "
+                "(whitespace-only values are rejected — whitespace carries no "
+                "human-readable justification)"
+            )
+        if not isinstance(force_approver, str) or not force_approver.strip():
+            raise ValueError(
+                "force_approver must be a non-empty string when force=True "
+                "(whitespace-only values are rejected)"
+            )
+
     manifest_path = task_dir / "manifest.json"
     manifest = load_json(manifest_path)
 
@@ -1668,7 +1703,23 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 from check_deferred_findings import (
                     check_deferred_findings as _check_deferred,
                 )
-            except ImportError:
+            except ImportError as exc:
+                # F1 AC13: surface the fail-open silent-skip via an
+                # observability event BEFORE flipping _check_deferred to
+                # None. D3 contract: log_event failures must never block
+                # the fail-open path, so wrap the emit in a best-effort
+                # try/except.
+                try:
+                    from lib_log import log_event as _log_cdf_unavail
+                    _log_cdf_unavail(
+                        task_dir.parent.parent,
+                        "deferred_findings_check_unavailable",
+                        task=task_dir.name,
+                        reason="import_error",
+                        error=str(exc),
+                    )
+                except Exception:
+                    pass  # log_event must never block the fail-open.
                 _check_deferred = None  # type: ignore
 
             if _check_deferred is not None:
@@ -1742,10 +1793,25 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     _expired = _check_deferred(
                         task_dir.parent.parent, changed_files
                     )
-                except Exception:
+                except Exception as exc:
                     # check_deferred_findings is designed to never raise;
                     # if it does (unforeseen bug), treat as no signal and
                     # fail open rather than wedge the DONE gate.
+                    # F1 AC14: surface the fail-open silent-skip via an
+                    # observability event BEFORE the fail-open
+                    # assignment. D3 contract: swallow log_event
+                    # failures so a broken logger does not block the
+                    # fail-open path.
+                    try:
+                        from lib_log import log_event as _log_cdf_err
+                        _log_cdf_err(
+                            task_dir.parent.parent,
+                            "deferred_findings_check_errored",
+                            task=task_dir.name,
+                            error=str(exc),
+                        )
+                    except Exception:
+                        pass  # log_event must never block the fail-open.
                     _expired = []
 
                 if _expired:
@@ -1788,6 +1854,8 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 from_stage=current_stage,
                 to_stage=next_stage,
                 bypassed_gates=list(bypassed_gates),
+                reason=force_reason,
+                approver=force_approver,
             )
         except Exception:
             pass  # Logging must never block the forced transition.
@@ -1798,6 +1866,8 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 from_stage=current_stage or "UNKNOWN",
                 to_stage=next_stage,
                 bypassed_gates=list(bypassed_gates),
+                reason=force_reason,
+                approver=force_approver,
             )
         except OSError as _force_rcpt_exc:
             try:
@@ -1873,15 +1943,22 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
     _auto_log(task_dir, current_stage, next_stage, force)
 
     # ---- Log stage transition to events.jsonl ----
-    from lib_log import log_event
-    log_event(
-        task_dir.parent.parent,
-        "stage_transition",
-        task=manifest["task_id"],
-        from_stage=current_stage,
-        to_stage=next_stage,
-        forced=force,
-    )
+    # D3: a broken logger must never wedge the state-machine mutation
+    # that already landed on disk via ``write_json(manifest_path, ...)``
+    # above. Swallow log_event failures so a force=True break-glass
+    # transition still returns cleanly to its caller.
+    try:
+        from lib_log import log_event
+        log_event(
+            task_dir.parent.parent,
+            "stage_transition",
+            task=manifest["task_id"],
+            from_stage=current_stage,
+            to_stage=next_stage,
+            forced=force,
+        )
+    except Exception:
+        pass  # log_event must never block a completed transition.
 
     # ---- Auto-emit stage-transition event to per-task token ledger ----
     try:
@@ -2354,6 +2431,7 @@ def collect_retrospectives(root: Path) -> list[dict]:
         # SEC-003: verify persistent retros against the flushed-event
         # sha256. Tampered content (content-hash != event-hash) →
         # skip. No-event-known → trust (cold-start compat).
+        matched_flush_event = False
         if persistent and isinstance(tid, str) and tid:
             expected = flushed_shas.get(tid)
             if expected:
@@ -2365,9 +2443,32 @@ def collect_retrospectives(root: Path) -> list[dict]:
                     # Skip this persistent copy entirely — the worktree
                     # copy (if present) will stand.
                     return
+                matched_flush_event = True
 
         data["_path"] = str(path)
-        data["_source"] = "persistent" if persistent else "worktree"
+        # F1 AC21: a persistent retro without a known flushed-event match
+        # (either no flush event for tid, or tid is not a non-empty
+        # string) is trusted for backward compat but labelled
+        # ``persistent-unverified`` so downstream consumers can audit
+        # the weaker provenance. Emit a one-shot observability event
+        # naming the path. D3: swallow log_event failures so a broken
+        # logger does not block retro collection.
+        if persistent and not matched_flush_event:
+            data["_source"] = "persistent-unverified"
+            try:
+                from lib_log import log_event as _log_retro_unverified
+                _log_retro_unverified(
+                    root,
+                    "retrospective_trusted_without_flush_event",
+                    task=tid if isinstance(tid, str) and tid else None,
+                    path=str(path),
+                )
+            except Exception:
+                pass  # log_event must never block collection.
+        elif persistent:
+            data["_source"] = "persistent"
+        else:
+            data["_source"] = "worktree"
 
         if isinstance(tid, str) and tid:
             key = tid

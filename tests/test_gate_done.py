@@ -107,7 +107,13 @@ def test_empty_auditors_passes(tmp_path: Path):
 def test_force_bypass_succeeds(tmp_path: Path):
     td = _setup(tmp_path)
     # Nothing else: no audit-routing, no postmortem
-    transition_task(td, "DONE", force=True)
+    transition_task(
+        td,
+        "DONE",
+        force=True,
+        force_reason="test: DONE gate bypass without required receipts",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "DONE"
 

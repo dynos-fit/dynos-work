@@ -148,6 +148,8 @@ def test_calibration_noop_writer_exported():
     assert "receipt_calibration_noop" in lib_receipts.__all__
 
 
-def test_receipt_contract_version_constant_is_four():
-    """AC 27: contract bump landed (RECEIPT_CONTRACT_VERSION == 4)."""
-    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 4
+def test_receipt_contract_version_constant_is_five():
+    """AC 27 (migrated for task-009 AC 24): contract bumped to 5.
+    Renamed from _is_four → _is_five so the pin value is legible to
+    future readers rather than hidden behind a stale name."""
+    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 5

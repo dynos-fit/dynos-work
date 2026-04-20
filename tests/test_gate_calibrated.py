@@ -47,6 +47,12 @@ def test_calibration_receipt_present_passes(tmp_path: Path, monkeypatch):
 
 def test_force_bypass_succeeds(tmp_path: Path):
     td = _setup(tmp_path)
-    transition_task(td, "CALIBRATED", force=True)
+    transition_task(
+        td,
+        "CALIBRATED",
+        force=True,
+        force_reason="test: DONE->CALIBRATED force bypass invariant",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "CALIBRATED"

@@ -87,6 +87,12 @@ def test_low_absent_tdd_required_passes(tmp_path: Path):
 def test_force_true_bypasses_gate(tmp_path: Path):
     """AC 9: force=True bypasses the tdd_required requirement."""
     td = _setup(tmp_path, risk="critical", tdd_required=None)
-    transition_task(td, "SPEC_NORMALIZATION", force=True)
+    transition_task(
+        td,
+        "SPEC_NORMALIZATION",
+        force=True,
+        force_reason="test: tdd_required classify gate bypass",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "SPEC_NORMALIZATION"

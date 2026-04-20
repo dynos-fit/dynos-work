@@ -406,15 +406,39 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
                         duration = round(time.monotonic() - t0, 3)
                         handler_durations.setdefault(consumer_name, []).append(duration)
 
-                        log_event(
-                            root,
-                            "eventbus_handler",
-                            handler=consumer_name,
-                            trigger_event=event_type,
-                            success=success,
-                            duration_s=duration,
-                            error=err_msg if not success else None,
-                        )
+                        # AC18: attribute the eventbus_handler log event to
+                        # the task whose task-completed event triggered this
+                        # handler invocation. task_dir_str is populated above
+                        # (lines 378-384) only when event_type ==
+                        # "task-completed" AND payload carries a non-empty
+                        # task_dir; for maintenance/cold-start/follow-on
+                        # events it stays None and task= is omitted (which
+                        # log_event treats as "no task key" — the repo-level
+                        # .dynos/events.jsonl path). This attribution is the
+                        # precondition for AC19's tighten at
+                        # lib_receipts.py:1263, which filters handler events
+                        # by task_id in the post-completion self-verify set.
+                        task_id = Path(task_dir_str).name if task_dir_str else None
+                        try:
+                            log_event(
+                                root,
+                                "eventbus_handler",
+                                task=task_id,
+                                handler=consumer_name,
+                                trigger_event=event_type,
+                                success=success,
+                                duration_s=duration,
+                                error=err_msg if not success else None,
+                            )
+                        except Exception as log_exc:
+                            # D3: event emission must not block the fail-open
+                            # — swallow log_event failures on the emit path
+                            # so a bad disk / JSON encode / perms issue does
+                            # not abort the drain loop.
+                            print(
+                                f"  [warn] log_event(eventbus_handler) failed: {log_exc}",
+                                file=sys.stderr,
+                            )
 
                     # Track success with AND semantics: any failure sticks
                     prev = handler_all_ok.setdefault(event_type, {}).get(consumer_name, True)

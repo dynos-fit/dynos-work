@@ -97,6 +97,12 @@ def test_force_true_bypasses(tmp_path: Path, monkeypatch):
     td = _setup_done(tmp_path)
     _patch_policy_hash(monkeypatch, "live_hash" + "0" * 55)
     receipt_calibration_applied(td, 1, 1, "b" * 64, "different_hash" + "0" * 50)
-    transition_task(td, "CALIBRATED", force=True)
+    transition_task(
+        td,
+        "CALIBRATED",
+        force=True,
+        force_reason="test: calibration live-hash mismatch bypass",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "CALIBRATED"

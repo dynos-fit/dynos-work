@@ -97,8 +97,39 @@ def cmd_validate_task(args: argparse.Namespace) -> int:
 
 def cmd_transition(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+
+    # F1: --force requires both --reason and --approver. Validate at the
+    # CLI boundary BEFORE invoking transition_task so the caller gets a
+    # named-flag error message rather than a generic ValueError from
+    # the library. Exit code 2 mirrors argparse's usage-error convention.
+    force_reason: str | None = None
+    force_approver: str | None = None
+    if args.force:
+        reason_val = getattr(args, "reason", None)
+        approver_val = getattr(args, "approver", None)
+        if not isinstance(reason_val, str) or not reason_val.strip():
+            print(
+                "--force requires --reason STR (non-empty; whitespace-only values are rejected)",
+                file=sys.stderr,
+            )
+            return 2
+        if not isinstance(approver_val, str) or not approver_val.strip():
+            print(
+                "--force requires --approver STR (non-empty; whitespace-only values are rejected)",
+                file=sys.stderr,
+            )
+            return 2
+        force_reason = reason_val
+        force_approver = approver_val
+
     try:
-        previous, manifest = transition_task(task_dir, args.next_stage, force=args.force)
+        previous, manifest = transition_task(
+            task_dir,
+            args.next_stage,
+            force=args.force,
+            force_reason=force_reason,
+            force_approver=force_approver,
+        )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -629,6 +660,16 @@ def build_parser() -> argparse.ArgumentParser:
     transition_parser.add_argument("task_dir")
     transition_parser.add_argument("next_stage")
     transition_parser.add_argument("--force", action="store_true")
+    transition_parser.add_argument(
+        "--reason",
+        default=None,
+        help="Break-glass rationale — required when --force is used.",
+    )
+    transition_parser.add_argument(
+        "--approver",
+        default=None,
+        help="Operator identity authorising the force — required with --force.",
+    )
     transition_parser.set_defaults(func=cmd_transition)
 
     approve_stage_parser = subparsers.add_parser(

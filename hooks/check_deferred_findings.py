@@ -47,6 +47,12 @@ except ImportError:
     except ImportError:
         _persistent_project_dir = None  # type: ignore
 
+# Sentinel for parse errors in _load_registry (AC15).
+# Returned when the registry file exists but cannot be parsed (malformed JSON,
+# OSError on read, or non-dict shape). Distinguished from None (missing file)
+# so future callers can branch on the failure mode if needed.
+_REGISTRY_PARSE_ERROR = object()
+
 
 def _current_retrospective_count(root: Path) -> int:
     """Return the count of ``retrospectives/*.json`` files under the
@@ -67,23 +73,31 @@ def _current_retrospective_count(root: Path) -> int:
         return 0
 
 
-def _load_registry(root: Path) -> dict[str, Any] | None:
-    """Load ``root/.dynos/deferred-findings.json``. Returns None on any
-    failure (missing file, unreadable, malformed JSON, wrong shape).
-    The caller treats None as "no signal → fail open → exit 0"."""
+def _load_registry(
+    root: Path,
+) -> dict[str, Any] | None | object:
+    """Load ``root/.dynos/deferred-findings.json``. Returns one of:
+    - The loaded dict on success.
+    - None if the registry file does not exist (missing file).
+    - _REGISTRY_PARSE_ERROR if the file exists but cannot be parsed
+      (malformed JSON, OSError on read, or non-dict shape).
+
+    The caller treats both None and _REGISTRY_PARSE_ERROR as "no signal
+    → fail open → exit 0", but future callers can distinguish the two
+    failure modes via the sentinel."""
     registry_path = root / ".dynos" / "deferred-findings.json"
     if not registry_path.exists():
         return None
     try:
         text = registry_path.read_text(encoding="utf-8")
     except OSError:
-        return None
+        return _REGISTRY_PARSE_ERROR
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        return _REGISTRY_PARSE_ERROR
     if not isinstance(data, dict):
-        return None
+        return _REGISTRY_PARSE_ERROR
     return data
 
 
@@ -111,7 +125,7 @@ def check_deferred_findings(
         return []
 
     registry = _load_registry(root)
-    if registry is None:
+    if registry is None or registry is _REGISTRY_PARSE_ERROR:
         return []
     entries = registry.get("findings")
     if not isinstance(entries, list):

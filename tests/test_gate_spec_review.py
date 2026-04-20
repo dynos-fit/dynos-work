@@ -66,7 +66,13 @@ def test_hash_drift_refuses(tmp_path: Path):
 def test_force_bypass_succeeds(tmp_path: Path):
     td = _setup(tmp_path)
     # No receipt; force=True must succeed
-    transition_task(td, "PLANNING", force=True)
+    transition_task(
+        td,
+        "PLANNING",
+        force=True,
+        force_reason="test: SPEC_REVIEW human-approval gate bypass",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "PLANNING"
 

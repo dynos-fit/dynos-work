@@ -141,7 +141,13 @@ def test_force_true_bypasses_gate(tmp_path: Path):
     """AC 8: force=True bypasses even with missing receipt."""
     td = _setup(tmp_path, tdd_required=True)
     # No receipt, no evidence
-    transition_task(td, "EXECUTION", force=True)
+    transition_task(
+        td,
+        "EXECUTION",
+        force=True,
+        force_reason="test: tdd-tests receipt gate bypass",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "EXECUTION"
 

@@ -50,18 +50,13 @@ Skipping the router in inline mode silently ignores learned agents and breaks th
 
 **Normal execution (fast_track is false or >1 segment):**
 
-Update `manifest.json` stage to `EXECUTION`. If available in this repo, use:
+Update `manifest.json` stage to `EXECUTION` (transition_task auto-writes the `[STAGE] → EXECUTION` log line; the skill does not append it manually). Transition the stage by running:
 
 ```text
 python3 hooks/dynosctl.py transition .dynos/task-{id} EXECUTION
 ```
 
-Append to log:
-```
-{timestamp} [STAGE] → EXECUTION
-```
-
-Read `execution-graph.json`. Before spawning any executor, perform deterministic preflight validation. If available in this repo, run:
+Read `execution-graph.json`. Before spawning any executor, run deterministic preflight validation:
 
 ```text
 python3 hooks/validate_task_artifacts.py .dynos/task-{id}
@@ -260,15 +255,10 @@ Append to log:
 
 ### Step 4 — Run tests
 
-Update `manifest.json` stage to `TEST_EXECUTION`. If available in this repo, use:
+Update `manifest.json` stage to `TEST_EXECUTION` (transition_task auto-writes the `[STAGE] → TEST_EXECUTION` log line). Transition the stage by running:
 
 ```text
 python3 hooks/dynosctl.py transition .dynos/task-{id} TEST_EXECUTION
-```
-
-Append to log:
-```
-{timestamp} [STAGE] → TEST_EXECUTION
 ```
 
 Read `plan.md` Test Strategy. Run the specified tests. Use incremental testing if the framework supports it (e.g. `jest --onlyChanged`).

@@ -46,6 +46,12 @@ def test_force_bypass_succeeds_without_required_receipts(
     # Without force, the gate should refuse (proves the gate exists). We don't
     # assert here on the exact message because the spec is exercised in the
     # per-gate test files. With force=True, we should advance.
-    transition_task(td, next_stage, force=True)
+    transition_task(
+        td,
+        next_stage,
+        force=True,
+        force_reason="test: parametrized gate bypass invariant proof",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == next_stage

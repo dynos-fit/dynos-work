@@ -101,7 +101,13 @@ def test_forced_transition_writes_receipt(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         transition_task(td, "EXECUTION")
 
-    transition_task(td, "EXECUTION", force=True)
+    transition_task(
+        td,
+        "EXECUTION",
+        force=True,
+        force_reason="test: force-override receipt writer contract",
+        force_approver="test-suite",
+    )
 
     receipt_path = td / "receipts" / "force-override-PRE_EXECUTION_SNAPSHOT-EXECUTION.json"
     assert receipt_path.exists(), (
@@ -122,7 +128,13 @@ def test_forced_transition_emits_force_override_event(tmp_path: Path) -> None:
     """force=True → a `force_override` entry is appended to events.jsonl,
     carrying the task_id and a non-empty `bypassed_gates` list."""
     td = _setup_pre_exec_task(tmp_path, slug="FO-EVT")
-    transition_task(td, "EXECUTION", force=True)
+    transition_task(
+        td,
+        "EXECUTION",
+        force=True,
+        force_reason="test: force-override event emission",
+        force_approver="test-suite",
+    )
 
     events = _read_events(td)
     force_events = [e for e in events if e.get("event") == "force_override"]
@@ -145,7 +157,13 @@ def test_forced_transition_with_no_bypassed_gates_still_records(tmp_path: Path) 
     invariant is "every force leaves a trace", regardless of whether
     force was strictly necessary."""
     td = _setup_noop_task(tmp_path, slug="FO-NOOP")
-    transition_task(td, "SPEC_NORMALIZATION", force=True)
+    transition_task(
+        td,
+        "SPEC_NORMALIZATION",
+        force=True,
+        force_reason="test: every-force-leaves-a-trace invariant on no-gate edge",
+        force_approver="test-suite",
+    )
 
     receipt_path = td / "receipts" / "force-override-FOUNDRY_INITIALIZED-SPEC_NORMALIZATION.json"
     assert receipt_path.exists()
@@ -169,7 +187,8 @@ def test_forced_transition_with_no_bypassed_gates_still_records(tmp_path: Path) 
 
 def test_receipt_writer_signature_valid_args(tmp_path: Path) -> None:
     """Direct call with valid args → a receipt file exists, and the
-    payload carries the exact values we passed in."""
+    payload carries the exact values we passed in (including the v5
+    ``reason`` + ``approver`` justification fields)."""
     td = tmp_path / ".dynos" / "task-FO-DIRECT"
     td.mkdir(parents=True)
     out = receipt_force_override(
@@ -177,12 +196,16 @@ def test_receipt_writer_signature_valid_args(tmp_path: Path) -> None:
         from_stage="X",
         to_stage="Y",
         bypassed_gates=["gate1"],
+        reason="test: direct receipt writer call",
+        approver="test-suite",
     )
     assert out.exists()
     payload = json.loads(out.read_text())
     assert payload["from_stage"] == "X"
     assert payload["to_stage"] == "Y"
     assert payload["bypassed_gates"] == ["gate1"]
+    assert payload["reason"] == "test: direct receipt writer call"
+    assert payload["approver"] == "test-suite"
 
 
 def test_receipt_writer_rejects_path_traversal_stage(tmp_path: Path) -> None:
@@ -190,35 +213,55 @@ def test_receipt_writer_rejects_path_traversal_stage(tmp_path: Path) -> None:
     Stage names must match ^[A-Z][A-Z0-9_]*$ to prevent path injection."""
     td = _setup_pre_exec_task(tmp_path, slug="SEC2")
     with pytest.raises(ValueError, match="from_stage must match"):
-        receipt_force_override(td, "../../etc/x", "DONE", [])
+        receipt_force_override(
+            td, "../../etc/x", "DONE", [],
+            reason="test: sec2 traversal probe", approver="test-suite",
+        )
     with pytest.raises(ValueError, match="to_stage must match"):
-        receipt_force_override(td, "EXECUTION", "../evil", [])
+        receipt_force_override(
+            td, "EXECUTION", "../evil", [],
+            reason="test: sec2 traversal probe", approver="test-suite",
+        )
     with pytest.raises(ValueError, match="from_stage must match"):
-        receipt_force_override(td, "execution", "DONE", [])  # lowercase rejected
+        receipt_force_override(
+            td, "execution", "DONE", [],
+            reason="test: sec2 lowercase probe", approver="test-suite",
+        )  # lowercase rejected
     with pytest.raises(ValueError, match="to_stage must match"):
-        receipt_force_override(td, "EXECUTION", "done/x", [])
+        receipt_force_override(
+            td, "EXECUTION", "done/x", [],
+            reason="test: sec2 slash probe", approver="test-suite",
+        )
 
 
 def test_receipt_writer_rejects_bad_args(tmp_path: Path) -> None:
     """Every bad-arg combination → ValueError naming the offending arg.
     This is a guardrail against silent "" / None / non-list slipping
-    into the receipt chain."""
+    into the receipt chain. Extended for the v4→v5 bump: empty or
+    non-string ``reason`` / ``approver`` must also be rejected."""
     td = tmp_path / ".dynos" / "task-FO-BAD"
     td.mkdir(parents=True)
 
     # Empty from_stage
     with pytest.raises(ValueError, match="from_stage"):
-        receipt_force_override(td, from_stage="", to_stage="Y", bypassed_gates=[])
+        receipt_force_override(
+            td, from_stage="", to_stage="Y", bypassed_gates=[],
+            reason="test: bad-arg probe", approver="test-suite",
+        )
 
     # Empty to_stage
     with pytest.raises(ValueError, match="to_stage"):
-        receipt_force_override(td, from_stage="X", to_stage="", bypassed_gates=[])
+        receipt_force_override(
+            td, from_stage="X", to_stage="", bypassed_gates=[],
+            reason="test: bad-arg probe", approver="test-suite",
+        )
 
     # Non-list bypassed_gates
     with pytest.raises(ValueError, match="bypassed_gates"):
         receipt_force_override(
             td, from_stage="X", to_stage="Y",
             bypassed_gates="not a list",  # type: ignore[arg-type]
+            reason="test: bad-arg probe", approver="test-suite",
         )
 
     # List with non-string entry
@@ -226,6 +269,55 @@ def test_receipt_writer_rejects_bad_args(tmp_path: Path) -> None:
         receipt_force_override(
             td, from_stage="X", to_stage="Y",
             bypassed_gates=[1, 2, 3],  # type: ignore[list-item]
+            reason="test: bad-arg probe", approver="test-suite",
+        )
+
+    # v5 floor: empty reason MUST be rejected by the receipt writer even
+    # when every other arg is valid. Mirrors the contract bump at AC24 —
+    # no silent empty-justification slipping past the writer.
+    with pytest.raises(ValueError, match="reason"):
+        receipt_force_override(
+            td, from_stage="X", to_stage="Y", bypassed_gates=[],
+            reason="", approver="test-suite",
+        )
+
+    # v5 floor: None reason (non-string) MUST be rejected.
+    with pytest.raises(ValueError, match="reason"):
+        receipt_force_override(
+            td, from_stage="X", to_stage="Y", bypassed_gates=[],
+            reason=None,  # type: ignore[arg-type]
+            approver="test-suite",
+        )
+
+    # v5 floor: empty approver MUST be rejected.
+    with pytest.raises(ValueError, match="approver"):
+        receipt_force_override(
+            td, from_stage="X", to_stage="Y", bypassed_gates=[],
+            reason="test: bad-arg probe", approver="",
+        )
+
+    # v5 floor: None approver MUST be rejected.
+    with pytest.raises(ValueError, match="approver"):
+        receipt_force_override(
+            td, from_stage="X", to_stage="Y", bypassed_gates=[],
+            reason="test: bad-arg probe",
+            approver=None,  # type: ignore[arg-type]
+        )
+
+    # v5 floor: non-string reason (int) MUST be rejected.
+    with pytest.raises(ValueError, match="reason"):
+        receipt_force_override(
+            td, from_stage="X", to_stage="Y", bypassed_gates=[],
+            reason=123,  # type: ignore[arg-type]
+            approver="test-suite",
+        )
+
+    # v5 floor: non-string approver (int) MUST be rejected.
+    with pytest.raises(ValueError, match="approver"):
+        receipt_force_override(
+            td, from_stage="X", to_stage="Y", bypassed_gates=[],
+            reason="test: bad-arg probe",
+            approver=42,  # type: ignore[arg-type]
         )
 
 
@@ -248,7 +340,13 @@ def test_forced_transition_does_not_corrupt_normal_gate_state(tmp_path: Path) ->
     """
     # --- Task A: force=True on a would-refuse edge --------------------
     td_a = _setup_pre_exec_task(tmp_path, slug="ISO-A")
-    transition_task(td_a, "EXECUTION", force=True)
+    transition_task(
+        td_a,
+        "EXECUTION",
+        force=True,
+        force_reason="test: dry-run-gate isolation probe (task A)",
+        force_approver="test-suite",
+    )
     manifest_a = json.loads((td_a / "manifest.json").read_text())
     assert manifest_a["stage"] == "EXECUTION"
 

@@ -119,7 +119,7 @@ Each receipt auto-records tokens to `token-usage.json`. If you skip this, the re
    - A file path ending in `.prd.md`, `.pdf`, or `.txt` and treat it as a primary spec source.
    - A URL to a Figma link, screenshot, or wireframe and note it as a design artifact.
    - An attached screenshot or image and note it as a visual spec artifact.
-7. Deterministically verify that `manifest.json` parses as valid JSON and that `task_id`, `created_at`, `raw_input`, and `stage` are present before continuing. If available in this repo, use:
+7. Deterministically verify that `manifest.json` parses as valid JSON and that `task_id`, `created_at`, `raw_input`, and `stage` are present before continuing. Run:
 
 ```text
 python3 hooks/ctl.py validate-task .dynos/task-{id}
@@ -253,7 +253,7 @@ Deterministic validation before proceeding:
 3. `classification.domains` must be an array of known domains only.
 4. If validation fails, stop and correct the classification before moving on.
 
-Update `manifest.json` stage to `SPEC_NORMALIZATION`. If available in this repo, use:
+Transition the stage by running:
 
 ```text
 python3 hooks/ctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
@@ -269,7 +269,7 @@ After classification, determine fast-track eligibility **deterministically** by 
 PYTHONPATH="hooks:${PYTHONPATH:-}" python3 -c "from lib import apply_fast_track; from pathlib import Path; print(apply_fast_track(Path('.dynos/task-{id}')))"
 ```
 
-This checks: `risk_level == "low"` AND exactly 1 domain. It writes `"fast_track": true` or `"fast_track": false` to `manifest.json`. If the command is not available, manually check the conditions and write the field.
+This checks: `risk_level == "low"` AND exactly 1 domain. It writes `"fast_track": true` or `"fast_track": false` to `manifest.json`. If the command is not available, abort. Fast-track eligibility is a deterministic gate; manual fallback is forbidden.
 
 When fast-tracked (`fast_track: true`), apply these simplifications throughout the remaining steps:
 - **Spec (Step 3):** The planner should produce a concise spec. The `Implicit Requirements Surfaced` and `Risk Notes` sections can contain a single line each if no significant risks exist.
@@ -406,21 +406,16 @@ After `spec.md` is written, run deterministic spec validation:
 
 If any rule fails, send the Planner back to fix `spec.md` before presenting it.
 
-**Receipt: spec-validated (MANDATORY).** Once the four checks pass, count the acceptance criteria and hash `spec.md`, then write the receipt. The downstream `human-approval-SPEC_REVIEW` gate (Step 6) compares the artifact hash against `spec.md` at transition time, but `receipt_spec_validated` records the validated state for retrospectives:
+**Receipt: spec-validated (MANDATORY).** Once the four checks pass, write the receipt. The downstream `human-approval-SPEC_REVIEW` gate (Step 6) compares the artifact hash against `spec.md` at transition time, but `receipt_spec_validated` records the validated state for retrospectives:
 
 ```python
 from pathlib import Path
-from lib_receipts import receipt_spec_validated, hash_file
+from lib_receipts import receipt_spec_validated
 
-spec_path = Path(".dynos/task-{id}/spec.md")
-receipt_spec_validated(
-    task_dir=Path(".dynos/task-{id}"),
-    criteria_count=N,                       # numbered count from spec.md
-    spec_sha256=hash_file(spec_path),
-)
+receipt_spec_validated(task_dir=Path(".dynos/task-{id}"))
 ```
 
-Update `manifest.json` stage to `SPEC_REVIEW`. If available in this repo, use:
+Transition the stage by running:
 
 ```text
 python3 hooks/ctl.py transition .dynos/task-{id} SPEC_REVIEW
@@ -521,7 +516,7 @@ Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_
 {timestamp} [DONE] planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})
 ```
 
-Update `manifest.json` stage to `PLAN_REVIEW`. If available in this repo, use:
+Transition the stage by running:
 
 ```text
 python3 hooks/ctl.py transition .dynos/task-{id} PLAN_REVIEW
@@ -628,7 +623,7 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 
 ## Step 9 — Done
 
-Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. If available in this repo, use:
+Transition the stage by running:
 
 ```text
 python3 hooks/ctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT

@@ -321,6 +321,12 @@ def test_done_transition_force_bypasses_deferred_gate(
         _deferred_entry(id="SEC-003", files=["hooks/lib_core.py"],
                         first_seen=0, ttl=0),
     ])
-    transition_task(td, "DONE", force=True)
+    transition_task(
+        td,
+        "DONE",
+        force=True,
+        force_reason="test: deferred-findings gate force bypass",
+        force_approver="test-suite",
+    )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "DONE"

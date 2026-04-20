@@ -20,14 +20,34 @@ from lib_log import log_event
 
 
 # Receipt contract version. Receipts written by this module embed
-# `contract_version: 4`. Readers MUST treat receipts without this field
+# `contract_version: 5`. Readers MUST treat receipts without this field
 # as v1 and accept them when `valid=true`.
 #
-# Bump rationale (v3 -> v4): caller-falsification hardening. A family of
-# receipt writers now self-compute their payload fields from on-disk
-# artifacts instead of accepting caller-supplied counts/hashes. Callers
-# that still pass the legacy kwargs raise TypeError so an out-of-date
-# integration cannot silently ship a stale receipt. Affected writers:
+# Bump rationale (v4 -> v5): F1 — force-override receipts now require
+# human-intent justification. ``receipt_force_override`` accepts
+# ``reason`` and ``approver`` as keyword-only non-empty strings and
+# writes them as top-level payload fields. These values are the one
+# intended caller-supplied exception to the v4 self-compute rule because
+# they encode human intent (break-glass rationale + operator identity)
+# that is not derivable from on-disk state. Pre-v5 force-override
+# receipts are NOT retroactively invalidated — the floor in
+# MIN_VERSION_PER_STEP applies to v5+ writes only and existing receipts
+# remain readable. F2-F6 findings close alongside F1 as additive
+# observability/attribution changes that ride the same v5 bump without
+# introducing new caller-supplied fields: F2/F3 are skill-prose and
+# template-scope hardening (no receipt-shape impact); F4 adds a
+# self-computing ``self_verify`` enum on receipt_post_completion; F5
+# tightens receipt-side event-attribution filtering paired with
+# eventbus source-side ``task=task_id`` emission; F6 tags unverified
+# persistent retrospectives with ``_source: "persistent-unverified"``
+# and emits ``retrospective_trusted_without_flush_event``.
+#
+# Bump rationale (v3 -> v4, prior): caller-falsification hardening. A
+# family of receipt writers now self-compute their payload fields from
+# on-disk artifacts instead of accepting caller-supplied counts/hashes.
+# Callers that still pass the legacy kwargs raise TypeError so an
+# out-of-date integration cannot silently ship a stale receipt. Affected
+# writers:
 #   * receipt_postmortem_generated (reads postmortem JSON for counts +
 #     hashes sibling md via hash_file)
 #   * receipt_retrospective (invokes lib_validate.compute_reward)
@@ -49,7 +69,7 @@ from lib_log import log_event
 #   * receipt_rules_check_passed derives counts internally from rules_engine
 # The bump signals "new semantics available"; it does NOT retroactively
 # invalidate v2 receipts (see MIN_VERSION_PER_STEP floors below).
-RECEIPT_CONTRACT_VERSION = 4
+RECEIPT_CONTRACT_VERSION = 5
 
 
 # Files that compose the calibration policy snapshot used by the
@@ -90,6 +110,11 @@ MIN_VERSION_PER_STEP: dict[str, int] = {
     "calibration-applied": 2,
     "calibration-noop": 2,
     "human-approval-*": 2,
+    # v4 -> v5 bump: force-override receipts now carry required
+    # ``reason`` / ``approver`` fields. The floor applies only to v5+
+    # writes; existing pre-v5 force-override receipts remain readable
+    # and are NOT retroactively invalidated.
+    "force-override-*": 5,
 }
 
 
@@ -1222,12 +1247,26 @@ def receipt_post_completion(
     missing handler raises
     ``ValueError("post-completion handler not in events: <name>")``.
 
+    v5 self_verify enum: the receipt payload now carries a top-level
+    ``self_verify: str`` field with one of three values:
+      * ``"passed"`` — events.jsonl was readable AND every handler name
+        in ``handlers_run`` was matched against an ``eventbus_handler``
+        record.
+      * ``"skipped-no-events-log"`` — no events.jsonl file was readable
+        (task-scoped and repo-level both absent / unreadable).
+      * ``"skipped-handlers-empty"`` — ``handlers_run`` list was empty
+        (no handlers to verify).
+
     Fail-open on file trouble: if events.jsonl is absent, unreadable, or
     unparseable, emit a single stderr warning and proceed with the write
     so the post-completion pipeline is not held hostage to a missing log.
     """
     if not isinstance(handlers_run, list):
         raise ValueError("handlers_run must be a list")
+
+    # Default: empty handlers_run short-circuits to the skipped enum and
+    # no file IO happens.
+    self_verify: str = "skipped-handlers-empty"
 
     if handlers_run:
         root = task_dir.parent.parent
@@ -1255,12 +1294,15 @@ def receipt_post_completion(
                         if record.get("event") != "eventbus_handler":
                             continue
                         rec_task = record.get("task")
-                        # Repo-level handler events often carry no task
-                        # attribution (handlers run during drain, not
-                        # inside a task context). Accept records that
-                        # either match task_id OR have no task key at
-                        # all; reject mismatched tasks.
-                        if rec_task is not None and rec_task != task_id:
+                        # Post-AC18: the eventbus drain now stamps every
+                        # per-task ``eventbus_handler`` emission with
+                        # ``task=task_id`` before writing to the repo-
+                        # level ``.dynos/events.jsonl``. Attribution-less
+                        # records therefore cannot have legitimately come
+                        # from another task's drain — they are dropped so
+                        # a task's self-verify set cannot pull in handler
+                        # events it did not produce. Strict equality only.
+                        if rec_task != task_id:
                             continue
                         for key in ("handler", "name"):
                             name = record.get(key)
@@ -1282,6 +1324,7 @@ def receipt_post_completion(
                 "unavailable",
                 file=_sys.stderr,
             )
+            self_verify = "skipped-no-events-log"
         else:
             for idx, entry in enumerate(handlers_run):
                 if not isinstance(entry, dict):
@@ -1298,11 +1341,14 @@ def receipt_post_completion(
                     raise ValueError(
                         f"post-completion handler not in events: {name}"
                     )
+            # All handlers matched and events.jsonl was readable — pass.
+            self_verify = "passed"
 
     return write_receipt(
         task_dir,
         "post-completion",
         handlers_run=handlers_run,
+        self_verify=self_verify,
     )
 
 
@@ -1556,8 +1602,12 @@ def receipt_human_approval(
         raise ValueError(f"stage must not contain path separators: {stage!r}")
     if not isinstance(artifact_sha256, str) or not artifact_sha256:
         raise ValueError("artifact_sha256 must be a non-empty string")
-    if not isinstance(approver, str) or not approver:
-        raise ValueError("approver must be a non-empty string")
+    if not isinstance(approver, str) or not approver.strip():
+        raise ValueError(
+            "approver must be a non-empty string "
+            "(whitespace-only values are rejected — whitespace carries no "
+            "human identity)"
+        )
 
     return write_receipt(
         task_dir,
@@ -1937,6 +1987,9 @@ def receipt_force_override(
     from_stage: str,
     to_stage: str,
     bypassed_gates: list[str],
+    *,
+    reason: str,
+    approver: str,
 ) -> Path:
     """Write receipt proving a forced stage transition occurred.
 
@@ -1956,6 +2009,13 @@ def receipt_force_override(
       - ``bypassed_gates`` MUST be a list (possibly empty). Every entry
         MUST be a string. Any other container type or non-string entry
         raises ``ValueError``.
+      - ``reason`` and ``approver`` are keyword-only, required, and MUST
+        be non-empty ``str``. Empty / non-string values raise
+        ``ValueError`` naming the offending arg. Mirrors the validation
+        pattern from ``receipt_human_approval``. These are the only
+        caller-supplied payload fields on this writer because they
+        encode human intent (break-glass rationale + operator identity)
+        that is not derivable from on-disk state.
     """
     if not isinstance(from_stage, str) or not from_stage:
         raise ValueError("from_stage must be a non-empty string")
@@ -1981,6 +2041,20 @@ def receipt_force_override(
             raise ValueError(
                 f"bypassed_gates[{idx}] must be a string (got {type(entry).__name__})"
             )
+    # F1 (v4 -> v5): reason + approver required. Validation mirrors
+    # receipt_human_approval — non-empty strings only. Whitespace-only
+    # values are rejected (they carry no human-readable justification and
+    # defeat the break-glass audit purpose).
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError(
+            "reason must be a non-empty string "
+            "(whitespace-only values are rejected)"
+        )
+    if not isinstance(approver, str) or not approver.strip():
+        raise ValueError(
+            "approver must be a non-empty string "
+            "(whitespace-only values are rejected)"
+        )
 
     step_name = f"force-override-{from_stage}-{to_stage}"
     return write_receipt(
@@ -1990,6 +2064,8 @@ def receipt_force_override(
         to_stage=to_stage,
         bypassed_gates=list(bypassed_gates),
         bypassed_count=len(bypassed_gates),
+        reason=reason,
+        approver=approver,
         forced_at=now_iso(),
     )
 
