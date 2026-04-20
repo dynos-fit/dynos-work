@@ -1005,10 +1005,10 @@ def receipt_audit_done(
     task_dir: Path,
     auditor_name: str,
     model_used: str | None,
-    finding_count: int,
-    blocking_count: int,
-    report_path: str | None,
-    tokens_used: int | None,
+    finding_count: int | None = None,
+    blocking_count: int | None = None,
+    report_path: str | None = None,
+    tokens_used: int | None = None,
     *,
     route_mode: str,
     agent_path: str | None,
@@ -1089,6 +1089,12 @@ def receipt_audit_done(
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
 
+    if (finding_count is None) ^ (blocking_count is None):
+        raise TypeError(
+            "finding_count and blocking_count must be provided together "
+            "or both omitted"
+        )
+
     # MA-005 hardening: when report_path is None we have no way to verify
     # caller-supplied finding_count / blocking_count. Any non-zero count
     # supplied without a corresponding report file is caller-attested and
@@ -1099,6 +1105,9 @@ def receipt_audit_done(
     # (report_path REQUIRED). This rule catches the remaining generic
     # case and legacy voting-harness callers that pass None+counts>0.
     if not (isinstance(report_path, str) and report_path):
+        if finding_count is None:
+            finding_count = 0
+            blocking_count = 0
         if finding_count != 0 or blocking_count != 0:
             raise ValueError(
                 f"audit-{auditor_name}: report_path is None but "
@@ -1148,6 +1157,9 @@ def receipt_audit_done(
                 1 for f in findings
                 if isinstance(f, dict) and f.get("blocking") is True
             )
+            if finding_count is None:
+                finding_count = actual_finding_count
+                blocking_count = actual_blocking_count
             if finding_count != actual_finding_count:
                 raise ValueError(
                     f"audit-{auditor_name}: finding_count mismatch — "
@@ -1167,6 +1179,11 @@ def receipt_audit_done(
                     f"audit-{auditor_name}: cannot hash report at "
                     f"{report_path}: {exc}"
                 ) from exc
+        elif finding_count is None:
+            raise ValueError(
+                f"audit-{auditor_name}: report_path={report_path!r} does not exist; "
+                "cannot derive finding_count/blocking_count automatically"
+            )
 
     return write_receipt(
         task_dir,

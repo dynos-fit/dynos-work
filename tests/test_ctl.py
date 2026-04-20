@@ -145,3 +145,54 @@ def test_check_ownership_fails_for_foreign_file(tmp_path) -> None:
     )
     assert result.returncode == 1
     assert "src/b.py" in result.stdout
+
+
+def test_audit_receipt_derives_counts_from_report(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    report = audit_dir / "security-auditor.json"
+    report.write_text(json.dumps({
+        "findings": [
+            {"id": "SEC-1", "blocking": True},
+            {"id": "SEC-2", "blocking": False},
+        ]
+    }))
+    result = _run_ctl(
+        "audit-receipt",
+        str(task_dir),
+        "security-auditor",
+        "--model",
+        "haiku",
+        "--report-path",
+        str(report),
+        "--tokens-used",
+        "123",
+        "--route-mode",
+        "generic",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads((task_dir / "receipts" / "audit-security-auditor.json").read_text())
+    assert receipt["finding_count"] == 2
+    assert receipt["blocking_count"] == 1
+    assert receipt["report_path"] == str(report)
+
+
+def test_audit_receipt_missing_report_fails_without_manual_counts(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    missing = task_dir / "audit-reports" / "missing.json"
+    result = _run_ctl(
+        "audit-receipt",
+        str(task_dir),
+        "security-auditor",
+        "--model",
+        "haiku",
+        "--report-path",
+        str(missing),
+        "--tokens-used",
+        "123",
+        "--route-mode",
+        "generic",
+    )
+    assert result.returncode == 1
+    assert "cannot derive finding_count/blocking_count automatically" in result.stderr

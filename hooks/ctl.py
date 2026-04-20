@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from lib_core import find_active_tasks, load_json, next_command_for_stage, transition_task
-from lib_receipts import hash_file, receipt_human_approval
+from lib_receipts import hash_file, receipt_audit_done, receipt_human_approval
 from lib_validate import check_segment_ownership, validate_task_artifacts
 
 
@@ -217,6 +217,27 @@ def cmd_check_ownership(args: argparse.Namespace) -> int:
             print(f"- {file_path}")
         return 1
     print("Ownership check passed.")
+    return 0
+
+
+def cmd_audit_receipt(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        out = receipt_audit_done(
+            task_dir,
+            args.auditor_name,
+            args.model,
+            report_path=args.report_path,
+            tokens_used=args.tokens_used,
+            route_mode=args.route_mode,
+            agent_path=args.agent_path,
+            injected_agent_sha256=args.injected_agent_sha256,
+            ensemble_context=args.ensemble_context,
+        )
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(str(out))
     return 0
 
 
@@ -696,6 +717,50 @@ def build_parser() -> argparse.ArgumentParser:
     ownership_parser.add_argument("segment_id")
     ownership_parser.add_argument("files", nargs="+")
     ownership_parser.set_defaults(func=cmd_check_ownership)
+
+    audit_receipt_parser = subparsers.add_parser(
+        "audit-receipt",
+        help="Write an audit receipt deterministically from the on-disk report",
+    )
+    audit_receipt_parser.add_argument("task_dir")
+    audit_receipt_parser.add_argument("auditor_name")
+    audit_receipt_parser.add_argument(
+        "--model",
+        default=None,
+        help="Model identifier used by the auditor (optional).",
+    )
+    audit_receipt_parser.add_argument(
+        "--report-path",
+        default=None,
+        help="Path to the audit report JSON. When present, counts are derived from it.",
+    )
+    audit_receipt_parser.add_argument(
+        "--tokens-used",
+        type=int,
+        default=0,
+        help="Tokens consumed by the auditor run.",
+    )
+    audit_receipt_parser.add_argument(
+        "--route-mode",
+        required=True,
+        help="Routing mode from audit-routing (generic, learned, replace, alongside).",
+    )
+    audit_receipt_parser.add_argument(
+        "--agent-path",
+        default=None,
+        help="Learned agent path from audit-routing, or null/omitted for generic.",
+    )
+    audit_receipt_parser.add_argument(
+        "--injected-agent-sha256",
+        default=None,
+        help="Injected auditor prompt sidecar digest when non-generic.",
+    )
+    audit_receipt_parser.add_argument(
+        "--ensemble-context",
+        action="store_true",
+        help="Mark this receipt as part of ensemble voting/escalation.",
+    )
+    audit_receipt_parser.set_defaults(func=cmd_audit_receipt)
 
     rp_parser = subparsers.add_parser("repair-plan", help="Q-learning repair plan (reads findings from stdin)")
     rp_parser.add_argument("--root", default=".")
