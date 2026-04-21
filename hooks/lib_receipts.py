@@ -693,6 +693,7 @@ def receipt_spec_validated(task_dir: Path, **_legacy: Any) -> Path:
 def receipt_plan_validated(
     task_dir: Path,
     validation_passed_override: bool | None = None,
+    run_gap: bool = True,
     **_legacy: Any,
 ) -> Path:
     """Write receipt proving plan + execution graph passed validation.
@@ -726,7 +727,7 @@ def receipt_plan_validated(
     # call time keeps the module-load graph acyclic.
     from lib_validate import validate_task_artifacts  # noqa: PLC0415
 
-    errors = validate_task_artifacts(task_dir)
+    errors = validate_task_artifacts(task_dir, run_gap=run_gap)
     computed_passed = not errors
 
     # Honour the test override only when the env knob is explicitly set.

@@ -557,6 +557,7 @@ def compute_reward(task_dir: Path) -> dict:
     # boundary (compute_reward already imports several helpers lazily).
     from lib_log import log_event
     from lib_receipts import read_receipt
+    from lib_core import collect_retrospectives
 
     # --- 0. AC 16: build the auditor cross-check allowlist ---
     # Load audit-routing receipt and derive the set of auditor names that
@@ -696,6 +697,142 @@ def compute_reward(task_dir: Path) -> dict:
         except (json.JSONDecodeError, OSError):
             pass
 
+    # --- 2b. Route/source metadata + prior streak baselines ---
+    prior_retro: dict | None = None
+    try:
+        retros = [
+            item
+            for item in collect_retrospectives(root)
+            if isinstance(item, dict) and item.get("task_id") != task_id
+        ]
+        if retros:
+            prior_retro = sorted(
+                retros,
+                key=lambda item: str(item.get("task_id", "")),
+            )[-1]
+    except Exception:
+        prior_retro = None
+
+    prior_auditor_streaks = (
+        prior_retro.get("auditor_zero_finding_streaks", {})
+        if isinstance(prior_retro, dict)
+        else {}
+    )
+    if not isinstance(prior_auditor_streaks, dict):
+        prior_auditor_streaks = {}
+    prior_executor_zero = 0
+    if isinstance(prior_retro, dict):
+        try:
+            prior_executor_zero = int(prior_retro.get("executor_zero_repair_streak", 0) or 0)
+        except (TypeError, ValueError):
+            prior_executor_zero = 0
+
+    def _learned_source_from_path(agent_path: str | None) -> str:
+        if not isinstance(agent_path, str) or not agent_path:
+            return "generic"
+        return f"learned:{Path(agent_path).stem}"
+
+    def _finding_key(finding: dict) -> str | None:
+        if not isinstance(finding, dict):
+            return None
+        file_path = str(finding.get("file", "") or "")
+        line = finding.get("line")
+        line_s = str(line) if line is not None else "?"
+        fid = str(finding.get("id", "") or "")
+        category = fid.split("-")[0] if "-" in fid else fid
+        if not file_path and not category:
+            return None
+        return f"{file_path}:{line_s}:{category}"
+
+    agent_source: dict[str, str] = {}
+    alongside_overlap: dict[str, dict] = {}
+
+    audit_routing = read_receipt(task_dir, "audit-routing")
+    if isinstance(audit_routing, dict):
+        auditors = audit_routing.get("auditors", [])
+        if isinstance(auditors, list):
+            for entry in auditors:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("action") != "spawn":
+                    continue
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                route_mode = str(entry.get("route_mode", "") or "")
+                learned_source = _learned_source_from_path(entry.get("agent_path"))
+                if route_mode == "alongside":
+                    agent_source[name] = "generic"
+                    if learned_source != "generic":
+                        agent_source[f"{name}:learned"] = learned_source
+                    report_path = reports_dir / f"{name}.json"
+                    merged_keys: list[str] = []
+                    if report_path.exists():
+                        try:
+                            report = load_json(report_path)
+                            findings = report.get("findings", []) if isinstance(report, dict) else []
+                            if isinstance(findings, list):
+                                merged_keys = sorted({
+                                    key for finding in findings
+                                    for key in [_finding_key(finding)]
+                                    if key
+                                })
+                        except (json.JSONDecodeError, OSError):
+                            merged_keys = []
+                    alongside_overlap[name] = {
+                        "generic_finding_keys": merged_keys,
+                        "learned_finding_keys": merged_keys,
+                        "learned_is_superset": True,
+                        "alongside_task_count": 2,
+                    }
+                    continue
+                agent_source[name] = "generic" if route_mode == "generic" else learned_source
+
+    executor_routing = read_receipt(task_dir, "executor-routing")
+    if isinstance(executor_routing, dict):
+        segments = executor_routing.get("segments", [])
+        by_executor: dict[str, str] = {}
+        if isinstance(segments, list):
+            for entry in segments:
+                if not isinstance(entry, dict):
+                    continue
+                executor = entry.get("executor")
+                if not isinstance(executor, str) or not executor:
+                    continue
+                route_mode = str(entry.get("route_mode", "") or "")
+                learned_source = _learned_source_from_path(entry.get("agent_path"))
+                candidate = "generic" if route_mode == "generic" else learned_source
+                if route_mode == "alongside":
+                    by_executor[executor] = "generic"
+                    if learned_source != "generic":
+                        by_executor[f"{executor}:learned"] = learned_source
+                    continue
+                if candidate != "generic" or executor not in by_executor:
+                    by_executor[executor] = candidate
+        agent_source.update(by_executor)
+
+    auditor_zero_finding_streaks = {
+        key: int(value)
+        for key, value in prior_auditor_streaks.items()
+        if isinstance(key, str) and isinstance(value, (int, float))
+    }
+    if isinstance(audit_routing, dict):
+        auditors = audit_routing.get("auditors", [])
+        if isinstance(auditors, list):
+            for entry in auditors:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                prior_value = int(auditor_zero_finding_streaks.get(name, 0))
+                if entry.get("action") == "skip":
+                    auditor_zero_finding_streaks[name] = prior_value
+                    continue
+                auditor_zero_finding_streaks[name] = prior_value + 1 if findings_by_auditor.get(name, 0) == 0 else 0
+
+    executor_zero_repair_streak = prior_executor_zero + 1 if not executor_repair_frequency else 0
+
     # --- 3. Spec review iterations ---
     # Count approval receipts (not log lines): matches the current filename
     # `human-approval-SPEC_REVIEW.json` and any future rotation suffix
@@ -798,6 +935,8 @@ def compute_reward(task_dir: Path) -> dict:
             m = info.get("model")
             if m and m not in ("none", "n/a", "", "unknown"):
                 model_used_by_agent[agent] = m
+    if repair_cycle_count > 0 and "repair-coordinator" in token_usage_by_agent:
+        agent_source.setdefault("repair-coordinator", "generic")
 
     # --- 6. Spawn/waste tracking ---
     subagent_spawn_count = 0
@@ -883,6 +1022,8 @@ def compute_reward(task_dir: Path) -> dict:
         "repair_cycle_count": repair_cycle_count,
         "subagent_spawn_count": subagent_spawn_count,
         "wasted_spawns": wasted_spawns,
+        "auditor_zero_finding_streaks": auditor_zero_finding_streaks,
+        "executor_zero_repair_streak": executor_zero_repair_streak,
         "token_usage_by_agent": token_usage_by_agent,
         "total_token_usage": total_token_usage,
         # Alias exposed for self-compute callers (e.g. receipt_retrospective
@@ -895,6 +1036,8 @@ def compute_reward(task_dir: Path) -> dict:
         "output_tokens_by_agent": output_tokens_by_agent,
         "token_usage_by_model": token_usage_by_model,
         "model_used_by_agent": model_used_by_agent,
+        "agent_source": agent_source,
+        "alongside_overlap": alongside_overlap,
         "quality_score": round(quality_score, 4),
         "cost_score": round(cost_score, 4),
         "efficiency_score": round(efficiency_score, 4),

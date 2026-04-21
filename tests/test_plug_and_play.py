@@ -54,6 +54,12 @@ class TestAuditorRegistry:
         registry = _load_auditor_registry(tmp_path)
         assert registry == _DEFAULT_AUDITOR_REGISTRY
 
+    def test_default_registry_omits_dead_code_from_always(self, tmp_path: Path):
+        from router import _load_auditor_registry
+        registry = _load_auditor_registry(tmp_path)
+        assert "dead-code-auditor" not in registry["always"]
+        assert "dead-code-auditor" in registry["domain_conditional"]["backend"]
+
 
 # ---------------------------------------------------------------------------
 # Executor Auto-Discovery

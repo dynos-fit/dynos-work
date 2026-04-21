@@ -94,15 +94,26 @@ def test_start_skill_has_three_planner_inject_prompt_calls(skill_text: str):
 def test_skill_receipt_planner_spawn_calls_include_injected_prompt_sha256(
     skill_text: str,
 ):
-    """Every receipt_planner_spawn(...) block in skills/start/SKILL.md must
-    carry `injected_prompt_sha256=` within the same call."""
+    """skills/start/SKILL.md must preserve planner injection proof.
+
+    Accept either:
+    - direct `receipt_planner_spawn(..., injected_prompt_sha256=...)` calls
+    - deterministic `hooks/ctl.py planner-receipt ... --injected-prompt-sha256`
+    """
     calls = _find_all_rps_calls(skill_text)
-    assert calls, f"no receipt_planner_spawn(...) calls found in {SKILL_PATH}"
-    for idx, args in enumerate(calls):
-        assert "injected_prompt_sha256=" in args, (
-            f"receipt_planner_spawn() call #{idx + 1} in {SKILL_PATH} is "
-            f"missing the injected_prompt_sha256 kwarg. Args block:\n{args}"
-        )
+    if calls:
+        for idx, args in enumerate(calls):
+            assert "injected_prompt_sha256=" in args, (
+                f"receipt_planner_spawn() call #{idx + 1} in {SKILL_PATH} is "
+                f"missing the injected_prompt_sha256 kwarg. Args block:\n{args}"
+            )
+        return
+
+    assert "--injected-prompt-sha256" in skill_text and "planner-receipt" in skill_text, (
+        f"{SKILL_PATH} must document either direct receipt_planner_spawn(..., "
+        "injected_prompt_sha256=...) calls or ctl.py planner-receipt with "
+        "--injected-prompt-sha256"
+    )
 
 
 def test_template_has_three_planner_inject_prompt_calls(template_text: str):

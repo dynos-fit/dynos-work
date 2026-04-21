@@ -22,7 +22,7 @@ DEFAULT_AUDITOR_ROLES = [
     "spec-completion-auditor",
     "code-quality-auditor",
 ]
-SKIP_EXEMPT_AUDITORS = {"security-auditor", "spec-completion-auditor", "code-quality-auditor"}
+SKIP_EXEMPT_AUDITORS = {"security-auditor", "spec-completion-auditor"}
 VALID_MODELS = {"haiku", "sonnet", "opus"}
 from lib_defaults import (
     EMA_ALPHA,

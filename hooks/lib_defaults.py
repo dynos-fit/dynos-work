@@ -15,7 +15,7 @@ from __future__ import annotations
 # Global model default
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL: str = "opus"
+DEFAULT_MODEL: str = "sonnet"
 
 # Git subprocess timeouts (seconds)
 GIT_REVPARSE_TIMEOUT: int = 10

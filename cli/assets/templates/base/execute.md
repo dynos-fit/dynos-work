@@ -36,6 +36,14 @@ Append to log:
 
 ### Step 3 — Execute segments (Optimized Scheduler)
 
+Run deterministic execute setup first:
+
+```text
+python3 hooks/dynosctl.py run-execute-setup .dynos/task-{id}
+```
+
+This command runs execution preflight validation, advances `PRE_EXECUTION_SNAPSHOT -> EXECUTION`, builds the executor plan, and writes the `executor-routing` receipt. Use its JSON output directly.
+
 **Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. However, you MUST still run the router and apply learned agent rules before executing:
 
 1. Run the executor plan router: `python3 "{{HOOKS_PATH}}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
@@ -50,72 +58,29 @@ Skipping the router in inline mode silently ignores learned agents and breaks th
 
 **Normal execution (fast_track is false or >1 segment):**
 
-Update `manifest.json` stage to `EXECUTION` (transition_task auto-writes the `[STAGE] → EXECUTION` log line; the skill does not append it manually). Transition the stage by running:
+`run-execute-setup` already performed deterministic preflight validation and stage advancement. If it failed, repair the plan first; do not patch around a broken plan during execution.
 
-```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} EXECUTION
-```
-
-Read `execution-graph.json`. Before spawning any executor, run deterministic preflight validation:
-
-```text
-python3 hooks/validate_task_artifacts.py .dynos/task-{id}
-```
-
-Then enforce the following checks:
-
-1. `execution-graph.json` must parse as valid JSON.
-2. Every segment ID must be unique.
-3. Every `depends_on` reference must resolve to an existing segment.
-4. The dependency graph must be acyclic.
-5. No file may appear in more than one segment's `files_expected`.
-6. Every `criteria_id` must map to a real acceptance criterion in `spec.md`.
-7. Every acceptance criterion must be covered by at least one segment.
-8. If `.dynos/task-{id}/evidence/tdd-tests.md` exists, the execution graph must still cover every criterion represented by the approved tests.
-
-If any preflight validation fails, stop and return to `/dynos-work:start` or `/dynos-work:plan` to repair the plan artifacts.
-
-After preflight validation, perform the following execution optimizations:
-
-1. **Critical Path Identification:** 
-   - Calculate the "Dependency Depth" for every segment (defined as the maximum number of steps required to reach the end of the graph from that segment).
-   - Segments with the highest depth are on the **Critical Path**. 
-   - **Spawn Priority:** In each parallel batch, prioritize spawning segments with the highest depth first to prevent them from becoming bottlenecks.
-
-2. **Incremental Execution (Incremental Caching):**
-   - For each segment, check if an evidence file already exists at `.dynos/task-{id}/evidence/{segment-id}.md` from a previous run.
-   - If it exists, compare the current `spec.md`, `plan.md`, and the **modified time** of all files in the segment's `files_expected`. 
-   - **Skip Gate:** If the specs haven't changed AND the files haven't been manually edited since the last evidence write, **SKIP the executor spawn** and mark the segment as `CACHED` in the manifest. Reuse the existing evidence.
-   - Append to log: `{timestamp} [CACHE] {segment-id} — skipping (inputs unchanged)`.
-
-3. **Progressive Auditing (Pipelining):**
-   - Do not wait for the entire graph to finish before auditing.
-   - As soon as a segment completes (or is resolved from cache), if it is a high-risk domain (`security`, `db`), immediately spawn its corresponding **Auditor** (following the Skip and Model Policies in `audit` skill) in the background.
-   - Append to log: `{timestamp} [PIPE] {auditor-name} — background audit triggered for {segment-id}`.
-
-**Deterministic routing (MANDATORY):** Before spawning any executor, run the router to get a structured spawn plan:
+Immediately compute the authoritative execution schedule:
 
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
+python3 "{{HOOKS_PATH}}/ctl.py" run-execution-batch-plan .dynos/task-{id}
 ```
 
-This returns a JSON object with model, route mode, and agent path for each segment.
+This command is authoritative for:
+- segment state: `completed | cached | pending`
+- cache eligibility and cache rejection reasons
+- dependency depth / critical path
+- next runnable batch and remaining batches
 
-Log each decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
+Do NOT re-derive dependency depth, cache reuse, or runnable batches in prompt logic. Consume the JSON output and follow it.
 
-**Receipt: executor-routing (MANDATORY):** Immediately after building the executor plan, write the routing receipt:
+If `cached_segments` is non-empty, treat those segments as already satisfied and reuse their evidence files. Append to log: `{timestamp} [CACHE] {segment-id} — skipping (inputs unchanged)`.
 
-```bash
-python3 -c "
-from pathlib import Path
-from dynoslib_receipts import receipt_executor_routing
-import json
-plan = json.loads('''${EXECUTOR_PLAN_JSON}''')
-receipt_executor_routing(Path('.dynos/task-{id}'), plan['segments'])
-"
-```
+If `next_batch` is empty while `pending_segments` is non-empty, stop and fail the task as blocked. That means dependency resolution or receipt state is inconsistent; do not guess.
 
-This receipt is required by `transition_task()` before the task can reach CHECKPOINT_AUDIT. If you skip it, the audit transition will be blocked.
+Progressive auditing remains allowed, but only after a segment is deterministically known complete or cached.
+
+**Deterministic routing (MANDATORY):** Use the `segments` payload returned by `run-execute-setup` as the authoritative executor plan. Do not rebuild routing in prompt logic. The `executor-routing` receipt has already been written.
 
 Do NOT read dynos_patterns.md tables manually. The router handles model policy, agent routing, and security floors deterministically.
 
@@ -149,7 +114,7 @@ If `inject-prompt` is not available (command not found), fall back to manually r
 
 **TDD-First Awareness:** Check if `.dynos/task-{id}/evidence/tdd-tests.md` exists. If it does, include this instruction in the base prompt (before piping through inject-prompt): "A TDD test suite has already been committed. Your implementation must make those tests pass. Do NOT write new tests or modify existing test files."
 
-Spawn the prioritized batch of non-cached executor agents in parallel.
+Spawn the `next_batch` executor agents in parallel.
 
 Executor agents by type:
 - `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`.
@@ -162,23 +127,25 @@ The base prompt for each executor (before inject-prompt) must include:
 
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 
-**Receipt: executor-{seg-id} (MANDATORY):** After each executor completes, write its receipt. Pass the `injected_prompt_sha256` you captured from the sidecar above. The legacy boolean kwarg has been removed; the writer now derives generic vs learned from `bool(agent_name)`:
+**Segment finalization (MANDATORY):** After each executor completes, finalize the segment through ctl instead of hand-writing receipt / ownership / manifest logic:
 
-```python
-from dynoslib_receipts import receipt_executor_done
-receipt_executor_done(
-    task_dir=Path(".dynos/task-{id}"),
-    segment_id="{seg-id}",
-    executor_type="{executor from plan}",
-    model_used="{model from plan or null}",
-    agent_name="{agent_name from plan or None}",
-    evidence_path=".dynos/task-{id}/evidence/{seg-id}.md",
-    tokens_used={total_tokens from Agent result or None},
-    injected_prompt_sha256="{INJECTED_PROMPT_SHA256 captured from sidecar}",
-)
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-execution-segment-done \
+  .dynos/task-{id} \
+  "{seg-id}" \
+  --injected-prompt-sha256 "{INJECTED_PROMPT_SHA256 captured from sidecar}" \
+  --model "{model from plan or null}" \
+  --agent-name "{agent_name from plan or None}" \
+  --executor-type "{executor from plan}" \
+  --evidence-path ".dynos/task-{id}/evidence/{seg-id}.md" \
+  --tokens-used {total_tokens from Agent result or None}
 ```
 
-This proves the segment completed with the correct routing AND that the bytes the executor saw are the same bytes the orchestrator hashed. The writer asserts the sidecar at `receipts/_injected-prompts/{seg-id}.sha256` exists and matches; on mismatch it raises `ValueError`. The receipt is checked by `validate-receipts`.
+This command deterministically:
+- verifies segment ownership against `execution-graph.json`
+- verifies the evidence file exists
+- writes `receipt_executor_done(...)`
+- updates `manifest.json.execution_progress` from deterministic execution state
 
 After each batch (or cached resolution) completes, record events and verify:
 
@@ -223,11 +190,9 @@ After each batch (or cached resolution) completes, record events and verify:
     --type deterministic \
     --detail "Router: {executor}={model} route={route_mode}"
   ```
-- Deterministically verify that only files from the segment's `files_expected` were modified. If available in this repo, use `python3 hooks/dynosctl.py check-ownership .dynos/task-{id} {segment-id} {files...}`. If extra files changed, fail the segment and route it to repair instead of accepting the evidence.
-- Deterministically verify that the segment wrote its evidence file.
-- Update `manifest.json` execution_progress.
+- Use `run-execution-segment-done` as the authoritative completion gate.
 - Append to log: `{timestamp} [DONE] {segment-id} — complete`.
-- Find next unblocked batch (ordered by Depth) and spawn.
+- Re-run `run-execution-batch-plan` to get the next authoritative batch.
 
 **For inline fast-track execution** (no subagent spawn), record with `--type inline`:
 ```bash
@@ -246,20 +211,15 @@ PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tok
 
 **Test execution** (Step 4): Record test runner events with `--phase execution --stage TEST_EXECUTION`.
 
-Repeat until all segments have evidence files.
+When `run-execution-batch-plan` reports no pending segments, advance through ctl:
 
-Append to log:
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-execution-finish .dynos/task-{id}
 ```
-{timestamp} [ADVANCE] EXECUTION → TEST_EXECUTION
-```
+
+This command refuses the transition if any segment is still pending. Do not manually decide that execution is complete.
 
 ### Step 4 — Run tests
-
-Update `manifest.json` stage to `TEST_EXECUTION` (transition_task auto-writes the `[STAGE] → TEST_EXECUTION` log line). Transition the stage by running:
-
-```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} TEST_EXECUTION
-```
 
 Read `plan.md` Test Strategy. Run the specified tests. Use incremental testing if the framework supports it (e.g. `jest --onlyChanged`).
 

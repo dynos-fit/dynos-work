@@ -134,14 +134,6 @@ _KEY_ROLES = [
     "spec-completion-auditor",
 ]
 
-_AUDITORS = [
-    "spec-completion-auditor",
-    "security-auditor",
-    "code-quality-auditor",
-    "dead-code-auditor",
-]
-
-
 def _build_policy_packet(root: Path, task_id: str) -> dict:
     """Build the complete policy packet for a task."""
     task_dir = root / ".dynos" / task_id
@@ -193,9 +185,23 @@ def _build_policy_packet(root: Path, task_id: str) -> dict:
         decision = resolve_model(root, role, task_type, ctx=ctx)
         models[role] = {"model": decision.get("model"), "source": decision.get("source", "default")}
 
-    # Skip decisions
+    # Audit plan
+    audit_plan = build_audit_plan(root, task_type, domains, fast_track=fast_track, ctx=ctx)
+
+    # Skip decisions — only compute for auditors the task is actually eligible to
+    # consider. This avoids broad policy-packet work for irrelevant auditors.
     skip_decisions: dict[str, dict] = {}
-    for auditor in _AUDITORS:
+    for auditor_entry in audit_plan.get("auditors", []):
+        auditor = auditor_entry.get("name")
+        if not isinstance(auditor, str) or not auditor:
+            continue
+        if auditor_entry.get("action") == "skip":
+            skip_decisions[auditor] = {
+                "skip": True,
+                "reason": auditor_entry.get("reason", ""),
+                "source": "learned_history" if auditor_entry.get("streak", 0) > 0 else "default",
+            }
+            continue
         decision = resolve_skip(root, auditor, task_type, ctx=ctx)
         skip_decisions[auditor] = {
             "skip": decision.get("skip", False),
@@ -218,9 +224,6 @@ def _build_policy_packet(root: Path, task_id: str) -> dict:
             "agent_path": decision.get("agent_path"),
             "source": decision.get("source", "default"),
         }
-
-    # Audit plan
-    audit_plan = build_audit_plan(root, task_type, domains, fast_track=fast_track, ctx=ctx)
 
     # Prevention rules
     prevention_rules = load_prevention_rules(root)

@@ -14,7 +14,7 @@ Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 After finding the active task, validate that all required inputs from the execute skill are present:
 
 ```text
-python3 hooks/dynosctl.py validate-contract --skill audit --task-dir .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" validate-contract --skill audit --task-dir .dynos/task-{id}
 ```
 
 If validation fails with missing required inputs (evidence files, snapshot SHA), print the errors and stop.
@@ -25,25 +25,17 @@ Find the most recent active task in `.dynos/`. Read `manifest.json`.
 
 Verify stage is `CHECKPOINT_AUDIT`. If not, print the current stage and what command to run instead.
 
-### Step 2 — Diff scope
+### Step 2 — Audit Setup
 
-Run `git diff --name-only {snapshot.head_sha}` to get all files changed by this task. Pass this list to every auditor. Auditors only inspect these files.
+Build the deterministic audit setup first:
 
-If no snapshot exists (standalone audit), use `git diff --name-only HEAD`.
-
-### Step 3 — Audit (conditional auditor spawning with skip optimization)
-
-Update `manifest.json` stage to `CHECKPOINT_AUDIT`.
-
-**Determine which auditors to spawn (DETERMINISTIC ROUTER):**
-
-Read `manifest.json` for `classification` and `fast_track`. Then run the deterministic router:
-
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynorouter.py" audit-plan --root . --task-type {task_type} --domains {comma-separated-domains} [--fast-track]
+```text
+python3 "{{HOOKS_PATH}}/ctl.py" run-audit-setup .dynos/task-{id}
 ```
 
-This returns a JSON plan with each auditor's action (spawn/skip), model, and route mode. **Use this plan directly.** Do not re-derive model, skip, or routing decisions from markdown tables.
+This command reads `manifest.json`, derives the audit plan, writes `.dynos/task-{id}/audit-plan.json`, and computes diff scope from `snapshot.head_sha` (or `HEAD` fallback when needed). Use its JSON output directly. Do not hand-derive diff scope, task type, domains, fast-track, skip policy, or model selection in prompt logic.
+
+### Step 3 — Audit (conditional auditor spawning with skip optimization)
 
 For each auditor in the plan:
 - If `action: "skip"`: log `{timestamp} [SKIP] {name} — {reason}` and do not spawn
@@ -67,7 +59,7 @@ After each auditor spawn returns, you MUST write the audit receipt via the deter
 
 ```bash
 INJECTED_AGENT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256)
-python3 hooks/dynosctl.py audit-receipt .dynos/task-{id} {auditor_name} \
+python3 "{{HOOKS_PATH}}/ctl.py" audit-receipt .dynos/task-{id} {auditor_name} \
   --model {model_used} \
   --report-path .dynos/task-{id}/audit-reports/{report_filename}.json \
   --tokens-used {tokens_used} \
@@ -76,7 +68,7 @@ python3 hooks/dynosctl.py audit-receipt .dynos/task-{id} {auditor_name} \
   --injected-agent-sha256 "${INJECTED_AGENT_SHA256}"
 ```
 
-`python3 hooks/dynosctl.py audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. The `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
+`python3 "{{HOOKS_PATH}}/ctl.py" audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. The `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
@@ -140,42 +132,56 @@ Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.jso
 - Step 3: Each auditor spawn (type=spawn, phase=audit)
 - Step 4: repair-coordinator spawn (type=spawn, phase=repair)
 - Step 4: Each repair executor spawn (type=spawn, phase=repair, include --segment)
-- Step 4: dynosctl check-ownership after repair (type=deterministic, phase=repair)
+- Step 4: ctl check-ownership after repair (type=deterministic, phase=repair)
 - Step 4: Re-audit spawns (type=spawn, phase=audit, detail="Re-audit after repair cycle N")
 - Step 5: compute_reward / validate_retrospective_scores (type=deterministic, phase=audit, detail="Computed retrospective scores")
 
-**Eager two-phase repair trigger:**
+**Audit repair gate (deterministic):**
 
-Do not wait for all auditors to complete before proceeding. Instead, monitor auditor results as they arrive:
+Decide whether audit proceeds to repair or reflect through ctl:
 
-1. When the first auditor returns with one or more blocking findings, immediately proceed to Step 4 phase 1 repair with those findings. Do not wait for remaining auditors.
-2. **Short-circuit on critical spec failure:** If `spec-completion-auditor` returns findings with severity `critical`, immediately proceed to Step 4 phase 1 repair with those critical findings, even if other auditors have not returned yet. This is a specific instance of the eager repair trigger.
-3. If no auditor returns blocking findings after all auditors complete, append to log and proceed to Step 5:
-   ```
-   {timestamp} [DONE] audit complete — no blocking findings
-   ```
-
-Record which auditors are still running at the time phase 1 repair begins. Their results are **late findings** and feed into phase 2 (see Step 4).
-
-### Step 4 — Two-phase repair loop
-
-This step runs only when blocking findings exist. It uses a two-phase model: phase 1 repairs early findings (from the first auditor(s) to return), phase 2 repairs late findings (from auditors that completed after phase 1 began) plus any new findings from phase 1 re-audit.
-
-**If no blocking findings from any auditor:** skip this step entirely. Proceed to Step 5.
-
-**Phase 1 — Early findings repair:**
-
-Collect all blocking findings available at the time of the eager trigger (Step 3). These are the phase 1 findings.
-
-Update stage to `REPAIR_PLANNING` (transition_task auto-writes the `[STAGE] → REPAIR_PLANNING` log line). Append to log only the REPAIR-P1 line:
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-audit-findings-gate .dynos/task-{id}
 ```
-{timestamp} [REPAIR-P1] {N} findings — {list of finding IDs}
+
+Use the JSON output as authoritative:
+- `status == "repair_required"`: proceed to Step 4
+- `status == "clear"`: skip Step 4 and proceed to Step 5
+
+Do NOT re-count blocking findings, infer critical spec failure, or decide repair-vs-reflect from prompt logic.
+
+### Step 4 — Deterministic repair loop
+
+This step runs only when blocking findings exist.
+
+**If `run-audit-findings-gate` returns `status == "clear"`:** skip this step entirely. Proceed to Step 5.
+
+Build the repair queue through ctl:
+
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-audit-repair-cycle-plan .dynos/task-{id}
+```
+
+Use this JSON output as authoritative:
+- `phase` is the current repair-cycle label (`phase_1`, `phase_2`, or `repair_cycle_N`)
+- `repair_cycle` is the exact cycle number the coordinator must write to `repair-log.json`
+- `blocking_findings` is the exact finding set to repair now
+- each finding's `retry_count` is authoritative
+- each finding's optional `model_override` is authoritative
+- `critical_spec_finding_ids` must be repaired first
+- `transitioned_to_repair_planning == true` means ctl already advanced `CHECKPOINT_AUDIT|FINAL_AUDIT -> REPAIR_PLANNING`
+
+Do NOT collect early findings, late findings, queued findings, or increment retry counts in prompt logic.
+
+Append to log:
+```
+{timestamp} [REPAIR] {phase} cycle={repair_cycle} findings={list of finding IDs}
 ```
 
 **Q-learning repair plan (deterministic):** Before spawning the repair coordinator, get executor and model assignments from the Q-learning planner:
 
 ```bash
-echo '{"findings": [{finding objects}]}' | python3 "{{HOOKS_PATH}}/dynosctl.py" repair-plan --root . --task-type {task_type}
+echo '{"findings": [{finding objects}]}' | python3 "{{HOOKS_PATH}}/ctl.py" repair-plan --root . --task-type {task_type}
 ```
 
 If the response has `"source": "q-learning"`, pass the assignments to the repair coordinator as constraints: "Use these executor and model assignments for the listed findings." The coordinator still decides batch ordering, instructions, and file lists — but executor and model choices come from the Q-table.
@@ -184,120 +190,98 @@ If `"source": "default"` (Q-learning disabled), the repair coordinator uses its 
 
 Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
 
-Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
+Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports plus the deterministic repair-cycle payload. Produce a repair plan for exactly those findings. Preserve each finding's provided `retry_count`, `repair_cycle`, and any `model_override`. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
 
-Wait for completion. Update stage to `REPAIR_EXECUTION` (transition_task auto-writes the `[STAGE] → REPAIR_EXECUTION` log line — the skill does not manually append it).
+Wait for completion, then finalize repair execution readiness through the control plane:
 
-**Parallel batch spawning:**
-
-Read `repair-log.json` batches. Spawn batches where `parallel: true` concurrently. Batches where `parallel: false` are serialized (wait for preceding batches with shared files to complete first).
-
-Append to log when spawning parallel batches:
+```text
+python3 "{{HOOKS_PATH}}/ctl.py" run-repair-execution-ready .dynos/task-{id}
 ```
-{timestamp} [SPAWN] repair batch-1, batch-3 in parallel
-{timestamp} [SPAWN] repair batch-2 — waiting, shares files with batch-1
+
+This command validates `repair-log.json` and advances `REPAIR_PLANNING -> REPAIR_EXECUTION`.
+
+Build the repair execution groups through ctl:
+
+```text
+python3 "{{HOOKS_PATH}}/ctl.py" run-repair-batch-plan .dynos/task-{id}
 ```
+
+Use this JSON output as authoritative:
+- `execution_groups` is the exact execution order
+- groups with `parallel == true` may be spawned concurrently
+- groups with `parallel == false` must be serialized
+- `model_overrides` inside each batch are authoritative
+
+Do NOT infer parallelism, shared-file conflicts, or execution order from prompt logic.
 
 For each batch, spawn executor agents as assigned in `repair-log.json`:
 - `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`
 
-**Model escalation:** For findings with `retry_count >= 2`, spawn with `model_override: "opus"`. Log: `{timestamp} [ESCALATE] finding {finding-id} retry {N} -> opus`.
+**Model escalation:** Use the `model_override` values returned by `run-repair-batch-plan` / `repair-log.json`. Do NOT recompute escalation from prose rules.
 
 Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
 
 After all batches complete, append to log:
 ```
-{timestamp} [DONE] repair-execution-p1 — all phase 1 fixes applied
+{timestamp} [DONE] repair-execution-{phase} — all fixes applied
 ```
 
-**Late-finding conflict resolution:** All findings from auditors that complete while phase 1 is running are queued for phase 2, regardless of file overlap.
-
-**Q-learning update (after phase 1 repair):** After executors complete but before re-audit, build outcomes from the repair results and update Q-tables:
+**Q-learning update (after repair execution):** After executors complete but before re-audit, build outcomes from the repair results and update Q-tables:
 
 ```bash
-echo '{"outcomes": [{outcome objects}]}' | python3 "{{HOOKS_PATH}}/dynosctl.py" repair-update --root . --task-type {task_type}
+echo '{"outcomes": [{outcome objects}]}' | python3 "{{HOOKS_PATH}}/ctl.py" repair-update --root . --task-type {task_type}
 ```
 
 Each outcome includes: finding_id, state (from repair-plan), executor, model, resolved (from re-audit), new_findings count, tokens_used. Set `next_state` to the encoded state for the next retry cycle if unresolved, or `null` if resolved/terminal.
 
 This is a no-op if Q-learning is disabled. Log: `{timestamp} [Q-UPDATE] {N} outcomes, avg reward={avg}`
 
-**Phase 1 re-audit (domain-aware, incremental scope):** Compute the repair-modified file list by unioning `repair-log.json` task file lists with `git diff --name-only` against the pre-repair commit. Scope re-audit to only these files (not the full Step 2 diff). Exception: `spec-completion-auditor` always gets the original full diff scope. All re-audit auditors receive previous reports for context. Spawn only: `spec-completion-auditor` (full scope), `security-auditor` (repair files), and auditors whose findings appear in this phase's repair-log (repair files). Skip domain-unrelated auditors. New findings from re-audit are added to the phase 2 queue.
+**Phase 1 re-audit (domain-aware, incremental scope):** Build the re-audit plan through ctl:
 
-**Phase 2 — Late findings and re-audit findings repair:**
-
-Collect all queued findings: late auditor findings plus any new findings from phase 1 re-audit. If no queued findings exist, skip phase 2.
-
-If queued findings exist, append to log:
-```
-{timestamp} [REPAIR-P2] {N} findings — {list of finding IDs}
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-audit-reaudit-plan .dynos/task-{id}
 ```
 
-Spawn `repair-coordinator` with the phase 2 findings. The coordinator writes to `repair-log.json` with an incremented `repair_cycle` value (phase 2 overwrites with the new cycle).
+Use its JSON output as authoritative:
+- `modified_files` is the scoped re-audit file set
+- `auditors_to_spawn` is the exact auditor list
+- `full_scope_auditors` always receive the original broad scope
+- `scoped_auditors` receive only `modified_files`
 
-Apply the same parallel batch spawning and model escalation logic as phase 1.
+Do NOT hand-compute repair-modified files or choose the re-audit auditor set in prompt logic.
 
-**Retry count continuity:** Retry counts are continuous across phases. A finding first repaired in phase 1 at retry 1 and re-found in phase 2 is at retry 2, not retry 0. The `max_retries` limit (3) applies across both phases combined for a given finding.
+After re-audit, run `run-audit-findings-gate` again.
 
-After phase 2 repairs complete, run a phase 2 re-audit using the same domain-aware incremental scope logic as phase 1 re-audit (scoped to phase 2 repair-modified files).
+- If `status == "clear"`: proceed to Step 5.
+- If `status == "repair_required"`: let the control plane decide whether another repair cycle is legal:
 
-- If all clear after phase 2 re-audit: append `{timestamp} [DONE] repair-execution-p2 — all phase 2 fixes applied` to log. Proceed to Step 5.
-- If new findings remain: increment `retry_count` for each finding. If any finding has exceeded 3 retries, set stage to `FAILED`, append `[FAILED] max retries exceeded for: {finding-ids}`, and stop. Otherwise loop back into another repair cycle (continuing phase 2).
+  ```text
+  python3 "{{HOOKS_PATH}}/ctl.py" run-repair-retry .dynos/task-{id}
+  ```
 
-**Degenerate cases:** If no late auditors exist, phase 2 only contains re-audit findings (skip if none). If no blocking findings from any auditor, both phases are skipped entirely.
+  If it returns `repair_retry_ready`, re-run `run-audit-repair-cycle-plan` and continue. If it returns `escalation_required`, write `escalation.md`, transition to `FAILED`, and stop.
 
 ### Step 5 — Gate to DONE
 
-Read all audit reports. Write `audit-summary.json`.
+Write the deterministic audit summary:
+
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-audit-summary .dynos/task-{id}
+```
+
+This command writes `audit-summary.json` from the on-disk audit reports. Do not aggregate counts by hand.
 
 **Reflect (deterministic reward computation):**
 
-Before writing `completion.json`, generate `task-retrospective.json` using the deterministic reward calculator:
+Generate the retrospective through the control plane:
 
-```bash
-python3 "{{HOOKS_PATH}}/dynosctl.py" compute-reward .dynos/task-{id} --write
+```text
+python3 "{{HOOKS_PATH}}/ctl.py" run-audit-reflect .dynos/task-{id}
 ```
 
-This reads audit reports, repair-log, token-usage, execution-log, and manifest, then computes quality_score, cost_score, and efficiency_score deterministically. The model does NOT compute these scores — the Python runtime does.
+This command computes `task-retrospective.json` and writes the `retrospective` receipt deterministically.
 
-After the command writes the retrospective, the model adds the following fields that require model judgment (not arithmetic):
-   - `model_used_by_agent`: map agent name to actual model used at spawn time (null if unavailable).
-   - `agent_source`: map agent name to routing source: `"generic"`, `"learned:{prompt-name}"`, or for alongside mode both `"{name}": "generic"` and `"{name}:learned": "learned:{prompt-name}"`.
-   - `alongside_overlap`: for alongside-mode auditors, compare generic vs learned finding sets using dedup keys `{file}:{line}:{category}`. Record per-auditor: `generic_finding_keys`, `learned_finding_keys`, `learned_is_superset` (boolean), `alongside_task_count`. Empty `{}` if no alongside auditors ran.
-   - `auditor_zero_finding_streaks`: per-auditor streaks from prior retrospective. Spawned + zero findings = increment; spawned + findings = reset to 0; skipped = carry forward.
-   - `executor_zero_repair_streak`: consecutive most-recent executor segments with zero repair tasks.
-
-Read the written `task-retrospective.json`, merge these fields into it, and write it back.
-10. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
-
-```json
-{
-  "task_id": "task-{id}",
-  "task_outcome": "DONE",
-  "task_type": "feature",
-  "task_domains": "ui,backend",
-  "task_risk_level": "medium",
-  "findings_by_auditor": { "security-auditor": 2, "code-quality-auditor": 1 },
-  "findings_by_category": { "sec": 2, "cq": 1 },
-  "executor_repair_frequency": { "backend-executor": 2 },
-  "spec_review_iterations": 1,
-  "repair_cycle_count": 0,
-  "subagent_spawn_count": 12,
-  "wasted_spawns": 2,
-  "auditor_zero_finding_streaks": { "security-auditor": 0, "spec-completion-auditor": 1, "code-quality-auditor": 3, "dead-code-auditor": 5, "ui-auditor": 2 },
-  "executor_zero_repair_streak": 3,
-  "token_usage_by_agent": { "security-auditor": 45000, "code-quality-auditor": 38000, "spec-completion-auditor": 52000, "repair-coordinator": 15000, "backend-executor": 62000 },
-  "total_token_usage": 212000,
-  "model_used_by_agent": { "security-auditor": "opus", "code-quality-auditor": "sonnet", "spec-completion-auditor": "sonnet", "repair-coordinator": "sonnet", "backend-executor": "opus" },
-  "agent_source": { "security-auditor": "generic", "code-quality-auditor": "learned:cq-v2", "code-quality-auditor:learned": "learned:cq-v2", "spec-completion-auditor": "generic" },
-  "alongside_overlap": { "code-quality-auditor": { "generic_finding_keys": ["src/main.ts:10:cq"], "learned_finding_keys": ["src/main.ts:10:cq", "src/util.ts:3:cq"], "learned_is_superset": true, "alongside_task_count": 2 } },
-  "quality_score": 0.67,
-  "cost_score": 0.79,
-  "efficiency_score": 1.0
-}
-```
-
-If no audit reports or repair logs exist, write the same structure with zeroed-out counts (empty objects `{}`, zeros, and `1.0` for scores). Old retrospectives missing newer fields (`token_usage_by_agent`, `total_token_usage`, `model_used_by_agent`, `agent_source`, `alongside_overlap`, `quality_score`, `cost_score`, `efficiency_score`) are treated as `null`, not errors.
+The written retrospective is complete. Do NOT reopen it to patch `model_used_by_agent`, `agent_source`, `alongside_overlap`, `auditor_zero_finding_streaks`, or `executor_zero_repair_streak` from prompt logic.
 
 Append to log:
 ```

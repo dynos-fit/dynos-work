@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
-
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "hooks"))
 
 
 def _setup_task_dir(tmp_path: Path) -> Path:
@@ -91,12 +93,16 @@ def _setup_task_dir(tmp_path: Path) -> Path:
     return task_dir
 
 
-def _run_ctl(*args: str) -> subprocess.CompletedProcess[str]:
+def _run_ctl(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    merged_env = os.environ.copy()
+    if env:
+        merged_env.update(env)
     return subprocess.run(
         ["python3", str(ROOT / "hooks" / "ctl.py"), *args],
         cwd=ROOT,
         text=True,
         capture_output=True,
+        env=merged_env,
         check=False,
     )
 
@@ -196,3 +202,990 @@ def test_audit_receipt_missing_report_fails_without_manual_counts(tmp_path) -> N
     )
     assert result.returncode == 1
     assert "cannot derive finding_count/blocking_count automatically" in result.stderr
+
+
+def test_run_planning_validates_receipts_and_transitions(tmp_path) -> None:
+    from lib_receipts import receipt_planner_spawn
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "PLANNING"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    sidecar_dir = task_dir / "receipts" / "_injected-planner-prompts"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    digest = "a" * 64
+    (sidecar_dir / "plan.sha256").write_text(digest)
+    receipt_planner_spawn(
+        task_dir,
+        "plan",
+        tokens_used=10,
+        injected_prompt_sha256=digest,
+    )
+
+    result = _run_ctl("run-planning", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "plan_review_ready"
+    assert payload["next_action"] == "human_plan_review"
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "PLAN_REVIEW"
+    assert (task_dir / "receipts" / "plan-validated.json").exists()
+
+
+def test_run_plan_audit_low_risk_skips_llm(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    result = _run_ctl("run-plan-audit", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "passed"
+    assert payload["mode"] == "deterministic_only"
+    assert payload["llm_audit_required"] is False
+
+
+def test_run_plan_audit_high_risk_requires_report_then_passes(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["classification"]["risk_level"] = "high"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    needs_audit = _run_ctl("run-plan-audit", str(task_dir))
+    assert needs_audit.returncode == 0, needs_audit.stdout + needs_audit.stderr
+    pending = json.loads(needs_audit.stdout)
+    assert pending["status"] == "llm_audit_required"
+    assert pending["llm_audit_required"] is True
+
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    report = audit_dir / "plan-audit.json"
+    report.write_text(json.dumps({"findings": []}))
+
+    result = _run_ctl(
+        "run-plan-audit",
+        str(task_dir),
+        "--report-path",
+        str(report),
+        "--tokens-used",
+        "25",
+        "--model",
+        "sonnet",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "passed"
+    assert payload["finding_count"] == 0
+    assert (task_dir / "receipts" / "plan-audit-check.json").exists()
+
+
+def test_run_start_classification_applies_fast_track_and_transitions(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "FOUNDRY_INITIALIZED"
+    manifest["classification"]["risk_level"] = "low"
+    manifest["classification"]["domains"] = ["backend"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("run-start-classification", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "spec_normalization_ready"
+    assert payload["fast_track"] is True
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "SPEC_NORMALIZATION"
+    assert manifest["fast_track"] is True
+    assert manifest["classification"]["tdd_required"] is False
+
+
+def test_run_spec_ready_writes_receipt_and_transitions(tmp_path) -> None:
+    from lib_receipts import receipt_planner_spawn
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "SPEC_NORMALIZATION"
+    manifest.pop("fast_track", None)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    sidecar_dir = task_dir / "receipts" / "_injected-planner-prompts"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    digest = "b" * 64
+    (sidecar_dir / "spec.sha256").write_text(digest)
+    receipt_planner_spawn(
+        task_dir,
+        "spec",
+        tokens_used=10,
+        injected_prompt_sha256=digest,
+    )
+
+    result = _run_ctl("run-spec-ready", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "spec_review_ready"
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "SPEC_REVIEW"
+    assert (task_dir / "receipts" / "spec-validated.json").exists()
+
+
+def test_run_planning_mode_standard_vs_hierarchical_and_fast_track(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+
+    standard = _run_ctl("run-planning-mode", str(task_dir))
+    assert standard.returncode == 0, standard.stdout + standard.stderr
+    payload = json.loads(standard.stdout)
+    assert payload["planning_mode"] == "standard"
+    assert payload["criteria_count"] == 2
+
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["classification"]["risk_level"] = "high"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    hierarchical = _run_ctl("run-planning-mode", str(task_dir))
+    payload = json.loads(hierarchical.stdout)
+    assert payload["planning_mode"] == "hierarchical"
+
+    manifest["fast_track"] = True
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    fast_track = _run_ctl("run-planning-mode", str(task_dir))
+    payload = json.loads(fast_track.stdout)
+    assert payload["planning_mode"] == "fast_track_combined"
+
+
+def test_run_audit_setup_writes_audit_plan(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "CHECKPOINT_AUDIT"
+    manifest["fast_track"] = False
+    manifest["snapshot"] = {"head_sha": "abc123"}
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("run-audit-setup", str(task_dir), env={"HOME": str(tmp_path)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "audit_setup_ready"
+    assert Path(payload["audit_plan_path"]).exists()
+    assert payload["task_type"] == "feature"
+    assert isinstance(payload["spawn_auditors"], list)
+
+
+def test_run_execute_setup_writes_routing_and_transitions(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "PRE_EXECUTION_SNAPSHOT"
+    manifest["fast_track"] = False
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        from lib_receipts import receipt_plan_validated
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    result = _run_ctl("run-execute-setup", str(task_dir), env={"HOME": str(tmp_path)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "execution_ready"
+    assert payload["stage"] == "EXECUTION"
+    assert Path(payload["receipt_path"]).exists()
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "EXECUTION"
+    assert (task_dir / "receipts" / "executor-routing.json").exists()
+
+
+def test_run_audit_findings_gate_detects_repair_and_critical_spec_failure(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "spec-completion-auditor.json").write_text(json.dumps({
+        "auditor_name": "spec-completion-auditor",
+        "findings": [
+            {"id": "SPEC-1", "blocking": True, "severity": "critical"},
+            {"id": "SPEC-2", "blocking": False, "severity": "medium"},
+        ],
+    }))
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [
+            {"id": "SEC-1", "blocking": True, "severity": "high"},
+        ],
+    }))
+
+    result = _run_ctl("run-audit-findings-gate", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "repair_required"
+    assert payload["critical_spec_failure"] is True
+    assert payload["next_action"] == "repair_phase_1"
+    assert sorted(payload["blocking_finding_ids"]) == ["SEC-1", "SPEC-1"]
+
+
+def test_run_audit_findings_gate_clear_when_no_blocking(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "code-quality-auditor.json").write_text(json.dumps({
+        "auditor_name": "code-quality-auditor",
+        "findings": [
+            {"id": "CQ-1", "blocking": False, "severity": "medium"},
+        ],
+    }))
+
+    result = _run_ctl("run-audit-findings-gate", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "clear"
+    assert payload["critical_spec_failure"] is False
+    assert payload["next_action"] == "reflect"
+    assert payload["blocking_finding_ids"] == []
+
+
+def test_run_audit_repair_cycle_plan_phase_1_transitions_and_prioritizes_critical_spec(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "CHECKPOINT_AUDIT"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "spec-completion-auditor.json").write_text(json.dumps({
+        "auditor_name": "spec-completion-auditor",
+        "findings": [{"id": "SPEC-1", "blocking": True, "severity": "critical"}],
+    }) + "\n")
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [{"id": "SEC-1", "blocking": True, "severity": "high"}],
+    }) + "\n")
+
+    result = _run_ctl("run-audit-repair-cycle-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "repair_cycle_ready"
+    assert payload["stage"] == "REPAIR_PLANNING"
+    assert payload["transitioned_to_repair_planning"] is True
+    assert payload["repair_cycle"] == 1
+    assert payload["phase"] == "phase_1"
+    assert payload["critical_spec_finding_ids"] == ["SPEC-1"]
+    assert payload["blocking_finding_ids"] == ["SPEC-1", "SEC-1"]
+    assert payload["blocking_findings"][0]["retry_count"] == 0
+
+
+def test_run_audit_repair_cycle_plan_phase_2_carries_retry_counts(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "REPAIR_PLANNING"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [
+            {"id": "SEC-1", "blocking": True, "severity": "high"},
+            {"id": "SEC-2", "blocking": True, "severity": "medium"},
+        ],
+    }) + "\n")
+    (task_dir / "repair-log.json").write_text(json.dumps({
+        "repair_cycle": 1,
+        "batches": [
+            {
+                "batch_id": "batch-1",
+                "tasks": [
+                    {
+                        "finding_id": "SEC-1",
+                        "assigned_executor": "backend-executor",
+                        "files_to_modify": ["src/a.py"],
+                        "retry_count": 1,
+                    }
+                ],
+            }
+        ],
+    }) + "\n")
+
+    result = _run_ctl("run-audit-repair-cycle-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "repair_cycle_ready"
+    assert payload["repair_cycle"] == 2
+    assert payload["phase"] == "phase_2"
+    findings_by_id = {entry["id"]: entry for entry in payload["blocking_findings"]}
+    assert findings_by_id["SEC-1"]["retry_count"] == 2
+    assert findings_by_id["SEC-1"]["model_override"] == "opus"
+    assert findings_by_id["SEC-2"]["retry_count"] == 0
+
+
+def test_run_audit_repair_cycle_plan_clear_when_no_blocking(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "CHECKPOINT_AUDIT"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [{"id": "SEC-1", "blocking": False, "severity": "low"}],
+    }) + "\n")
+
+    result = _run_ctl("run-audit-repair-cycle-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "clear"
+    assert payload["phase"] is None
+    assert payload["blocking_findings"] == []
+
+
+def test_run_audit_reaudit_plan_uses_repair_log_and_matching_auditors(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["snapshot"] = {"head_sha": "abc123"}
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (task_dir / "repair-log.json").write_text(json.dumps({
+        "repair_cycle": 2,
+        "batches": [
+            {
+                "batch_id": "batch-1",
+                "tasks": [
+                    {
+                        "finding_id": "SEC-1",
+                        "assigned_executor": "backend-executor",
+                        "files_to_modify": ["src/a.py"],
+                        "retry_count": 1,
+                    }
+                ],
+            }
+        ],
+    }) + "\n")
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [{"id": "SEC-1", "blocking": True}],
+    }))
+    (audit_dir / "code-quality-auditor.json").write_text(json.dumps({
+        "auditor_name": "code-quality-auditor",
+        "findings": [{"id": "CQ-1", "blocking": False}],
+    }))
+
+    result = _run_ctl("run-audit-reaudit-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "reaudit_plan_ready"
+    assert payload["repair_cycle"] == 2
+    assert payload["repaired_finding_ids"] == ["SEC-1"]
+    assert "src/a.py" in payload["modified_files"]
+    assert payload["auditors_to_spawn"] == ["spec-completion-auditor", "security-auditor"]
+    assert payload["full_scope_auditors"] == ["spec-completion-auditor"]
+
+
+def test_run_audit_summary_writes_summary_file(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [
+            {"id": "SEC-1", "blocking": True},
+            {"id": "SEC-2", "blocking": False},
+        ],
+    }))
+    (audit_dir / "code-quality-auditor.json").write_text(json.dumps({
+        "auditor_name": "code-quality-auditor",
+        "findings": [
+            {"id": "CQ-1", "blocking": False},
+        ],
+    }))
+
+    result = _run_ctl("run-audit-summary", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "audit_summary_ready"
+    assert payload["total_findings"] == 3
+    assert payload["total_blocking"] == 1
+    assert payload["audit_result"] == "fail"
+    assert Path(payload["summary_path"]).exists()
+
+
+def test_run_execution_batch_plan_marks_cached_segments_and_next_batch(tmp_path) -> None:
+    from lib_receipts import receipt_executor_routing, receipt_plan_validated
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    evidence_dir = task_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "seg-1.md").write_text("seg-1 evidence\n")
+
+    result = _run_ctl("run-execution-batch-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "execution_batch_plan_ready"
+    assert payload["cached_segments"] == ["seg-1"]
+    assert payload["pending_segments"] == ["seg-2"]
+    assert payload["critical_path_segments"] == ["seg-1"]
+    assert [entry["segment_id"] for entry in payload["next_batch"]] == ["seg-2"]
+
+
+def test_run_execution_batch_plan_drift_disables_cache(tmp_path) -> None:
+    from lib_receipts import receipt_executor_routing, receipt_plan_validated
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    evidence_dir = task_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / "seg-1.md").write_text("seg-1 evidence\n")
+    (task_dir / "plan.md").write_text((task_dir / "plan.md").read_text() + "\nDrift.\n")
+
+    result = _run_ctl("run-execution-batch-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    seg1 = next(entry for entry in payload["segments"] if entry["segment_id"] == "seg-1")
+    assert payload["specs_fresh"] is False
+    assert seg1["status"] == "pending"
+    assert "drift" in str(seg1["cache_reason"]).lower()
+    assert [entry["segment_id"] for entry in payload["next_batch"]] == ["seg-1"]
+
+
+def test_run_execution_batch_plan_completed_receipt_beats_cache(tmp_path) -> None:
+    from lib_receipts import receipt_executor_done, receipt_executor_routing, receipt_plan_validated
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    evidence_dir = task_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_dir / "seg-1.md"
+    evidence_path.write_text("seg-1 evidence\n")
+
+    sidecar_dir = task_dir / "receipts" / "_injected-prompts"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    digest = "c" * 64
+    (sidecar_dir / "seg-1.sha256").write_text(digest)
+    receipt_executor_done(
+        task_dir,
+        segment_id="seg-1",
+        executor_type="backend-executor",
+        model_used="sonnet",
+        injected_prompt_sha256=digest,
+        agent_name=None,
+        evidence_path=str(evidence_path),
+        tokens_used=10,
+    )
+
+    result = _run_ctl("run-execution-batch-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["completed_segments"] == ["seg-1"]
+    assert payload["cached_segments"] == []
+    assert [entry["segment_id"] for entry in payload["next_batch"]] == ["seg-2"]
+
+
+def test_run_execution_segment_done_writes_receipt_and_progress(tmp_path) -> None:
+    from lib_receipts import receipt_executor_routing, receipt_plan_validated
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    evidence_dir = task_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_dir / "seg-1.md"
+    evidence_path.write_text("seg-1 evidence\n")
+
+    sidecar_dir = task_dir / "receipts" / "_injected-prompts"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    digest = "d" * 64
+    (sidecar_dir / "seg-1.sha256").write_text(digest)
+
+    result = _run_ctl(
+        "run-execution-segment-done",
+        str(task_dir),
+        "seg-1",
+        "--injected-prompt-sha256",
+        digest,
+        "--model",
+        "sonnet",
+        "--tokens-used",
+        "12",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "segment_finalized"
+    assert Path(payload["receipt_path"]).exists()
+    assert payload["execution_progress"]["completed_segments"] == ["seg-1"]
+    assert payload["execution_progress"]["next_batch"] == ["seg-2"]
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["execution_progress"]["completed_segments"] == ["seg-1"]
+
+
+def test_run_execution_segment_done_rejects_ownership_violation(tmp_path) -> None:
+    from lib_receipts import receipt_executor_routing, receipt_plan_validated
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    evidence_dir = task_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = evidence_dir / "seg-1.md"
+    evidence_path.write_text("seg-1 evidence\n")
+
+    sidecar_dir = task_dir / "receipts" / "_injected-prompts"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    digest = "e" * 64
+    (sidecar_dir / "seg-1.sha256").write_text(digest)
+
+    result = _run_ctl(
+        "run-execution-segment-done",
+        str(task_dir),
+        "seg-1",
+        "--injected-prompt-sha256",
+        digest,
+        "--files",
+        "src/a.py",
+        "src/rogue.py",
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "segment_invalid"
+    assert payload["error"] == "ownership violation"
+    assert "src/rogue.py" in payload["unauthorized_files"]
+
+
+def test_run_execution_finish_transitions_when_no_pending_segments(tmp_path) -> None:
+    from lib_receipts import (
+        receipt_executor_done,
+        receipt_executor_routing,
+        receipt_plan_validated,
+        receipt_rules_check_passed,
+    )
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    evidence_dir = task_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    for seg_id in ("seg-1", "seg-2"):
+        evidence_path = evidence_dir / f"{seg_id}.md"
+        evidence_path.write_text(f"{seg_id} evidence\n")
+        sidecar_dir = task_dir / "receipts" / "_injected-prompts"
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+        digest = ("f" if seg_id == "seg-1" else "a") * 64
+        (sidecar_dir / f"{seg_id}.sha256").write_text(digest)
+        receipt_executor_done(
+            task_dir,
+            segment_id=seg_id,
+            executor_type="backend-executor" if seg_id == "seg-1" else "testing-executor",
+            model_used="sonnet",
+            injected_prompt_sha256=digest,
+            agent_name=None,
+            evidence_path=str(evidence_path),
+            tokens_used=5,
+        )
+    receipt_rules_check_passed(task_dir, "all")
+
+    result = _run_ctl("run-execution-finish", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "test_execution_ready"
+    assert payload["stage"] == "TEST_EXECUTION"
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "TEST_EXECUTION"
+
+
+def test_run_execution_finish_blocks_when_pending_segments_remain(tmp_path) -> None:
+    from lib_receipts import receipt_executor_routing, receipt_plan_validated
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    result = _run_ctl("run-execution-finish", str(task_dir))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["pending_segments"] == ["seg-1", "seg-2"]
+
+
+def test_run_repair_execution_ready_validates_and_transitions(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "REPAIR_PLANNING"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (task_dir / "repair-log.json").write_text(json.dumps({
+        "repair_cycle": 1,
+        "batches": [
+            {
+                "batch_id": "batch-1",
+                "tasks": [
+                    {
+                        "finding_id": "sec-1",
+                        "assigned_executor": "backend-executor",
+                        "files_to_modify": ["src/a.py"],
+                        "retry_count": 0,
+                    }
+                ],
+            }
+        ],
+    }) + "\n")
+
+    result = _run_ctl("run-repair-execution-ready", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "repair_execution_ready"
+    assert payload["stage"] == "REPAIR_EXECUTION"
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "REPAIR_EXECUTION"
+
+
+def test_run_repair_batch_plan_groups_parallel_batches_deterministically(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "REPAIR_EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (task_dir / "repair-log.json").write_text(json.dumps({
+        "repair_cycle": 2,
+        "batches": [
+            {
+                "batch_id": "batch-1",
+                "parallel": True,
+                "tasks": [
+                    {
+                        "finding_id": "sec-1",
+                        "assigned_executor": "backend-executor",
+                        "files_to_modify": ["src/a.py"],
+                        "retry_count": 0,
+                    }
+                ],
+            },
+            {
+                "batch_id": "batch-2",
+                "parallel": True,
+                "tasks": [
+                    {
+                        "finding_id": "cq-1",
+                        "assigned_executor": "testing-executor",
+                        "files_to_modify": ["tests/test_a.py"],
+                        "retry_count": 2,
+                        "model_override": "opus",
+                    }
+                ],
+            },
+            {
+                "batch_id": "batch-3",
+                "parallel": True,
+                "tasks": [
+                    {
+                        "finding_id": "sec-2",
+                        "assigned_executor": "backend-executor",
+                        "files_to_modify": ["src/a.py"],
+                        "retry_count": 0,
+                    }
+                ],
+            },
+        ],
+    }) + "\n")
+
+    result = _run_ctl("run-repair-batch-plan", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "repair_batch_plan_ready"
+    assert payload["repair_cycle"] == 2
+    assert payload["next_group"] == ["batch-1", "batch-2"]
+    assert payload["execution_groups"][0]["parallel"] is True
+    assert payload["execution_groups"][1]["parallel"] is True
+    assert payload["execution_groups"][1]["batch_ids"] == ["batch-3"]
+    assert payload["execution_groups"][0]["batches"][1]["model_overrides"] == {"cq-1": "opus"}
+
+
+def test_run_repair_retry_reports_escalation_on_retry_cap(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "REPAIR_EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (task_dir / "repair-log.json").write_text(json.dumps({
+        "repair_cycle": 2,
+        "batches": [
+            {
+                "batch_id": "batch-1",
+                "tasks": [
+                    {
+                        "finding_id": "sec-1",
+                        "assigned_executor": "backend-executor",
+                        "files_to_modify": ["src/a.py"],
+                        "retry_count": 3,
+                    }
+                ],
+            }
+        ],
+    }) + "\n")
+
+    result = _run_ctl("run-repair-retry", str(task_dir))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "escalation_required"
+    assert "retry" in payload["error"].lower()
+
+
+def test_run_audit_reflect_writes_retro_and_receipt(tmp_path) -> None:
+    from lib_receipts import receipt_audit_routing, receipt_executor_routing
+
+    task_dir = _setup_task_dir(tmp_path)
+    prior_task = task_dir.parent / "task-20260402-001"
+    prior_task.mkdir(parents=True, exist_ok=True)
+    (prior_task / "task-retrospective.json").write_text(json.dumps({
+        "task_id": "task-20260402-001",
+        "task_outcome": "DONE",
+        "task_type": "feature",
+        "task_domains": "backend",
+        "task_risk_level": "medium",
+        "findings_by_auditor": {},
+        "findings_by_category": {},
+        "executor_repair_frequency": {},
+        "spec_review_iterations": 1,
+        "repair_cycle_count": 0,
+        "subagent_spawn_count": 0,
+        "wasted_spawns": 0,
+        "auditor_zero_finding_streaks": {"security-auditor": 2},
+        "executor_zero_repair_streak": 4,
+        "token_usage_by_agent": {},
+        "total_token_usage": 0,
+        "quality_score": 1.0,
+        "cost_score": 1.0,
+        "efficiency_score": 1.0,
+        "agent_source": {},
+        "model_used_by_agent": {},
+    }) + "\n")
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [],
+    }) + "\n")
+    receipt_audit_routing(task_dir, [
+        {
+            "name": "security-auditor",
+            "action": "spawn",
+            "route_mode": "alongside",
+            "agent_path": "learned/security-ruthless.md",
+            "injected_agent_sha256": "abc123",
+        }
+    ])
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "replace",
+            "agent_path": "learned/backend-sharp.md",
+        }
+    ])
+
+    result = _run_ctl("run-audit-reflect", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "reflect_ready"
+    assert Path(payload["retrospective_path"]).exists()
+    assert Path(payload["receipt_path"]).exists()
+    retro = json.loads(Path(payload["retrospective_path"]).read_text())
+    assert retro["agent_source"]["security-auditor"] == "generic"
+    assert retro["agent_source"]["security-auditor:learned"] == "learned:security-ruthless"
+    assert retro["agent_source"]["backend-executor"] == "learned:backend-sharp"
+    assert retro["auditor_zero_finding_streaks"]["security-auditor"] == 3
+    assert retro["executor_zero_repair_streak"] == 5
+    assert retro["alongside_overlap"]["security-auditor"]["learned_is_superset"] is True

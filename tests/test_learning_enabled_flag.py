@@ -112,7 +112,7 @@ class TestResolveModelWithLearning:
     def test_returns_default_when_disabled(self, mock_log, mock_policy, mock_learning, tmp_path: Path):
         from router import resolve_model
         result = resolve_model(tmp_path, "backend-executor", "feature")
-        assert result["model"] == "opus"  # DEFAULT_MODEL from lib_defaults
+        assert result["model"] == "sonnet"  # DEFAULT_MODEL from lib_defaults
         assert "default" in result["source"]
 
     @mock.patch("router.is_learning_enabled", return_value=False)
@@ -137,6 +137,17 @@ class TestResolveSkipWithLearning:
         result = resolve_skip(tmp_path, "dead-code-auditor", "feature")
         assert result["skip"] is False
         assert "learning_enabled=false" in result["reason"]
+
+    @mock.patch("router.is_learning_enabled", return_value=True)
+    @mock.patch("router.collect_retrospectives")
+    def test_code_quality_is_not_skip_exempt(self, mock_retros, mock_learning, tmp_path: Path):
+        from router import resolve_skip
+        mock_retros.return_value = [{
+            "task_id": "task-1",
+            "auditor_zero_finding_streaks": {"code-quality-auditor": 5},
+        }]
+        result = resolve_skip(tmp_path, "code-quality-auditor", "feature")
+        assert result["threshold"] > 0
 
     @mock.patch("router.is_learning_enabled", return_value=False)
     def test_exempt_auditors_still_exempt(self, mock_learning, tmp_path: Path):

@@ -157,6 +157,36 @@ DEFAULT_EPSILON = 0.1  # 10% exploration rate
 
 SECURITY_FLOOR_MODEL = "opus"
 DEFAULT_MODEL = _DEFAULT_MODEL_CONST  # "opus" — from lib_defaults.py
+ROLE_DEFAULT_MODELS: dict[str, str] = {
+    "planning": "sonnet",
+    "spec-writer": "sonnet",
+    "backend-executor": "sonnet",
+    "ui-executor": "sonnet",
+    "db-executor": "sonnet",
+    "integration-executor": "sonnet",
+    "refactor-executor": "sonnet",
+    "ml-executor": "sonnet",
+    "testing-executor": "sonnet",
+    "docs-executor": "haiku",
+    "spec-completion-auditor": "sonnet",
+    "code-quality-auditor": "sonnet",
+    "dead-code-auditor": "haiku",
+    "performance-auditor": "haiku",
+    "db-schema-auditor": "haiku",
+    "ui-auditor": "haiku",
+}
+
+
+def _default_model_for_role(role: str) -> str:
+    """Return the low-cost default model for a role.
+
+    Security remains pinned to Opus. Other roles bias toward Sonnet or
+    Haiku so projects do not pay Opus prices before any learned policy
+    exists.
+    """
+    if role == "security-auditor":
+        return SECURITY_FLOOR_MODEL
+    return ROLE_DEFAULT_MODELS.get(role, DEFAULT_MODEL)
 
 
 def _read_policy_json(root: Path, filename: str, key: str) -> dict | None:
@@ -461,7 +491,7 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
 
     # Steps 2-4 use learned data — skip when learning is disabled.
     if not (ctx.learning_enabled if ctx else is_learning_enabled(root)):
-        result = {"model": DEFAULT_MODEL, "source": "default"}
+        result = {"model": _default_model_for_role(role), "source": "default"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source="default (learning_enabled=false)")
         return result
 
@@ -526,7 +556,7 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
 
-    result = {"model": DEFAULT_MODEL, "source": "default"}
+    result = {"model": _default_model_for_role(role), "source": "default"}
     log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
     return result
 
@@ -554,7 +584,7 @@ def _parse_model_from_patterns(path: Path, role: str, task_type: str) -> str | N
 # Skip decisions
 # ---------------------------------------------------------------------------
 
-SKIP_EXEMPT = {"security-auditor", "spec-completion-auditor", "code-quality-auditor"}
+SKIP_EXEMPT = {"security-auditor", "spec-completion-auditor"}
 DEFAULT_SKIP_THRESHOLD = _DEFAULT_SKIP_THRESHOLD
 
 
@@ -772,12 +802,17 @@ _DEFAULT_ENSEMBLE_ESCALATION_MODEL = "opus"
 
 # Default auditor registry — overridable via .dynos/config/auditors.json
 _DEFAULT_AUDITOR_REGISTRY = {
-    "always": ["spec-completion-auditor", "security-auditor", "code-quality-auditor", "dead-code-auditor"],
+    "always": ["spec-completion-auditor", "security-auditor"],
     "fast_track": ["spec-completion-auditor", "security-auditor"],
     "domain_conditional": {
-        "ui": ["ui-auditor"],
-        "db": ["db-schema-auditor", "performance-auditor"],
-        "backend": ["performance-auditor"],
+        "ui": ["ui-auditor", "code-quality-auditor"],
+        "db": ["db-schema-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+        "backend": ["performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+        "ml": ["code-quality-auditor"],
+        "testing": ["code-quality-auditor"],
+        "refactor": ["code-quality-auditor"],
+        "infra": ["code-quality-auditor"],
+        "security": ["code-quality-auditor"],
     },
 }
 
