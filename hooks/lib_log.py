@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from lib_core import now_iso
+from write_policy import WriteAttempt, require_write_allowed
 
 
 # Event names whose sole purpose is operator visibility / forensic trace.
@@ -73,8 +74,9 @@ __all__ = [
 ]
 
 
-def _append_jsonl(path: Path, line: str) -> None:
+def _append_jsonl(path: Path, line: str, *, attempt: WriteAttempt) -> None:
     """Thread-safe append a single line to a JSONL file."""
+    require_write_allowed(attempt, emit_event=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -110,10 +112,31 @@ def log_event(root: Path, event_type: str, *, task: str | None = None, **payload
         if task is not None:
             task_dir = root / ".dynos" / task
             if task_dir.is_dir():
-                _append_jsonl(task_dir / "events.jsonl", line)
+                _append_jsonl(
+                    task_dir / "events.jsonl",
+                    line,
+                    attempt=WriteAttempt(
+                        role="eventbus",
+                        task_dir=task_dir,
+                        path=task_dir / "events.jsonl",
+                        operation="modify" if (task_dir / "events.jsonl").exists() else "create",
+                        source="eventbus",
+                    ),
+                )
                 return
 
         # Global fallback
-        _append_jsonl(root / ".dynos" / "events.jsonl", line)
+        global_path = root / ".dynos" / "events.jsonl"
+        _append_jsonl(
+            global_path,
+            line,
+            attempt=WriteAttempt(
+                role="system",
+                task_dir=None,
+                path=global_path,
+                operation="modify" if global_path.exists() else "create",
+                source="system",
+            ),
+        )
     except Exception as exc:
         print(f"[dynos-log] WARNING: log_event failed: {exc}", file=sys.stderr)

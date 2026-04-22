@@ -79,6 +79,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lib_core import load_json, write_json
+from write_policy import WriteAttempt, require_write_allowed
 
 
 EMPTY_USAGE: dict = {
@@ -113,6 +114,21 @@ STAGE_TO_PHASE: dict[str, str] = {
     "DONE": "completion",
     "FAILED": "completion",
 }
+
+
+def _write_usage(task_dir: Path, data: dict) -> None:
+    """Persist token usage through the write boundary."""
+    usage_path = task_dir / "token-usage.json"
+    require_write_allowed(
+        WriteAttempt(
+            role="system",
+            task_dir=task_dir,
+            path=usage_path,
+            operation="modify" if usage_path.exists() else "create",
+            source="system",
+        )
+    )
+    write_json(usage_path, data)
 
 
 def phase_for_stage(stage: str) -> str:
@@ -245,7 +261,7 @@ def record_tokens(
         by_agent[agent]["model"] = model
 
     _recompute_totals(data)
-    write_json(task_dir / "token-usage.json", data)
+    _write_usage(task_dir, data)
     return data
 
 
@@ -258,7 +274,7 @@ def get_summary(task_dir: Path) -> dict:
     task_dir = Path(task_dir)
     data = _load_usage(task_dir)
     _recompute_totals(data)
-    write_json(task_dir / "token-usage.json", data)
+    _write_usage(task_dir, data)
     return data
 
 

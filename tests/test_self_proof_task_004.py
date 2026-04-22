@@ -3,6 +3,7 @@ expected receipts are present (AC self-proof)."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,25 @@ CALIBRATION_RECEIPT = TASK_DIR / "receipts" / "calibration-applied.json"
 
 
 pytestmark = pytest.mark.integration
+
+
+def _integration_requested(config) -> bool:
+    if os.environ.get("RUN_INTEGRATION") == "1":
+        return True
+    markexpr = ""
+    try:
+        markexpr = config.getoption("-m") or ""
+    except Exception:
+        markexpr = ""
+    return "integration" in markexpr
+
+
+@pytest.fixture(autouse=True)
+def _skip_unless_explicit_integration(request):
+    if not _integration_requested(request.config):
+        pytest.skip(
+            "integration: set RUN_INTEGRATION=1 or pass `-m integration` to run"
+        )
 
 
 @pytest.fixture(autouse=True)

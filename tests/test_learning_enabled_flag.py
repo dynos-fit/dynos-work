@@ -229,10 +229,12 @@ class TestCtlConfig:
         assert "{}" in result.stdout
 
     def test_config_set_and_get(self, tmp_path: Path):
+        dynos_home = tmp_path / ".dynos-home"
         # Set
         result = subprocess.run(
             [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "set", "learning_enabled", "false", "--root", str(tmp_path)],
             capture_output=True, text=True, timeout=10,
+            env={**os.environ, "DYNOS_HOME": str(dynos_home)},
         )
         assert result.returncode == 0
         assert "false" in result.stdout
@@ -241,14 +243,17 @@ class TestCtlConfig:
         result = subprocess.run(
             [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "get", "learning_enabled", "--root", str(tmp_path)],
             capture_output=True, text=True, timeout=10,
+            env={**os.environ, "DYNOS_HOME": str(dynos_home)},
         )
         assert result.returncode == 0
         assert "false" in result.stdout
 
     def test_config_set_true(self, tmp_path: Path):
+        dynos_home = tmp_path / ".dynos-home"
         result = subprocess.run(
             [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "set", "learning_enabled", "true", "--root", str(tmp_path)],
             capture_output=True, text=True, timeout=10,
+            env={**os.environ, "DYNOS_HOME": str(dynos_home)},
         )
         assert result.returncode == 0
         assert "true" in result.stdout

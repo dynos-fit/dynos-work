@@ -228,6 +228,232 @@ def _compute_external_solution_gate(task_dir: Path) -> dict:
     return gate
 
 
+def _write_ctl_json(task_dir: Path, path: Path, payload: dict) -> None:
+    """Persist ctl-owned JSON artifacts through the write boundary."""
+    require_write_allowed(
+        WriteAttempt(
+            role="ctl",
+            task_dir=task_dir,
+            path=path,
+            operation="modify" if path.exists() else "create",
+            source="ctl",
+        )
+    )
+    write_json(path, payload)
+
+
+def _read_json_input(path: str) -> dict:
+    payload = load_json(Path(path).resolve())
+    if not isinstance(payload, dict):
+        raise ValueError("input payload must be a JSON object")
+    return payload
+
+
+def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
+    segments_in = payload.get("segments", [])
+    if not isinstance(segments_in, list):
+        raise ValueError("segments must be an array")
+    normalized_segments: list[dict] = []
+    for raw in segments_in:
+        if not isinstance(raw, dict):
+            raise ValueError("each segment must be an object")
+        files_expected: list[str] = []
+        seen_files: set[str] = set()
+        for entry in raw.get("files_expected", []) or []:
+            if not isinstance(entry, str):
+                continue
+            item = entry.strip()
+            if not item or item in seen_files:
+                continue
+            seen_files.add(item)
+            files_expected.append(item)
+        depends_on: list[str] = []
+        seen_deps: set[str] = set()
+        for entry in raw.get("depends_on", []) or []:
+            if not isinstance(entry, str):
+                continue
+            item = entry.strip()
+            if not item or item in seen_deps:
+                continue
+            seen_deps.add(item)
+            depends_on.append(item)
+        criteria_ids: list[int] = []
+        seen_criteria: set[int] = set()
+        for entry in raw.get("criteria_ids", []) or []:
+            try:
+                item = int(entry)
+            except (TypeError, ValueError):
+                continue
+            if item in seen_criteria:
+                continue
+            seen_criteria.add(item)
+            criteria_ids.append(item)
+        normalized_segments.append(
+            {
+                "id": str(raw.get("id", "")).strip(),
+                "executor": str(raw.get("executor", "")).strip(),
+                "description": str(raw.get("description", "")).strip(),
+                "files_expected": files_expected,
+                "depends_on": depends_on,
+                "parallelizable": bool(raw.get("parallelizable", False)),
+                "criteria_ids": criteria_ids,
+            }
+        )
+    return {"task_id": task_dir.name, "segments": normalized_segments}
+
+
+def _validate_execution_graph_payload(task_dir: Path, payload: dict) -> None:
+    segments = payload.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("execution graph must contain at least one segment")
+    seen_ids: set[str] = set()
+    for idx, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            raise ValueError(f"segment[{idx}] must be an object")
+        seg_id = str(segment.get("id", "")).strip()
+        if not seg_id:
+            raise ValueError(f"segment[{idx}] missing id")
+        if seg_id in seen_ids:
+            raise ValueError(f"duplicate segment id: {seg_id}")
+        seen_ids.add(seg_id)
+        if not str(segment.get("executor", "")).strip():
+            raise ValueError(f"{seg_id}: executor is required")
+        files_expected = segment.get("files_expected")
+        if not isinstance(files_expected, list) or not files_expected:
+            raise ValueError(f"{seg_id}: files_expected must be a non-empty array")
+        criteria_ids = segment.get("criteria_ids")
+        if not isinstance(criteria_ids, list) or not criteria_ids:
+            raise ValueError(f"{seg_id}: criteria_ids must be a non-empty array")
+
+
+def _normalize_repair_log_payload(task_dir: Path, payload: dict) -> dict:
+    batches_in = payload.get("batches", [])
+    if not isinstance(batches_in, list):
+        raise ValueError("batches must be an array")
+    normalized_batches: list[dict] = []
+    for raw_batch in batches_in:
+        if not isinstance(raw_batch, dict):
+            raise ValueError("each batch must be an object")
+        tasks_in = raw_batch.get("tasks", [])
+        if not isinstance(tasks_in, list):
+            raise ValueError("batch tasks must be an array")
+        normalized_tasks: list[dict] = []
+        for raw_task in tasks_in:
+            if not isinstance(raw_task, dict):
+                raise ValueError("repair task must be an object")
+            files_source = raw_task.get("affected_files")
+            if files_source is None:
+                files_source = raw_task.get("files_to_modify", [])
+            affected_files: list[str] = []
+            seen_files: set[str] = set()
+            for entry in files_source or []:
+                if not isinstance(entry, str):
+                    continue
+                item = entry.strip()
+                if not item or item in seen_files:
+                    continue
+                seen_files.add(item)
+                affected_files.append(item)
+            normalized_tasks.append(
+                {
+                    "finding_id": str(raw_task.get("finding_id", "")).strip(),
+                    "auditor": str(raw_task.get("auditor", "")).strip(),
+                    "severity": str(raw_task.get("severity", "")).strip(),
+                    "instruction": str(raw_task.get("instruction", "")).strip(),
+                    "assigned_executor": str(raw_task.get("assigned_executor", "")).strip(),
+                    "affected_files": affected_files,
+                    "retry_count": int(raw_task.get("retry_count", 0) or 0),
+                    "max_retries": int(raw_task.get("max_retries", 3) or 3),
+                    "status": str(raw_task.get("status", "pending") or "pending"),
+                }
+            )
+        normalized_batches.append(
+            {
+                "batch_id": str(raw_batch.get("batch_id", "")).strip(),
+                "parallel": bool(raw_batch.get("parallel", False)),
+                "tasks": normalized_tasks,
+            }
+        )
+    return {
+        "task_id": task_dir.name,
+        "repair_cycle": int(payload.get("repair_cycle", 1) or 1),
+        "batches": normalized_batches,
+    }
+
+
+def _validate_repair_log_payload(task_dir: Path, payload: dict) -> None:
+    batches = payload.get("batches")
+    if not isinstance(batches, list) or not batches:
+        raise ValueError("repair log must contain at least one batch")
+    for batch in batches:
+        if not isinstance(batch, dict):
+            raise ValueError("repair batch must be an object")
+        batch_id = str(batch.get("batch_id", "")).strip() or "<unknown-batch>"
+        tasks = batch.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            raise ValueError(f"{batch_id}: tasks must be a non-empty array")
+        for task in tasks:
+            if not isinstance(task, dict):
+                raise ValueError(f"{batch_id}: task must be an object")
+            if not str(task.get("finding_id", "")).strip():
+                raise ValueError(f"{batch_id}: finding_id is required")
+            if not str(task.get("assigned_executor", "")).strip():
+                raise ValueError(f"{batch_id}: assigned_executor is required")
+            affected_files = task.get("affected_files")
+            if not isinstance(affected_files, list) or not affected_files:
+                raise ValueError(f"{batch_id}: affected_files must be a non-empty array")
+
+
+def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
+    domains = payload.get("domains", [])
+    if not isinstance(domains, list):
+        domains = []
+    normalized_domains: list[str] = []
+    seen_domains: set[str] = set()
+    for entry in domains:
+        item = str(entry).strip()
+        if not item or item in seen_domains:
+            continue
+        seen_domains.add(item)
+        normalized_domains.append(item)
+    out = {
+        "type": str(payload.get("type", "")).strip(),
+        "domains": normalized_domains,
+        "risk_level": str(payload.get("risk_level", "")).strip(),
+    }
+    notes = payload.get("notes")
+    if isinstance(notes, str):
+        out["notes"] = notes.strip()
+    if "tdd_required" in payload:
+        out["tdd_required"] = bool(payload.get("tdd_required"))
+    return out
+
+
+def _persist_classification(task_dir: Path, payload: dict) -> None:
+    ctype = payload.get("type")
+    risk = payload.get("risk_level")
+    domains = payload.get("domains")
+    if ctype not in VALID_CLASSIFICATION_TYPES:
+        raise ValueError(f"invalid classification.type: {ctype!r}")
+    if risk not in VALID_RISK_LEVELS:
+        raise ValueError(f"invalid classification.risk_level: {risk!r}")
+    if not isinstance(domains, list) or not domains:
+        raise ValueError("classification.domains must be a non-empty array")
+    invalid_domains = [domain for domain in domains if domain not in VALID_DOMAINS]
+    if invalid_domains:
+        raise ValueError(f"classification domain invalid: {invalid_domains}")
+    manifest = _load_manifest(task_dir)
+    manifest["classification"] = payload
+    from lib_validate import compute_fast_track  # noqa: PLC0415
+
+    fast_track = compute_fast_track(manifest)
+    payload["fast_track"] = fast_track
+    manifest["classification"] = payload
+    manifest["fast_track"] = fast_track
+    _write_ctl_json(task_dir, task_dir / "classification.json", payload)
+    _write_ctl_json(task_dir, task_dir / "manifest.json", manifest)
+
+
 def cmd_validate_task(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     # AC 18: validate-task is a task-creation entry-point — refuse when
@@ -2025,7 +2251,7 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
             "next_batch": [entry.get("segment_id") for entry in batch_payload["next_batch"] if isinstance(entry, dict)],
             "updated_at": now_iso(),
         }
-        write_json(task_dir / "manifest.json", manifest)
+        _write_ctl_json(task_dir, task_dir / "manifest.json", manifest)
 
         print(json.dumps({
             "status": "segment_finalized",
@@ -2889,13 +3115,6 @@ def build_parser() -> argparse.ArgumentParser:
     ownership_parser.add_argument("files", nargs="+")
     ownership_parser.set_defaults(func=cmd_check_ownership)
 
-    external_gate_parser = subparsers.add_parser(
-        "run-external-solution-gate",
-        help="Write external-solution-gate.json from deterministic task heuristics",
-    )
-    external_gate_parser.add_argument("task_dir")
-    external_gate_parser.set_defaults(func=cmd_run_external_solution_gate)
-
     execute_handoff_parser = subparsers.add_parser(
         "write-execute-handoff",
         help="Write handoff-execute-audit.json deterministically",
@@ -3049,37 +3268,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_external_solution_gate_parser.add_argument("task_dir")
     run_external_solution_gate_parser.set_defaults(func=cmd_run_external_solution_gate)
-
-    execute_handoff_parser = subparsers.add_parser(
-        "write-execute-handoff",
-        help="Write handoff-execute-audit.json deterministically",
-    )
-    execute_handoff_parser.add_argument("task_dir")
-    execute_handoff_parser.set_defaults(func=cmd_write_execute_handoff)
-
-    graph_write_parser = subparsers.add_parser(
-        "write-execution-graph",
-        help="Validate, normalize, and atomically write execution-graph.json",
-    )
-    graph_write_parser.add_argument("task_dir")
-    graph_write_parser.add_argument("--from", dest="from_path", required=True)
-    graph_write_parser.set_defaults(func=cmd_write_execution_graph)
-
-    repair_write_parser = subparsers.add_parser(
-        "write-repair-log",
-        help="Validate, normalize, and atomically write repair-log.json",
-    )
-    repair_write_parser.add_argument("task_dir")
-    repair_write_parser.add_argument("--from", dest="from_path", required=True)
-    repair_write_parser.set_defaults(func=cmd_write_repair_log)
-
-    classification_write_parser = subparsers.add_parser(
-        "write-classification",
-        help="Validate, normalize, and atomically write classification.json plus synced manifest state",
-    )
-    classification_write_parser.add_argument("task_dir")
-    classification_write_parser.add_argument("--from", dest="from_path", required=True)
-    classification_write_parser.set_defaults(func=cmd_write_classification)
 
     run_spec_ready_parser = subparsers.add_parser(
         "run-spec-ready",

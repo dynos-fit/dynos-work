@@ -230,9 +230,10 @@ def _emit_policy_event(attempt: WriteAttempt, decision: WriteDecision) -> None:
         pass
 
 
-def require_write_allowed(attempt: WriteAttempt) -> None:
+def require_write_allowed(attempt: WriteAttempt, *, emit_event: bool = True) -> None:
     decision = decide_write(attempt)
-    _emit_policy_event(attempt, decision)
+    if emit_event:
+        _emit_policy_event(attempt, decision)
     if not decision.allowed:
         raise ValueError(decision.reason)
 

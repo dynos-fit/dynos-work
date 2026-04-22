@@ -7,6 +7,9 @@ description: "Run checkpoint audit, repair any findings, then reach DONE — all
 
 Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 
+All repair-log persistence must go through `python3 hooks/ctl.py write-repair-log ... --from ...`.
+Do not hand-write `.dynos/task-{id}/repair-log.json`.
+
 ## Ruthlessness Standard
 
 - Missing evidence is a finding.

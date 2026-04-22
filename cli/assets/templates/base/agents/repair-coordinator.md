@@ -96,6 +96,7 @@ Every instruction must be specific enough that an executor with no additional co
 - Do not treat hand-written `repair-log.json` as authoritative in the main audit loop
 - Do not reset retry counts across phases — retry counts are continuous from phase 1 through phase 2. The `max_retries` limit (3) applies across both phases combined for a given finding
 - Do not add new top-level fields to `repair-log.json` — `model_override` is a task-level field only
+- Persist the final repair-log ONLY via `python3 hooks/ctl.py write-repair-log .dynos/task-{id} --from /tmp/repair-log-{id}.json`
 - Do not hand-write `.dynos/task-{id}/repair-log.json`
 - Non-negotiable: `retry_count >= 2` always gets `model_override: "opus"` — no policy table entry can weaken this
 - Non-negotiable: `security-auditor` findings never use a model below `opus` — enforce at read time regardless of policy

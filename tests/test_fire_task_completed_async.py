@@ -20,7 +20,8 @@ from unittest import mock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "hooks"))
 
 
 def _make_task_dir(tmp_path: Path) -> Path:
@@ -36,9 +37,10 @@ class TestFireTaskCompletedAsync:
         task_dir = _make_task_dir(tmp_path)
         from lib_core import _fire_task_completed
 
-        with mock.patch("subprocess.run") as mock_run, \
-             mock.patch("subprocess.Popen") as mock_popen:
-            _fire_task_completed(task_dir)
+        with mock.patch.dict("os.environ", {"PLUGIN_HOOKS": str(ROOT / "hooks")}, clear=False):
+            with mock.patch("subprocess.run") as mock_run, \
+                 mock.patch("subprocess.Popen") as mock_popen:
+                _fire_task_completed(task_dir)
 
         # The emit step is still sync (must precede drain), so subprocess.run
         # is allowed exactly once and only for the emit command.
@@ -58,9 +60,10 @@ class TestFireTaskCompletedAsync:
         task_dir = _make_task_dir(tmp_path)
         from lib_core import _fire_task_completed
 
-        with mock.patch("subprocess.run"), \
-             mock.patch("subprocess.Popen") as mock_popen:
-            _fire_task_completed(task_dir)
+        with mock.patch.dict("os.environ", {"PLUGIN_HOOKS": str(ROOT / "hooks")}, clear=False):
+            with mock.patch("subprocess.run"), \
+                 mock.patch("subprocess.Popen") as mock_popen:
+                _fire_task_completed(task_dir)
 
         drain_calls = [
             call for call in mock_popen.call_args_list
@@ -116,10 +119,11 @@ class TestFireTaskCompletedAsync:
         task_dir = _make_task_dir(tmp_path)
         from lib_core import _fire_task_completed
 
-        with mock.patch("subprocess.run", side_effect=OSError("boom")), \
-             mock.patch("subprocess.Popen") as mock_popen:
-            # Must not raise.
-            _fire_task_completed(task_dir)
+        with mock.patch.dict("os.environ", {"PLUGIN_HOOKS": str(ROOT / "hooks")}, clear=False):
+            with mock.patch("subprocess.run", side_effect=OSError("boom")), \
+                 mock.patch("subprocess.Popen") as mock_popen:
+                # Must not raise.
+                _fire_task_completed(task_dir)
 
         # Drain dispatch should still have been attempted.
         assert mock_popen.called, "drain dispatch must run even when emit fails"

@@ -18,6 +18,7 @@ calls share one read pass.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -36,6 +37,9 @@ from lib_receipts import hash_file  # noqa: E402
 def _project(tmp_path: Path) -> Path:
     root = tmp_path / "proj"
     (root / ".dynos").mkdir(parents=True)
+    dynos_home = tmp_path / "dynos-home"
+    dynos_home.mkdir(parents=True, exist_ok=True)
+    os.environ["DYNOS_HOME"] = str(dynos_home)
     return root
 
 
