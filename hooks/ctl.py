@@ -421,6 +421,9 @@ def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
         "domains": normalized_domains,
         "risk_level": str(payload.get("risk_level", "")).strip(),
     }
+    notes = payload.get("notes")
+    if isinstance(notes, str):
+        out["notes"] = notes.strip()
     if "tdd_required" in payload:
         out["tdd_required"] = bool(payload.get("tdd_required"))
     return out
@@ -438,10 +441,16 @@ def _persist_classification(task_dir: Path, payload: dict) -> None:
         raise ValueError("classification.domains must be a non-empty array")
     invalid_domains = [domain for domain in domains if domain not in VALID_DOMAINS]
     if invalid_domains:
-        raise ValueError(f"invalid classification.domains: {invalid_domains}")
-    _write_ctl_json(task_dir, task_dir / "classification.json", payload)
+        raise ValueError(f"classification domain invalid: {invalid_domains}")
     manifest = _load_manifest(task_dir)
     manifest["classification"] = payload
+    from lib_validate import compute_fast_track  # noqa: PLC0415
+
+    fast_track = compute_fast_track(manifest)
+    payload["fast_track"] = fast_track
+    manifest["classification"] = payload
+    manifest["fast_track"] = fast_track
+    _write_ctl_json(task_dir, task_dir / "classification.json", payload)
     _write_ctl_json(task_dir, task_dir / "manifest.json", manifest)
 
 

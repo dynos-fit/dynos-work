@@ -165,7 +165,10 @@ def test_report_path_missing_file_refuses_when_counts_omitted(tmp_path: Path):
     must explicitly pass zero counts with report_path=None."""
     td = _make_task(tmp_path)
     missing = str(td / "audit-reports" / "nonexistent.json")
-    with pytest.raises(ValueError, match="cannot derive finding_count/blocking_count automatically"):
+    with pytest.raises(
+        ValueError,
+        match="does not exist; cannot derive finding_count/blocking_count automatically",
+    ):
         receipt_audit_done(
             td, "sec", "haiku", report_path=missing, tokens_used=100,
             route_mode="generic", agent_path=None, injected_agent_sha256=None,
