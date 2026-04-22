@@ -18,7 +18,11 @@ ROUTER = REPO_ROOT / "hooks" / "router.py"
 
 
 def _run(project: Path, task_id: str, phase: str, stdin: bytes) -> subprocess.CompletedProcess:
-    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "hooks")}
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(REPO_ROOT / "hooks"),
+        "DYNOS_HOME": str(project / ".dynos-home"),
+    }
     return subprocess.run(
         [
             sys.executable,

@@ -42,6 +42,7 @@ from lib_receipts import (
     INJECTED_PROMPTS_DIR,
 )
 from lib_registry import ensure_learned_registry
+from write_policy import WriteAttempt, require_write_allowed
 
 
 # ---------------------------------------------------------------------------
@@ -1301,7 +1302,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
+def _atomic_write_bytes(path: Path, data: bytes, *, attempt: WriteAttempt | None = None) -> None:
     """Atomically write *data* to *path* via tempfile + os.replace.
 
     Creates parent directories with ``mkdir(parents=True, exist_ok=True)``.
@@ -1309,6 +1310,8 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     The temp file lives next to the destination so the replace is on the
     same filesystem (otherwise it would not be atomic on POSIX).
     """
+    if attempt is not None:
+        require_write_allowed(attempt)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
@@ -1331,7 +1334,13 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def _write_prompt_sidecar(sidecar_dir: Path, base_name: str, prompt_bytes: bytes) -> str:
+def _write_prompt_sidecar(
+    sidecar_dir: Path,
+    base_name: str,
+    prompt_bytes: bytes,
+    *,
+    task_dir: Path,
+) -> str:
     """Write `{base_name}.sha256` and `{base_name}.txt` sidecars atomically.
 
     Returns the hex digest. The `.sha256` file contains a single line of
@@ -1343,8 +1352,28 @@ def _write_prompt_sidecar(sidecar_dir: Path, base_name: str, prompt_bytes: bytes
     txt_path = sidecar_dir / f"{base_name}.txt"
     # Write the .txt FIRST so a reader that sees the .sha256 can always
     # find the matching bytes. os.replace is atomic on the same FS.
-    _atomic_write_bytes(txt_path, prompt_bytes)
-    _atomic_write_bytes(sha_path, digest.encode("ascii"))
+    _atomic_write_bytes(
+        txt_path,
+        prompt_bytes,
+        attempt=WriteAttempt(
+            role="receipt-writer",
+            task_dir=task_dir,
+            path=txt_path,
+            operation="modify" if txt_path.exists() else "create",
+            source="system",
+        ),
+    )
+    _atomic_write_bytes(
+        sha_path,
+        digest.encode("ascii"),
+        attempt=WriteAttempt(
+            role="receipt-writer",
+            task_dir=task_dir,
+            path=sha_path,
+            operation="modify" if sha_path.exists() else "create",
+            source="system",
+        ),
+    )
     return digest
 
 
@@ -1457,7 +1486,12 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
     if task_id:
         sidecar_dir = root / ".dynos" / task_id / "receipts" / INJECTED_PROMPTS_DIR
         try:
-            digest = _write_prompt_sidecar(sidecar_dir, args.segment_id, printed_bytes)
+            digest = _write_prompt_sidecar(
+                sidecar_dir,
+                args.segment_id,
+                printed_bytes,
+                task_dir=root / ".dynos" / task_id,
+            )
             log_event(
                 root, "injected_prompt_sidecar_written",
                 task_id=task_id,
@@ -1594,7 +1628,12 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
 
     sidecar_dir = task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
     try:
-        digest = _write_prompt_sidecar(sidecar_dir, base_name, printed_bytes)
+        digest = _write_prompt_sidecar(
+            sidecar_dir,
+            base_name,
+            printed_bytes,
+            task_dir=task_dir,
+        )
     except OSError as exc:
         print(
             json.dumps({"error": f"sidecar write failed: {exc}"}),
@@ -1672,7 +1711,12 @@ def cmd_planner_inject_prompt(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        digest = _write_prompt_sidecar(sidecar_dir, args.phase, stdin_bytes)
+        digest = _write_prompt_sidecar(
+            sidecar_dir,
+            args.phase,
+            stdin_bytes,
+            task_dir=root / ".dynos" / args.task_id,
+        )
     except OSError as exc:
         print(
             json.dumps({"error": f"sidecar write failed: {exc}"}),

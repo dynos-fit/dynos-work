@@ -17,6 +17,7 @@ from typing import Any
 
 from lib_core import now_iso, append_execution_log, _persistent_project_dir
 from lib_log import log_event
+from write_policy import WriteAttempt, require_write_allowed
 
 
 # Receipt contract version. Receipts written by this module embed
@@ -304,6 +305,15 @@ def _record_tokens(task_dir: Path, agent: str, model: str, tokens: int) -> None:
         # Fallback: write directly if lib_tokens isn't available
         try:
             token_path = task_dir / "token-usage.json"
+            require_write_allowed(
+                WriteAttempt(
+                    role="receipt-writer",
+                    task_dir=task_dir,
+                    path=token_path,
+                    operation="modify" if token_path.exists() else "create",
+                    source="receipt-writer",
+                )
+            )
             data = json.loads(token_path.read_text()) if token_path.exists() else {"agents": {}, "total": 0}
             data["agents"][agent] = data.get("agents", {}).get(agent, 0) + tokens
             data["total"] = sum(v for v in data["agents"].values() if isinstance(v, (int, float)))
@@ -359,6 +369,15 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     }
 
     receipt_path = receipts / f"{step_name}.json"
+    require_write_allowed(
+        WriteAttempt(
+            role="receipt-writer",
+            task_dir=task_dir,
+            path=receipt_path,
+            operation="modify" if receipt_path.exists() else "create",
+            source="receipt-writer",
+        )
+    )
     _atomic_write_text(receipt_path, json.dumps(receipt, indent=2, default=str))
 
     # Log the receipt write to events.jsonl

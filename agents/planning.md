@@ -69,11 +69,11 @@ Your spec must be hostile to sloppy implementation. It should leave no room for 
 
 ## Phase: Spec + Plan (combined, fast-track only)
 
-When given this phase, produce BOTH `spec.md` AND `plan.md` AND `execution-graph.json` in a single pass. This phase is only used for fast-track tasks (low risk, single domain) where the spec and plan are tightly coupled and the overhead of two separate spawns dominates the actual work.
+When given this phase, produce BOTH `spec.md` AND `plan.md` AND an execution-graph payload in a single pass. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. This phase is only used for fast-track tasks (low risk, single domain) where the spec and plan are tightly coupled and the overhead of two separate spawns dominates the actual work.
 
 Read `raw-input.md`, `discovery-notes.md`, `design-decisions.md`, AND the actual implementation files referenced in the task. Verify runtime semantics directly — do not assume.
 
-Produce all three artifacts following the same rules as the individual phases below (Spec Normalization for `spec.md`, Implementation Planning for `plan.md` and `execution-graph.json`). For a fast-track task, the execution graph should contain a **single segment** and the spec should be concise (each section may be a single line if no significant complexity exists).
+Produce all three artifacts following the same rules as the individual phases below (Spec Normalization for `spec.md`, Implementation Planning for `plan.md` and the execution-graph payload). For a fast-track task, the execution graph should contain a **single segment** and the spec should be concise (each section may be a single line if no significant complexity exists).
 
 Apply the same heading rules as the individual phases — including the conditional `## API Contracts`, `## Data Model`, and `## Architecture Decisions` sections. Use `N/A — ...` bodies when the section is triggered by domain/risk but the task does not actually touch that surface.
 
@@ -92,7 +92,7 @@ Before classifying or writing anything, answer these silently:
 
 ### Step 2 — Classify
 
-Produce a JSON classification object and write it to `.dynos/task-{id}/manifest.json` under the `classification` key:
+Produce a JSON classification payload with this shape, write it to `/tmp/classification-{id}.json`, then persist the final normalized classification ONLY through `python3 hooks/ctl.py write-classification .dynos/task-{id} --from /tmp/classification-{id}.json`:
 
 ```json
 {
@@ -159,7 +159,7 @@ Write to `.dynos/task-{id}/spec.md`:
 
 ## Phase: Implementation Planning (+ Execution Graph)
 
-When given this phase, generate BOTH the implementation plan (`plan.md`) AND the execution graph (`execution-graph.json`). This eliminates the need for a separate execution-coordinator spawn.
+When given this phase, generate BOTH the implementation plan (`plan.md`) AND the execution graph payload. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. This eliminates the need for a separate execution-coordinator spawn.
 
 Before writing the plan, read the normalized spec and ask:
 
@@ -240,7 +240,7 @@ For ORMs: name the model class and its location. For raw SQL: name the migration
 [Any unresolved decisions executor subagents should be aware of. For each: state the question, the options considered, and a recommended default if the executor needs to proceed without an answer.]
 ```
 
-Also write `.dynos/task-{id}/execution-graph.json`:
+Write the execution graph payload to `/tmp/execution-graph-{id}.json` with this shape, then run `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`:
 
 ```json
 {
@@ -287,13 +287,15 @@ When given this phase, you act as the **Project Lead for a specific subsystem**.
    - Identify all specific files to create/modify.
    - Define internal data flow and component structures.
    - List the specific sub-tasks for this segment.
-4. Return the detailed segment object to be merged into the final `execution-graph.json`.
+4. Return the detailed segment object to be merged into the final execution-graph payload. The merged payload is persisted through the `write-execution-graph` ctl wrapper.
 
 ## Hard Rules
 
 - **Do not invent requirements** — only normalize and surface what was given or clearly implied. Flag surfaced requirements distinctly from stated ones.
 - **Do not write the `stage` field to manifest.json** — do not touch it.
-- **During CLASSIFY_AND_SPEC you may only write** the `classification` key to manifest.json and `spec.md`.
+- **Do not hand-write `.dynos/task-{id}/classification.json` or mutate `manifest.json` directly during CLASSIFY_AND_SPEC.**
+- **During CLASSIFY_AND_SPEC you may write** `spec.md` directly, and you may persist classification only via `write-classification`.
+- **Do not hand-write `.dynos/task-{id}/execution-graph.json`.** Write the payload to `/tmp/execution-graph-{id}.json` and call the ctl wrapper.
 - **Do not advance lifecycle stages.**
 - **Do not spawn other agents.**
 - **Every ambiguity must be resolved or flagged.** If you encounter something unclear, do not silently pick an interpretation and move on. Either resolve it by reading more code, or flag it explicitly in Assumptions with "needs confirmation."

@@ -184,7 +184,7 @@ If `"source": "default"` (Q-learning disabled), the repair coordinator uses its 
 
 Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
 
-Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
+Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write the repair-log payload to `/tmp/repair-log-{id}.json`, then persist the final `.dynos/task-{id}/repair-log.json` ONLY via `python3 hooks/ctl.py write-repair-log .dynos/task-{id} --from /tmp/repair-log-{id}.json`. Do not hand-write `.dynos/task-{id}/repair-log.json`."
 
 Wait for completion. Update stage to `REPAIR_EXECUTION` (transition_task auto-writes the `[STAGE] → REPAIR_EXECUTION` log line — the skill does not manually append it).
 
@@ -233,7 +233,7 @@ If queued findings exist, append to log:
 {timestamp} [REPAIR-P2] {N} findings — {list of finding IDs}
 ```
 
-Spawn `repair-coordinator` with the phase 2 findings. The coordinator writes to `repair-log.json` with an incremented `repair_cycle` value (phase 2 overwrites with the new cycle).
+Spawn `repair-coordinator` with the phase 2 findings. The coordinator writes the payload to `/tmp/repair-log-{id}.json`, then persists the final `repair-log.json` via `python3 hooks/ctl.py write-repair-log .dynos/task-{id} --from /tmp/repair-log-{id}.json` with an incremented `repair_cycle` value (phase 2 overwrites with the new cycle).
 
 Apply the same parallel batch spawning and model escalation logic as phase 1.
 
@@ -242,7 +242,7 @@ Apply the same parallel batch spawning and model escalation logic as phase 1.
 After phase 2 repairs complete, run a phase 2 re-audit using the same domain-aware incremental scope logic as phase 1 re-audit (scoped to phase 2 repair-modified files).
 
 - If all clear after phase 2 re-audit: append `{timestamp} [DONE] repair-execution-p2 — all phase 2 fixes applied` to log. Proceed to Step 5.
-- If new findings remain: increment `retry_count` for each finding. If any finding has exceeded 3 retries, set stage to `FAILED`, append `[FAILED] max retries exceeded for: {finding-ids}`, and stop. Otherwise loop back into another repair cycle (continuing phase 2).
+- If new findings remain: increment `retry_count` for each finding. If any finding has exceeded 3 retries, run `python3 hooks/dynosctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] max retries exceeded for: {finding-ids}`, and stop. Do not edit `manifest.json` directly. Otherwise loop back into another repair cycle (continuing phase 2).
 
 **Degenerate cases:** If no late auditors exist, phase 2 only contains re-audit findings (skip if none). If no blocking findings from any auditor, both phases are skipped entirely.
 

@@ -5,12 +5,27 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import argparse
+import json
+import re
+import shutil
 import sys
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-from lib_core import find_active_tasks, load_json, next_command_for_stage, transition_task
+from lib_core import (
+    VALID_CLASSIFICATION_TYPES,
+    VALID_DOMAINS,
+    VALID_RISK_LEVELS,
+    find_active_tasks,
+    load_json,
+    next_command_for_stage,
+    transition_task,
+    write_json,
+)
 from lib_receipts import hash_file, receipt_audit_done, receipt_human_approval
 from lib_validate import check_segment_ownership, validate_task_artifacts
+from write_policy import WriteAttempt, require_write_allowed
 
 
 _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
@@ -74,6 +89,382 @@ def _root_for_task_dir(task_dir: Path) -> Path:
         return task_dir.parent.parent
     except Exception:
         return task_dir
+
+
+_EXTERNAL_TRIGGER_TERMS: tuple[str, ...] = (
+    "sdk",
+    "oauth",
+    "sso",
+    "webhook",
+    "stripe",
+    "docker",
+    "terraform",
+    "github actions",
+    "gitlab ci",
+    "retry",
+    "queue",
+    "cache",
+    "pagination",
+    "rate limit",
+    "rate limiting",
+    "metrics",
+    "tracing",
+    "protocol",
+    "migration",
+    "migrate",
+    "setup",
+    "configure",
+    "integration",
+    "event bus",
+    "eventbus",
+    "cloud",
+    "aws",
+    "gcp",
+    "azure",
+)
+
+_LOCAL_BUG_TERMS: tuple[str, ...] = (
+    "bug",
+    "fix",
+    "failing test",
+    "regression",
+    "traceback",
+    "exception",
+    "stack trace",
+    "null",
+    "none",
+)
+
+
+def _task_raw_input(task_dir: Path, manifest: dict) -> str:
+    raw = manifest.get("raw_input")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    raw_input_path = task_dir / "raw-input.md"
+    if raw_input_path.exists():
+        return raw_input_path.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _match_terms(text: str, terms: tuple[str, ...]) -> list[str]:
+    lowered = text.lower()
+    return [term for term in terms if term in lowered]
+
+
+def _looks_like_local_file_scoped_task(text: str) -> bool:
+    return bool(
+        re.search(r"\b[\w./-]+\.(py|ts|tsx|js|jsx|go|rb|java|rs|yml|yaml|json|md|sql)\b", text.lower())
+    )
+
+
+def _compute_external_solution_gate(task_dir: Path) -> dict:
+    manifest = load_json(task_dir / "manifest.json")
+    classification = manifest.get("classification")
+    if not isinstance(classification, dict):
+        classification = {}
+    task_type = str(classification.get("type", "feature") or "feature")
+    risk_level = str(classification.get("risk_level", "medium") or "medium")
+    domains = classification.get("domains")
+    if not isinstance(domains, list):
+        domains = []
+    domains = [str(d) for d in domains if str(d).strip()]
+
+    raw_input = _task_raw_input(task_dir, manifest)
+    trigger_matches = _match_terms(raw_input, _EXTERNAL_TRIGGER_TERMS)
+    local_bug_matches = _match_terms(raw_input, _LOCAL_BUG_TERMS)
+    file_scoped = _looks_like_local_file_scoped_task(raw_input)
+    migration_like = task_type in {"migration", "full-stack"} or "migration" in domains or "infra" in domains
+
+    search_recommended = False
+    reasons: list[str] = []
+    if migration_like:
+        search_recommended = True
+        reasons.append(f"task_type={task_type}")
+    if trigger_matches:
+        search_recommended = True
+        reasons.append("matched external-solution terms")
+    if file_scoped and local_bug_matches and not trigger_matches and not migration_like:
+        search_recommended = False
+        reasons = ["file-scoped local bugfix task"]
+    elif not search_recommended:
+        reasons = ["local repo evidence likely sufficient"]
+
+    query_reason = (
+        "external search recommended: " + ", ".join(reasons)
+        if search_recommended
+        else "local repo evidence is sufficient"
+    )
+    if len(query_reason) > 200:
+        query_reason = query_reason[:197] + "..."
+
+    return {
+        "search_recommended": search_recommended,
+        "search_used": False,
+        "query_reason": query_reason,
+        "candidates": [],
+        "recommended_choice": None,
+        "decision_basis": {
+            "task_type": task_type,
+            "risk_level": risk_level,
+            "domains": domains,
+            "trigger_matches": trigger_matches[:8],
+            "local_bug_matches": local_bug_matches[:8],
+            "file_scoped": file_scoped,
+        },
+    }
+
+
+def _write_ctl_json(task_dir: Path, path: Path, payload: dict) -> None:
+    require_write_allowed(
+        WriteAttempt(
+            role="ctl",
+            task_dir=task_dir,
+            path=path,
+            operation="modify" if path.exists() else "create",
+            source="ctl",
+        )
+    )
+    write_json(path, payload)
+
+
+def _normalize_repo_relative_path(raw: object) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("path entries must be non-empty strings")
+    p = Path(raw.strip())
+    if p.is_absolute() or ".." in p.parts:
+        raise ValueError(f"path must stay inside repo: {raw}")
+    return p.as_posix()
+
+
+def _dedupe_preserve(values: list[object]) -> list[object]:
+    seen: set[object] = set()
+    out: list[object] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _compute_fast_track_from_classification(classification: dict[str, object]) -> bool:
+    return (
+        classification.get("risk_level") == "low"
+        and isinstance(classification.get("domains"), list)
+        and len(classification["domains"]) == 1
+    )
+
+
+def _normalize_classification_payload(task_dir: Path, raw: object) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("classification payload must be a JSON object")
+
+    ctype = str(raw.get("type", "")).strip()
+    if ctype not in VALID_CLASSIFICATION_TYPES:
+        raise ValueError(f"classification.type invalid: {ctype!r}")
+
+    risk_level = str(raw.get("risk_level", "")).strip()
+    if risk_level not in VALID_RISK_LEVELS:
+        raise ValueError(f"classification.risk_level invalid: {risk_level!r}")
+
+    domains_raw = raw.get("domains")
+    if not isinstance(domains_raw, list):
+        raise ValueError("classification.domains must be a non-empty array")
+    domains: list[str] = []
+    seen_domains: set[str] = set()
+    for domain_raw in domains_raw:
+        domain = str(domain_raw).strip()
+        if not domain:
+            continue
+        if domain not in VALID_DOMAINS:
+            raise ValueError(f"classification domain invalid: {domain!r}")
+        if domain in seen_domains:
+            continue
+        seen_domains.add(domain)
+        domains.append(domain)
+    if not domains:
+        raise ValueError("classification.domains must contain at least one known domain")
+
+    notes_raw = raw.get("notes", "")
+    if notes_raw is None:
+        notes = ""
+    elif isinstance(notes_raw, str):
+        notes = notes_raw.strip()
+    else:
+        raise ValueError("classification.notes must be a string")
+
+    normalized: dict[str, object] = {
+        "type": ctype,
+        "domains": domains,
+        "risk_level": risk_level,
+        "notes": notes,
+    }
+    tdd_required = raw.get("tdd_required")
+    if tdd_required is not None:
+        if not isinstance(tdd_required, bool):
+            raise ValueError("classification.tdd_required must be a boolean when present")
+        normalized["tdd_required"] = tdd_required
+
+    normalized["fast_track"] = _compute_fast_track_from_classification(normalized)
+    return normalized
+
+
+def _normalize_execution_graph_payload(task_dir: Path, raw: object) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("execution graph payload must be a JSON object")
+    manifest = load_json(task_dir / "manifest.json")
+    task_id = str(manifest.get("task_id") or task_dir.name)
+    segments_raw = raw.get("segments")
+    if not isinstance(segments_raw, list):
+        raise ValueError("execution graph segments must be an array")
+    normalized_segments: list[dict] = []
+    seen_ids: set[str] = set()
+    for seg in segments_raw:
+        if not isinstance(seg, dict):
+            raise ValueError("execution graph segment must be an object")
+        seg_id = str(seg.get("id", "")).strip()
+        if not seg_id:
+            raise ValueError("execution graph segment missing non-empty id")
+        if seg_id in seen_ids:
+            raise ValueError(f"duplicate execution graph segment id: {seg_id}")
+        seen_ids.add(seg_id)
+        files_expected = seg.get("files_expected", [])
+        if not isinstance(files_expected, list):
+            raise ValueError(f"{seg_id}: files_expected must be an array")
+        criteria_ids = seg.get("criteria_ids", [])
+        if not isinstance(criteria_ids, list):
+            raise ValueError(f"{seg_id}: criteria_ids must be an array")
+        depends_on = seg.get("depends_on", [])
+        if not isinstance(depends_on, list):
+            raise ValueError(f"{seg_id}: depends_on must be an array")
+        normalized_segments.append({
+            **seg,
+            "id": seg_id,
+            "files_expected": _dedupe_preserve([_normalize_repo_relative_path(v) for v in files_expected]),
+            "criteria_ids": _dedupe_preserve([int(v) for v in criteria_ids]),
+            "depends_on": _dedupe_preserve([str(v).strip() for v in depends_on if str(v).strip()]),
+        })
+    return {
+        **raw,
+        "task_id": task_id,
+        "segments": normalized_segments,
+    }
+
+
+def _normalize_repair_log_payload(task_dir: Path, raw: object) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("repair log payload must be a JSON object")
+    manifest = load_json(task_dir / "manifest.json")
+    task_id = str(manifest.get("task_id") or task_dir.name)
+    batches_raw = raw.get("batches")
+    if not isinstance(batches_raw, list):
+        raise ValueError("repair-log batches must be an array")
+    normalized_batches: list[dict] = []
+    seen_batch_ids: set[str] = set()
+    seen_finding_ids: set[str] = set()
+    for index, batch in enumerate(batches_raw, start=1):
+        if not isinstance(batch, dict):
+            raise ValueError("repair-log batch must be an object")
+        batch_id = str(batch.get("batch_id", "")).strip()
+        if not batch_id:
+            raise ValueError("repair-log batch missing string batch_id")
+        if batch_id in seen_batch_ids:
+            raise ValueError(f"duplicate repair batch id: {batch_id}")
+        seen_batch_ids.add(batch_id)
+        tasks_raw = batch.get("tasks")
+        if not isinstance(tasks_raw, list) or not tasks_raw:
+            raise ValueError(f"{batch_id}: tasks must be a non-empty array")
+        normalized_tasks: list[dict] = []
+        for task in tasks_raw:
+            if not isinstance(task, dict):
+                raise ValueError(f"{batch_id}: task must be an object")
+            finding_id = str(task.get("finding_id", "")).strip()
+            if not finding_id:
+                raise ValueError(f"{batch_id}: finding_id must be a non-empty string")
+            if finding_id in seen_finding_ids:
+                raise ValueError(f"duplicate finding_id across repair-log batches: {finding_id}")
+            seen_finding_ids.add(finding_id)
+            files = task.get("affected_files")
+            if files is None:
+                files = task.get("files_to_modify")
+            if not isinstance(files, list) or not files:
+                raise ValueError(f"{batch_id}: affected_files must be a non-empty array")
+            normalized_task = dict(task)
+            normalized_task["finding_id"] = finding_id
+            normalized_task["affected_files"] = _dedupe_preserve([_normalize_repo_relative_path(v) for v in files])
+            normalized_task.pop("files_to_modify", None)
+            normalized_task["retry_count"] = int(task.get("retry_count", 0) or 0)
+            normalized_task["max_retries"] = int(task.get("max_retries", 3) or 3)
+            normalized_task["status"] = str(task.get("status", "pending") or "pending")
+            normalized_tasks.append(normalized_task)
+        normalized_batches.append({
+            **batch,
+            "batch_id": batch_id,
+            "tasks": normalized_tasks,
+            "parallel": bool(batch.get("parallel", False)),
+            "_order": index,
+        })
+    normalized_batches.sort(key=lambda batch: (batch["batch_id"], batch["_order"]))
+    for batch in normalized_batches:
+        batch.pop("_order", None)
+    return {
+        **raw,
+        "task_id": task_id,
+        "repair_cycle": int(raw.get("repair_cycle", 0) or 0),
+        "batches": normalized_batches,
+    }
+
+
+def _shadow_task_dir(task_dir: Path) -> Path:
+    shadow_root = Path(tempfile.mkdtemp(prefix="dynos-write-boundary-"))
+    shadow_task = shadow_root / task_dir.name
+    shadow_task.mkdir(parents=True)
+    for name in ("manifest.json", "spec.md", "plan.md"):
+        src = task_dir / name
+        if src.exists():
+            shutil.copy2(src, shadow_task / name)
+    src_reports = task_dir / "audit-reports"
+    if src_reports.is_dir():
+        dst_reports = shadow_task / "audit-reports"
+        shutil.copytree(src_reports, dst_reports)
+    return shadow_task
+
+
+def _validate_execution_graph_payload(task_dir: Path, payload: dict) -> None:
+    shadow = _shadow_task_dir(task_dir)
+    try:
+        write_json(shadow / "execution-graph.json", payload)
+        errors = validate_task_artifacts(shadow, strict=False)
+        if errors:
+            raise ValueError("; ".join(errors))
+    finally:
+        shutil.rmtree(shadow.parent, ignore_errors=True)
+
+
+def _validate_repair_log_payload(task_dir: Path, payload: dict) -> None:
+    from lib_validate import validate_repair_log
+
+    shadow = _shadow_task_dir(task_dir)
+    try:
+        write_json(shadow / "repair-log.json", payload)
+        errors = validate_repair_log(shadow)
+        if errors:
+            raise ValueError("; ".join(errors))
+    finally:
+        shutil.rmtree(shadow.parent, ignore_errors=True)
+
+
+def _persist_classification(task_dir: Path, payload: dict) -> None:
+    manifest_path = task_dir / "manifest.json"
+    manifest = load_json(manifest_path)
+    manifest["classification"] = payload
+    manifest["fast_track"] = bool(payload.get("fast_track"))
+    _write_ctl_json(task_dir, task_dir / "classification.json", payload)
+    _write_ctl_json(task_dir, manifest_path, manifest)
+
+
+def _read_json_input(path_arg: str) -> object:
+    return json.loads(Path(path_arg).read_text(encoding="utf-8"))
 
 
 def cmd_validate_task(args: argparse.Namespace) -> int:
@@ -217,6 +608,90 @@ def cmd_check_ownership(args: argparse.Namespace) -> int:
             print(f"- {file_path}")
         return 1
     print("Ownership check passed.")
+    return 0
+
+
+def cmd_run_external_solution_gate(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        gate = _compute_external_solution_gate(task_dir)
+        gate_path = task_dir / "external-solution-gate.json"
+        _write_ctl_json(task_dir, gate_path, gate)
+        print(json.dumps({
+            "status": "external_solution_gate_ready",
+            "task_dir": str(task_dir),
+            "gate_path": str(gate_path),
+            **gate,
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def cmd_write_execute_handoff(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        manifest = load_json(task_dir / "manifest.json")
+        handoff = {
+            "from_skill": "execute",
+            "to_skill": "audit",
+            "handoff_at": datetime.now(timezone.utc).isoformat(),
+            "contract_version": "1.0.0",
+            "manifest_stage": str(manifest.get("stage", "unknown")),
+        }
+        handoff_path = task_dir / "handoff-execute-audit.json"
+        _write_ctl_json(task_dir, handoff_path, handoff)
+        print(json.dumps({
+            "status": "execute_handoff_ready",
+            "task_dir": str(task_dir),
+            "handoff_path": str(handoff_path),
+            **handoff,
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def cmd_write_execution_graph(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        payload = _normalize_execution_graph_payload(task_dir, _read_json_input(args.from_path))
+        _validate_execution_graph_payload(task_dir, payload)
+        out_path = task_dir / "execution-graph.json"
+        _write_ctl_json(task_dir, out_path, payload)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps({"status": "execution_graph_written", "path": str(out_path)}, indent=2))
+    return 0
+
+
+def cmd_write_repair_log(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        payload = _normalize_repair_log_payload(task_dir, _read_json_input(args.from_path))
+        _validate_repair_log_payload(task_dir, payload)
+        out_path = task_dir / "repair-log.json"
+        _write_ctl_json(task_dir, out_path, payload)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps({"status": "repair_log_written", "path": str(out_path)}, indent=2))
+    return 0
+
+
+def cmd_write_classification(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        payload = _normalize_classification_payload(task_dir, _read_json_input(args.from_path))
+        _persist_classification(task_dir, payload)
+        out_path = task_dir / "classification.json"
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(json.dumps({"status": "classification_written", "path": str(out_path)}, indent=2))
     return 0
 
 
@@ -717,6 +1192,44 @@ def build_parser() -> argparse.ArgumentParser:
     ownership_parser.add_argument("segment_id")
     ownership_parser.add_argument("files", nargs="+")
     ownership_parser.set_defaults(func=cmd_check_ownership)
+
+    external_gate_parser = subparsers.add_parser(
+        "run-external-solution-gate",
+        help="Write external-solution-gate.json from deterministic task heuristics",
+    )
+    external_gate_parser.add_argument("task_dir")
+    external_gate_parser.set_defaults(func=cmd_run_external_solution_gate)
+
+    execute_handoff_parser = subparsers.add_parser(
+        "write-execute-handoff",
+        help="Write handoff-execute-audit.json deterministically",
+    )
+    execute_handoff_parser.add_argument("task_dir")
+    execute_handoff_parser.set_defaults(func=cmd_write_execute_handoff)
+
+    graph_write_parser = subparsers.add_parser(
+        "write-execution-graph",
+        help="Validate, normalize, and atomically write execution-graph.json",
+    )
+    graph_write_parser.add_argument("task_dir")
+    graph_write_parser.add_argument("--from", dest="from_path", required=True)
+    graph_write_parser.set_defaults(func=cmd_write_execution_graph)
+
+    repair_write_parser = subparsers.add_parser(
+        "write-repair-log",
+        help="Validate, normalize, and atomically write repair-log.json",
+    )
+    repair_write_parser.add_argument("task_dir")
+    repair_write_parser.add_argument("--from", dest="from_path", required=True)
+    repair_write_parser.set_defaults(func=cmd_write_repair_log)
+
+    classification_write_parser = subparsers.add_parser(
+        "write-classification",
+        help="Validate, normalize, and atomically write classification.json plus synced manifest state",
+    )
+    classification_write_parser.add_argument("task_dir")
+    classification_write_parser.add_argument("--from", dest="from_path", required=True)
+    classification_write_parser.set_defaults(func=cmd_write_classification)
 
     audit_receipt_parser = subparsers.add_parser(
         "audit-receipt",

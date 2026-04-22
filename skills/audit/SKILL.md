@@ -200,7 +200,7 @@ If `"source": "default"` (Q-learning disabled), the repair coordinator uses its 
 
 Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
 
-Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
+Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write the repair-log payload to `/tmp/repair-log-{id}.json`, then persist the final `.dynos/task-{id}/repair-log.json` ONLY via `python3 hooks/ctl.py write-repair-log .dynos/task-{id} --from /tmp/repair-log-{id}.json`. Do not hand-write `.dynos/task-{id}/repair-log.json`."
 
 Wait for completion. Update stage to `REPAIR_EXECUTION` (transition_task auto-appends the `[STAGE] → REPAIR_EXECUTION` log line; the call alone is sufficient).
 
@@ -249,7 +249,7 @@ If queued findings exist, append to log:
 {timestamp} [REPAIR-P2] {N} findings — {list of finding IDs}
 ```
 
-Spawn `repair-coordinator` with the phase 2 findings. The coordinator writes to `repair-log.json` with an incremented `repair_cycle` value (phase 2 overwrites with the new cycle).
+Spawn `repair-coordinator` with the phase 2 findings. The coordinator writes the payload to `/tmp/repair-log-{id}.json`, then persists the final `repair-log.json` via `python3 hooks/ctl.py write-repair-log .dynos/task-{id} --from /tmp/repair-log-{id}.json` with an incremented `repair_cycle` value (phase 2 overwrites with the new cycle).
 
 Apply the same parallel batch spawning and model escalation logic as phase 1.
 

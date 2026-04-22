@@ -215,6 +215,42 @@ function readTextSafe(filePath: string): string {
   return fs.readFileSync(filePath, "utf-8");
 }
 
+function readJsonLines(filePath: string): Record<string, unknown>[] {
+  const raw = readTextFile(filePath);
+  return raw
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => {
+      try {
+        return JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter(notNull);
+}
+
+function countByStringField(items: Record<string, unknown>[], field: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of items) {
+    const key = typeof item[field] === "string" && item[field] ? String(item[field]) : "unknown";
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function topPathCounts(items: Record<string, unknown>[], limit: number): Array<{ path: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    if (typeof item.path !== "string" || !item.path) continue;
+    counts.set(item.path, (counts.get(item.path) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([pathValue, count]) => ({ path: pathValue, count }))
+    .sort((a, b) => b.count - a.count || a.path.localeCompare(b.path))
+    .slice(0, limit);
+}
+
 function collectRetrospectivesForProject(projectPath: string): Array<Record<string, unknown>> {
   return listTaskDirs(projectPath).map((taskDir) => {
     try {
@@ -1015,11 +1051,45 @@ export function dynosApi(): Plugin {
               return;
             }
             try {
-              const raw = readTextFile(path.join(localDynosDir(projectPath), taskId, "events.jsonl"));
-              const events = raw.split("\n").filter((l) => l.trim()).map((line) => {
-                try { return JSON.parse(line); } catch { return null; }
-              }).filter(notNull);
+              const events = readJsonLines(path.join(localDynosDir(projectPath), taskId, "events.jsonl"));
               jsonResponse(res, 200, { events });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/tasks/:taskId/write-boundary
+          const writeBoundaryMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/write-boundary$/);
+          if (writeBoundaryMatch) {
+            const taskId = writeBoundaryMatch[1];
+            if (!TASK_ID_PATTERN.test(taskId)) {
+              jsonResponse(res, 400, { error: "Invalid task ID" });
+              return;
+            }
+            try {
+              const allEvents = readJsonLines(path.join(localDynosDir(projectPath), taskId, "events.jsonl"));
+              const events = allEvents.filter((evt) => {
+                const eventName = evt.event;
+                return eventName === "write_policy_allowed"
+                  || eventName === "write_policy_wrapper_required"
+                  || eventName === "write_policy_denied";
+              });
+              const denied = events.filter((evt) => evt.event === "write_policy_denied");
+              const wrapperRequired = events.filter((evt) => evt.event === "write_policy_wrapper_required");
+              const allowed = events.filter((evt) => evt.event === "write_policy_allowed");
+              jsonResponse(res, 200, {
+                counts: {
+                  allowed: allowed.length,
+                  wrapper_required: wrapperRequired.length,
+                  denied: denied.length,
+                  total: events.length,
+                },
+                by_role: countByStringField(events, "role"),
+                top_denied_paths: topPathCounts(denied, 5),
+                top_wrapper_paths: topPathCounts(wrapperRequired, 5),
+                events,
+              });
             } catch (err) {
               handleFsError(res, err);
             }

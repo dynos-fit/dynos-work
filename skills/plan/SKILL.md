@@ -41,7 +41,7 @@ Append to execution log (transition_task already auto-logged the `[STAGE] → PL
 {timestamp} [SPAWN] planning — generate implementation plan
 ```
 
-Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding. Write to `.dynos/task-{id}/plan.md` and `.dynos/task-{id}/execution-graph.json`. Include: technical approach, module/component breakdown, data flow, error handling, failure modes, rollback or migration risk where relevant, test strategy, and explicit file ownership per segment. Do not leave any acceptance criterion covered only by implication."
+Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, write the JSON payload to `/tmp/execution-graph-{id}.json`, then persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. Include: technical approach, module/component breakdown, data flow, error handling, failure modes, rollback or migration risk where relevant, test strategy, and explicit file ownership per segment. Do not leave any acceptance criterion covered only by implication. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
 
 Wait for completion. Run deterministic artifact validation before human review. Run:
 
@@ -81,7 +81,7 @@ Approve this plan? (yes / no + what to change)
 
   Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause: missing artifact, hash drift, illegal transition). Do not bypass with `transition --force`.
 - If **changes requested**: append `{timestamp} [HUMAN] PLAN_REVIEW — changes requested: {summary}` to log. Spawn planning agent again with the feedback. Re-present the updated plan. Repeat until approved. Do NOT call `approve-stage` against a stale plan — the next time you call it, the live `plan.md` content (and therefore its hash) MUST match the version the user just approved, otherwise the transition will be refused.
-- If **rejected**: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`. Stop.
+- If **rejected**: run `python3 hooks/ctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`. Stop. Do not edit `manifest.json` directly.
 
 ### Step 4 — Spec coverage audit (PLAN_AUDIT)
 

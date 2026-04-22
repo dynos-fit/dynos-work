@@ -28,7 +28,11 @@ def _setup(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _run(project: Path, graph: Path, segment: str, stdin: str = "BASE PROMPT") -> subprocess.CompletedProcess:
-    env = {**os.environ, "PYTHONPATH": str(ROOT / "hooks")}
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT / "hooks"),
+        "DYNOS_HOME": str(project / ".dynos-home"),
+    }
     return subprocess.run(
         [sys.executable, str(ROUTER), "inject-prompt",
          "--root", str(project), "--task-type", "feature",

@@ -189,7 +189,7 @@ You MUST pass this captured digest to `receipt_executor_done(...)` below as `inj
 
 If the injected prompt is weak, strengthen the base prompt before spawning. Do not accept vague executor instructions.
 
-If `inject-prompt` is not available (command not found), fall back to manually reading the `agent_path` file from the executor plan and appending its contents to the prompt. But this should never happen in this repo.
+If `inject-prompt` fails or is unavailable, stop and fix the deterministic routing path. Do NOT manually read `agent_path` or hand-build the learned-agent prompt.
 
 **Model selection:** Pass the `model` field from the executor plan as the model parameter when spawning the agent. If `model` is null, use default (omit the model parameter).
 
@@ -329,17 +329,13 @@ Append to log:
 
 ### Handoff — Write handoff record
 
-After Step 5, write `.dynos/task-{id}/handoff-execute-audit.json`:
+After Step 5, run:
 
-```json
-{
-  "from_skill": "execute",
-  "to_skill": "audit",
-  "handoff_at": "{ISO timestamp}",
-  "contract_version": "1.0.0",
-  "manifest_stage": "{current stage}"
-}
+```text
+python3 hooks/ctl.py write-execute-handoff .dynos/task-{id}
 ```
+
+This writes `.dynos/task-{id}/handoff-execute-audit.json` deterministically from the live manifest stage. Do NOT hand-write the handoff JSON in prompt logic.
 
 ## Hard Rules
 - **No speculative implementation:** Executors must stay strictly within their segment's `files_expected` and `criteria_ids`.

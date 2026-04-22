@@ -245,6 +245,54 @@ class TestValidateConditionalHeadings:
         errors = validate_task_artifacts(task_dir)
         assert any("API Contracts" in e for e in errors)
 
+    def test_component_subsection_without_exact_files_fails(self, tmp_path: Path):
+        task_dir = _make_task_dir(tmp_path, domains=["backend"], extra_plan=_api_contracts_section())
+        (task_dir / "plan.md").write_text(textwrap.dedent("""\
+            # Implementation Plan
+
+            ## Technical Approach
+            Approach text.
+
+            ## Reference Code
+            No references needed.
+
+            ## Components / Modules
+            ### Component: Widget
+            - **Purpose:** Does things
+
+            ## API Contracts
+            | Endpoint | Method | Request | Response | Auth | Codes |
+            |---|---|---|---|---|---|
+            | /api/test | GET | — | `{ok: true}` | none | 200 |
+
+            ## Data Flow
+            Data flows.
+
+            ## Error Handling Strategy
+            Errors handled.
+
+            ## Test Strategy
+            Tests written.
+
+            ## Dependency Graph
+            No deps.
+
+            ## Open Questions
+            None.
+        """))
+        errors = validate_task_artifacts(task_dir, run_gap=False)
+        assert "plan component section missing exact files: ### Component: Widget" in errors
+
+    def test_component_subsection_with_exact_files_passes(self, tmp_path: Path):
+        task_dir = _make_task_dir(
+            tmp_path,
+            domains=["backend"],
+            extra_plan=_api_contracts_section(),
+            source_files={"src/widget.py": "def ok():\n    return True\n"},
+        )
+        errors = validate_task_artifacts(task_dir, run_gap=False)
+        assert "plan component section missing exact files" not in "\n".join(errors)
+
 
 # ---------------------------------------------------------------------------
 # Backwards compatibility: domains that don't trigger conditional sections

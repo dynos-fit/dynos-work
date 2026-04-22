@@ -22,7 +22,7 @@ import type {
   AuditReport, AuditFinding, TokenUsage,
   TaskEventsResponse, TaskReceiptsResponse, TaskEvidenceResponse,
   TaskCompletion, TaskPostmortem, RouterDecision, RouterDecisionsResponse,
-  MarkdownContent,
+  MarkdownContent, TaskWriteBoundaryResponse, WriteBoundaryEvent,
 } from "@/data/types";
 
 // ---- Constants (shared with TaskPipeline) ----
@@ -302,6 +302,7 @@ function ExecutionTab({ taskId }: { taskId: string }) {
   const { data: logData, loading: lLoading } = usePollingData<{ lines: string[] }>(`/api/tasks/${taskId}/execution-log`, 10000);
   const { data: eventsData, loading: eLoading } = usePollingData<TaskEventsResponse>(`/api/tasks/${taskId}/events`, 30000);
   const { data: evidenceData, loading: evLoading } = usePollingData<TaskEvidenceResponse>(`/api/tasks/${taskId}/evidence`, 30000);
+  const { data: boundaryData, loading: wbLoading } = usePollingData<TaskWriteBoundaryResponse>(`/api/tasks/${taskId}/write-boundary`, 30000);
 
   return (
     <div className="space-y-5">
@@ -350,6 +351,62 @@ function ExecutionTab({ taskId }: { taskId: string }) {
         ) : !eLoading ? <NotAvailable label="Events" /> : null}
       </SectionCard>
 
+      <SectionCard title="Write Boundary" icon={<AlertTriangle className="w-3.5 h-3.5 text-[#7A776E]" />}>
+        {wbLoading && <SectionSkeleton />}
+        {!wbLoading && boundaryData?.counts && boundaryData.counts.total > 0 ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <MetricCard label="Denied" value={String(boundaryData.counts.denied)} icon={<XCircle className="w-3 h-3 text-[#FF3B3B]" />} />
+              <MetricCard label="Wrapper" value={String(boundaryData.counts.wrapper_required)} icon={<AlertTriangle className="w-3 h-3 text-[#FF9F43]" />} />
+              <MetricCard label="Allowed" value={String(boundaryData.counts.allowed)} icon={<CheckCircle2 className="w-3 h-3 text-[#2DD4A8]" />} />
+              <MetricCard label="Total" value={String(boundaryData.counts.total)} icon={<Activity className="w-3 h-3 text-[#00E5FF]" />} />
+            </div>
+
+            {Object.keys(boundaryData.by_role ?? {}).length > 0 && (
+              <div>
+                <span className="text-[10px] text-[#7A776E] uppercase tracking-wider block mb-2">Attempts by Role</span>
+                <div className="space-y-1">
+                  {Object.entries(boundaryData.by_role).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([role, count]) => (
+                    <KvRow key={role} label={role} value={String(count)} mono />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {boundaryData.top_denied_paths.length > 0 && (
+              <div>
+                <span className="text-[10px] text-[#7A776E] uppercase tracking-wider block mb-2">Most Denied Paths</span>
+                <div className="space-y-1">
+                  {boundaryData.top_denied_paths.map((item) => (
+                    <KvRow key={item.path} label={String(item.count)} value={item.path} mono />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {boundaryData.top_wrapper_paths.length > 0 && (
+              <div>
+                <span className="text-[10px] text-[#7A776E] uppercase tracking-wider block mb-2">Wrapper Required Paths</span>
+                <div className="space-y-1">
+                  {boundaryData.top_wrapper_paths.map((item) => (
+                    <KvRow key={item.path} label={String(item.count)} value={item.path} mono />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <span className="text-[10px] text-[#7A776E] uppercase tracking-wider block mb-2">Recent Policy Events</span>
+              <div className="max-h-72 overflow-y-auto bg-black/30 rounded-lg p-3 space-y-2">
+                {boundaryData.events.slice().reverse().map((evt, index) => (
+                  <WriteBoundaryEventRow key={`${evt.ts}-${evt.event}-${index}`} evt={evt} />
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : !wbLoading ? <NotAvailable label="Write boundary diagnostics" /> : null}
+      </SectionCard>
+
       {/* Evidence */}
       <SectionCard title="Segment Evidence" icon={<FileText className="w-3.5 h-3.5 text-[#7A776E]" />}>
         {evLoading && <SectionSkeleton />}
@@ -361,6 +418,37 @@ function ExecutionTab({ taskId }: { taskId: string }) {
           </div>
         ) : !evLoading ? <NotAvailable label="Evidence files" /> : null}
       </SectionCard>
+    </div>
+  );
+}
+
+function WriteBoundaryEventRow({ evt }: { evt: WriteBoundaryEvent }) {
+  let color = "#2DD4A8";
+  if (evt.event === "write_policy_denied") {
+    color = "#FF3B3B";
+  } else if (evt.event === "write_policy_wrapper_required") {
+    color = "#FF9F43";
+  }
+
+  return (
+    <div className="border border-white/6 rounded-lg p-3 bg-black/20 space-y-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] font-mono text-[#B47AFF]">{formatTime(evt.ts)}</span>
+        <Badge label={evt.event.replace("write_policy_", "")} color={color} />
+        {evt.role && <Badge label={evt.role} color="#7A776E" />}
+        {evt.operation && <Badge label={evt.operation} color="#00E5FF" />}
+      </div>
+      {evt.path && (
+        <div className="text-[11px] font-mono text-slate-300 break-all">
+          {evt.path}
+        </div>
+      )}
+      {evt.reason && (
+        <div className="text-[11px] text-slate-400">{evt.reason}</div>
+      )}
+      {evt.wrapper_command && (
+        <div className="text-[11px] font-mono text-[#BDF000] break-all">{evt.wrapper_command}</div>
+      )}
     </div>
   );
 }

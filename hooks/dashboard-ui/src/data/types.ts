@@ -378,6 +378,33 @@ export interface TaskEventsResponse {
   events: TaskEvent[];
 }
 
+export interface WriteBoundaryEvent extends TaskEvent {
+  role?: string;
+  path?: string;
+  operation?: string;
+  reason?: string;
+  mode?: string;
+  wrapper_command?: string;
+}
+
+export interface WriteBoundaryPathStat {
+  path: string;
+  count: number;
+}
+
+export interface TaskWriteBoundaryResponse {
+  counts: {
+    allowed: number;
+    wrapper_required: number;
+    denied: number;
+    total: number;
+  };
+  by_role: Record<string, number>;
+  top_denied_paths: WriteBoundaryPathStat[];
+  top_wrapper_paths: WriteBoundaryPathStat[];
+  events: WriteBoundaryEvent[];
+}
+
 // ---- Task Detail: Receipts ----
 
 export interface TaskReceipt {

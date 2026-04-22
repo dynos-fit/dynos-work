@@ -177,14 +177,7 @@ This writes to `.dynos/task-{id}/token-usage.json` with a chronological event lo
 
 ## Step 2 — Discovery + Design + Classification
 
-**Fast-track discovery skip:** Before spawning the planner, check if the task input is already well-scoped. A task is well-scoped when ALL of:
-- It names a specific file or narrow set of files
-- It states explicit constraints (e.g., "do not change X", "UI only", "single-file")
-- It describes a concrete, bounded change (not open-ended like "improve performance")
-
-When well-scoped: skip the planner spawn entirely. Instead, write `discovery-notes.md` with "No discovery needed — task is well-scoped." Write `design-decisions.md` with "No hard/critical design options — autonomous decisions only." Classify directly (infer type, domains, risk_level from the input). Then proceed to Step 2b (fast-track gate) and Step 3.
-
-When NOT well-scoped: spawn the planner as normal below.
+There is no direct-classify shortcut here. Always use the planner for Discovery + Design + Classification. Do NOT skip the planner spawn and do NOT infer classification directly from the task input in prompt logic.
 
 **Learned Planning Skill Injection (MANDATORY):** Before spawning the planner, check if a learned planning skill exists for this task type:
 
@@ -220,13 +213,13 @@ If hard or critical design options were returned:
 
 If no high-risk design options were returned, write `design-decisions.md` with the autonomous design choices and rationale.
 
-Write the returned classification object to `manifest.json`.
+Write the returned classification object to `/tmp/classification-{id}.json`, then run `python3 hooks/ctl.py write-classification .dynos/task-{id} --from /tmp/classification-{id}.json`.
 
 Deterministic validation before proceeding:
-1. `classification.type` must be one of `feature | bugfix | refactor | migration | ml | full-stack`.
-2. `classification.risk_level` must be one of `low | medium | high | critical`.
-3. `classification.domains` must be an array of known domains only.
-4. If validation fails, stop and correct the classification before moving on.
+1. The wrapper enforces `classification.type`.
+2. The wrapper enforces `classification.risk_level`.
+3. The wrapper enforces `classification.domains`.
+4. If `write-classification` fails, stop and correct the payload before moving on.
 
 Transition the stage by running:
 
@@ -244,7 +237,7 @@ After classification, determine fast-track eligibility **deterministically** by 
 PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 -c "from lib import apply_fast_track; from pathlib import Path; print(apply_fast_track(Path('.dynos/task-{id}')))"
 ```
 
-This checks: `risk_level == "low"` AND exactly 1 domain. It writes `"fast_track": true` or `"fast_track": false` to `manifest.json`. If the command is not available, manually check the conditions and write the field.
+This checks: `risk_level == "low"` AND exactly 1 domain. It writes `"fast_track": true` or `"fast_track": false` to `manifest.json`. If the command is not available, abort. Fast-track eligibility is a deterministic gate; manual fallback is forbidden.
 
 When fast-tracked (`fast_track: true`), apply these simplifications throughout the remaining steps:
 - **Spec (Step 3):** The planner should produce a concise spec. The `Implicit Requirements Surfaced` and `Risk Notes` sections can contain a single line each if no significant risks exist.
@@ -299,7 +292,7 @@ Present `spec.md` to the user and ask for approval.
 
 - If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, then transitions SPEC_REVIEW → PLANNING in one atomic step. Do NOT add a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
 - If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, write a new `receipt_spec_validated`, and present the updated spec again. Do NOT call `approve-stage` until the user re-approves the regenerated spec.
-- If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Spec rejected by user`, and stop.
+- If rejected outright: run `python3 hooks/dynosctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Spec rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 When approved:
 
@@ -322,10 +315,10 @@ Choose planning mode deterministically:
 Hierarchical flow:
 1. Spawn Master Planner (Opus) for strategic boundaries.
 2. Spawn Worker Planners in parallel for non-overlapping subsystems.
-3. Merge outputs into final `plan.md` and `execution-graph.json`.
+3. Merge outputs into final `plan.md` and an execution-graph payload, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`.
 
 Standard flow:
-1. Spawn Planner (Opus) with instruction to generate `plan.md` and `execution-graph.json`.
+1. Spawn Planner (Opus) with instruction to generate `plan.md` and an execution-graph payload, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`.
 
 After generation, run deterministic artifact validation before any human review. If available in this repo, run:
 
@@ -374,7 +367,7 @@ Present `plan.md` to the user and ask for approval.
 
 - If approved: run `python3 hooks/dynosctl.py approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`. Do NOT add a manual `[HUMAN]` log line — the receipt is the audit trail.
 - If changes are requested: append the feedback, respawn planning, re-run deterministic artifact validation, and present the updated plan again. Do NOT call `approve-stage` against a stale plan.
-- If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`, and stop.
+- If rejected outright: run `python3 hooks/dynosctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 ---
 

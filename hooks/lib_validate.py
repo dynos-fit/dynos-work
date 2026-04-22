@@ -19,6 +19,7 @@ from lib_core import (
     require,
     write_json,
 )
+from write_policy import find_write_violations
 
 REQUIRED_SPEC_HEADINGS: list[str] = [
     "Task Summary",
@@ -127,6 +128,24 @@ def parse_acceptance_criteria(spec_text: str) -> list[int]:
     return numbers
 
 
+def extract_markdown_section(markdown: str, heading: str) -> str:
+    """Return the body of a level-2 markdown section, or empty string."""
+    pattern = rf"^##\s+{re.escape(heading)}\s*$"
+    match = re.search(pattern, markdown, flags=re.MULTILINE)
+    if not match:
+        return ""
+    start = match.end()
+    rest = markdown[start:]
+    next_heading = re.search(r"^##\s+", rest, flags=re.MULTILINE)
+    if next_heading:
+        return rest[:next_heading.start()]
+    return rest
+
+
+def _contains_file_reference(text: str) -> bool:
+    return bool(re.search(r"`?[\w./-]+\.[A-Za-z0-9]{1,8}`?", text))
+
+
 def detect_cycle(graph: dict) -> bool:
     """Detect cycles in a dependency graph."""
     visiting: set[str] = set()
@@ -149,6 +168,37 @@ def detect_cycle(graph: dict) -> bool:
     return any(walk(node_id) for node_id in by_id)
 
 
+def _collect_audit_findings(task_dir: Path) -> dict[str, dict]:
+    """Return audit findings keyed by finding id from live audit reports."""
+    findings_by_id: dict[str, dict] = {}
+    audit_dir = task_dir / "audit-reports"
+    if not audit_dir.is_dir():
+        return findings_by_id
+    for report_path in sorted(audit_dir.glob("*.json")):
+        try:
+            payload = load_json(report_path)
+        except (json.JSONDecodeError, OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        findings = payload.get("findings")
+        if not isinstance(findings, list):
+            continue
+        auditor_name = payload.get("auditor_name") or payload.get("auditor") or report_path.stem
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            finding_id = finding.get("id")
+            if not isinstance(finding_id, str) or not finding_id:
+                continue
+            if finding_id in findings_by_id:
+                continue
+            row = dict(finding)
+            row["_auditor_name"] = auditor_name
+            findings_by_id[finding_id] = row
+    return findings_by_id
+
+
 def validate_manifest(manifest: dict) -> list[str]:
     """Validate a task manifest for required fields and valid values."""
     errors: list[str] = []
@@ -160,6 +210,9 @@ def validate_manifest(manifest: dict) -> list[str]:
         errors.append(f"manifest has invalid stage: {stage!r}")
     classification = manifest.get("classification")
     if classification is not None:
+        if not isinstance(classification, dict):
+            errors.append("classification must be an object")
+            return errors
         ctype = classification.get("type")
         if ctype not in VALID_CLASSIFICATION_TYPES:
             errors.append(f"classification.type invalid: {ctype!r}")
@@ -170,9 +223,23 @@ def validate_manifest(manifest: dict) -> list[str]:
         if not isinstance(domains, list) or not domains:
             errors.append("classification.domains must be a non-empty array")
         else:
+            seen_domains: set[str] = set()
             for domain in domains:
+                if not isinstance(domain, str) or not domain.strip():
+                    errors.append("classification.domains entries must be non-empty strings")
+                    continue
                 if domain not in VALID_DOMAINS:
                     errors.append(f"classification domain invalid: {domain!r}")
+                if domain in seen_domains:
+                    errors.append(f"classification.domains contains duplicate entry: {domain!r}")
+                else:
+                    seen_domains.add(domain)
+        if "notes" in classification and not isinstance(classification.get("notes"), str):
+            errors.append("classification.notes must be a string")
+        if "tdd_required" in classification and not isinstance(classification.get("tdd_required"), bool):
+            errors.append("classification.tdd_required must be a boolean")
+        if "fast_track" in classification and not isinstance(classification.get("fast_track"), bool):
+            errors.append("classification.fast_track must be a boolean")
     return errors
 
 
@@ -338,6 +405,26 @@ def validate_task_artifacts(
                 if not full.exists():
                     errors.append(f"plan Reference Code path does not exist: {ref_path}")
 
+        components_section = extract_markdown_section(plan_text, "Components / Modules")
+        if components_section.strip():
+            component_chunks = [
+                chunk for chunk in re.split(r"(?=^###\s+)", components_section, flags=re.MULTILINE)
+                if chunk.strip()
+            ]
+            has_component_subsections = any(
+                chunk.lstrip().startswith("### ") for chunk in component_chunks
+            )
+            if has_component_subsections:
+                for chunk in component_chunks:
+                    stripped = chunk.strip()
+                    if not stripped or not stripped.startswith("### "):
+                        continue
+                    heading_line = stripped.splitlines()[0].strip()
+                    if not _contains_file_reference(chunk):
+                        errors.append(
+                            f"plan component section missing exact files: {heading_line}"
+                        )
+
         # Gap analysis: verify API Contracts / Data Model claims against code.
         # Skipped when caller passes run_gap=False (e.g., execute preflight
         # after planning has already validated the same plan).
@@ -356,6 +443,12 @@ def validate_task_artifacts(
         except json.JSONDecodeError as exc:
             errors.append(f"invalid JSON in {graph_path}: {exc}")
             graph = {}
+        graph_task_id = graph.get("task_id")
+        manifest_task_id = manifest.get("task_id")
+        if graph_task_id is not None and manifest_task_id is not None and graph_task_id != manifest_task_id:
+            errors.append(
+                f"execution graph task_id mismatch: graph={graph_task_id!r} manifest={manifest_task_id!r}"
+            )
         segments = graph.get("segments")
         if not isinstance(segments, list) or not segments:
             errors.append("execution graph must contain a non-empty segments array")
@@ -371,7 +464,12 @@ def validate_task_artifacts(
                 if not segment_id or not isinstance(segment_id, str):
                     errors.append("every segment must have a string id")
                     continue
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", segment_id):
+                    errors.append(f"{segment_id}: segment id must match [A-Za-z0-9][A-Za-z0-9_.-]*")
                 segment_ids.append(segment_id)
+                description = segment.get("description")
+                if not isinstance(description, str) or not description.strip():
+                    errors.append(f"{segment_id}: description must be a non-empty string")
                 executor = segment.get("executor")
                 if executor not in VALID_EXECUTORS:
                     errors.append(f"{segment_id}: invalid executor {executor!r}")
@@ -379,12 +477,17 @@ def validate_task_artifacts(
                 if not isinstance(files_expected, list) or not files_expected:
                     errors.append(f"{segment_id}: files_expected must be a non-empty array")
                 else:
+                    segment_seen_files: set[str] = set()
                     for file_path in files_expected:
-                        if not isinstance(file_path, str):
+                        if not isinstance(file_path, str) or not file_path.strip():
                             errors.append(f"{segment_id}: file path must be a string")
                             continue
                         if Path(file_path).is_absolute() or ".." in Path(file_path).parts:
                             errors.append(f"{segment_id}: file path must stay inside repo: {file_path}")
+                        if file_path in segment_seen_files:
+                            errors.append(f"{segment_id}: duplicate file in files_expected: {file_path}")
+                        else:
+                            segment_seen_files.add(file_path)
                         owner = seen_files.get(file_path)
                         if owner and owner != segment_id:
                             errors.append(f"file {file_path} appears in multiple segments: {owner}, {segment_id}")
@@ -393,11 +496,31 @@ def validate_task_artifacts(
                 depends_on = segment.get("depends_on", [])
                 if not isinstance(depends_on, list):
                     errors.append(f"{segment_id}: depends_on must be an array")
+                else:
+                    seen_deps: set[str] = set()
+                    for dep in depends_on:
+                        if not isinstance(dep, str) or not dep.strip():
+                            errors.append(f"{segment_id}: depends_on entries must be non-empty strings")
+                            continue
+                        if dep == segment_id:
+                            errors.append(f"{segment_id}: depends_on cannot reference itself")
+                        if dep in seen_deps:
+                            errors.append(f"{segment_id}: duplicate depends_on entry: {dep}")
+                        else:
+                            seen_deps.add(dep)
                 criteria_ids = segment.get("criteria_ids")
                 if not isinstance(criteria_ids, list) or not criteria_ids:
                     errors.append(f"{segment_id}: criteria_ids must be a non-empty array")
                 else:
+                    seen_criteria_ids: set[int] = set()
                     for criterion_id in criteria_ids:
+                        if not isinstance(criterion_id, int):
+                            errors.append(f"{segment_id}: criteria_id must be an integer")
+                            continue
+                        if criterion_id in seen_criteria_ids:
+                            errors.append(f"{segment_id}: duplicate criteria_id: {criterion_id}")
+                        else:
+                            seen_criteria_ids.add(criterion_id)
                         if criterion_id not in criteria_set:
                             errors.append(f"{segment_id}: criteria_id {criterion_id!r} does not exist in spec")
             if len(segment_ids) != len(set(segment_ids)):
@@ -437,21 +560,45 @@ def validate_repair_log(task_dir: Path) -> list[str]:
     except json.JSONDecodeError as exc:
         return [f"invalid JSON in {path}: {exc}"]
     errors: list[str] = []
+    try:
+        manifest = load_json(task_dir / "manifest.json")
+    except (json.JSONDecodeError, OSError, ValueError, FileNotFoundError):
+        manifest = {}
+    manifest_task_id = manifest.get("task_id") if isinstance(manifest, dict) else None
+    task_id = data.get("task_id")
+    if task_id is not None and not isinstance(task_id, str):
+        errors.append("repair-log task_id must be a string")
+    elif (
+        isinstance(task_id, str)
+        and isinstance(manifest_task_id, str)
+        and task_id != manifest_task_id
+    ):
+        errors.append(
+            f"repair-log task_id mismatch: repair-log={task_id!r} manifest={manifest_task_id!r}"
+        )
+    repair_cycle = data.get("repair_cycle")
+    if repair_cycle is not None and (not isinstance(repair_cycle, int) or repair_cycle < 0):
+        errors.append("repair-log repair_cycle must be a non-negative integer")
+    live_findings = _collect_audit_findings(task_dir)
     batches = data.get("batches")
     if not isinstance(batches, list):
         return ["repair-log batches must be an array"]
     seen_batch_ids: set[str] = set()
+    seen_finding_ids: set[str] = set()
     for batch in batches:
         if not isinstance(batch, dict):
             errors.append("repair-log batch must be an object")
             continue
         batch_id = batch.get("batch_id")
-        if not isinstance(batch_id, str):
+        if not isinstance(batch_id, str) or not batch_id.strip():
             errors.append("repair-log batch missing string batch_id")
         elif batch_id in seen_batch_ids:
             errors.append(f"duplicate repair batch id: {batch_id}")
         else:
             seen_batch_ids.add(batch_id)
+        parallel = batch.get("parallel")
+        if parallel is not None and not isinstance(parallel, bool):
+            errors.append(f"{batch_id}: parallel must be a boolean")
         tasks = batch.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             errors.append(f"{batch_id}: tasks must be a non-empty array")
@@ -460,15 +607,76 @@ def validate_repair_log(task_dir: Path) -> list[str]:
             if not isinstance(task, dict):
                 errors.append(f"{batch_id}: task must be an object")
                 continue
+            finding_id = task.get("finding_id")
+            if not isinstance(finding_id, str) or not finding_id.strip():
+                errors.append(f"{batch_id}: finding_id must be a non-empty string")
+            elif finding_id in seen_finding_ids:
+                errors.append(f"duplicate finding_id across repair-log batches: {finding_id}")
+            else:
+                seen_finding_ids.add(finding_id)
+            live_finding = live_findings.get(finding_id) if isinstance(finding_id, str) else None
+            if finding_id and not live_finding:
+                errors.append(f"{batch_id}: finding_id not found in live audit reports: {finding_id}")
+            auditor = task.get("auditor")
+            if auditor is not None and (not isinstance(auditor, str) or not auditor.strip()):
+                errors.append(f"{batch_id}: auditor must be a non-empty string when present")
+            elif (
+                isinstance(auditor, str)
+                and live_finding is not None
+                and auditor != live_finding.get("_auditor_name")
+            ):
+                errors.append(
+                    f"{batch_id}: auditor mismatch for {finding_id}: "
+                    f"repair-log={auditor!r} audit-report={live_finding.get('_auditor_name')!r}"
+                )
+            severity = task.get("severity")
+            if severity is not None and severity not in {"critical", "high", "medium", "low"}:
+                errors.append(f"{batch_id}: invalid severity {severity!r}")
+            elif (
+                severity is not None
+                and live_finding is not None
+                and isinstance(live_finding.get("severity"), str)
+                and severity != live_finding.get("severity")
+            ):
+                errors.append(
+                    f"{batch_id}: severity mismatch for {finding_id}: "
+                    f"repair-log={severity!r} audit-report={live_finding.get('severity')!r}"
+                )
+            instruction = task.get("instruction")
+            if not isinstance(instruction, str) or not instruction.strip():
+                errors.append(f"{batch_id}: instruction must be a non-empty string")
             executor = task.get("assigned_executor")
             if executor not in VALID_EXECUTORS:
                 errors.append(f"{batch_id}: invalid assigned_executor {executor!r}")
-            files = task.get("files_to_modify")
+            files = task.get("affected_files")
+            if files is None:
+                files = task.get("files_to_modify")
             if not isinstance(files, list) or not files:
-                errors.append(f"{batch_id}: files_to_modify must be a non-empty array")
+                errors.append(f"{batch_id}: affected_files must be a non-empty array")
+            else:
+                seen_files: set[str] = set()
+                for file_path in files:
+                    if not isinstance(file_path, str) or not file_path.strip():
+                        errors.append(f"{batch_id}: affected_files entries must be non-empty strings")
+                        continue
+                    if Path(file_path).is_absolute() or ".." in Path(file_path).parts:
+                        errors.append(f"{batch_id}: affected_files must stay inside repo: {file_path}")
+                    if file_path in seen_files:
+                        errors.append(f"{batch_id}: duplicate affected_files entry: {file_path}")
+                    else:
+                        seen_files.add(file_path)
             retry_count = task.get("retry_count", 0)
             if not isinstance(retry_count, int) or retry_count < 0:
                 errors.append(f"{batch_id}: retry_count must be a non-negative integer")
+            max_retries = task.get("max_retries")
+            if max_retries is not None and (not isinstance(max_retries, int) or max_retries <= 0):
+                errors.append(f"{batch_id}: max_retries must be a positive integer when present")
+            status = task.get("status")
+            if status is not None and status not in {"pending", "in_progress", "done", "failed", "blocked"}:
+                errors.append(f"{batch_id}: invalid status {status!r}")
+            model_override = task.get("model_override")
+            if model_override is not None and model_override not in {"haiku", "sonnet", "opus"}:
+                errors.append(f"{batch_id}: invalid model_override {model_override!r}")
     return errors
 
 
@@ -907,8 +1115,44 @@ def compute_reward(task_dir: Path) -> dict:
 def check_segment_ownership(task_dir: Path, segment_id: str, files: Iterable[str]) -> list[str]:
     """Check that files are owned by the specified segment."""
     graph = load_json(task_dir / "execution-graph.json")
+    root = task_dir.parent.parent
     for segment in graph.get("segments", []):
         if segment.get("id") == segment_id:
+            executor = segment.get("executor")
+            if not isinstance(executor, str) or not executor.strip():
+                raise ValueError(f"{segment_id}: segment missing executor")
             allowed = set(segment.get("files_expected", []))
-            return [file_path for file_path in files if file_path not in allowed]
+            abs_paths: list[Path] = []
+            for file_path in files:
+                p = Path(file_path)
+                if p.is_absolute():
+                    abs_paths.append(p)
+                    continue
+                rel = p.as_posix()
+                if (
+                    rel in {"manifest.json", "execution-graph.json", "repair-log.json", "external-solution-gate.json", "token-usage.json", "events.jsonl"}
+                    or rel.startswith("receipts/")
+                    or rel.startswith("handoff-")
+                    or rel.startswith("evidence/")
+                    or rel.startswith("audit-reports/")
+                ):
+                    abs_paths.append(task_dir / p)
+                else:
+                    abs_paths.append(root / p)
+            violations = find_write_violations(
+                role=executor,
+                task_dir=task_dir,
+                paths=abs_paths,
+                source="agent",
+            )
+            for file_path, abs_path in zip(files, abs_paths):
+                try:
+                    rel_to_task = abs_path.resolve().relative_to(task_dir.resolve()).as_posix()
+                except Exception:
+                    rel_to_task = None
+                if rel_to_task is not None and rel_to_task.startswith("evidence/"):
+                    continue
+                if file_path not in allowed:
+                    violations.append(str(file_path))
+            return violations
     raise ValueError(f"Unknown segment id: {segment_id}")

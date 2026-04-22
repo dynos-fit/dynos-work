@@ -196,3 +196,103 @@ def test_audit_receipt_missing_report_fails_without_manual_counts(tmp_path) -> N
     )
     assert result.returncode == 1
     assert "cannot derive finding_count/blocking_count automatically" in result.stderr
+
+
+def test_run_external_solution_gate_recommends_search_for_integration_tasks(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["raw_input"] = "Set up Stripe webhook retry handling for our API integration"
+    manifest["classification"]["type"] = "migration"
+    manifest["classification"]["domains"] = ["backend", "infra"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("run-external-solution-gate", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "external_solution_gate_ready"
+    assert payload["search_recommended"] is True
+    gate = json.loads((task_dir / "external-solution-gate.json").read_text())
+    assert gate["search_recommended"] is True
+    assert gate["search_used"] is False
+    assert gate["candidates"] == []
+    assert gate["recommended_choice"] is None
+    assert "stripe" in gate["decision_basis"]["trigger_matches"]
+
+
+def test_run_external_solution_gate_skips_search_for_file_scoped_bugfix(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["raw_input"] = "Fix regression in src/auth/service.py failing test for null token handling"
+    manifest["classification"]["type"] = "bugfix"
+    manifest["classification"]["domains"] = ["backend"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("run-external-solution-gate", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["search_recommended"] is False
+    gate = json.loads((task_dir / "external-solution-gate.json").read_text())
+    assert gate["search_recommended"] is False
+    assert gate["query_reason"] == "local repo evidence is sufficient"
+    assert gate["decision_basis"]["file_scoped"] is True
+
+
+def test_write_execute_handoff_uses_live_manifest_stage(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "TEST_EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("write-execute-handoff", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "execute_handoff_ready"
+    assert payload["from_skill"] == "execute"
+    assert payload["to_skill"] == "audit"
+    assert payload["manifest_stage"] == "TEST_EXECUTION"
+    assert payload["contract_version"] == "1.0.0"
+
+    handoff = json.loads((task_dir / "handoff-execute-audit.json").read_text())
+    assert handoff["manifest_stage"] == "TEST_EXECUTION"
+    assert handoff["from_skill"] == "execute"
+    assert handoff["to_skill"] == "audit"
+
+
+def test_write_classification_persists_normalized_payload_and_syncs_manifest(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    payload_path = tmp_path / "classification.json"
+    payload_path.write_text(json.dumps({
+        "type": "bugfix",
+        "domains": ["backend", "backend", "", "security"],
+        "risk_level": "low",
+        "notes": "  tighten auth path  ",
+    }))
+
+    result = _run_ctl("write-classification", str(task_dir), "--from", str(payload_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    classification = json.loads((task_dir / "classification.json").read_text())
+    manifest = json.loads((task_dir / "manifest.json").read_text())
+    assert classification == manifest["classification"]
+    assert classification["domains"] == ["backend", "security"]
+    assert classification["notes"] == "tighten auth path"
+    assert classification["fast_track"] is False
+    assert manifest["fast_track"] is False
+
+
+def test_write_classification_rejects_invalid_domain(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    payload_path = tmp_path / "classification.json"
+    payload_path.write_text(json.dumps({
+        "type": "feature",
+        "domains": ["backend", "unknown-domain"],
+        "risk_level": "medium",
+        "notes": "",
+    }))
+
+    result = _run_ctl("write-classification", str(task_dir), "--from", str(payload_path))
+    assert result.returncode == 1
+    assert "classification domain invalid" in result.stderr
