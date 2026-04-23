@@ -22,6 +22,23 @@ from lib_core import (
 )
 from write_policy import find_write_violations
 
+def require_nonblank(value: str, *, field_name: str) -> str:
+    """Validate that *value* is a non-empty string and return its stripped form.
+
+    Raises:
+        TypeError: if *value* is not a ``str``.
+        ValueError: if the stripped *value* is empty.
+
+    Returns the stripped value when valid.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be a string, got {type(value).__name__}")
+    stripped = value.strip()
+    if stripped == "":
+        raise ValueError(f"{field_name} must be non-empty")
+    return stripped
+
+
 REQUIRED_SPEC_HEADINGS: list[str] = [
     "Task Summary",
     "User Context",

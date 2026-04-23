@@ -1,7 +1,7 @@
 ---
 name: backend-executor
 description: "Internal dynos-work agent. Implements API routes, services, business logic, and auth. Spawned by /dynos-work:execute for backend execution segments."
-model: opus
+model: sonnet
 tools: [Read, Write, Edit, Grep, Glob, Bash]
 ---
 

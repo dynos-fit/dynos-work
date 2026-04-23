@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from lib_core import now_iso, append_execution_log, _persistent_project_dir
-from lib_log import log_event
+from lib_log import log_event, verify_signed_events
+from lib_validate import require_nonblank
 from write_policy import WriteAttempt, require_write_allowed
 
 
@@ -1309,31 +1310,27 @@ def receipt_post_completion(
                 f"post-completion task events log missing: {task_events}"
             )
 
-        seen_handlers: set[str] = set()
         try:
-            with task_events.open("r", encoding="utf-8") as f:
-                for raw in f:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        record = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(record, dict):
-                        continue
-                    if record.get("event") != "eventbus_handler":
-                        continue
-                    if record.get("task") != task_id:
-                        continue
-                    for key in ("handler", "name"):
-                        name = record.get(key)
-                        if isinstance(name, str) and name:
-                            seen_handlers.add(name)
+            verified_records = verify_signed_events(
+                task_dir,
+                os.environ.get("DYNOS_EVENT_SECRET", ""),
+                strict=False,
+            )
         except OSError as exc:
             raise ValueError(
                 f"post-completion task events log unreadable: {task_events}: {exc}"
             ) from exc
+
+        seen_handlers: set[str] = set()
+        for record in verified_records:
+            if record.get("event") != "eventbus_handler":
+                continue
+            if record.get("task") != task_id:
+                continue
+            for key in ("handler", "name"):
+                hname = record.get(key)
+                if isinstance(hname, str) and hname:
+                    seen_handlers.add(hname)
 
         for idx, entry in enumerate(handlers_run):
             if not isinstance(entry, dict):
@@ -1610,7 +1607,9 @@ def receipt_human_approval(
         raise ValueError(f"stage must not contain path separators: {stage!r}")
     if not isinstance(artifact_sha256, str) or not artifact_sha256:
         raise ValueError("artifact_sha256 must be a non-empty string")
-    if not isinstance(approver, str) or not approver.strip():
+    try:
+        require_nonblank(approver, field_name="approver")
+    except (TypeError, ValueError):
         raise ValueError(
             "approver must be a non-empty string "
             "(whitespace-only values are rejected — whitespace carries no "
@@ -2053,12 +2052,16 @@ def receipt_force_override(
     # receipt_human_approval — non-empty strings only. Whitespace-only
     # values are rejected (they carry no human-readable justification and
     # defeat the break-glass audit purpose).
-    if not isinstance(reason, str) or not reason.strip():
+    try:
+        require_nonblank(reason, field_name="reason")
+    except (TypeError, ValueError):
         raise ValueError(
             "reason must be a non-empty string "
             "(whitespace-only values are rejected)"
         )
-    if not isinstance(approver, str) or not approver.strip():
+    try:
+        require_nonblank(approver, field_name="approver")
+    except (TypeError, ValueError):
         raise ValueError(
             "approver must be a non-empty string "
             "(whitespace-only values are rejected)"

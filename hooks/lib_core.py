@@ -544,7 +544,13 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
             action = entry.get("action")
             if action == "skip":
                 reason = entry.get("reason")
-                if not isinstance(reason, str) or not reason.strip():
+                from lib_validate import require_nonblank  # noqa: PLC0415
+                _reason_ok = True
+                try:
+                    require_nonblank(reason if isinstance(reason, str) else "", field_name="reason")
+                except (TypeError, ValueError):
+                    _reason_ok = False
+                if not _reason_ok:
                     gaps.append(
                         f"auditor {name} marked skip without reason"
                     )
@@ -1167,13 +1173,18 @@ def transition_task(
     # reach the receipt writer. Order matters: reason first, then
     # approver, so the ValueError names the first missing arg.
     if force:
-        if not isinstance(force_reason, str) or not force_reason.strip():
+        from lib_validate import require_nonblank  # noqa: PLC0415 (local import avoids circular dep)
+        try:
+            require_nonblank(force_reason if isinstance(force_reason, str) else "", field_name="force_reason")
+        except (TypeError, ValueError):
             raise ValueError(
                 "force_reason must be a non-empty string when force=True "
                 "(whitespace-only values are rejected — whitespace carries no "
                 "human-readable justification)"
             )
-        if not isinstance(force_approver, str) or not force_approver.strip():
+        try:
+            require_nonblank(force_approver if isinstance(force_approver, str) else "", field_name="force_approver")
+        except (TypeError, ValueError):
             raise ValueError(
                 "force_approver must be a non-empty string when force=True "
                 "(whitespace-only values are rejected)"
@@ -2389,7 +2400,7 @@ def append_deferred_findings(
     )
 
 
-def collect_retrospectives(root: Path) -> list[dict]:
+def collect_retrospectives(root: Path, *, include_unverified: bool = False) -> list[dict]:
     """Collect all task retrospective JSON files from both the worktree
     and the project-persistent directory.
 
@@ -2422,12 +2433,27 @@ def collect_retrospectives(root: Path) -> list[dict]:
     as empty. Malformed JSON is skipped silently on either side. Entries
     without a string ``task_id`` are kept under synthetic keys so a
     malformed registry cannot drop a legitimate worktree entry.
+
+    AC14: ``include_unverified`` (keyword-only, default ``False``) controls
+    whether persistent-unverified entries (``_source == "persistent-unverified"``)
+    are included in the result.  When ``False`` (the default) such entries are
+    filtered out before returning.  Pass ``True`` only when the caller
+    explicitly needs to inspect or audit unverified entries.  The full
+    (unfiltered) collection is always stored in the memo cache; the filter is
+    applied at return time so filter-on and filter-off callers never interfere
+    with each other's cache state.
     """
     root = Path(root)
     fingerprint = _retros_stat_fingerprint(root)
     cached = _COLLECT_RETRO_CACHE.get(root)
     if cached is not None and cached[0] == fingerprint:
-        return list(cached[1])
+        full = list(cached[1])
+        if include_unverified:
+            return full
+        return [
+            entry for entry in full
+            if entry.get("_source") != "persistent-unverified"
+        ]
 
     flushed_shas = _flushed_sha_by_task_id(root)
 
@@ -2534,7 +2560,12 @@ def collect_retrospectives(root: Path) -> list[dict]:
 
     result = list(by_task_id.values())
     _COLLECT_RETRO_CACHE[root] = (fingerprint, result)
-    return list(result)
+    if include_unverified:
+        return list(result)
+    return [
+        entry for entry in result
+        if entry.get("_source") != "persistent-unverified"
+    ]
 
 
 def retrospective_task_ids(root: Path) -> list[str]:

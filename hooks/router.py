@@ -14,6 +14,7 @@ import hashlib
 import math
 import os
 import tempfile
+import zlib
 from pathlib import Path
 
 from lib_core import (
@@ -157,7 +158,7 @@ DEFAULT_EPSILON = 0.1  # 10% exploration rate
 # ---------------------------------------------------------------------------
 
 SECURITY_FLOOR_MODEL = "opus"
-DEFAULT_MODEL = _DEFAULT_MODEL_CONST  # "opus" — from lib_defaults.py
+DEFAULT_MODEL = _DEFAULT_MODEL_CONST  # "sonnet" — from lib_defaults.py
 ROLE_DEFAULT_MODELS: dict[str, str] = {
     "planning": "sonnet",
     "spec-writer": "sonnet",
@@ -797,6 +798,7 @@ def load_prevention_rules(root: Path) -> list[dict]:
 
 
 # Ensemble voting defaults — overridable via .dynos/config/policy.json
+ENSEMBLE_SAMPLE_RATE: float = 0.20
 _DEFAULT_ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
 _DEFAULT_ENSEMBLE_VOTING_MODELS = ["haiku", "sonnet"]
 _DEFAULT_ENSEMBLE_ESCALATION_MODEL = "opus"
@@ -844,6 +846,8 @@ def build_audit_plan(
     domains: list[str],
     fast_track: bool = False,
     *,
+    risk_level: str = "medium",
+    task_id: str = "",
     ctx: RouterContext | None = None,
 ) -> dict:
     """Build a complete, deterministic audit spawn plan.
@@ -923,13 +927,31 @@ def build_audit_plan(
             "composite_score": route_decision["composite_score"],
         }
 
-        # Ensemble voting for high-risk auditors
-        if auditor in ensemble_auditors and not fast_track:
+        # Ensemble sampling — risk_level-gated with deterministic CRC32 tie-break
+        if auditor in ensemble_auditors:
+            # Baseline ensemble auditors always run ensemble
             entry["ensemble"] = True
+            reason = "always_ensemble_auditor"
+        elif fast_track:
+            entry["ensemble"] = False
+            reason = "fast_track"
+        elif risk_level in {"high", "critical"}:
+            entry["ensemble"] = True
+            reason = "high_risk"
+        else:
+            # Medium / low: probabilistic sampling keyed on task_id + auditor
+            seed_key = f"{task_id}|{auditor}".encode()
+            sampled = zlib.crc32(seed_key) % 10000 < int(ENSEMBLE_SAMPLE_RATE * 10000)
+            entry["ensemble"] = sampled
+            reason = "sampled_in" if sampled else "sampled_out"
+
+        if entry["ensemble"]:
             entry["ensemble_voting_models"] = list(ensemble_models)
             entry["ensemble_escalation_model"] = ensemble_escalation
-        else:
-            entry["ensemble"] = False
+
+        log_event(root, "auditor_ensemble_decision",
+                  auditor=auditor, sampled=entry["ensemble"],
+                  reason=reason, risk_level=risk_level)
 
         plan["auditors"].append(entry)
 
@@ -1269,7 +1291,14 @@ def _read_executor_plan_cache(
 def cmd_audit_plan(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else []
-    plan = build_audit_plan(root, args.task_type, domains, fast_track=args.fast_track)
+    plan = build_audit_plan(
+        root,
+        args.task_type,
+        domains,
+        fast_track=args.fast_track,
+        risk_level=getattr(args, "risk_level", "medium"),
+        task_id=getattr(args, "task_id", ""),
+    )
     print(json.dumps(plan, indent=2))
     return 0
 
@@ -1835,6 +1864,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task-type", required=True)
     ap.add_argument("--domains", default="")
     ap.add_argument("--fast-track", action="store_true")
+    ap.add_argument("--risk-level", dest="risk_level", default="medium",
+                    choices=("low", "medium", "high", "critical"),
+                    help="Task risk level; controls ensemble sampling gates")
+    ap.add_argument("--task-id", dest="task_id", default="",
+                    help="Task ID for deterministic CRC32 ensemble sampling")
     ap.set_defaults(func=cmd_audit_plan)
 
     ep = subparsers.add_parser("executor-plan", help="Build deterministic executor spawn plan")

@@ -8,7 +8,10 @@ Thread-safe via fcntl advisory locking.
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import hmac
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -65,13 +68,170 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     "maintenance_cycle",
     "scheduler_transition_refused",
     "scheduler_transition_race",
+    "verify_signed_events_no_secret",
+    "verify_signed_events_mismatch",
+    # Per-auditor ensemble routing decision (router.py build_audit_plan).
+    # Diagnostic trace — no gate or state machine depends on this event.
+    "auditor_ensemble_decision",
+    # PreToolUse hook diagnostics (pre_tool_use.py).
+    # These are forensic traces — no gate or state machine depends on them.
+    "pre_tool_use_role_missing",
+    "pre_tool_use_bash_check",
+    # Risk level override observability (ctl._normalize_classification_payload).
+    # Forensic trace — records when an observed_floor overrides the planner's
+    # risk_level upward. No gate or state machine blocks on this event.
+    "risk_level_upgrade_blocked",
 })
 
 
 __all__ = [
     "DIAGNOSTIC_ONLY_EVENTS",
     "log_event",
+    "sign_event",
+    "verify_signed_events",
 ]
+
+
+def sign_event(payload: dict, secret: str) -> str:
+    """Return the hex digest of HMAC-SHA256 over the canonical JSON of payload.
+
+    The ``_sig`` key is excluded from the canonical serialization before
+    computing the digest. The input payload is never mutated.
+
+    Canonical form: ``json.dumps(filtered, sort_keys=True,
+    separators=(",", ":"), ensure_ascii=False, default=str)``.
+    """
+    without_sig = {k: v for k, v in payload.items() if k != "_sig"}
+    canonical = json.dumps(
+        without_sig,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        canonical,
+        hashlib.sha256,
+    ).hexdigest()
+    return digest
+
+
+def verify_signed_events(
+    task_dir: Path,
+    secret: str,
+    *,
+    strict: bool = False,
+) -> list[dict]:
+    """Read task_dir/events.jsonl and return only records whose _sig is valid.
+
+    Parameters
+    ----------
+    task_dir:
+        Directory containing ``events.jsonl``.
+    secret:
+        HMAC-SHA256 secret used to verify signatures.
+    strict:
+        When ``True``, any record with a missing or mismatched ``_sig``
+        raises ``ValueError``.  When ``False`` (default), such records are
+        silently excluded from the result.
+
+    Special-case: when ``secret`` is empty or ``None``:
+    - ``strict=True``: returns an empty list immediately (no records can be
+      verified without a secret).
+    - ``strict=False``: logs a ``verify_signed_events_no_secret`` event and
+      returns all parseable records unchanged (documented fallback).
+    """
+    if not secret:
+        if strict:
+            # Cannot verify anything without a secret — return empty list.
+            return []
+        # Non-strict fallback: read all parseable records first, then log event.
+        # Reading before logging ensures the no_secret event itself is not
+        # included in the returned records.
+        records: list[dict] = []
+        events_path = task_dir / "events.jsonl"
+        if events_path.exists():
+            # OSError propagates to caller.
+            with events_path.open("r", encoding="utf-8") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(record, dict):
+                        records.append(record)
+        log_event(
+            task_dir.parent.parent,
+            "verify_signed_events_no_secret",
+            task=task_dir.name,
+        )
+        return records
+
+    events_path = task_dir / "events.jsonl"
+    if not events_path.exists():
+        return []
+
+    verified: list[dict] = []
+    # OSError propagates to caller — receipt_post_completion wraps it in ValueError.
+    with events_path.open("r", encoding="utf-8") as f:
+        for n, raw in enumerate(f, start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                if strict:
+                    raise ValueError(
+                        f"event signature invalid at line {n}: unparseable JSON"
+                    )
+                continue
+            if not isinstance(record, dict):
+                if strict:
+                    raise ValueError(
+                        f"event signature invalid at line {n}: not a JSON object"
+                    )
+                continue
+
+            stored_sig = record.get("_sig")
+            if stored_sig is None:
+                reason = "missing_sig"
+                if strict:
+                    raise ValueError(
+                        f"event signature invalid at line {n}: {reason}"
+                    )
+                log_event(
+                    task_dir.parent.parent,
+                    "verify_signed_events_mismatch",
+                    task_dir=str(task_dir),
+                    line_number=n,
+                    reason=reason,
+                )
+                continue
+
+            expected = sign_event(record, secret)
+            if not hmac.compare_digest(expected, stored_sig):
+                reason = "signature_mismatch"
+                if strict:
+                    raise ValueError(
+                        f"event signature invalid at line {n}: {reason}"
+                    )
+                log_event(
+                    task_dir.parent.parent,
+                    "verify_signed_events_mismatch",
+                    task_dir=str(task_dir),
+                    line_number=n,
+                    reason=reason,
+                )
+                continue
+
+            verified.append(record)
+
+    return verified
 
 
 def _append_jsonl(path: Path, line: str, *, attempt: WriteAttempt) -> None:
@@ -105,6 +265,16 @@ def log_event(root: Path, event_type: str, *, task: str | None = None, **payload
         if task is not None:
             record["task"] = task
         record.update(payload)
+
+        secret = os.environ.get("DYNOS_EVENT_SECRET")
+        if secret:
+            try:
+                record["_sig"] = sign_event(record, secret)
+            except Exception as sig_exc:
+                print(
+                    f"[dynos-log] WARNING: sign_event failed: {sig_exc}",
+                    file=sys.stderr,
+                )
 
         line = json.dumps(record, default=str, ensure_ascii=False) + "\n"
 

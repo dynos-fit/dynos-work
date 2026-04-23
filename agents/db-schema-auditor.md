@@ -1,7 +1,7 @@
 ---
 name: db-schema-auditor
 description: "Internal dynos-work agent. Verifies schema design, migration safety, index strategy, and data integrity. Blocks on DB tasks. Read-only."
-model: opus
+model: haiku
 tools: [Read, Grep, Glob, Bash]
 ---
 

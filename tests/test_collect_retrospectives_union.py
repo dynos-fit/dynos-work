@@ -79,7 +79,7 @@ def test_merges_both_sources(tmp_path: Path,
     _write_worktree_retro(root, "task-A")
     _write_persistent_retro(root, "task-B")
 
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
     assert _tids(retros) == {"task-A", "task-B"}
 
 
@@ -94,7 +94,7 @@ def test_persistent_wins_on_conflict(tmp_path: Path,
     _write_persistent_retro(root, "task-X",
                             extra={"quality_score": 0.99})
 
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
     rows = [r for r in retros if r.get("task_id") == "task-X"]
     assert len(rows) == 1, f"expected exactly one row for task-X — got {rows!r}"
     row = rows[0]
@@ -114,7 +114,7 @@ def test_works_when_persistent_dir_missing(tmp_path: Path,
     # _persistent_project_dir(root)/retrospectives is absent.
     assert not (_persistent_project_dir(root) / "retrospectives").exists()
 
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
     assert _tids(retros) == {"task-solo"}
 
 
@@ -125,7 +125,7 @@ def test_works_when_worktree_is_empty(tmp_path: Path,
     root = _setup_project(tmp_path, monkeypatch)
     _write_persistent_retro(root, "task-persistent-only")
     # No worktree retros.
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
     assert _tids(retros) == {"task-persistent-only"}
 
 
@@ -142,7 +142,7 @@ def test_skips_malformed_json(tmp_path: Path,
     # Malformed entry.
     (pdir / "task-bad.json").write_text("{not valid json")
 
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
     # No crash. The good entry is in the result; the malformed one
     # is either skipped or kept under a synthetic key — either way it
     # must not cause an exception and must not shadow task-good.
@@ -165,7 +165,7 @@ def test_malformed_worktree_entry_does_not_drop_persistent(
     # Valid persistent row for the same task_id — MUST survive.
     _write_persistent_retro(root, "task-gremlin", extra={"quality_score": 0.88})
 
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
     rows = [r for r in retros if r.get("task_id") == "task-gremlin"]
     assert len(rows) == 1, f"lost persistent row for task-gremlin: {retros!r}"
     assert rows[0]["quality_score"] == 0.88

@@ -1,7 +1,7 @@
 ---
 name: db-executor
 description: "Internal dynos-work agent. Implements schema changes, migrations, ORM models, and queries. Spawned by /dynos-work:execute for database execution segments."
-model: opus
+model: sonnet
 tools: [Read, Write, Edit, Grep, Glob, Bash]
 ---
 

@@ -186,7 +186,10 @@ def _build_policy_packet(root: Path, task_id: str) -> dict:
         models[role] = {"model": decision.get("model"), "source": decision.get("source", "default")}
 
     # Audit plan
-    audit_plan = build_audit_plan(root, task_type, domains, fast_track=fast_track, ctx=ctx)
+    audit_plan = build_audit_plan(
+        root, task_type, domains, fast_track=fast_track,
+        risk_level=str(risk_level), task_id=task_id, ctx=ctx,
+    )
 
     # Skip decisions — only compute for auditors the task is actually eligible to
     # consider. This avoids broad policy-packet work for irrelevant auditors.

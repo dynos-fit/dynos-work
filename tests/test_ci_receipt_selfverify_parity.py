@@ -59,6 +59,7 @@ _SELF_VERIFY_EXEMPT = {
     "receipt_rules_check_passed",   # payload: error_violations + rules_file_sha256; self-verify against rules_engine at gate time (B-008)
     "receipt_force_override",       # payload: bypassed_gates observability snapshot supplied by caller; no authoritative on-disk artifact to self-verify against
     "receipt_scheduler_refused",    # payload: missing_proofs observability snapshot from compute_next_stage; no authoritative on-disk artifact to self-verify against (parallel to receipt_force_override)
+    "receipt_post_completion",      # payload: handlers_run list; self-verified via verify_signed_events (HMAC-checked events log); AST checker cannot see through the cross-module call boundary
 }
 
 

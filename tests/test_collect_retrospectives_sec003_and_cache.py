@@ -111,7 +111,7 @@ def test_persistent_retro_without_flush_event_trusted(tmp_path: Path) -> None:
     # events.jsonl does not exist — no flush record for task-COLD.
 
     _COLLECT_RETRO_CACHE.clear()
-    result = collect_retrospectives(root)
+    result = collect_retrospectives(root, include_unverified=True)
     assert any(r.get("task_id") == "task-COLD" for r in result)
 
 
