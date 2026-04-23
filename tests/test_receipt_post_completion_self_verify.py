@@ -1,10 +1,8 @@
-"""TDD-first tests for AC17 (task-20260419-009).
+"""Tests for post-completion self-verification.
 
 Verifies the new ``self_verify`` enum field on
 ``hooks/lib_receipts.receipt_post_completion``:
 
-  * ``"skipped-no-events-log"`` — no task-scoped events.jsonl AND no
-    repo-level ``.dynos/events.jsonl`` exists or both are unreadable.
   * ``"skipped-handlers-empty"`` — ``handlers_run`` list is empty.
   * ``"passed"`` — events.jsonl readable AND every handler name in
     ``handlers_run`` matched a corresponding ``eventbus_handler`` event.
@@ -39,21 +37,40 @@ def _read_self_verify(receipt_path: Path) -> str | None:
     return payload.get("self_verify")
 
 
-# --- AC17 Test 1: no events.jsonl --> "skipped-no-events-log" ------------
+# --- Missing task events log is now a hard failure ------------------------
 
-def test_self_verify_skipped_no_events_log(tmp_path):
+def test_self_verify_requires_task_events_log(tmp_path):
     td = _make_task(tmp_path, slug="SKIP-NO-LOG")
-    # Explicitly ensure neither task-scoped nor repo-level events.jsonl
-    # exists.
+    # Explicitly ensure the task-scoped events.jsonl does not exist.
     assert not (td / "events.jsonl").exists()
-    assert not (td.parent / "events.jsonl").exists()
+    with pytest.raises(ValueError, match="post-completion task events log missing"):
+        receipt_post_completion(td, [{"name": "h1"}])
 
-    out = receipt_post_completion(td, [{"name": "h1"}])
-    val = _read_self_verify(out)
-    assert val == "skipped-no-events-log", (
-        f"self_verify must be 'skipped-no-events-log' when both events.jsonl "
-        f"are absent; got {val!r}"
-    )
+
+def test_self_verify_rejects_unreadable_task_events_log(tmp_path, monkeypatch):
+    """Adversarial cover for the OSError raise at lib_receipts.py:1334.
+
+    The events.jsonl exists but reading it raises OSError (e.g., permission
+    denied, filesystem I/O error). The receipt writer must surface the
+    failure as a ValueError with the 'post-completion task events log
+    unreadable' substring — NOT silently proceed with an empty handler set
+    (which would falsely count the post-completion as 'passed').
+    """
+    td = _make_task(tmp_path, slug="UNREAD")
+    events_path = td / "events.jsonl"
+    events_path.write_text('{"event":"eventbus_handler","task":"' + td.name + '","handler":"h1"}\n')
+
+    real_open = Path.open
+
+    def explode(self, *args, **kwargs):
+        if self.resolve() == events_path.resolve():
+            raise OSError("simulated read failure")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", explode)
+
+    with pytest.raises(ValueError, match="post-completion task events log unreadable"):
+        receipt_post_completion(td, [{"name": "h1"}])
 
 
 # --- AC17 Test 2: handlers_run=[] --> "skipped-handlers-empty" -----------
@@ -99,11 +116,21 @@ def test_self_verify_passed_with_matching_events(tmp_path):
 def test_self_verify_enum_is_one_of_three_values(tmp_path):
     """Field must be exactly one of the three enum strings. Anything else
     is a regression."""
-    allowed = {"passed", "skipped-no-events-log", "skipped-handlers-empty"}
+    allowed = {"passed", "skipped-handlers-empty"}
     td = _make_task(tmp_path, slug="ENUM-A")
     out = receipt_post_completion(td, [])
     assert _read_self_verify(out) in allowed
 
     td_b = _make_task(tmp_path, slug="ENUM-B")
+    handler_event = {
+        "ts": "2026-04-19T00:00:00Z",
+        "event": "eventbus_handler",
+        "handler": "h1",
+        "trigger_event": "task-completed",
+        "success": True,
+        "duration_s": 0.01,
+        "task": td_b.name,
+    }
+    (td_b / "events.jsonl").write_text(json.dumps(handler_event) + "\n")
     out_b = receipt_post_completion(td_b, [{"name": "h1"}])
     assert _read_self_verify(out_b) in allowed

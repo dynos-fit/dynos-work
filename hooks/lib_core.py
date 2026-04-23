@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from write_policy import WriteAttempt, require_write_allowed
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -163,6 +165,20 @@ def write_json(path: Path, data: Any) -> None:
         except OSError:
             pass
         raise
+
+
+def write_ctl_json(task_dir: Path, path: Path, data: Any) -> None:
+    """Persist ctl-owned task JSON through the write-boundary policy."""
+    require_write_allowed(
+        WriteAttempt(
+            role="ctl",
+            task_dir=task_dir,
+            path=path,
+            operation="modify" if path.exists() else "create",
+            source="ctl",
+        )
+    )
+    write_json(path, data)
 
 
 def require(path: Path) -> str:
@@ -1919,7 +1935,7 @@ def transition_task(
         manifest["completion_at"] = now_iso()
     if next_stage == "FAILED" and manifest.get("blocked_reason") is None:
         manifest["blocked_reason"] = "transitioned to FAILED"
-    write_json(manifest_path, manifest)
+    write_ctl_json(task_dir, manifest_path, manifest)
 
     # ---- AC 15 side-effect: pre-repair blocking snapshot ----
     # On entry into REPAIR_PLANNING (the first repair cycle), capture the
@@ -1948,7 +1964,7 @@ def transition_task(
 
     # ---- Log stage transition to events.jsonl ----
     # D3: a broken logger must never wedge the state-machine mutation
-    # that already landed on disk via ``write_json(manifest_path, ...)``
+    # that already landed on disk via ``write_ctl_json(task_dir, manifest_path, ...)``
     # above. Swallow log_event failures so a force=True break-glass
     # transition still returns cleanly to its caller.
     try:

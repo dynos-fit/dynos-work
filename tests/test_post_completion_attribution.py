@@ -1,4 +1,4 @@
-"""TDD-first tests for AC18 + AC19 + AC20 (task-20260419-009).
+"""Task-local attribution tests for post-completion self-verification.
 
 The D5 ordering hazard: ``hooks/eventbus.py`` drain must carry
 ``task=task_id`` on the ``eventbus_handler`` log_event call (AC18); only
@@ -7,9 +7,8 @@ from ``if rec_task is not None and rec_task != task_id`` to
 ``if rec_task != task_id`` (AC19). Without the tighten, legitimate
 handler events for task-B contaminate task-A's self-verify set.
 
-This test simulates a concurrent drain producing attributed handler
-events in the repo-level ``.dynos/events.jsonl`` (the file the eventbus
-writes to when ``log_event`` has no task-dir context) and proves:
+This test simulates concurrent drains producing attributed handler
+events in each task's own ``events.jsonl`` and proves:
 
   1. receipt_post_completion(task_dir_A, [{"name": "hA"}]) succeeds —
      hA's event carries task=task-A and matches.
@@ -36,9 +35,10 @@ from lib_receipts import receipt_post_completion  # noqa: E402
 
 
 def _setup_two_tasks(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Create two sibling task dirs under a shared project root plus the
-    repo-level .dynos/events.jsonl that carries both attributed handler
-    events. Returns (task_dir_A, task_dir_B, repo_events_path).
+    """Create two sibling task dirs under a shared project root.
+
+    Each task gets its own attributed ``events.jsonl`` file because
+    post-completion self-verify now trusts only task-local evidence.
     """
     project = tmp_path / "project"
     dynos = project / ".dynos"
@@ -56,37 +56,36 @@ def _setup_two_tasks(tmp_path: Path) -> tuple[Path, Path, Path]:
         json.dumps({"task_id": task_b.name, "stage": "CHECKPOINT_AUDIT"})
     )
 
-    repo_events = dynos / "events.jsonl"
-    # Attributed handler events — the shape AC18 produces.
-    lines = [
+    (task_a / "events.jsonl").write_text(
         json.dumps({
             "ts": "2026-04-19T00:00:00Z",
             "event": "eventbus_handler",
-            "task": task_a.name,  # AC18 attribution
+            "task": task_a.name,
             "handler": "hA",
             "trigger_event": "task-completed",
             "success": True,
             "duration_s": 0.01,
-        }),
+        }) + "\n"
+    )
+    (task_b / "events.jsonl").write_text(
         json.dumps({
             "ts": "2026-04-19T00:00:01Z",
             "event": "eventbus_handler",
-            "task": task_b.name,  # AC18 attribution
+            "task": task_b.name,
             "handler": "hB",
             "trigger_event": "task-completed",
             "success": True,
             "duration_s": 0.01,
-        }),
-    ]
-    repo_events.write_text("\n".join(lines) + "\n")
+        }) + "\n"
+    )
 
-    return task_a, task_b, repo_events
+    return task_a, task_b, dynos
 
 
 # --- AC20 assertion 1: task-A claiming hA succeeds -----------------------
 
 def test_task_a_claim_hA_succeeds(tmp_path):
-    task_a, _task_b, _repo_events = _setup_two_tasks(tmp_path)
+    task_a, _task_b, _dynos = _setup_two_tasks(tmp_path)
     # Must not raise — hA's event carries task=task_a.name.
     out = receipt_post_completion(task_a, [{"name": "hA"}])
     payload = json.loads(out.read_text())
@@ -100,7 +99,7 @@ def test_task_a_claim_hA_succeeds(tmp_path):
 # --- AC20 assertion 2: task-A claiming hB raises after AC19 tighten ------
 
 def test_task_a_claim_hB_raises_after_ac19_tighten(tmp_path):
-    task_a, _task_b, _repo_events = _setup_two_tasks(tmp_path)
+    task_a, _task_b, _dynos = _setup_two_tasks(tmp_path)
     # hB's event is attributed to task-B; after the AC19 tighten at
     # lib_receipts.py:1263, the per-task self-verify set for task-A must
     # NOT include hB — so the handler-not-in-events check raises.
@@ -127,7 +126,7 @@ def test_events_without_task_attribution_are_filtered_after_tighten(tmp_path):
     )
 
     # Write an eventbus_handler event with NO task= attribution.
-    (dynos / "events.jsonl").write_text(
+    (td / "events.jsonl").write_text(
         json.dumps({
             "ts": "2026-04-19T00:00:00Z",
             "event": "eventbus_handler",
@@ -139,8 +138,6 @@ def test_events_without_task_attribution_are_filtered_after_tighten(tmp_path):
         }) + "\n"
     )
 
-    # Today this would pass because the filter accepts records with no
-    # task; after AC19 it must raise.
     with pytest.raises(ValueError, match="post-completion handler not in events: orphan"):
         receipt_post_completion(td, [{"name": "orphan"}])
 
@@ -157,7 +154,7 @@ def test_ac18_eventbus_drain_passes_task_kwarg_to_log_event(monkeypatch, tmp_pat
     records every call and we assert at least one ``eventbus_handler``
     entry was emitted with ``task=`` attribution derived from the payload.
     """
-    import hooks.eventbus as eventbus_mod  # noqa: PLC0415  (lazy; may fail import)
+    import eventbus as eventbus_mod  # noqa: PLC0415  (lazy; may fail import)
     recorded: list[dict] = []
 
     def _spy(root, event_type, *, task=None, **payload):

@@ -17,6 +17,7 @@ from lib_core import (
     VALID_RISK_LEVELS,
     load_json,
     require,
+    write_ctl_json,
     write_json,
 )
 from write_policy import find_write_violations
@@ -289,7 +290,7 @@ def apply_fast_track(task_dir: Path) -> bool:
         risk_level = classification.get("risk_level")
         classification["tdd_required"] = risk_level in _HIGH_RISK_LEVELS
 
-    write_json(manifest_path, manifest)
+    write_ctl_json(task_dir, manifest_path, manifest)
     return fast
 
 

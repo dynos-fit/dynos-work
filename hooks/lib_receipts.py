@@ -1274,14 +1274,10 @@ def receipt_post_completion(
     receipts (see `receipt_postmortem_*`).
 
     v4 self-verify: when ``handlers_run`` is non-empty, cross-check each
-    declared handler name against ``eventbus_handler`` events in
-    ``events.jsonl``. Both the task-scoped log
-    (``task_dir/events.jsonl``) and the repo-level fallback
-    (``<root>/.dynos/events.jsonl``) are consulted because the eventbus
-    currently writes handler events without a ``task=`` attribution and
-    they land in the global file. Each entry in ``handlers_run`` must
-    resolve to an event whose ``handler`` or ``name`` field matches; a
-    missing handler raises
+    declared handler name against ``eventbus_handler`` events in the
+    task-scoped ``events.jsonl`` at ``task_dir/events.jsonl``. Each
+    entry in ``handlers_run`` must resolve to an event whose ``handler``
+    or ``name`` field matches; a missing handler raises
     ``ValueError("post-completion handler not in events: <name>")``.
 
     v5 self_verify enum: the receipt payload now carries a top-level
@@ -1289,14 +1285,13 @@ def receipt_post_completion(
       * ``"passed"`` — events.jsonl was readable AND every handler name
         in ``handlers_run`` was matched against an ``eventbus_handler``
         record.
-      * ``"skipped-no-events-log"`` — no events.jsonl file was readable
-        (task-scoped and repo-level both absent / unreadable).
       * ``"skipped-handlers-empty"`` — ``handlers_run`` list was empty
         (no handlers to verify).
 
-    Fail-open on file trouble: if events.jsonl is absent, unreadable, or
-    unparseable, emit a single stderr warning and proceed with the write
-    so the post-completion pipeline is not held hostage to a missing log.
+    Missing or unreadable task-scoped events are a hard error when
+    ``handlers_run`` is non-empty. A post-completion receipt without an
+    inspectable task-local event log is caller-attested rather than
+    self-verifying and would reopen a trust-me-bro bypass.
     """
     if not isinstance(handlers_run, list):
         raise ValueError("handlers_run must be a list")
@@ -1306,80 +1301,56 @@ def receipt_post_completion(
     self_verify: str = "skipped-handlers-empty"
 
     if handlers_run:
-        root = task_dir.parent.parent
         task_id = task_dir.name
-        repo_events = root / ".dynos" / "events.jsonl"
         task_events = task_dir / "events.jsonl"
 
-        seen_handlers: set[str] = set()
-        any_file_readable = False
-        for path in (repo_events, task_events):
-            if not path.exists():
-                continue
-            try:
-                with path.open("r", encoding="utf-8") as f:
-                    for raw in f:
-                        raw = raw.strip()
-                        if not raw:
-                            continue
-                        try:
-                            record = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        if not isinstance(record, dict):
-                            continue
-                        if record.get("event") != "eventbus_handler":
-                            continue
-                        rec_task = record.get("task")
-                        # Post-AC18: the eventbus drain now stamps every
-                        # per-task ``eventbus_handler`` emission with
-                        # ``task=task_id`` before writing to the repo-
-                        # level ``.dynos/events.jsonl``. Attribution-less
-                        # records therefore cannot have legitimately come
-                        # from another task's drain — they are dropped so
-                        # a task's self-verify set cannot pull in handler
-                        # events it did not produce. Strict equality only.
-                        if rec_task != task_id:
-                            continue
-                        for key in ("handler", "name"):
-                            name = record.get(key)
-                            if isinstance(name, str) and name:
-                                seen_handlers.add(name)
-                any_file_readable = True
-            except OSError as exc:
-                import sys as _sys
-                print(
-                    f"post-completion self-verify skipped: events.jsonl "
-                    f"unavailable ({path}: {exc})",
-                    file=_sys.stderr,
-                )
-
-        if not any_file_readable:
-            import sys as _sys
-            print(
-                "post-completion self-verify skipped: events.jsonl "
-                "unavailable",
-                file=_sys.stderr,
+        if not task_events.exists():
+            raise ValueError(
+                f"post-completion task events log missing: {task_events}"
             )
-            self_verify = "skipped-no-events-log"
-        else:
-            for idx, entry in enumerate(handlers_run):
-                if not isinstance(entry, dict):
-                    raise ValueError(
-                        f"handlers_run[{idx}] must be a dict (got "
-                        f"{type(entry).__name__})"
-                    )
-                name = entry.get("name") or entry.get("handler")
-                if not isinstance(name, str) or not name:
-                    raise ValueError(
-                        f"handlers_run[{idx}] missing 'name'/'handler' key"
-                    )
-                if name not in seen_handlers:
-                    raise ValueError(
-                        f"post-completion handler not in events: {name}"
-                    )
-            # All handlers matched and events.jsonl was readable — pass.
-            self_verify = "passed"
+
+        seen_handlers: set[str] = set()
+        try:
+            with task_events.open("r", encoding="utf-8") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        record = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if record.get("event") != "eventbus_handler":
+                        continue
+                    if record.get("task") != task_id:
+                        continue
+                    for key in ("handler", "name"):
+                        name = record.get(key)
+                        if isinstance(name, str) and name:
+                            seen_handlers.add(name)
+        except OSError as exc:
+            raise ValueError(
+                f"post-completion task events log unreadable: {task_events}: {exc}"
+            ) from exc
+
+        for idx, entry in enumerate(handlers_run):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"handlers_run[{idx}] must be a dict (got "
+                    f"{type(entry).__name__})"
+                )
+            name = entry.get("name") or entry.get("handler")
+            if not isinstance(name, str) or not name:
+                raise ValueError(
+                    f"handlers_run[{idx}] missing 'name'/'handler' key"
+                )
+            if name not in seen_handlers:
+                raise ValueError(
+                    f"post-completion handler not in events: {name}"
+                )
+        self_verify = "passed"
 
     return write_receipt(
         task_dir,

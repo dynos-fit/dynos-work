@@ -113,6 +113,23 @@ def test_ctl_can_write_handoff(tmp_path: Path) -> None:
     assert decision.mode == "direct"
 
 
+def test_task_scoped_role_cannot_escape_task_boundary(tmp_path: Path) -> None:
+    task_dir = _task_dir(tmp_path)
+    escaped = tmp_path / "outside.json"
+    decision = decide_write(
+        WriteAttempt(
+            role="planning",
+            task_dir=task_dir,
+            path=escaped,
+            operation="create",
+            source="agent",
+        )
+    )
+    assert decision.allowed is False
+    assert decision.mode == "deny"
+    assert "escapes task boundary" in decision.reason
+
+
 def test_require_write_allowed_emits_denial_event(tmp_path: Path) -> None:
     task_dir = _task_dir(tmp_path)
     events = task_dir / "events.jsonl"

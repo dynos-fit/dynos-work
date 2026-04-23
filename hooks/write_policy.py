@@ -176,6 +176,20 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             return WriteDecision(True, "evidence markdown is executor-owned", "direct")
         return WriteDecision(False, "evidence artifacts are reserved for executor roles", "deny")
 
+    if rel_posix is None:
+        # Path lives outside the task dir. Executor and planning roles
+        # legitimately write repo artifacts (src/, tests/, docs/) as part of
+        # their work — those are NOT "task boundary escapes." System roles
+        # (scheduler/eventbus/system) likewise need the global log path.
+        # Only reject out-of-task paths when the role has no authority to
+        # write repo artifacts.
+        if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
+            return WriteDecision(True, "repo work artifact allowed for executor role", "direct")
+        if attempt.role in {"scheduler", "eventbus", "system"}:
+            return WriteDecision(True, "non-task system path allowed", "direct")
+        if attempt.task_dir is not None:
+            return WriteDecision(False, "path escapes task boundary", "deny")
+        return WriteDecision(False, "non-task path requires system-owned writer", "deny")
     if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
         return WriteDecision(True, "repo work artifact allowed for executor role", "direct")
     if attempt.role == "planning":
@@ -188,8 +202,6 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         return WriteDecision(True, "ctl direct write allowed", "direct")
     if attempt.role in {"scheduler", "eventbus", "system", "receipt-writer"}:
         return WriteDecision(True, f"{attempt.role} write allowed", "direct")
-    if rel_posix is None:
-        return WriteDecision(True, "non-task path allowed", "direct")
     return WriteDecision(False, f"no write policy matched for role={attempt.role}", "deny")
 
 
