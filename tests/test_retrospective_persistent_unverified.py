@@ -89,7 +89,7 @@ def test_persistent_retro_without_flush_event_tagged_unverified(
     _write_persistent_retro(root, tid)
     # Intentionally no retrospective_flushed event in .dynos/events.jsonl.
 
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
 
     matching = [r for r in retros if r.get("task_id") == tid]
     assert matching, f"retro for {tid} not collected; got {retros!r}"
@@ -162,7 +162,7 @@ def test_fail_open_when_log_event_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(lib_log, "log_event", _explode)
 
     # Must not raise.
-    retros = collect_retrospectives(root)
+    retros = collect_retrospectives(root, include_unverified=True)
     matching = [r for r in retros if r.get("task_id") == tid]
     assert matching, "retro must still be collected when log_event explodes"
     assert matching[0].get("_source") == "persistent-unverified", (

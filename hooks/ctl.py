@@ -6,6 +6,7 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -37,12 +38,13 @@ from lib_receipts import (
     receipt_spec_validated,
     receipt_executor_routing,
 )
-from lib_validate import apply_fast_track, check_segment_ownership, validate_task_artifacts
+from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, validate_task_artifacts
 from write_policy import WriteAttempt, require_write_allowed
 
 
 _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
     # review_stage -> (relative artifact path, next stage)
+    "SPEC_NORMALIZATION": ("spec.md", "SPEC_REVIEW"),
     "SPEC_REVIEW": ("spec.md", "PLANNING"),
     "PLAN_REVIEW": ("plan.md", "PLAN_AUDIT"),
     "TDD_REVIEW": ("evidence/tdd-tests.md", "PRE_EXECUTION_SNAPSHOT"),
@@ -262,8 +264,11 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
         for entry in raw.get("files_expected", []) or []:
             if not isinstance(entry, str):
                 continue
-            item = entry.strip()
-            if not item or item in seen_files:
+            try:
+                item = require_nonblank(entry, field_name="files_expected entry")
+            except ValueError:
+                continue
+            if item in seen_files:
                 continue
             seen_files.add(item)
             files_expected.append(item)
@@ -272,8 +277,11 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
         for entry in raw.get("depends_on", []) or []:
             if not isinstance(entry, str):
                 continue
-            item = entry.strip()
-            if not item or item in seen_deps:
+            try:
+                item = require_nonblank(entry, field_name="depends_on entry")
+            except ValueError:
+                continue
+            if item in seen_deps:
                 continue
             seen_deps.add(item)
             depends_on.append(item)
@@ -310,13 +318,16 @@ def _validate_execution_graph_payload(task_dir: Path, payload: dict) -> None:
     for idx, segment in enumerate(segments):
         if not isinstance(segment, dict):
             raise ValueError(f"segment[{idx}] must be an object")
-        seg_id = str(segment.get("id", "")).strip()
-        if not seg_id:
+        try:
+            seg_id = require_nonblank(str(segment.get("id", "")), field_name=f"segment[{idx}].id")
+        except ValueError:
             raise ValueError(f"segment[{idx}] missing id")
         if seg_id in seen_ids:
             raise ValueError(f"duplicate segment id: {seg_id}")
         seen_ids.add(seg_id)
-        if not str(segment.get("executor", "")).strip():
+        try:
+            require_nonblank(str(segment.get("executor", "")), field_name=f"{seg_id}.executor")
+        except ValueError:
             raise ValueError(f"{seg_id}: executor is required")
         files_expected = segment.get("files_expected")
         if not isinstance(files_expected, list) or not files_expected:
@@ -349,8 +360,11 @@ def _normalize_repair_log_payload(task_dir: Path, payload: dict) -> dict:
             for entry in files_source or []:
                 if not isinstance(entry, str):
                     continue
-                item = entry.strip()
-                if not item or item in seen_files:
+                try:
+                    item = require_nonblank(entry, field_name="affected_files entry")
+                except ValueError:
+                    continue
+                if item in seen_files:
                     continue
                 seen_files.add(item)
                 affected_files.append(item)
@@ -395,13 +409,140 @@ def _validate_repair_log_payload(task_dir: Path, payload: dict) -> None:
         for task in tasks:
             if not isinstance(task, dict):
                 raise ValueError(f"{batch_id}: task must be an object")
-            if not str(task.get("finding_id", "")).strip():
+            try:
+                require_nonblank(str(task.get("finding_id", "")), field_name=f"{batch_id}.finding_id")
+            except ValueError:
                 raise ValueError(f"{batch_id}: finding_id is required")
-            if not str(task.get("assigned_executor", "")).strip():
+            try:
+                require_nonblank(str(task.get("assigned_executor", "")), field_name=f"{batch_id}.assigned_executor")
+            except ValueError:
                 raise ValueError(f"{batch_id}: assigned_executor is required")
             affected_files = task.get("affected_files")
             if not isinstance(affected_files, list) or not affected_files:
                 raise ValueError(f"{batch_id}: affected_files must be a non-empty array")
+
+
+_RISK_LEVEL_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+# Hardcoded keyword list — no external config, no ReDoS risk (anchored word-boundary
+# alternation over a fixed set of short literals; all branches are O(n) in input length).
+_RISK_KEYWORD_PATTERN: re.Pattern[str] = re.compile(
+    r"\b(auth|migration|payment|delete|drop|irreversible|hmac|signing|encryption)\b",
+    re.IGNORECASE,
+)
+
+_HIGH_RISK_DOMAINS: frozenset[str] = frozenset({"security", "db", "migration"})
+
+
+def _files_expected_from_graph(task_dir: Path) -> list[str] | None:
+    """Return the flat list of all files_expected from execution-graph.json, or None if absent."""
+    graph_path = task_dir / "execution-graph.json"
+    if not graph_path.exists():
+        return None
+    try:
+        graph = load_json(graph_path)
+    except Exception:
+        return None
+    if not isinstance(graph, dict):
+        return None
+    segments = graph.get("segments", [])
+    if not isinstance(segments, list):
+        return None
+    files: list[str] = []
+    seen: set[str] = set()
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        for f in seg.get("files_expected", []) or []:
+            if not isinstance(f, str):
+                continue
+            try:
+                item = require_nonblank(f, field_name="files_expected entry")
+            except ValueError:
+                continue
+            if item not in seen:
+                seen.add(item)
+                files.append(item)
+    return files
+
+
+def _compute_risk_floor(
+    task_dir: Path,
+    domains: list[str],
+    payload: dict,
+) -> tuple[str, list[str], dict]:
+    """Compute observed_floor from the three composite signals.
+
+    Returns (floor_level, triggering_signals, raw_matches).
+    """
+    triggering_signals: list[str] = []
+    raw_matches: dict = {}
+
+    # --- Signal (a): file/domain heuristic ---
+    files_from_graph = _files_expected_from_graph(task_dir)
+    if files_from_graph is not None:
+        files_expected = files_from_graph
+    else:
+        fe = payload.get("files_expected", [])
+        if not isinstance(fe, list):
+            fe = []
+        files_expected = [str(f).strip() for f in fe if isinstance(f, str) and str(f).strip()]
+
+    high_risk_domain_hits = [d for d in domains if d in _HIGH_RISK_DOMAINS]
+    file_domain_floor: str | None = None
+    if len(files_expected) >= 10 or len(domains) >= 3 or high_risk_domain_hits:
+        file_domain_floor = "high"
+        triggering_signals.append("file_domain")
+        raw_matches["file_domain"] = {
+            "files_expected_count": len(files_expected),
+            "domains": list(domains),
+            "high_risk_domains_matched": high_risk_domain_hits,
+        }
+
+    # --- Signal (b): keyword scan on raw-input.md + spec.md ---
+    keyword_floor: str | None = None
+    raw_input_text = ""
+    spec_text = ""
+    raw_input_path = task_dir / "raw-input.md"
+    spec_path = task_dir / "spec.md"
+    if raw_input_path.exists():
+        try:
+            raw_input_text = raw_input_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            raw_input_text = ""
+    if spec_path.exists():
+        try:
+            spec_text = spec_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            spec_text = ""
+    combined_text = raw_input_text + "\n" + spec_text
+    keyword_matches = _RISK_KEYWORD_PATTERN.findall(combined_text)
+    if keyword_matches:
+        keyword_floor = "high"
+        triggering_signals.append("keyword_scan")
+        raw_matches["keyword_scan"] = {
+            "matched_keywords": sorted(set(k.lower() for k in keyword_matches)),
+        }
+
+    # --- Signal (c): token count on spec.md ---
+    token_count_floor: str | None = None
+    spec_tokens = len(spec_text.split())
+    if spec_tokens > 1500:
+        token_count_floor = "medium"
+        triggering_signals.append("token_count")
+        raw_matches["token_count"] = {"spec_token_count": spec_tokens}
+
+    # observed_floor = maximum of the three
+    floor_levels = [
+        lvl
+        for lvl in (file_domain_floor, keyword_floor, token_count_floor)
+        if lvl is not None
+    ]
+    if not floor_levels:
+        return "low", [], {}
+
+    observed_floor = max(floor_levels, key=lambda lvl: _RISK_LEVEL_ORDER.get(lvl, 0))
+    return observed_floor, triggering_signals, raw_matches
 
 
 def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
@@ -411,8 +552,11 @@ def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
     normalized_domains: list[str] = []
     seen_domains: set[str] = set()
     for entry in domains:
-        item = str(entry).strip()
-        if not item or item in seen_domains:
+        try:
+            item = require_nonblank(str(entry), field_name="domain")
+        except ValueError:
+            continue
+        if item in seen_domains:
             continue
         seen_domains.add(item)
         normalized_domains.append(item)
@@ -426,6 +570,35 @@ def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
         out["notes"] = notes.strip()
     if "tdd_required" in payload:
         out["tdd_required"] = bool(payload.get("tdd_required"))
+
+    # Compute observed_floor and override upward if needed (AC8/AC9).
+    planner_risk = out["risk_level"]
+    observed_floor, triggering_signals, raw_matches = _compute_risk_floor(
+        task_dir, normalized_domains, payload
+    )
+    planner_order = _RISK_LEVEL_ORDER.get(planner_risk, 0)
+    floor_order = _RISK_LEVEL_ORDER.get(observed_floor, 0)
+    if floor_order > planner_order:
+        out["risk_level"] = observed_floor
+        # Emit exactly one event per call when an upgrade happens.
+        try:
+            from lib_log import log_event  # noqa: PLC0415
+            task_id = task_dir.name
+            root = _root_for_task_dir(task_dir)
+            manifest = _load_manifest(task_dir)
+            log_event(
+                root,
+                "risk_level_upgrade_blocked",
+                task=task_id,
+                task_id=manifest.get("task_id", task_id),
+                planner_risk=planner_risk,
+                observed_floor=observed_floor,
+                triggering_signals=triggering_signals,
+                raw_matches=raw_matches,
+            )
+        except Exception:
+            pass
+
     return out
 
 
@@ -485,20 +658,22 @@ def cmd_transition(args: argparse.Namespace) -> int:
     if args.force:
         reason_val = getattr(args, "reason", None)
         approver_val = getattr(args, "approver", None)
-        if not isinstance(reason_val, str) or not reason_val.strip():
+        try:
+            force_reason = require_nonblank(reason_val if isinstance(reason_val, str) else "", field_name="--reason")
+        except (TypeError, ValueError):
             print(
                 "--force requires --reason STR (non-empty; whitespace-only values are rejected)",
                 file=sys.stderr,
             )
             return 2
-        if not isinstance(approver_val, str) or not approver_val.strip():
+        try:
+            force_approver = require_nonblank(approver_val if isinstance(approver_val, str) else "", field_name="--approver")
+        except (TypeError, ValueError):
             print(
                 "--force requires --approver STR (non-empty; whitespace-only values are rejected)",
                 file=sys.stderr,
             )
             return 2
-        force_reason = reason_val
-        force_approver = approver_val
 
     try:
         previous, manifest = transition_task(
@@ -516,17 +691,19 @@ def cmd_transition(args: argparse.Namespace) -> int:
 
 
 def cmd_approve_stage(args: argparse.Namespace) -> int:
-    """Record a human approval receipt for a review stage.
+    """Record a human approval receipt and atomically advance the manifest stage.
 
-    stage must be one of SPEC_REVIEW / PLAN_REVIEW / TDD_REVIEW. Exits 1 on any
-    failure that prevents the receipt write (unknown stage, missing artifact,
-    receipt-write refusal); exits 0 after the receipt is durably on disk.
-    The scheduler (hooks/scheduler.py) observes the receipt write via the
-    write_receipt chokepoint and drives any resulting stage advance
-    asynchronously in-process. Exit 0 therefore signals "receipt written";
-    it does NOT signal "stage advanced" — callers that need the latter must
-    re-read manifest.json after the call returns. stderr carries the
-    ValueError text; stdout is reserved for a success line.
+    stage must be one of SPEC_NORMALIZATION / SPEC_REVIEW / PLAN_REVIEW /
+    TDD_REVIEW. Exits 1 on any failure that prevents the receipt write or the
+    stage transition (unknown stage, missing artifact, receipt-write refusal,
+    illegal transition). Exits 0 only after both the receipt is durably on disk
+    AND manifest.json reflects the new stage.
+
+    The manifest stage is guaranteed to be advanced before this function
+    returns; callers do not depend on the daemon to observe the receipt and
+    issue the transition. The daemon may still observe receipts for telemetry
+    purposes but is not required for correctness. stderr carries error text;
+    stdout is reserved for a success line.
     """
     stage = args.stage
     mapping = _APPROVE_STAGE_MAP.get(stage)
@@ -537,7 +714,7 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    artifact_rel, _ = mapping
+    artifact_rel, next_stage = mapping
 
     task_dir = Path(args.task_dir).resolve()
     artifact_path = task_dir / artifact_rel
@@ -560,7 +737,216 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    print(f"{task_dir.name}: approved {stage} ({sha256_hex[:12]}) — receipt written, scheduler will advance")
+    # The scheduler (scheduler.py) fires synchronously inside write_receipt
+    # and may have already advanced the stage. Re-read the manifest to check;
+    # if the stage is already at next_stage, the receipt-write path did the
+    # work and we do not call transition_task a second time. If it is still
+    # at the current review stage, we call it explicitly so the guarantee
+    # holds regardless of scheduler availability.
+    try:
+        current_manifest = load_json(task_dir / "manifest.json")
+        already_advanced = current_manifest.get("stage") == next_stage
+    except Exception:
+        already_advanced = False
+
+    if not already_advanced:
+        try:
+            transition_task(task_dir, next_stage)
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+
+    print(f"{task_dir.name}: approved {stage} ({sha256_hex[:12]}) — stage advanced to {next_stage}")
+    return 0
+
+
+# Artifact name → (relative file path within task_dir, canonical receipt stem)
+_AMEND_ARTIFACT_MAP: dict[str, tuple[str, str]] = {
+    "spec": ("spec.md", "spec-validated"),
+    "plan": ("plan.md", "plan-validated"),
+    "tdd": ("evidence/tdd-tests.md", "tdd_review-approved"),
+}
+
+
+def cmd_amend_artifact(args: argparse.Namespace) -> int:
+    """Amend an artifact after it was approved, recording a receipt trail.
+
+    Resolves the artifact file from the artifact name (spec/plan/tdd),
+    requires a non-empty --reason, re-hashes the file, writes an amendment
+    receipt to receipts/amend-<name>-<ts>.json, and updates the canonical
+    receipt in-place by setting artifact_sha256 and appending to amendments.
+
+    Exits 1 on missing/blank --reason or missing artifact file.
+    """
+    task_dir = Path(args.task_dir).resolve()
+
+    # Validate --reason is non-empty.
+    reason_raw: str | None = getattr(args, "reason", None)
+    if not reason_raw or not reason_raw.strip():
+        print("amend-artifact: --reason must be non-empty", file=sys.stderr)
+        return 1
+
+    try:
+        reason = require_nonblank(reason_raw, field_name="--reason")
+    except (TypeError, ValueError):
+        print("amend-artifact: --reason must be non-empty", file=sys.stderr)
+        return 1
+
+    artifact_name: str = args.artifact_name
+    mapping = _AMEND_ARTIFACT_MAP.get(artifact_name)
+    if mapping is None:
+        allowed = ", ".join(sorted(_AMEND_ARTIFACT_MAP))
+        print(
+            f"amend-artifact: unknown artifact {artifact_name!r} (expected one of: {allowed})",
+            file=sys.stderr,
+        )
+        return 1
+
+    artifact_rel, canonical_stem = mapping
+    artifact_path = task_dir / artifact_rel
+    if not artifact_path.is_file():
+        print(
+            f"amend-artifact: artifact file not found: {artifact_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Re-hash artifact self-computedly — never accept caller-supplied hash.
+    try:
+        sha256_after = hash_file(artifact_path)
+    except OSError as exc:
+        print(f"amend-artifact: failed to hash {artifact_path}: {exc}", file=sys.stderr)
+        return 1
+
+    # Read canonical receipt to obtain before-hash.
+    receipts_dir = task_dir / "receipts"
+    canonical_path = receipts_dir / f"{canonical_stem}.json"
+    sha256_before: str = "none"
+    canonical_data: dict = {}
+    if canonical_path.is_file():
+        try:
+            canonical_data = json.loads(canonical_path.read_text(encoding="utf-8"))
+            # Look for the existing artifact hash under the canonical field name
+            # (spec-validated uses spec_sha256; we also check artifact_sha256 for
+            # receipts already amended at least once).
+            sha256_before = (
+                canonical_data.get("artifact_sha256")
+                or canonical_data.get("spec_sha256")
+                or canonical_data.get("plan_sha256")
+                or "none"
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            print(
+                f"amend-artifact: could not read canonical receipt {canonical_path}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+    amended_at = now_iso()
+
+    # Build amendment record (stored both in the amendment receipt and
+    # appended to the canonical receipt's amendments list).
+    amendment_record = {
+        "artifact_name": artifact_name,
+        "artifact_sha256_before": sha256_before,
+        "artifact_sha256_after": sha256_after,
+        "reason": reason,
+        "amended_at": amended_at,
+        "amended_by": "human",
+    }
+
+    # Write amendment receipt: receipts/amend-<name>-<ts>.json
+    # Compact timestamp: drop colons/dashes for filesystem friendliness.
+    ts_compact = amended_at.replace(":", "").replace("-", "").replace("Z", "Z")
+    amend_receipt_name = f"amend-{artifact_name}-{ts_compact}"
+    amend_receipt_path = receipts_dir / f"{amend_receipt_name}.json"
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+
+    amend_receipt_payload = {
+        "step": amend_receipt_name,
+        "ts": amended_at,
+        "valid": True,
+        **amendment_record,
+    }
+    try:
+        require_write_allowed(
+            WriteAttempt(
+                role="receipt-writer",
+                task_dir=task_dir,
+                path=amend_receipt_path,
+                operation="create",
+                source="amend-artifact",
+            )
+        )
+    except Exception as exc:
+        print(f"amend-artifact: write denied for amendment receipt: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{amend_receipt_path.name}.",
+            suffix=".tmp",
+            dir=str(receipts_dir),
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(amend_receipt_payload, indent=2))
+            os.replace(tmp, amend_receipt_path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        print(f"amend-artifact: failed to write amendment receipt: {exc}", file=sys.stderr)
+        return 1
+
+    # Update canonical receipt in-place: set artifact_sha256 and append amendment.
+    if canonical_path.is_file():
+        try:
+            require_write_allowed(
+                WriteAttempt(
+                    role="receipt-writer",
+                    task_dir=task_dir,
+                    path=canonical_path,
+                    operation="modify",
+                    source="amend-artifact",
+                )
+            )
+        except Exception as exc:
+            print(f"amend-artifact: write denied for canonical receipt update: {exc}", file=sys.stderr)
+            return 1
+
+        try:
+            canonical_data["artifact_sha256"] = sha256_after
+            existing_amendments = canonical_data.get("amendments", [])
+            if not isinstance(existing_amendments, list):
+                existing_amendments = []
+            existing_amendments.append(amendment_record)
+            canonical_data["amendments"] = existing_amendments
+
+            fd2, tmp2 = tempfile.mkstemp(
+                prefix=f".{canonical_path.name}.",
+                suffix=".tmp",
+                dir=str(receipts_dir),
+            )
+            try:
+                with os.fdopen(fd2, "w") as fh:
+                    fh.write(json.dumps(canonical_data, indent=2))
+                os.replace(tmp2, canonical_path)
+            except Exception:
+                try:
+                    os.unlink(tmp2)
+                except OSError:
+                    pass
+                raise
+        except Exception as exc:
+            print(f"amend-artifact: failed to update canonical receipt: {exc}", file=sys.stderr)
+            return 1
+
+    print(f"amended {artifact_name}: sha256={sha256_after}")
+    print(f"amendment receipt: {amend_receipt_path}")
     return 0
 
 
@@ -773,6 +1159,26 @@ def _parse_audit_report(report_path: Path) -> tuple[int, int]:
             continue
         if bool(finding.get("blocking")):
             blocking += 1
+
+    # Evidence gate: a report that claims "passed" (findings empty) must
+    # provide non-empty evidence.files_inspected and evidence.patterns_checked.
+    # Reports with non-empty findings are unaffected by this check.
+    if total == 0:
+        evidence = data.get("evidence") if isinstance(data, dict) else None
+        evidence = evidence if isinstance(evidence, dict) else {}
+        files_inspected = evidence.get("files_inspected")
+        patterns_checked = evidence.get("patterns_checked")
+        missing_fields: list[str] = []
+        if not (isinstance(files_inspected, list) and len(files_inspected) > 0):
+            missing_fields.append("evidence.files_inspected")
+        if not (isinstance(patterns_checked, list) and len(patterns_checked) > 0):
+            missing_fields.append("evidence.patterns_checked")
+        if missing_fields:
+            raise ValueError(
+                f"audit report {report_path} asserts passed without evidence: "
+                f"missing {missing_fields}"
+            )
+
     return (total, blocking)
 
 
@@ -1444,11 +1850,20 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
         if not isinstance(domains, list):
             domains = []
         fast_track = bool(manifest.get("fast_track", False))
+        risk_level = str(classification.get("risk_level", "medium"))
+        derived_task_id = task_dir.name if task_dir.name.startswith("task-") else ""
 
         from router import build_audit_plan  # noqa: PLC0415
 
         root = _root_for_task_dir(task_dir)
-        plan = build_audit_plan(root, str(task_type), [str(d) for d in domains], fast_track=fast_track)
+        plan = build_audit_plan(
+            root,
+            str(task_type),
+            [str(d) for d in domains],
+            fast_track=fast_track,
+            risk_level=risk_level,
+            task_id=derived_task_id,
+        )
         audit_plan_path = task_dir / "audit-plan.json"
         audit_plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
 
@@ -2261,6 +2676,31 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
             "execution_progress": manifest["execution_progress"],
         }, indent=2))
         return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def cmd_run_rules_check(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    mode = args.mode
+    try:
+        from lib_receipts import receipt_rules_check_passed
+        receipt_path = receipt_rules_check_passed(task_dir, mode)
+        print(json.dumps({
+            "status": "rules_check_passed",
+            "task_dir": str(task_dir),
+            "receipt_path": str(receipt_path),
+            "mode": mode,
+        }, indent=2))
+        return 0
+    except ValueError as exc:
+        print(json.dumps({
+            "status": "rules_check_failed",
+            "task_dir": str(task_dir),
+            "error": str(exc),
+        }, indent=2), file=sys.stderr)
+        return 1
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -3101,6 +3541,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     approve_stage_parser.set_defaults(func=cmd_approve_stage)
 
+    amend_artifact_parser = subparsers.add_parser(
+        "amend-artifact",
+        help="Amend an artifact post-approval and record an amendment receipt",
+    )
+    amend_artifact_parser.add_argument("task_dir")
+    amend_artifact_parser.add_argument(
+        "artifact_name",
+        help="Artifact to amend: spec, plan, or tdd",
+    )
+    amend_artifact_parser.add_argument(
+        "--reason",
+        default=None,
+        help="Human-readable rationale for the amendment (required, must be non-empty).",
+    )
+    amend_artifact_parser.set_defaults(func=cmd_amend_artifact)
+
     next_parser = subparsers.add_parser("next-command", help="Resolve next command for current stage")
     next_parser.add_argument("task_dir")
     next_parser.set_defaults(func=cmd_next_command)
@@ -3362,6 +3818,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Files to ownership-check; defaults to execution-graph files_expected for the segment.",
     )
     run_execution_segment_done_parser.set_defaults(func=cmd_run_execution_segment_done)
+
+    run_rules_check_parser = subparsers.add_parser(
+        "run-rules-check",
+        help="Run prevention-rules engine and write rules-check-passed receipt (required before run-execution-finish)",
+    )
+    run_rules_check_parser.add_argument("task_dir")
+    run_rules_check_parser.add_argument(
+        "--mode", choices=["staged", "all"], default="staged",
+        help="Check staged files only (default) or all files",
+    )
+    run_rules_check_parser.set_defaults(func=cmd_run_rules_check)
 
     run_execution_finish_parser = subparsers.add_parser(
         "run-execution-finish",

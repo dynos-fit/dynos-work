@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# PreToolUse hook for dynos-work write-policy enforcement.
+# Delegates immediately to Python3 which reads stdin and applies decide_write.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "${SCRIPT_DIR}/pre_tool_use.py"
