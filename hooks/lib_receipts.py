@@ -1332,6 +1332,7 @@ def receipt_post_completion(
                 if isinstance(hname, str) and hname:
                     seen_handlers.add(hname)
 
+
         for idx, entry in enumerate(handlers_run):
             if not isinstance(entry, dict):
                 raise ValueError(
