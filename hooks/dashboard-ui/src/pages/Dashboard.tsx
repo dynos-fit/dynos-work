@@ -611,11 +611,11 @@ export default function Dashboard() {
               </div>
               <div className="rounded-xl border border-white/6 bg-black/20 p-4">
                 <div className="text-[10px] text-slate-500 uppercase tracking-wider">Complexity</div>
-                <div className="text-xl font-mono text-slate-200 mt-2">{state.data.architecture_complexity_score.toFixed(2)}</div>
+                <div className="text-xl font-mono text-slate-200 mt-2">{state.data.architecture_complexity_score != null ? state.data.architecture_complexity_score.toFixed(2) : "—"}</div>
               </div>
               <div className="rounded-xl border border-white/6 bg-black/20 p-4">
                 <div className="text-[10px] text-slate-500 uppercase tracking-wider">Dependency Flux</div>
-                <div className="text-xl font-mono text-slate-200 mt-2">{state.data.dependency_flux.toFixed(2)}</div>
+                <div className="text-xl font-mono text-slate-200 mt-2">{state.data.dependency_flux != null ? state.data.dependency_flux.toFixed(2) : "—"}</div>
               </div>
             </div>
           )}

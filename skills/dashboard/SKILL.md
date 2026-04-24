@@ -1,11 +1,11 @@
 ---
 name: dashboard
-description: "Internal dynos-work skill. Start the global dashboard server showing all registered projects."
+description: "Internal dynos-work skill. Start the SPA dashboard server showing all registered projects."
 ---
 
 # dynos-work: Dashboard
 
-Start the global dashboard server. Shows all registered projects in a unified web UI.
+Start the SPA dashboard server. Shows all registered projects in a unified web UI.
 
 ## Ruthlessness Standard
 
@@ -16,7 +16,7 @@ Start the global dashboard server. Shows all registered projects in a unified we
 ## Usage
 
 ```
-/dynos-work:dashboard              # start server at :8766
+/dynos-work:dashboard              # start server at :8765
 /dynos-work:dashboard stop         # stop server
 /dynos-work:dashboard restart      # restart server
 ```
@@ -26,21 +26,21 @@ Start the global dashboard server. Shows all registered projects in a unified we
 ### serve (default)
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/global_dashboard.py" serve
+python3 "${REPO_DIR}/telemetry/dashboard.py" serve
 ```
 
-Print the URL: `http://127.0.0.1:8766/global-dashboard.html`
+Print the URL: `http://127.0.0.1:8765`
 
 ### stop
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/global_dashboard.py" kill
+python3 "${REPO_DIR}/telemetry/dashboard.py" kill
 ```
 
 ### restart
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/global_dashboard.py" restart
+python3 "${REPO_DIR}/telemetry/dashboard.py" restart
 ```
 
 ## Notes

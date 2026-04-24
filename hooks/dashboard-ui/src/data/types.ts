@@ -64,6 +64,9 @@ export interface TaskRetrospective {
   quality_score: number;
   cost_score: number;
   efficiency_score: number;
+  lead_time_seconds: number | null;
+  change_failure_rate: number | null;
+  recovery_time_seconds: number | null;
 }
 
 // ---- Execution Graph ----
@@ -530,4 +533,49 @@ export interface ApiResponse {
   ok: boolean;
   stdout?: string;
   stderr?: string;
+}
+
+// ---- Optional File Response ----
+
+/**
+ * Generic wrapper for API endpoints that return a file's content only when
+ * the file exists. When the file is absent the server returns { present: false }
+ * with no `data` field.
+ */
+export interface OptionalFileResponse<T> {
+  present: boolean;
+  data: T | null;
+}
+
+// ---- Opaque Audit/Plan Content ----
+
+/** Raw content returned by GET /api/tasks/{id}/audit-summary */
+export type AuditSummaryData = Record<string, unknown>;
+
+/** Raw content returned by GET /api/tasks/{id}/repair-log */
+export type RepairLogData = Record<string, unknown>;
+
+/** Raw content returned by GET /api/tasks/{id}/handoff */
+export type HandoffData = Record<string, unknown>;
+
+/** Raw content returned by GET /api/tasks/{id}/audit-plan */
+export type AuditPlanData = Record<string, unknown>;
+
+// ---- Projects Summary ----
+
+/**
+ * Per-project summary row returned by GET /api/projects-summary.
+ * Exactly 10 fields per AC 25.
+ */
+export interface ProjectSummary {
+  slug: string;
+  name: string;
+  path: string;
+  task_count: number;
+  avg_quality_score: number | null;
+  active_task_stage: string | null;
+  daemon_running: boolean;
+  last_active_at: string | null;
+  prevention_rule_count: number | null;
+  learned_routes_count: number | null;
 }

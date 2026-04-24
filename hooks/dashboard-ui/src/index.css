@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+/* ---- dynos dashboard — dark minimal theme variables ---- */
+
+:root {
+  --bg: #0a0a0a;
+  --surface: #111111;
+  --border: #222222;
+  --text: #e5e5e5;
+  --accent: #6ee7b7;
+}
+
+/* ---- dynos dashboard new pages — dark minimal theme utilities ---- */
+
+.dynos-bg { background-color: var(--bg); }
+.dynos-surface { background-color: var(--surface); }
+.dynos-border { border-color: var(--border); }
+.dynos-text { color: var(--text); }
+.dynos-accent { color: var(--accent); }
+.dynos-mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+
+/* ---- Teal spinner for new page loading states ---- */
+
+.spinner-teal {
+  border-color: rgba(110, 231, 183, 0.3);
+  border-top-color: #6ee7b7;
+}

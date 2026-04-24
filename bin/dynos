@@ -27,10 +27,9 @@ Getting started:
 
 Project commands:
   local         Project daemon: start, stop, status, logs, run-once
-  local dashboard  Per-project dashboard (generate or serve)
 
 Global commands:
-  dashboard     Global dashboard: generate, serve, kill, restart
+  dashboard     SPA dashboard: serve (default), stop, restart
   list          List all registered projects
   remove        Unregister a project (default: current dir)
   pause         Pause maintenance for a project
@@ -93,11 +92,6 @@ sys.exit(0 if pid else 1)
 
   # --- Project commands ---
   local)
-    # dynos local dashboard → generate only (no serve, global dashboard is the server)
-    if [ $# -gt 0 ] && [ "$1" = "dashboard" ]; then
-      shift
-      exec python3 "${HOOKS_DIR}/dashboard.py" generate "$@"
-    fi
     exec python3 "${HOOKS_DIR}/daemon.py" "$@"
     ;;
   daemon|maintain) exec python3 "${HOOKS_DIR}/daemon.py" "$@" ;;
@@ -149,17 +143,14 @@ sys.exit(0 if pid else 1)
 
   # --- Global dashboard (top-level) ---
   dashboard)
-    # Default to serve if no subcommand given
     if [ $# -eq 0 ]; then
-      exec python3 "${HOOKS_DIR}/global_dashboard.py" serve
+      exec python3 "${REPO_DIR}/telemetry/dashboard.py" serve
     fi
-    subcmd="$1"
+    subcmd="$1"; shift
     case "$subcmd" in
-      serve)    shift; exec python3 "${HOOKS_DIR}/global_dashboard.py" serve "$@" ;;
-      stop|kill) exec python3 "${HOOKS_DIR}/global_dashboard.py" kill ;;
-      restart)  shift; exec python3 "${HOOKS_DIR}/global_dashboard.py" restart "$@" ;;
-      generate) shift; exec python3 "${HOOKS_DIR}/global_dashboard.py" generate "$@" ;;
-      *)        exec python3 "${HOOKS_DIR}/global_dashboard.py" "$subcmd" "$@" ;;
+      stop|kill) exec python3 "${REPO_DIR}/telemetry/dashboard.py" kill ;;
+      restart)   exec python3 "${REPO_DIR}/telemetry/dashboard.py" restart ;;
+      *)         exec python3 "${REPO_DIR}/telemetry/dashboard.py" "$subcmd" "$@" ;;
     esac
     ;;
 

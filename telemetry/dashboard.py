@@ -30,6 +30,8 @@ STAGE_ORDER = {
     "CHECKPOINT_AUDIT": 10, "AUDITING": 11, "FINAL_AUDIT": 12, "DONE": 13,
 }
 
+TERMINAL_STAGES = {"DONE", "FAILED", "CALIBRATED"}
+
 RATES_PER_MILLION = {
     "haiku": {"input": 0.80, "output": 4.00},
     "sonnet": {"input": 3.00, "output": 15.00},
@@ -154,6 +156,124 @@ def collect_retrospectives_for_project(project_path: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Computed endpoint builders
 # ---------------------------------------------------------------------------
+
+def _is_daemon_running(project_path: str) -> bool:
+    """Return True if the maintenance daemon is running for the given project."""
+    pid_file = Path(project_path) / ".dynos" / "maintenance" / "daemon.pid"
+    if not pid_file.exists():
+        return False
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _build_project_summary(proj: dict) -> dict:
+    """Build a single entry for /api/projects-summary from a registry project dict."""
+    project_path = proj.get("path", "")
+    slug = compute_slug(project_path)
+    name = os.path.basename(project_path) if project_path else ""
+
+    # Count tasks and derive stage/activity metrics
+    task_dirs = list_task_dirs(project_path)
+    task_count = len(task_dirs)
+
+    quality_scores: list[float] = []
+    last_active_at: str | None = None
+    active_task_stage: str | None = None
+    # Track manifests sorted by created_at for stage and last_active_at
+    manifests: list[dict] = []
+    for td in task_dirs:
+        try:
+            task_path = local_dynos_dir(project_path) / td
+            manifest = read_json_file(task_path / "manifest.json")
+            if isinstance(manifest, dict):
+                manifest = reconcile_stage(task_path, manifest)
+                manifests.append(manifest)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    # Sort by created_at descending (most recent first)
+    def _created_at_key(m: dict) -> str:
+        v = m.get("created_at", "")
+        return v if isinstance(v, str) else ""
+
+    manifests_sorted = sorted(manifests, key=_created_at_key, reverse=True)
+
+    for m in manifests_sorted:
+        stage = m.get("stage", "")
+        if not isinstance(stage, str):
+            stage = ""
+        # active_task_stage: stage of most recently created non-terminal task
+        if active_task_stage is None and stage not in TERMINAL_STAGES:
+            active_task_stage = stage if stage else None
+        # last_active_at: completed_at of most recently completed (DONE) task
+        if last_active_at is None and stage == "DONE":
+            ca = m.get("completed_at")
+            if isinstance(ca, str) and ca:
+                last_active_at = ca
+
+    # Quality scores from retrospectives
+    for td in task_dirs:
+        try:
+            retro = read_json_file(local_dynos_dir(project_path) / td / "task-retrospective.json")
+            if isinstance(retro, dict):
+                qs = retro.get("quality_score")
+                if isinstance(qs, (int, float)):
+                    quality_scores.append(float(qs))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    avg_quality_score: float | None = (
+        round(sum(quality_scores) / len(quality_scores), 3)
+        if quality_scores else None
+    )
+
+    # prevention_rule_count: length of prevention-rules.json array
+    prevention_rule_count: int | None = None
+    try:
+        rules_path = persistent_dir(slug) / "prevention-rules.json"
+        rules_data = read_json_file(rules_path)
+        if isinstance(rules_data, list):
+            prevention_rule_count = len(rules_data)
+        elif isinstance(rules_data, dict):
+            items = rules_data.get("rules", rules_data.get("items", []))
+            if isinstance(items, list):
+                prevention_rule_count = len(items)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        prevention_rule_count = None
+
+    # learned_routes_count: agents with route_allowed==True in learned-agents/registry.json
+    learned_routes_count: int | None = None
+    try:
+        agents_registry = read_json_file(persistent_dir(slug) / "learned-agents" / "registry.json")
+        if isinstance(agents_registry, dict):
+            agents = agents_registry.get("agents", [])
+            if isinstance(agents, list):
+                learned_routes_count = sum(
+                    1 for a in agents
+                    if isinstance(a, dict) and a.get("route_allowed")
+                )
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        learned_routes_count = None
+
+    daemon_running = _is_daemon_running(project_path)
+
+    return {
+        "slug": slug,
+        "name": name,
+        "path": project_path,
+        "task_count": task_count,
+        "avg_quality_score": avg_quality_score,
+        "active_task_stage": active_task_stage,
+        "daemon_running": daemon_running,
+        "last_active_at": last_active_at,
+        "prevention_rule_count": prevention_rule_count,
+        "learned_routes_count": learned_routes_count,
+    }
+
 
 def build_repo_report(project_path: str) -> dict:
     pdir = persistent_project_dir(project_path)
@@ -758,11 +878,51 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response(200, build_control_plane(project_path, slug))
                 return
 
+            if pathname == "/api/projects-summary":
+                registry_data = read_json_or_default(
+                    Path.home() / ".dynos" / "registry.json",
+                    {"projects": []},
+                )
+                projects_list = (
+                    registry_data.get("projects", [])
+                    if isinstance(registry_data, dict)
+                    else []
+                )
+                if not isinstance(projects_list, list):
+                    projects_list = []
+                summary: list[dict] = []
+                for proj in projects_list:
+                    if not isinstance(proj, dict):
+                        continue
+                    try:
+                        summary.append(_build_project_summary(proj))
+                    except Exception:
+                        pass
+                self._json_response(200, summary)
+                return
+
             if pathname == "/api/state":
                 if is_global:
                     self._json_response(400, {"error": "Repo state is only available for a single project"})
                 else:
-                    self._json_response(200, {"version": 1, "target": project_path})
+                    state_path = local_dynos_dir(project_path) / "repo-state.json"
+                    raw_state = read_json_or_default(state_path, {})
+                    if not isinstance(raw_state, dict):
+                        raw_state = {}
+                    self._json_response(200, {
+                        "version": raw_state.get("version", 1),
+                        "target": raw_state.get("target", project_path),
+                        "architecture_complexity_score": raw_state.get("architecture_complexity_score", None),
+                        "dependency_flux": raw_state.get("dependency_flux", None),
+                        "finding_entropy": raw_state.get("finding_entropy", None),
+                        "file_count": raw_state.get("file_count", None),
+                        "line_count": raw_state.get("line_count", None),
+                        "import_count": raw_state.get("import_count", None),
+                        "control_flow_count": raw_state.get("control_flow_count", None),
+                        "dominant_languages": raw_state.get("dominant_languages", None),
+                        "recent_findings_by_category": raw_state.get("recent_findings_by_category", None),
+                        "blocked_reason": raw_state.get("blocked_reason", None),
+                    })
                 return
 
             # ---- Task-specific endpoints: /api/tasks/:taskId/... ----
@@ -796,7 +956,102 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # JSON file endpoints
         if sub == "retrospective":
             data = read_json_file(task_dir / "task-retrospective.json")
-            self._json_response(200, data)
+            if not isinstance(data, dict):
+                self._json_response(200, data)
+                return
+            # AC 37: augment with DORA fields
+            lead_time_seconds: int | None = None
+            change_failure_rate: float | None = None
+            recovery_time_seconds: int | None = None
+
+            # SC-003 fix: lead_time_seconds is computed from the manifest
+            # (stage/created_at/completed_at are manifest fields, not retrospective fields).
+            manifest_data = read_json_or_default(task_dir / "manifest.json", {})
+            if not isinstance(manifest_data, dict):
+                manifest_data = {}
+            try:
+                m_stage = manifest_data.get("stage", "")
+                m_created = manifest_data.get("created_at", "")
+                m_completed = manifest_data.get("completed_at", "")
+                if (
+                    m_stage == "DONE"
+                    and isinstance(m_created, str) and m_created
+                    and isinstance(m_completed, str) and m_completed
+                ):
+                    from datetime import datetime
+                    created = datetime.fromisoformat(m_created.replace("Z", "+00:00"))
+                    completed = datetime.fromisoformat(m_completed.replace("Z", "+00:00"))
+                    diff = (completed - created).total_seconds()
+                    if diff >= 0:
+                        lead_time_seconds = int(diff)
+                    else:
+                        lead_time_seconds = None
+                else:
+                    lead_time_seconds = None
+            except (ValueError, TypeError, AttributeError):
+                lead_time_seconds = None
+
+            # change_failure_rate: FAILED / total for this project
+            try:
+                all_task_dirs = list_task_dirs(project_path)
+                total_count = 0
+                failed_count = 0
+                for td in all_task_dirs:
+                    try:
+                        t_path = local_dynos_dir(project_path) / td
+                        m = read_json_file(t_path / "manifest.json")
+                        if isinstance(m, dict):
+                            m = reconcile_stage(t_path, m)
+                            total_count += 1
+                            if isinstance(m.get("stage"), str) and "FAIL" in m["stage"]:
+                                failed_count += 1
+                    except (FileNotFoundError, json.JSONDecodeError, OSError):
+                        pass
+                change_failure_rate = (
+                    round(failed_count / total_count, 4)
+                    if total_count > 0 else None
+                )
+            except Exception:
+                change_failure_rate = None
+
+            self._json_response(200, {
+                **data,
+                "lead_time_seconds": lead_time_seconds,
+                "change_failure_rate": change_failure_rate,
+                "recovery_time_seconds": recovery_time_seconds,
+            })
+            return
+
+        if sub == "audit-summary":
+            raw = read_json_or_default(task_dir / "audit-summary.json", None)
+            if raw is None:
+                self._json_response(200, {"present": False, "data": None})
+            else:
+                self._json_response(200, {"present": True, "data": raw})
+            return
+
+        if sub == "repair-log":
+            raw = read_json_or_default(task_dir / "repair-log.json", None)
+            if raw is None:
+                self._json_response(200, {"present": False, "data": None})
+            else:
+                self._json_response(200, {"present": True, "data": raw})
+            return
+
+        if sub == "handoff":
+            raw = read_json_or_default(task_dir / "handoff-execute-audit.json", None)
+            if raw is None:
+                self._json_response(200, {"present": False, "data": None})
+            else:
+                self._json_response(200, {"present": True, "data": raw})
+            return
+
+        if sub == "audit-plan":
+            raw = read_json_or_default(task_dir / "audit-plan.json", None)
+            if raw is None:
+                self._json_response(200, {"present": False, "data": None})
+            else:
+                self._json_response(200, {"present": True, "data": raw})
             return
 
         if sub == "execution-graph":
@@ -1369,7 +1624,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         allow_reuse_port = True
 
     port = getattr(args, "port", 8765)
-    print(json.dumps({"url": f"http://127.0.0.1:{port}/"}))
+    print(f"http://127.0.0.1:{port}")
     server = _ReuseServer(("127.0.0.1", port), handler_cls)
     try:
         server.serve_forever()
