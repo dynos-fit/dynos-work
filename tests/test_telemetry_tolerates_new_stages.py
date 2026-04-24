@@ -31,6 +31,8 @@ def test_reconcile_stage_handles_calibrated_manifest(tmp_path: Path):
     assert isinstance(out, dict)
     # Stage must remain CALIBRATED (or at least be a string we can work with)
     assert isinstance(out.get("stage"), str)
+    assert out["stage"] == "CALIBRATED"
+    assert out["task_id"] == manifest["task_id"]
 
 
 def test_reconcile_stage_handles_tdd_review_log_line(tmp_path: Path):
@@ -44,10 +46,12 @@ def test_reconcile_stage_handles_tdd_review_log_line(tmp_path: Path):
     }
     (td / "manifest.json").write_text(json.dumps(manifest))
     (td / "execution-log.md").write_text("[STAGE] PLAN_AUDIT \u2192 TDD_REVIEW\n")
-    # Should not raise. Unknown stage in STAGE_ORDER is treated as 0,
-    # so progression isn't asserted — only that no exception fires.
+    # TDD_REVIEW is absent from STAGE_ORDER (value defaults to 0 < PLAN_AUDIT=6),
+    # so the stage does not advance — manifest is returned unchanged.
     out = reconcile_stage(td, manifest)
     assert isinstance(out, dict)
+    assert out["stage"] == "PLAN_AUDIT"
+    assert out["task_id"] == manifest["task_id"]
 
 
 def test_reconcile_stage_does_not_crash_on_unknown_stage(tmp_path: Path):
@@ -63,3 +67,5 @@ def test_reconcile_stage_does_not_crash_on_unknown_stage(tmp_path: Path):
     (td / "execution-log.md").write_text("[STAGE] X \u2192 Y\n")
     out = reconcile_stage(td, manifest)
     assert isinstance(out, dict)
+    assert out["stage"] == "TOTALLY_NEW_STAGE"
+    assert out["task_id"] == manifest["task_id"]

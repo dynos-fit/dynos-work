@@ -158,12 +158,24 @@ class TestEnsembleConfig:
 # ---------------------------------------------------------------------------
 
 class TestHandlerDiscovery:
-    def test_builtin_handlers_always_present(self):
-        from eventbus import _BUILTIN_HANDLERS, HANDLERS
-        for event_type, entries in _BUILTIN_HANDLERS.items():
-            for name, _ in entries:
-                found = any(n == name for n, _ in HANDLERS.get(event_type, []))
-                assert found, f"built-in handler {name} missing from HANDLERS"
+    def test_discover_handlers_fallback_returns_builtins(self, tmp_path, monkeypatch):
+        import eventbus
+        from eventbus import _discover_handlers, _BUILTIN_HANDLERS
+        # Patch SCRIPT_DIR to a dir with no handlers/ subdir — exercises fallback branch
+        monkeypatch.setattr(eventbus, "SCRIPT_DIR", tmp_path)
+        result = _discover_handlers()
+        for event_type in _BUILTIN_HANDLERS:
+            assert event_type in result, f"builtin event type {event_type!r} missing from fallback result"
+        assert len(result["task-completed"]) >= len(_BUILTIN_HANDLERS["task-completed"])
+
+    def test_builtin_handler_callables_accept_root_and_payload(self):
+        import inspect
+        from eventbus import _BUILTIN_HANDLERS
+        for name, fn in _BUILTIN_HANDLERS["task-completed"]:
+            assert callable(fn), f"handler {name!r} is not callable"
+            assert len(inspect.signature(fn).parameters) == 2, (
+                f"handler {name!r} should accept exactly 2 parameters (root, payload)"
+            )
 
     def test_discovers_from_handlers_directory(self, tmp_path: Path):
         from eventbus import _discover_handlers, SCRIPT_DIR

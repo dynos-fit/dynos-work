@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -18,6 +19,21 @@ WriteSource = Literal[
     "system",
 ]
 WriteMode = Literal["direct", "wrapper", "deny"]
+
+# Maps each privileged role to the set of modules whose call chain may claim it.
+# ctl is included in receipt-writer because cmd_amend_artifact writes amendment
+# receipts directly without routing through lib_receipts.write_receipt.
+# lib_core is included in ctl because write_ctl_json is the canonical ctl-write
+# wrapper used by lib_validate and other helpers that lack a direct ctl import.
+# lib_log and lib_tokens are included in system because role='system' is the
+# global-fallback write role used by their top-level event/token write paths.
+_PRIVILEGED_ROLE_MODULE_MAP: dict[str, frozenset[str]] = {
+    "eventbus": frozenset({"lib_log"}),
+    "receipt-writer": frozenset({"lib_receipts", "ctl", "router"}),
+    "ctl": frozenset({"ctl", "lib_core"}),
+    "scheduler": frozenset({"scheduler"}),
+    "system": frozenset({"lib_log", "lib_tokens"}),
+}
 
 
 @dataclass(frozen=True)
@@ -243,6 +259,31 @@ def _emit_policy_event(attempt: WriteAttempt, decision: WriteDecision) -> None:
 
 
 def require_write_allowed(attempt: WriteAttempt, *, emit_event: bool = True) -> None:
+    if attempt.role in _PRIVILEGED_ROLE_MODULE_MAP:
+        expected_module = _PRIVILEGED_ROLE_MODULE_MAP[attempt.role]
+        # Walk the full call stack: the authorized module may call through a
+        # wrapper (e.g. lib_core.write_ctl_json) before reaching here.
+        # Also handle __main__ (e.g. `python3 hooks/ctl.py` sets __name__="__main__"
+        # but __file__ ends in the expected module name).
+        frame = sys._getframe(1)
+        authorized = False
+        while frame is not None:
+            raw_name = frame.f_globals.get("__name__", "")
+            mod_name = raw_name[len("hooks."):] if raw_name.startswith("hooks.") else raw_name
+            if mod_name in expected_module:
+                authorized = True
+                break
+            if raw_name == "__main__":
+                raw_file = frame.f_globals.get("__file__", "") or ""
+                if Path(raw_file).stem in expected_module:
+                    authorized = True
+                    break
+            frame = frame.f_back
+        if not authorized:
+            raise ValueError(
+                f"role {attempt.role!r} not authorized: "
+                f"call chain must include module {expected_module!r}"
+            )
     decision = decide_write(attempt)
     if emit_event:
         _emit_policy_event(attempt, decision)

@@ -164,10 +164,6 @@ class TestDynoslibFacadeReExports:
         import lib
         assert hasattr(lib, name), f"lib.{name} not found"
 
-    def test_facade_module_is_importable(self) -> None:
-        """lib can be imported without error."""
-        import lib  # noqa: F401
-
 
 # ===================================================================
 # AC 2: lib_core.py exports
@@ -672,9 +668,10 @@ class TestDynoslibNoMainBlock:
         )
 
     def test_lib_importable_as_module(self) -> None:
-        """lib can be imported without executing a main block."""
+        """lib exposes its public API after import."""
         import lib  # noqa: F401
-        # If this does not raise, the module is importable
+        assert hasattr(lib, "load_json"), "lib must export load_json"
+        assert hasattr(lib, "write_json"), "lib must export write_json"
 
 
 # ===================================================================

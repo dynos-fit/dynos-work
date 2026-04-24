@@ -55,21 +55,6 @@ def _make_finding(**overrides) -> dict:
 class TestTemplateModuleExists:
     """AC 4: lib_templates module with save_fix_template and find_matching_template."""
 
-    def test_module_importable(self) -> None:
-        # AC 4
-        import lib_templates
-        assert lib_templates is not None
-
-    def test_save_fix_template_callable(self) -> None:
-        # AC 4
-        from lib_templates import save_fix_template
-        assert callable(save_fix_template)
-
-    def test_find_matching_template_callable(self) -> None:
-        # AC 4
-        from lib_templates import find_matching_template
-        assert callable(find_matching_template)
-
     def test_save_fix_template_signature(self) -> None:
         # AC 4: save_fix_template(root, finding, diff)
         import inspect
@@ -203,11 +188,16 @@ class TestTemplateSaveAndStorage:
         assert len(stored_lines) <= 100, "Stored diff should be truncated to 100 lines"
 
     def test_handles_missing_template_file_gracefully(self, tmp_project: Path) -> None:
-        # AC 5 implicit: first save creates the file
+        # AC 5 implicit: cold-start path — first save creates the file with one entry
         from lib_templates import save_fix_template
-        # Should not raise on first save
+        from lib_core import _persistent_project_dir
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
+        assert not template_path.exists(), "fix-templates.json should not exist before first save"
         finding = _make_finding()
         save_fix_template(tmp_project, finding, "diff")
+        assert template_path.exists(), "fix-templates.json should be created after first save"
+        templates = json.loads(template_path.read_text())
+        assert len(templates) == 1, "exactly one entry should be written on first save"
 
     def test_handles_corrupt_template_file(self, tmp_project: Path) -> None:
         # AC 5 implicit: corrupt file treated as empty
@@ -227,13 +217,21 @@ class TestTemplateSaveAndStorage:
         assert len(templates) >= 1
 
     def test_save_never_raises(self, tmp_project: Path) -> None:
-        # AC 5 implicit: save_fix_template never raises
+        # AC 5 implicit: save_fix_template swallows write errors and leaves on-disk state unchanged
         from lib_templates import save_fix_template
+        from lib_core import _persistent_project_dir
+        # Pre-condition: write one valid entry so the file exists with known state
         finding = _make_finding()
-        # Even with bad inputs, should not raise
+        save_fix_template(tmp_project, finding, "first diff")
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
+        assert len(json.loads(template_path.read_text())) == 1
+        # Simulate a disk-full error on the next write
         with patch("lib_templates.write_json", side_effect=OSError("disk full")):
-            # Should not raise
-            save_fix_template(tmp_project, finding, "diff")
+            save_fix_template(tmp_project, finding, "second diff")  # must not raise
+        # File must still contain exactly one entry — no partial write, no corruption
+        assert len(json.loads(template_path.read_text())) == 1, (
+            "on-disk state should be unchanged after a failed write"
+        )
 
 
 # ===========================================================================
