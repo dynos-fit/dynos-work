@@ -184,9 +184,6 @@ step_plugin() {
     fi
 }
 
-step_global_daemon() {
-    ok "Global dashboard: run 'dynos dashboard' to start"
-}
 
 step_dev_tests() {
     info "Running tests to verify setup"
@@ -222,8 +219,6 @@ main() {
     step_path
     step_global_dirs
     step_plugin
-
-    step_global_daemon
 
     ok "Local daemon not started (manual setup per project)"
     echo ""
