@@ -12,11 +12,12 @@ import hashlib
 import hmac
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 from typing import Any
 
-from lib_core import now_iso
+from lib_core import _persistent_project_dir, now_iso
 from write_policy import WriteAttempt, require_write_allowed
 
 
@@ -77,6 +78,7 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # These are forensic traces — no gate or state machine depends on them.
     "pre_tool_use_role_missing",
     "pre_tool_use_bash_check",
+    "pre_tool_use_role_file_missing",
     # Risk level override observability (ctl._normalize_classification_payload).
     # Forensic trace — records when an observed_floor overrides the planner's
     # risk_level upward. No gate or state machine blocks on this event.
@@ -90,6 +92,64 @@ __all__ = [
     "sign_event",
     "verify_signed_events",
 ]
+
+_WRITE_ROLE = "eventbus"
+
+_EVENT_SECRET_CACHE: dict[str, str] = {}
+
+
+def _resolve_event_secret(root: Path) -> str:
+    """Resolve the HMAC-SHA256 secret used to sign events.
+
+    Resolution order:
+    (a) DYNOS_EVENT_SECRET env var — if non-empty, return it.
+    (b) In-process cache keyed on str(root.resolve()).
+    (c) Cache file at _persistent_project_dir(root)/'event-secret' with strict
+        0o600 permission check.
+    (d) Derive from sha256(f'{root.resolve()}:{platform.node()}')[:32], write
+        atomically via os.open(O_WRONLY|O_CREAT|O_EXCL, 0o600), handle
+        FileExistsError by re-reading (branch c).
+    """
+    env_secret = os.environ.get("DYNOS_EVENT_SECRET")
+    if env_secret:
+        return env_secret
+
+    cache_key = str(root.resolve())
+
+    if cache_key in _EVENT_SECRET_CACHE:
+        return _EVENT_SECRET_CACHE[cache_key]
+
+    cache_path = _persistent_project_dir(root) / "event-secret"
+
+    if cache_path.exists():
+        st_mode = os.stat(cache_path).st_mode & 0o777
+        if st_mode != 0o600:
+            raise ValueError(f"event-secret perms unsafe: {cache_path}")
+        secret = cache_path.read_text(encoding="utf-8").strip()
+        _EVENT_SECRET_CACHE[cache_key] = secret
+        return secret
+
+    # Derive a deterministic secret for this project+host combination.
+    secret = hashlib.sha256(
+        f"{root.resolve()}:{platform.node()}".encode("utf-8")
+    ).hexdigest()[:32]
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(cache_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, secret.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        # Another thread/process wrote the file concurrently — re-read it.
+        st_mode = os.stat(cache_path).st_mode & 0o777
+        if st_mode != 0o600:
+            raise ValueError(f"event-secret perms unsafe: {cache_path}")
+        secret = cache_path.read_text(encoding="utf-8").strip()
+
+    _EVENT_SECRET_CACHE[cache_key] = secret
+    return secret
 
 
 def sign_event(payload: dict, secret: str) -> str:
@@ -266,15 +326,14 @@ def log_event(root: Path, event_type: str, *, task: str | None = None, **payload
             record["task"] = task
         record.update(payload)
 
-        secret = os.environ.get("DYNOS_EVENT_SECRET")
-        if secret:
-            try:
-                record["_sig"] = sign_event(record, secret)
-            except Exception as sig_exc:
-                print(
-                    f"[dynos-log] WARNING: sign_event failed: {sig_exc}",
-                    file=sys.stderr,
-                )
+        try:
+            secret = _resolve_event_secret(root)
+            record["_sig"] = sign_event(record, secret)
+        except Exception as exc:
+            print(
+                f"[dynos-log] WARNING: _resolve_event_secret failed: {exc}",
+                file=sys.stderr,
+            )
 
         line = json.dumps(record, default=str, ensure_ascii=False) + "\n"
 
@@ -286,11 +345,11 @@ def log_event(root: Path, event_type: str, *, task: str | None = None, **payload
                     task_dir / "events.jsonl",
                     line,
                     attempt=WriteAttempt(
-                        role="eventbus",
+                        role=_WRITE_ROLE,
                         task_dir=task_dir,
                         path=task_dir / "events.jsonl",
                         operation="modify" if (task_dir / "events.jsonl").exists() else "create",
-                        source="eventbus",
+                        source=_WRITE_ROLE,
                     ),
                 )
                 return

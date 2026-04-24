@@ -6,6 +6,7 @@ contract_version=5.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -17,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 import lib_receipts  # noqa: E402
 from lib_receipts import (  # noqa: E402
     RECEIPT_CONTRACT_VERSION,
+    hash_file,
+    receipt_postmortem_analysis,
     write_receipt,
 )
 
@@ -43,8 +46,10 @@ def test_write_receipt_embeds_contract_version_five(tmp_path: Path):
     assert payload["contract_version"] == 5
 
 
-def _exercise_writer(name: str, td: Path):
+def _exercise_writer(name: str, td: Path, tmp_path: Path | None = None):
     """Invoke each writer with minimal valid args (mirrors test_receipt_contract_version)."""
+    if tmp_path is None:
+        tmp_path = td.parent
     sd = td / "receipts" / "_injected-prompts"
     sd.mkdir(parents=True, exist_ok=True)
 
@@ -80,7 +85,13 @@ def _exercise_writer(name: str, td: Path):
     if name == "receipt_postmortem_generated":
         return lib_receipts.receipt_postmortem_generated(td, pm_json)
     if name == "receipt_postmortem_analysis":
-        return lib_receipts.receipt_postmortem_analysis(td, "a" * 64, 0, "b" * 64)
+        analysis_file = tmp_path / "analysis.json"
+        analysis_file.write_text("{}")
+        rules_file = tmp_path / "rules.md"
+        rules_file.write_text("# rules")
+        return lib_receipts.receipt_postmortem_analysis(
+            td, analysis_path=analysis_file, rules_path=rules_file, rules_added=1
+        )
     if name == "receipt_postmortem_skipped":
         return lib_receipts.receipt_postmortem_skipped(td, "no-findings", "a" * 64, subsumed_by=[])
     if name == "receipt_calibration_applied":
@@ -98,6 +109,7 @@ def _exercise_writer(name: str, td: Path):
             td, "seg-CV", "backend", "haiku",
             injected_prompt_sha256=digest,
             agent_name=None, evidence_path=None, tokens_used=0,
+            diff_verified_files=[], no_op_justified=False,
         )
     if name == "receipt_audit_routing":
         return lib_receipts.receipt_audit_routing(td, [])
@@ -149,7 +161,7 @@ def test_every_writer_in_all_embeds_contract_version_five(tmp_path: Path, monkey
         if name == "receipt_rules_check_passed":
             out = lib_receipts.receipt_rules_check_passed(td, "all")
         else:
-            out = _exercise_writer(name, td)
+            out = _exercise_writer(name, td, tmp_path)
         if out is None:
             continue
         exercised += 1
@@ -164,3 +176,74 @@ def test_every_required_writer_includes_calibration_noop():
     """AC 24 (task-009): receipt_calibration_noop is part of the v5 writer set."""
     assert "receipt_calibration_noop" in lib_receipts.__all__
     assert callable(lib_receipts.receipt_calibration_noop)
+
+
+# ---------------------------------------------------------------------------
+# AC 13, 14, 15 — new keyword-only path-based API for receipt_postmortem_analysis
+# ---------------------------------------------------------------------------
+
+def test_postmortem_analysis_keyword_path_happy(tmp_path: Path):
+    """AC 13/14: keyword-only path form produces receipt with all required payload keys."""
+    td = tmp_path / ".dynos" / "task-test"
+    td.mkdir(parents=True)
+    analysis_file = tmp_path / "analysis.json"
+    analysis_file.write_text('{"findings": []}')
+    rules_file = tmp_path / "rules.md"
+    rules_file.write_text("# rules\n- rule one\n")
+
+    receipt_path = receipt_postmortem_analysis(
+        td,
+        analysis_path=analysis_file,
+        rules_path=rules_file,
+        rules_added=2,
+    )
+    payload = json.loads(receipt_path.read_text())
+
+    # AC 14: all required keys present
+    assert "analysis_sha256" in payload
+    assert "rules_added" in payload
+    assert "rules_sha256_after" in payload
+    assert "contract_version" in payload
+
+    # AC 13: hash is derived from the actual file content
+    assert payload["analysis_sha256"] == hash_file(analysis_file)
+    assert payload["rules_sha256_after"] == hash_file(rules_file)
+    assert payload["rules_added"] == 2
+    # AC 18: contract_version still 5 (no bump)
+    assert payload["contract_version"] == 5
+
+
+def test_postmortem_analysis_missing_analysis_path_raises(tmp_path: Path):
+    """AC 13: receipt_postmortem_analysis raises ValueError when analysis_path does not exist."""
+    td = tmp_path / ".dynos" / "task-test"
+    td.mkdir(parents=True)
+    missing = tmp_path / "does_not_exist.json"
+    rules_file = tmp_path / "rules.md"
+    rules_file.write_text("# rules")
+
+    with pytest.raises(ValueError, match="analysis_path does not exist"):
+        receipt_postmortem_analysis(
+            td,
+            analysis_path=missing,
+            rules_path=rules_file,
+            rules_added=0,
+        )
+
+
+def test_postmortem_analysis_missing_rules_path_gives_zero_hash(tmp_path: Path):
+    """AC 15: when rules_path is absent, rules_sha256_after == '0' * 64."""
+    td = tmp_path / ".dynos" / "task-test"
+    td.mkdir(parents=True)
+    analysis_file = tmp_path / "analysis.json"
+    analysis_file.write_text("{}")
+    missing_rules = tmp_path / "no_rules.md"  # does not exist
+
+    receipt_path = receipt_postmortem_analysis(
+        td,
+        analysis_path=analysis_file,
+        rules_path=missing_rules,
+        rules_added=0,
+    )
+    payload = json.loads(receipt_path.read_text())
+
+    assert payload["rules_sha256_after"] == "0" * 64

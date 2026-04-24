@@ -99,7 +99,13 @@ def test_generated_with_anomalies_plus_analysis_passes(tmp_path: Path):
     td = _setup(tmp_path, quality=0.95)
     pm = _write_postmortem_fixture(td, anomaly_count=4, pattern_count=0)
     receipt_postmortem_generated(td, pm)
-    receipt_postmortem_analysis(td, "c" * 64, 1, "d" * 64)
+    analysis_file = tmp_path / "analysis.json"
+    analysis_file.write_text('{"findings": []}')
+    rules_file = tmp_path / "rules.md"
+    rules_file.write_text("# rules\n")
+    receipt_postmortem_analysis(
+        td, analysis_path=analysis_file, rules_path=rules_file, rules_added=1
+    )
     gaps = require_receipts_for_done(td)
     assert gaps == []
 

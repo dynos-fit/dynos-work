@@ -176,21 +176,26 @@ def test_log_event_signs_when_secret_set_and_verifies(
 
 
 # ---------------------------------------------------------------------------
-# (c-extra) log_event with DYNOS_EVENT_SECRET unset writes the record
-#           WITHOUT _sig (graceful degradation per AC11).
+# (c-extra) log_event with DYNOS_EVENT_SECRET unset still writes _sig because
+#           _resolve_event_secret auto-derives a secret (AC 11/12).
 # ---------------------------------------------------------------------------
-def test_log_event_degrades_gracefully_without_secret(
+def test_log_event_signs_unconditionally_without_env_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, task_dir, task_id = _make_project(tmp_path)
     monkeypatch.delenv("DYNOS_EVENT_SECRET", raising=False)
+    monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
+    # Clear the in-process cache so the test does not inherit a cached secret
+    # from a previous test run in the same process.
+    lib_log._EVENT_SECRET_CACHE.clear()
 
     lib_log.log_event(root, "unit_no_secret_event", task=task_id)
 
     records = _read_jsonl(task_dir / "events.jsonl")
     assert len(records) == 1
-    assert "_sig" not in records[0], (
-        "log_event must NOT attach _sig when DYNOS_EVENT_SECRET is unset"
+    assert "_sig" in records[0], (
+        "log_event must attach _sig even when DYNOS_EVENT_SECRET is unset "
+        "(auto-derived secret via _resolve_event_secret, AC 12)"
     )
 
 

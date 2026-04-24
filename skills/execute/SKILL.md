@@ -149,6 +149,14 @@ If the injected prompt is weak, strengthen the base prompt before spawning. Do n
 
 If `inject-prompt` fails or is unavailable, stop and fix the deterministic routing path. Do NOT manually read `agent_path` or hand-build the learned-agent prompt.
 
+**Role stamping (MANDATORY — BEFORE every Agent tool spawn):** Write the executor role string to `.dynos/task-{id}/active-segment-role` immediately before spawning each executor subagent. This file is read by `hooks/pre_tool_use.py` to resolve the acting role when `DYNOS_ROLE` is not set in the environment.
+
+```bash
+printf '%s' "{executor-role}" > .dynos/task-{id}/active-segment-role
+```
+
+Where `{executor-role}` is the exact role string from the executor plan (e.g. `backend-executor`, `ui-executor`, `integration-executor`). The write MUST use truncate/overwrite semantics (not append). The write MUST complete before the Agent tool invocation that spawns the subagent — this is a sequential constraint, not a timing one.
+
 **Model selection:** Pass the `model` field from the executor plan as the model parameter when spawning the agent. If `model` is null, use default (omit the model parameter).
 
 **TDD-First Awareness:** Check if `.dynos/task-{id}/evidence/tdd-tests.md` exists. If it does, include this instruction in the base prompt (before piping through inject-prompt): "A TDD test suite has already been committed. Your implementation must make those tests pass. Do NOT write new tests or modify existing test files."
@@ -185,6 +193,12 @@ This command deterministically:
 - verifies the evidence file exists
 - writes `receipt_executor_done(...)`
 - updates `manifest.json.execution_progress` from deterministic execution state
+
+**Role file cleanup (MANDATORY — AFTER `run-execution-segment-done` writes the receipt):** Delete `.dynos/task-{id}/active-segment-role` immediately after the segment receipt is written. This prevents the completed segment's role from leaking into any subsequent segment's execution context.
+
+```bash
+rm -f .dynos/task-{id}/active-segment-role
+```
 
 After each batch (or cached resolution) completes, record events and verify:
 

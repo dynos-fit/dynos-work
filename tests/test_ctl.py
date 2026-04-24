@@ -32,6 +32,7 @@ def _setup_task_dir(tmp_path: Path) -> Path:
                 "retry_counts": {},
                 "blocked_reason": None,
                 "completion_at": None,
+                "snapshot": {"head_sha": "0000000000000000000000000000000000000000"},
             },
             indent=2,
         )
@@ -74,6 +75,8 @@ def _setup_task_dir(tmp_path: Path) -> Path:
                         "depends_on": [],
                         "parallelizable": True,
                         "criteria_ids": [1],
+                        "no_op_justified": True,
+                        "no_op_reason": "unit test task dir outside git repo",
                     },
                     {
                         "id": "seg-2",
@@ -83,6 +86,8 @@ def _setup_task_dir(tmp_path: Path) -> Path:
                         "depends_on": ["seg-1"],
                         "parallelizable": True,
                         "criteria_ids": [2],
+                        "no_op_justified": True,
+                        "no_op_reason": "unit test task dir outside git repo",
                     },
                 ],
             },
@@ -664,6 +669,8 @@ def test_run_execution_batch_plan_completed_receipt_beats_cache(tmp_path) -> Non
         agent_name=None,
         evidence_path=str(evidence_path),
         tokens_used=10,
+        diff_verified_files=[],
+        no_op_justified=False,
     )
 
     result = _run_ctl("run-execution-batch-plan", str(task_dir))
@@ -852,6 +859,8 @@ def test_run_execution_finish_transitions_when_no_pending_segments(tmp_path) -> 
             agent_name=None,
             evidence_path=str(evidence_path),
             tokens_used=5,
+            diff_verified_files=[],
+            no_op_justified=False,
         )
     receipt_rules_check_passed(task_dir, "all")
 

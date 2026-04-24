@@ -745,10 +745,13 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 ),
             )
         try:
-            analysis_sha = hash_file(analysis_path)
-            rules_sha_after = hash_file(rules_path) if rules_path.exists() else "0" * 64
             if task_dir.is_dir():
-                receipt_postmortem_analysis(task_dir, analysis_sha, 0, rules_sha_after)
+                receipt_postmortem_analysis(
+                    task_dir,
+                    analysis_path=analysis_path,
+                    rules_path=rules_path,
+                    rules_added=0,
+                )
         except (FileNotFoundError, OSError, ValueError) as exc:
             log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
         return {
@@ -854,10 +857,13 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
     # write fails, log it but do not raise — the merge already succeeded
     # and re-running this branch would double-count rules.
     try:
-        analysis_sha = hash_file(analysis_path)
-        rules_sha_after = hash_file(rules_path) if rules_path.exists() else "0" * 64
         if task_dir.is_dir():
-            receipt_postmortem_analysis(task_dir, analysis_sha, int(added), rules_sha_after)
+            receipt_postmortem_analysis(
+                task_dir,
+                analysis_path=analysis_path,
+                rules_path=rules_path,
+                rules_added=int(added),
+            )
     except (FileNotFoundError, OSError, ValueError) as exc:
         log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
 

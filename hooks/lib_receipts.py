@@ -287,40 +287,22 @@ _LOG_MESSAGES: dict[str, str] = {
 }
 
 
+_WRITE_ROLE = "receipt-writer"
+
+
 def _record_tokens(task_dir: Path, agent: str, model: str, tokens: int) -> None:
-    """Record token usage to token-usage.json. Called by receipt writers."""
-    try:
-        from lib_tokens import record_tokens
-        record_tokens(
-            task_dir=task_dir,
-            agent=agent,
-            model=model,
-            input_tokens=tokens // 2,  # rough split since we only have total
-            output_tokens=tokens - tokens // 2,
-            phase="receipt",
-            stage="receipt",
-            event_type="receipt-record",
-            detail=f"auto-recorded via receipt for {agent}",
-        )
-    except Exception:
-        # Fallback: write directly if lib_tokens isn't available
-        try:
-            token_path = task_dir / "token-usage.json"
-            require_write_allowed(
-                WriteAttempt(
-                    role="receipt-writer",
-                    task_dir=task_dir,
-                    path=token_path,
-                    operation="modify" if token_path.exists() else "create",
-                    source="receipt-writer",
-                )
-            )
-            data = json.loads(token_path.read_text()) if token_path.exists() else {"agents": {}, "total": 0}
-            data["agents"][agent] = data.get("agents", {}).get(agent, 0) + tokens
-            data["total"] = sum(v for v in data["agents"].values() if isinstance(v, (int, float)))
-            token_path.write_text(json.dumps(data, indent=2))
-        except Exception:
-            pass
+    """Deprecated compatibility shim for old receipt token recording.
+
+    LLM token usage is now attributed exclusively by the SubagentStop hook,
+    which parses the finished transcript and writes the authoritative
+    ``spawn`` record into ``token-usage.json``. Recording ``tokens_used`` a
+    second time from receipt writers double-counts the same work.
+
+    The helper remains in place so older receipt call sites and tests do not
+    need to change shape, but it intentionally performs no write.
+    """
+    _ = (task_dir, agent, model, tokens)
+    return None
 
 
 def _receipts_dir(task_dir: Path) -> Path:
@@ -372,11 +354,11 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     receipt_path = receipts / f"{step_name}.json"
     require_write_allowed(
         WriteAttempt(
-            role="receipt-writer",
+            role=_WRITE_ROLE,
             task_dir=task_dir,
             path=receipt_path,
             operation="modify" if receipt_path.exists() else "create",
-            source="receipt-writer",
+            source=_WRITE_ROLE,
         )
     )
     _atomic_write_text(receipt_path, json.dumps(receipt, indent=2, default=str))
@@ -896,6 +878,9 @@ def receipt_executor_done(
     agent_name: str | None,
     evidence_path: str | None,
     tokens_used: int | None,
+    *,
+    diff_verified_files: list[str],
+    no_op_justified: bool,
 ) -> Path:
     """Write receipt proving an executor segment completed.
 
@@ -910,9 +895,24 @@ def receipt_executor_done(
 
     Also records token usage to token-usage.json — the only reliable path
     for token recording since receipts are gated.
+
+    ``diff_verified_files`` (keyword-only, required): list of file paths the
+    executor verified as changed. Must be a list of strings; raises
+    ``ValueError`` on type violation.
+
+    ``no_op_justified`` (keyword-only, required): whether the executor
+    determined the segment was legitimately a no-op. Must be a bool; raises
+    ``ValueError`` on type violation.
     """
     if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
         raise ValueError("injected_prompt_sha256 must be a non-empty string")
+
+    if not isinstance(diff_verified_files, list) or not all(
+        isinstance(f, str) for f in diff_verified_files
+    ):
+        raise ValueError("diff_verified_files must be a list of strings")
+    if not isinstance(no_op_justified, bool):
+        raise ValueError("no_op_justified must be a bool")
 
     sidecar_dir = task_dir / "receipts" / INJECTED_PROMPTS_DIR
     sidecar_file = sidecar_dir / f"{segment_id}.sha256"
@@ -949,6 +949,8 @@ def receipt_executor_done(
         agent_name=agent_name,
         evidence_path=evidence_path,
         tokens_used=tokens_used,
+        diff_verified_files=diff_verified_files,
+        no_op_justified=no_op_justified,
     )
 
 
@@ -1689,17 +1691,48 @@ def receipt_postmortem_generated(
 
 def receipt_postmortem_analysis(
     task_dir: Path,
-    analysis_sha256: str,
-    rules_added: int,
-    rules_sha256_after: str,
+    analysis_sha256: str | None = None,
+    rules_added: int | None = None,
+    rules_sha256_after: str | None = None,
+    *,
+    analysis_path: Path | None = None,
+    rules_path: Path | None = None,
 ) -> Path:
-    """Write receipt proving postmortem analysis ran and rules updated."""
-    if not isinstance(analysis_sha256, str) or not analysis_sha256:
-        raise ValueError("analysis_sha256 must be a non-empty string")
-    if not isinstance(rules_added, int) or rules_added < 0:
-        raise ValueError("rules_added must be a non-negative int")
-    if not isinstance(rules_sha256_after, str) or not rules_sha256_after:
-        raise ValueError("rules_sha256_after must be a non-empty string")
+    """Write receipt proving postmortem analysis ran and rules updated.
+
+    Two calling conventions are supported:
+
+    Legacy positional (kept for backward compatibility):
+        receipt_postmortem_analysis(task_dir, analysis_sha256, rules_added, rules_sha256_after)
+
+    New keyword-only path-based (self-computes hashes from on-disk files):
+        receipt_postmortem_analysis(task_dir, analysis_path=p, rules_path=r, rules_added=n)
+        - Raises ValueError when analysis_path does not exist.
+        - rules_sha256_after is computed from rules_path when it exists, else "0"*64.
+
+    On-disk payload key set: analysis_sha256, rules_added, rules_sha256_after,
+    contract_version.
+    """
+    if analysis_path is not None:
+        # New self-compute path: hashes are derived from on-disk files.
+        if not analysis_path.exists():
+            raise ValueError(f"analysis_path does not exist: {analysis_path}")
+        if not isinstance(rules_added, int) or isinstance(rules_added, bool) or rules_added < 0:
+            raise ValueError("rules_added must be a non-negative int")
+        analysis_sha256 = hash_file(analysis_path)
+        rules_sha256_after = (
+            hash_file(rules_path)
+            if (rules_path is not None and rules_path.exists())
+            else "0" * 64
+        )
+    else:
+        # Legacy positional path: validate caller-supplied values.
+        if not isinstance(analysis_sha256, str) or not analysis_sha256:
+            raise ValueError("analysis_sha256 must be a non-empty string")
+        if not isinstance(rules_added, int) or isinstance(rules_added, bool) or rules_added < 0:
+            raise ValueError("rules_added must be a non-negative int")
+        if not isinstance(rules_sha256_after, str) or not rules_sha256_after:
+            raise ValueError("rules_sha256_after must be a non-empty string")
     return write_receipt(
         task_dir,
         "postmortem-analysis",

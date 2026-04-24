@@ -280,9 +280,10 @@ def require_write_allowed(attempt: WriteAttempt, *, emit_event: bool = True) -> 
                     break
             frame = frame.f_back
         if not authorized:
+            caller_module = sys._getframe(1).f_globals.get("__name__", "")
             raise ValueError(
-                f"role {attempt.role!r} not authorized: "
-                f"call chain must include module {expected_module!r}"
+                f"role {attempt.role!r} claimed by module {caller_module!r} not in allowlist "
+                f"{expected_module!r}"
             )
     decision = decide_write(attempt)
     if emit_event:

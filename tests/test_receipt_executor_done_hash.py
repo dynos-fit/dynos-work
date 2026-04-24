@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 from lib_receipts import receipt_executor_done  # noqa: E402
 
+_REQUIRED = dict(diff_verified_files=[], no_op_justified=False)
+
 
 def _task_dir(tmp_path: Path) -> Path:
     project = tmp_path / "project"
@@ -34,6 +36,7 @@ def test_sidecar_missing_raises_with_literal(tmp_path: Path):
             td, "seg-1", "backend", "haiku",
             injected_prompt_sha256="a" * 64,
             agent_name=None, evidence_path=None, tokens_used=10,
+            **_REQUIRED,
         )
 
 
@@ -45,6 +48,7 @@ def test_sidecar_mismatch_raises_with_literal(tmp_path: Path):
             td, "seg-1", "backend", "haiku",
             injected_prompt_sha256="b" * 64,
             agent_name=None, evidence_path=None, tokens_used=10,
+            **_REQUIRED,
         )
 
 
@@ -56,6 +60,7 @@ def test_sidecar_match_passes(tmp_path: Path):
         td, "seg-1", "backend", "haiku",
         injected_prompt_sha256=digest,
         agent_name=None, evidence_path=None, tokens_used=0,
+        **_REQUIRED,
     )
     assert out.exists()
     payload = json.loads(out.read_text())
@@ -73,6 +78,7 @@ def test_env_var_no_longer_bypasses_assertion(tmp_path: Path, monkeypatch):
             td, "seg-99", "backend", "haiku",
             injected_prompt_sha256="d" * 64,
             agent_name=None, evidence_path=None, tokens_used=0,
+            **_REQUIRED,
         )
 
 
@@ -86,6 +92,7 @@ def test_writer_does_not_carry_learned_agent_injected(tmp_path: Path):
         td, "seg-2", "backend", "haiku",
         injected_prompt_sha256=digest,
         agent_name="learned-backend", evidence_path=None, tokens_used=0,
+        **_REQUIRED,
     )
     payload = json.loads(out.read_text())
     assert "learned_agent_injected" not in payload

@@ -76,3 +76,35 @@ def test_record_tokens_skipped_when_zero(tmp_path: Path):
     with mock.patch.object(lib_receipts, "_record_tokens") as rt:
         receipt_tdd_tests(td, ["a.py"], "f" * 64, 0, "haiku")
     assert not rt.called
+
+
+def test_receipt_tokens_do_not_mutate_token_usage_json(tmp_path: Path):
+    td = _task_dir(tmp_path)
+    token_usage = td / "token-usage.json"
+    baseline = {
+        "agents": {"executor": 300},
+        "by_agent": {
+            "executor": {
+                "input_tokens": 200,
+                "output_tokens": 100,
+                "tokens": 300,
+                "model": "sonnet",
+            }
+        },
+        "by_model": {
+            "sonnet": {
+                "input_tokens": 200,
+                "output_tokens": 100,
+                "tokens": 300,
+            }
+        },
+        "total": 300,
+        "total_input_tokens": 200,
+        "total_output_tokens": 100,
+        "events": [],
+    }
+    token_usage.write_text(json.dumps(baseline, indent=2))
+
+    receipt_tdd_tests(td, ["a.py"], "f" * 64, 1000, "haiku")
+
+    assert json.loads(token_usage.read_text()) == baseline

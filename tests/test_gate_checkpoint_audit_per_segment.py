@@ -33,6 +33,7 @@ def _setup_task(tmp_path: Path, stage: str) -> Path:
         "task_id": "task-20260418-GX",
         "stage": stage,
         "classification": {"risk_level": "medium"},
+        "snapshot": {"head_sha": "0000000000000000000000000000000000000000"},
     }))
     return td
 
@@ -57,6 +58,8 @@ def _write_exec_receipt(td: Path, segment_id: str) -> None:
         agent_name=None,
         evidence_path=None,
         tokens_used=0,
+        diff_verified_files=[],
+        no_op_justified=False,
     )
 
 

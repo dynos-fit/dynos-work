@@ -8,7 +8,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -50,6 +49,9 @@ _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
     "TDD_REVIEW": ("evidence/tdd-tests.md", "PRE_EXECUTION_SNAPSHOT"),
 }
 
+# AC 8: single source of truth for the ctl write role used at all write sites.
+_WRITE_ROLE = "ctl"
+
 
 def _rules_corrupt_sentinel(root: Path) -> Path:
     """Return sentinel path co-located with daemon.py's writer.
@@ -62,17 +64,17 @@ def _rules_corrupt_sentinel(root: Path) -> Path:
 
 
 def _refuse_if_rules_corrupt(root: Path) -> int | None:
-    """Block task-creation commands when prevention-rules.json is corrupt.
+    """Block stage-advancing ctl commands when prevention-rules.json is corrupt.
 
     Returns an exit code (1) when the sentinel exists so the caller can
     propagate it directly; returns None when there is no sentinel and
     the command may proceed. Error goes to stderr and names the
     persistent rules path so the operator knows which file to fix.
 
-    AC 18 scope: only task-creation entry-points call this. Existing-task
-    operations (transition, approve-stage, validate-receipts, etc.) MUST
-    NOT be blocked — the sentinel is a *bootstrap* gate, not a runtime
-    kill switch.
+    This sentinel blocks every stage-advancing ctl command, including
+    cmd_transition (both normal and --force paths), cmd_approve_stage, and
+    each cmd_run_* function that invokes transition_task. The sentinel is a
+    kill switch for a corrupt prevention-rules.json, not a bootstrap-only gate.
     """
     sentinel = _rules_corrupt_sentinel(root)
     if not sentinel.exists():
@@ -234,11 +236,11 @@ def _write_ctl_json(task_dir: Path, path: Path, payload: dict) -> None:
     """Persist ctl-owned JSON artifacts through the write boundary."""
     require_write_allowed(
         WriteAttempt(
-            role="ctl",
+            role=_WRITE_ROLE,
             task_dir=task_dir,
             path=path,
             operation="modify" if path.exists() else "create",
-            source="ctl",
+            source=_WRITE_ROLE,
         )
     )
     write_json(path, payload)
@@ -648,6 +650,10 @@ def cmd_validate_task(args: argparse.Namespace) -> int:
 
 def cmd_transition(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
 
     # F1: --force requires both --reason and --approver. Validate at the
     # CLI boundary BEFORE invoking transition_task so the caller gets a
@@ -705,6 +711,12 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
     purposes but is not required for correctness. stderr carries error text;
     stdout is reserved for a success line.
     """
+    task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
+
     stage = args.stage
     mapping = _APPROVE_STAGE_MAP.get(stage)
     if mapping is None:
@@ -716,7 +728,6 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
         return 1
     artifact_rel, next_stage = mapping
 
-    task_dir = Path(args.task_dir).resolve()
     artifact_path = task_dir / artifact_rel
     if not artifact_path.is_file():
         print(
@@ -1070,6 +1081,10 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
 
 def cmd_audit_receipt(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         out = receipt_audit_done(
             task_dir,
@@ -1147,7 +1162,7 @@ def _risk_level_for_task(task_dir: Path) -> str:
     return risk if isinstance(risk, str) and risk else "medium"
 
 
-def _parse_audit_report(report_path: Path) -> tuple[int, int]:
+def _parse_audit_report(report_path: Path, root: Path | None = None) -> tuple[int, int]:
     data = load_json(report_path)
     findings = data.get("findings", []) if isinstance(data, dict) else []
     if not isinstance(findings, list):
@@ -1178,6 +1193,30 @@ def _parse_audit_report(report_path: Path) -> tuple[int, int]:
                 f"audit report {report_path} asserts passed without evidence: "
                 f"missing {missing_fields}"
             )
+
+    # AC 10: Verify that every file listed in evidence.files_inspected exists on disk.
+    # Runs on both empty-findings and non-empty-findings branches.
+    # Only enforced when root is supplied; callers that do not pass root skip this gate.
+    if root is not None:
+        evidence = data.get("evidence") if isinstance(data, dict) else None
+        evidence = evidence if isinstance(evidence, dict) else {}
+        files_inspected = evidence.get("files_inspected")
+        if isinstance(files_inspected, list):
+            missing: list[str] = []
+            for p in files_inspected:
+                if not isinstance(p, str):
+                    continue
+                # Glob pattern check
+                if any(c in p for c in ("*", "?", "[")):
+                    if not list(root.glob(p)):
+                        missing.append(p)
+                else:
+                    if not (root / p).exists():
+                        missing.append(p)
+            if missing:
+                raise ValueError(
+                    f"audit report {report_path} lists files_inspected that do not exist: {missing}"
+                )
 
     return (total, blocking)
 
@@ -1250,6 +1289,74 @@ def _git_dirty_files(root: Path, files_expected: list[str]) -> set[str]:
         if path:
             dirty.add(path)
     return dirty
+
+
+def _verify_git_diff_covers_files(
+    root: Path,
+    snapshot_sha: str,
+    files_expected: list[str],
+) -> list[str]:
+    """Return files_expected entries NOT present in git diff since snapshot.
+
+    Checks both 'git diff --name-only --diff-filter=AMRD <snapshot_sha>' and
+    'git ls-files --others --exclude-standard' (untracked new files). Any entry
+    from files_expected that appears in either set is considered covered.
+
+    Fails closed:
+    - snapshot_sha empty/None/whitespace  -> ValueError('snapshot_sha required')
+    - git binary not found (FileNotFoundError) -> ValueError('git binary not available')
+    - non-zero git returncode -> ValueError('git command failed: <returncode>')
+    """
+    import subprocess as _subprocess
+
+    if not snapshot_sha or not isinstance(snapshot_sha, str) or not snapshot_sha.strip():
+        raise ValueError("snapshot_sha required")
+
+    diff_cmd = ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=AMRD", snapshot_sha]
+    try:
+        diff_result = _subprocess.run(
+            diff_cmd,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+    except _subprocess.TimeoutExpired:
+        raise ValueError(f"git command timed out (cmd: {diff_cmd!r})")
+    except FileNotFoundError:
+        raise ValueError("git binary not available")
+
+    if diff_result.returncode != 0:
+        raise ValueError(f"git command failed: {diff_result.returncode} (cmd: {diff_cmd!r})")
+
+    untracked_cmd = ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"]
+    try:
+        untracked_result = _subprocess.run(
+            untracked_cmd,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=30,
+        )
+    except _subprocess.TimeoutExpired:
+        raise ValueError(f"git command timed out (cmd: {untracked_cmd!r})")
+    except FileNotFoundError:
+        raise ValueError("git binary not available")
+
+    if untracked_result.returncode != 0:
+        raise ValueError(f"git command failed: {untracked_result.returncode} (cmd: {untracked_cmd!r})")
+
+    covered: set[str] = set()
+    for line in diff_result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped:
+            covered.add(stripped)
+    for line in untracked_result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped:
+            covered.add(stripped)
+
+    return [f for f in files_expected if f not in covered]
 
 
 def _segment_runtime_state(
@@ -1516,6 +1623,9 @@ def cmd_run_planning(args: argparse.Namespace) -> int:
 def cmd_run_plan_audit(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         from plan_gap_analysis import run_gap_analysis
 
@@ -1572,7 +1682,7 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             tokens_used=args.tokens_used,
             model_used=args.model,
         )
-        finding_count, blocking_count = _parse_audit_report(report_path)
+        finding_count, blocking_count = _parse_audit_report(report_path, root=_root_for_task_dir(task_dir))
         status = "passed" if finding_count == 0 else "replan_required"
         payload = {
             "status": status,
@@ -1595,6 +1705,10 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
 
 def cmd_run_start_classification(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         errors = []
@@ -1741,6 +1855,10 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
 
 def cmd_run_spec_ready(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         if bool(manifest.get("fast_track", False)):
@@ -2166,6 +2284,10 @@ def _repair_files_for_finding(
 
 def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         stage = str(manifest.get("stage", ""))
@@ -2507,6 +2629,10 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
 
 def cmd_run_execute_setup(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         stage = manifest.get("stage")
@@ -2595,6 +2721,10 @@ def cmd_run_execution_batch_plan(args: argparse.Namespace) -> int:
 
 def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         if manifest.get("stage") != "EXECUTION":
@@ -2645,17 +2775,87 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
-        executor_type = args.executor_type or str(segment.get("executor", ""))
-        receipt_path = receipt_executor_done(
-            task_dir=task_dir,
-            segment_id=args.segment_id,
-            executor_type=executor_type,
-            model_used=args.model,
-            injected_prompt_sha256=args.injected_prompt_sha256,
-            agent_name=args.agent_name,
-            evidence_path=str(evidence_path),
-            tokens_used=args.tokens_used,
+        # AC 4: bypass iff BOTH no_op_justified is True (strict identity) AND
+        # no_op_reason is a non-empty string of at least 20 stripped characters.
+        no_op_justified_flag = segment.get("no_op_justified")
+        no_op_reason = segment.get("no_op_reason")
+        bypass = (
+            no_op_justified_flag is True
+            and isinstance(no_op_reason, str)
+            and len(no_op_reason.strip()) >= 20
         )
+
+        if bypass:
+            # AC 5 bypass path: diff_verified_files=[], no_op_justified=True
+            executor_type = args.executor_type or str(segment.get("executor", ""))
+            receipt_path = receipt_executor_done(
+                task_dir=task_dir,
+                segment_id=args.segment_id,
+                executor_type=executor_type,
+                model_used=args.model,
+                injected_prompt_sha256=args.injected_prompt_sha256,
+                agent_name=args.agent_name,
+                evidence_path=str(evidence_path),
+                tokens_used=args.tokens_used,
+                diff_verified_files=[],
+                no_op_justified=True,
+            )
+        else:
+            # AC 3: call _verify_git_diff_covers_files AFTER check_segment_ownership
+            # BEFORE receipt_executor_done. snapshot_sha from manifest['snapshot']['head_sha'].
+            snapshot = manifest.get("snapshot") if isinstance(manifest, dict) else None
+            snapshot_sha = (
+                snapshot.get("head_sha")
+                if isinstance(snapshot, dict)
+                else None
+            )
+            # AC 3: fail-closed when snapshot SHA absent — no silent bypass.
+            if not snapshot_sha or not isinstance(snapshot_sha, str) or not snapshot_sha.strip():
+                print(json.dumps({
+                    "status": "segment_invalid",
+                    "task_dir": str(task_dir),
+                    "segment_id": args.segment_id,
+                    "error": "snapshot_sha missing from manifest — cannot verify git diff",
+                    "missing_files": [],
+                }, indent=2))
+                return 1
+            try:
+                missing_files = _verify_git_diff_covers_files(
+                    root, snapshot_sha, files_to_check
+                )
+            except ValueError as exc:
+                print(json.dumps({
+                    "status": "segment_invalid",
+                    "task_dir": str(task_dir),
+                    "segment_id": args.segment_id,
+                    "error": str(exc),
+                }, indent=2))
+                return 1
+
+            if missing_files:
+                print(json.dumps({
+                    "status": "segment_invalid",
+                    "task_dir": str(task_dir),
+                    "segment_id": args.segment_id,
+                    "error": "files_expected not present in git diff since snapshot",
+                    "missing_files": missing_files,
+                }, indent=2))
+                return 1
+
+            # AC 5 happy path: diff_verified_files=files_to_check, no_op_justified=False
+            executor_type = args.executor_type or str(segment.get("executor", ""))
+            receipt_path = receipt_executor_done(
+                task_dir=task_dir,
+                segment_id=args.segment_id,
+                executor_type=executor_type,
+                model_used=args.model,
+                injected_prompt_sha256=args.injected_prompt_sha256,
+                agent_name=args.agent_name,
+                evidence_path=str(evidence_path),
+                tokens_used=args.tokens_used,
+                diff_verified_files=files_to_check,
+                no_op_justified=bool(segment.get("no_op_justified")),
+            )
 
         batch_payload = _compute_execution_batch_payload(task_dir)
         manifest = _load_manifest(task_dir)
@@ -2708,6 +2908,10 @@ def cmd_run_rules_check(args: argparse.Namespace) -> int:
 
 def cmd_run_execution_finish(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         payload = _compute_execution_batch_payload(task_dir)
         if payload["pending_segments"]:
@@ -2736,6 +2940,10 @@ def cmd_run_execution_finish(args: argparse.Namespace) -> int:
 
 def cmd_run_repair_execution_ready(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         stage = manifest.get("stage")
@@ -2978,6 +3186,10 @@ def cmd_run_repair_batch_plan(args: argparse.Namespace) -> int:
 
 def cmd_run_repair_retry(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         stage = manifest.get("stage")
@@ -3040,6 +3252,10 @@ def cmd_run_audit_reflect(args: argparse.Namespace) -> int:
 
 def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
     try:
         manifest = _load_manifest(task_dir)
         stage = manifest.get("stage")
