@@ -76,6 +76,8 @@ Avoid putting non-trivial policy directly into multiple scripts. Centralize it i
 
 The scheduler currently owns only the `SPEC_REVIEW` → `PLANNING` edge. All other stage transitions are driven by skill markdown invoking deterministic `ctl.py` subprocess commands — for example `python3 hooks/ctl.py transition` and `python3 hooks/ctl.py approve-stage`. Skills never call `transition_task()` directly; they always go through `ctl.py`. This keeps the control-plane surface narrow and ensures every transition passes through the same validator.
 
+**Implication for skill authors:** Because the scheduler is a POC covering one edge, skill prose is the enforcement layer for every phase beyond `SPEC_REVIEW`. The scheduler provides no safety net if a `ctl.py` subcommand is invoked out of order or omitted — correctness depends entirely on the skill calling the right commands in the right sequence. The design is intentionally extends-only: adding a new scheduler-owned edge requires adding one `elif` arm to `compute_next_stage` in `hooks/scheduler.py` (see `scheduler.py:23-27` for the documented scope ceiling).
+
 ### Compatibility Wrappers
 
 Approximately 22 files under `hooks/` are thin forwarding stubs. Their implementations have moved into `memory/`, `telemetry/`, or `sandbox/`. Each stub carries a docstring like `Compatibility wrapper — implementation moved to memory/postmortem.py`. When reading code under `hooks/`, follow the import into the target package for the real implementation rather than stopping at the stub.
@@ -195,6 +197,16 @@ When contributing, preserve these invariants:
 
 - Human approval gates should remain explicit at spec and plan boundaries.
 - Learned behavior should optimize choices inside guardrails, not redefine guardrails.
+
+### Retrospective Trust Model (SEC-003)
+
+Persistent retrospectives (`~/.dynos/projects/{slug}/retrospectives/*.json`) are hash-verified against the `retrospective_flushed` event recorded in `.dynos/events.jsonl` at DONE time. A content-hash mismatch means the file was tampered after flush and that retro is skipped; the worktree copy (if present) stands instead.
+
+**Trust hole (backward-compat):** When no `retrospective_flushed` event exists for a given `task_id` — pre-SEC-003 retros or cold-start — the file is accepted without hash proof and labeled `persistent-unverified`. The absence of a flush event is not a rejection by design (`lib_core.py:collect_retrospectives` docstring). Normal callers filter these entries out (`include_unverified=False` default); only explicit audit callers see them.
+
+**Residual risk:** A tampered retro that predates SEC-003 (or whose flush event was deleted from `events.jsonl`) passes through as `persistent-unverified` rather than being blocked. Any caller passing `include_unverified=True` receives these entries without hash proof.
+
+**Migration path:** Once all historical retros have been re-hashed and their flush events backfilled into `events.jsonl`, set a project-level migration flag and flip `collect_retrospectives` to reject `persistent-unverified` entries by default instead of trusting them. Until then, the trust hole is intentional and documented here.
 
 ## Multi-Project Architecture
 

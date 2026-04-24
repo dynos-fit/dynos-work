@@ -2580,7 +2580,14 @@ def collect_retrospectives(root: Path, *, include_unverified: bool = False) -> l
         pass
 
     result = list(by_task_id.values())
-    _COLLECT_RETRO_CACHE[root] = (fingerprint, result)
+    # Recompute fingerprint after ingestion so the stored key reflects any
+    # events.jsonl writes made by log_event during _ingest (e.g.
+    # retrospective_trusted_without_flush_event). A subsequent call's
+    # pre-ingestion fingerprint will match this post-ingestion snapshot,
+    # allowing the cache hit. Using the pre-ingestion fingerprint here
+    # would permanently defeat the cache because log_event mutates the
+    # very file included in the fingerprint.
+    _COLLECT_RETRO_CACHE[root] = (_retros_stat_fingerprint(root), result)
     if include_unverified:
         return list(result)
     return [
