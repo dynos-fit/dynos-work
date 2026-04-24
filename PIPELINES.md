@@ -120,18 +120,19 @@ Each stage validates its required inputs before proceeding. The runtime (`ctl.py
 
 ### Agents
 
-| Role | Agent | Default model |
+| Role | Agent | Spawn pattern |
 |---|---|---|
-| Planning | `planning` | sonnet |
-| Execution | `ui-executor`, `backend-executor`, `db-executor`, `ml-executor`, `integration-executor`, `refactor-executor`, `testing-executor` | sonnet |
-| Execution | `docs-executor` | haiku |
-| Audit | `security-auditor` | opus |
-| Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor` | sonnet |
-| Audit | `db-schema-auditor` | haiku |
-| Repair | `repair-coordinator` | sonnet |
-| Investigation | `investigator` | sonnet |
+| Planning | `planning` | single — sonnet |
+| Execution | `ui-executor`, `backend-executor`, `db-executor`, `ml-executor`, `integration-executor`, `refactor-executor`, `testing-executor` | single — sonnet |
+| Execution | `docs-executor` | single — haiku |
+| Audit | `security-auditor`, `db-schema-auditor` | **ensemble** — haiku + sonnet in parallel; if either finds issues → escalate to opus |
+| Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor` | single — sonnet (may be sampled into ensemble) |
+| Repair | `repair-coordinator` | single — sonnet |
+| Investigation | `investigator` | single — sonnet |
 
-Models shown are the defaults declared in each agent's frontmatter. The router may override them based on learned policy and benchmark history.
+**Ensemble voting** (`security-auditor` and `db-schema-auditor` always; others sampled): spawn haiku and sonnet in parallel. If both return zero findings → PASS. If either returns findings → discard both, escalate to opus. Opus verdict is final. Configurable via `.dynos/config/policy.json` (`ensemble_auditors`, `ensemble_voting_models`, `ensemble_escalation_model`).
+
+The router may further override models based on learned policy and benchmark history.
 
 ### Artifacts
 
