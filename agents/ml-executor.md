@@ -3,6 +3,7 @@ name: ml-executor
 description: "Internal dynos-work agent. Implements ML models, training pipelines, inference code, and data processing. Spawned by /dynos-work:execute for ML execution segments."
 model: sonnet
 tools: [Read, Write, Edit, Grep, Glob, Bash]
+maxTurns: 30
 ---
 
 # dynos-work ML Executor

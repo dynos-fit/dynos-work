@@ -3,6 +3,7 @@ name: refactor-executor
 description: "Internal dynos-work agent. Restructures code without changing behavior. No new features. Spawned by /dynos-work:execute for refactor execution segments."
 model: sonnet
 tools: [Read, Write, Edit, Grep, Glob, Bash]
+maxTurns: 30
 ---
 
 # dynos-work Refactor Executor

@@ -3,6 +3,7 @@ name: docs-executor
 description: "Internal dynos-work agent. Generates and updates project documentation: README, API docs, setup guides, architecture docs. Spawned by /dynos-work:execute for documentation segments."
 model: haiku
 tools: [Read, Write, Edit, Grep, Glob, Bash]
+maxTurns: 30
 ---
 
 # dynos-work Docs Executor

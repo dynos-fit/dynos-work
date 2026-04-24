@@ -3,6 +3,7 @@ name: performance-auditor
 description: "Internal dynos-work agent. Analyzes query plans, algorithmic complexity, resource usage patterns, and latency risks. Blocks on backend/db tasks. Read-only."
 model: sonnet
 tools: [Read, Grep, Glob, Bash]
+maxTurns: 20
 ---
 
 # dynos-work Performance Auditor

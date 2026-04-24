@@ -3,6 +3,7 @@ name: ui-executor
 description: "Internal dynos-work agent. Implements UI components, pages, interactions, and styles. Spawned by /dynos-work:execute for UI execution segments."
 model: sonnet
 tools: [Read, Write, Edit, Grep, Glob, Bash]
+maxTurns: 30
 ---
 
 # dynos-work UI Executor

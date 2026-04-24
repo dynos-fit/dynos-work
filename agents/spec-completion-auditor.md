@@ -2,7 +2,8 @@
 name: spec-completion-auditor
 description: "Internal dynos-work agent. Verifies every acceptance criterion is met with evidence. Runs on every task. Always blocks completion. Read-only."
 model: sonnet
-tools: [Read, Grep, Glob]
+tools: [Read]
+maxTurns: 20
 ---
 
 # dynos-work Spec-Completion Auditor

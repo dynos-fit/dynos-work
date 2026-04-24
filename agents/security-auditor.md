@@ -3,6 +3,7 @@ name: security-auditor
 description: "Internal dynos-work agent. Adversarial security review and compliance audit of all changed code. Runs on every task. Always blocks completion. Read-only."
 model: opus
 tools: [Read, Grep, Glob, Bash]
+maxTurns: 20
 ---
 
 # dynos-work Security Auditor
