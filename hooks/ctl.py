@@ -34,6 +34,7 @@ from lib_receipts import (
     receipt_plan_audit,
     receipt_plan_validated,
     receipt_planner_spawn,
+    receipt_search_conducted,
     receipt_spec_validated,
     receipt_executor_routing,
 )
@@ -1825,6 +1826,36 @@ def cmd_run_external_solution_gate(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_write_search_receipt(args: argparse.Namespace) -> int:
+    """Write a search-conducted receipt after the executor performs research.
+
+    Called by the executor after conducting external research in response to
+    ``external-solution-gate.json`` recommending a search.  ``run-spec-ready``
+    asserts this receipt before advancing to SPEC_REVIEW when the gate wrote
+    ``search_recommended: true``.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    query = (args.query or "").strip()
+    if not query:
+        print(json.dumps({
+            "status": "error",
+            "error": "--query must be a non-empty string describing the search conducted",
+        }, indent=2), file=sys.stderr)
+        return 1
+    try:
+        receipt_path = receipt_search_conducted(task_dir, query=query)
+        print(json.dumps({
+            "status": "search_receipt_written",
+            "task_dir": str(task_dir),
+            "receipt_path": str(receipt_path),
+            "query": query,
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 def cmd_write_execute_handoff(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -1906,6 +1937,37 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
                 "reason": "fast_track defers spec finalization to combined spec+plan path",
             }, indent=2))
             return 0
+
+        # External-solution gate enforcement: if the gate wrote
+        # search_recommended=true, a search-conducted receipt must exist before
+        # we advance. This converts the advisory gate into a hard block —
+        # the executor cannot reach SPEC_REVIEW by rationalizing around the
+        # recommendation. Missing gate file is treated as not recommended
+        # (cold-start / pre-gate tasks are not penalised).
+        gate_path = task_dir / "external-solution-gate.json"
+        if gate_path.exists():
+            try:
+                gate = load_json(gate_path)
+            except Exception:
+                gate = {}
+            if gate.get("search_recommended") is True:
+                receipts_dir = task_dir / "receipts"
+                search_receipt = receipts_dir / "search-conducted.json"
+                if not search_receipt.exists():
+                    print(json.dumps({
+                        "status": "search_required",
+                        "task_dir": str(task_dir),
+                        "error": (
+                            "external-solution-gate.json has search_recommended=true "
+                            "but no search-conducted receipt exists. "
+                            "Conduct the search and run: "
+                            "python3 hooks/ctl.py write-search-receipt "
+                            f".dynos/task-{{id}} --query '<your search query>'"
+                        ),
+                        "gate_path": str(gate_path),
+                        "missing_receipt": str(search_receipt),
+                    }, indent=2), file=sys.stderr)
+                    return 1
 
         errors = validate_task_artifacts(task_dir, strict=False, run_gap=False)
         errors = [e for e in errors if not e.startswith("plan ") and "execution-graph" not in e]
@@ -4070,6 +4132,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_external_solution_gate_parser.add_argument("task_dir")
     run_external_solution_gate_parser.set_defaults(func=cmd_run_external_solution_gate)
+
+    write_search_receipt_parser = subparsers.add_parser(
+        "write-search-receipt",
+        help="Write search-conducted receipt after executor performs gate-recommended research",
+    )
+    write_search_receipt_parser.add_argument("task_dir")
+    write_search_receipt_parser.add_argument(
+        "--query",
+        required=True,
+        help="The search query string actually used",
+    )
+    write_search_receipt_parser.set_defaults(func=cmd_write_search_receipt)
 
     run_spec_ready_parser = subparsers.add_parser(
         "run-spec-ready",

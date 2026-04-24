@@ -230,6 +230,7 @@ __all__ = [
     "hash_file",
     "plan_validated_receipt_matches",
     "plan_audit_matches",
+    "receipt_search_conducted",
     "receipt_spec_validated",
     "receipt_plan_validated",
     "receipt_executor_routing",
@@ -259,6 +260,7 @@ __all__ = [
 
 # Map receipt steps to human-readable execution-log entries
 _LOG_MESSAGES: dict[str, str] = {
+    "search-conducted": "[DONE] search conducted — query={query}",
     "spec-validated": "[DONE] spec validated — {criteria_count} acceptance criteria",
     "plan-validated": "[DONE] plan validated — {segment_count} segments, criteria {criteria_coverage}",
     "executor-routing": "[ROUTE] executor plan — {n_segments} segments routed",
@@ -648,6 +650,37 @@ def _hash_artifact(path: Path) -> str | None:
         return hash_file(path)
     except (FileNotFoundError, OSError):
         return None
+
+
+def receipt_search_conducted(task_dir: Path, *, query: str, search_used: bool = True) -> Path:
+    """Write receipt proving external research was conducted in response to gate.
+
+    Called by ``ctl.py write-search-receipt`` after the executor performs the
+    search recommended by ``external-solution-gate.json``.  ``run-spec-ready``
+    asserts this receipt exists before advancing to SPEC_REVIEW when the gate
+    wrote ``search_recommended: true``.
+
+    ``query`` is the search string actually used (non-empty, caller-supplied).
+    ``search_used`` must be ``True``; passing ``False`` raises ``ValueError``
+    so a caller cannot write a vacuous "search conducted" receipt without having
+    done any search.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("receipt_search_conducted: query must be a non-empty string")
+    if not search_used:
+        raise ValueError(
+            "receipt_search_conducted: search_used must be True — "
+            "do not write a search-conducted receipt if no search was performed"
+        )
+    gate_path = task_dir / "external-solution-gate.json"
+    gate_sha256 = _hash_artifact(gate_path)
+    return write_receipt(
+        task_dir,
+        "search-conducted",
+        query=query,
+        search_used=True,
+        gate_sha256=gate_sha256,
+    )
 
 
 def receipt_spec_validated(task_dir: Path, **_legacy: Any) -> Path:

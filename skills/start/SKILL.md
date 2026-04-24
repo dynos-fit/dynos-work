@@ -289,8 +289,14 @@ The artifact shape is:
 
 Rules:
 - If `search_recommended` is `false`, proceed with local repo evidence only.
-- If `search_recommended` is `true`, external research may inform planning, but the planner still owns the final design choice.
-- Treat `query_reason` and `decision_basis` as hints, not authorization to install or adopt anything automatically.
+- If `search_recommended` is `true`, you MUST conduct external research before proceeding. Use `query_reason` and `decision_basis` to form the search query, then call:
+
+  ```text
+  python3 hooks/ctl.py write-search-receipt .dynos/task-{id} --query "<your search query>"
+  ```
+
+  `run-spec-ready` (Step 3 exit) checks for this receipt and exits non-zero if it is missing. There is no rationalization that bypasses this — if `search_recommended` is `true` and the receipt is absent, the spec cannot advance to SPEC_REVIEW.
+- The planner still owns the final design choice. Research findings inform the plan; they do not automatically authorize adopting any external library or pattern.
 - Do not mutate the gate artifact by hand to claim search happened or to inject candidates.
 
 Logging: append exactly one line to the execution log:
