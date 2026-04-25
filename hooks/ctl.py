@@ -18,6 +18,7 @@ from lib_core import (
     VALID_DOMAINS,
     VALID_RISK_LEVELS,
     find_active_tasks,
+    get_tdd_required,
     load_json,
     next_command_for_stage,
     now_iso,
@@ -1694,12 +1695,21 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
 
         risk = _risk_level_for_task(task_dir)
         if risk not in {"high", "critical"}:
+            # Auto-advance to TDD_REVIEW when tdd_required=true. This fires
+            # deterministically — the executor cannot skip it by reading prose.
+            manifest = _load_manifest(task_dir)
+            transitioned_to = None
+            if get_tdd_required(manifest) and manifest.get("stage") == "PLAN_AUDIT":
+                _, updated = transition_task(task_dir, "TDD_REVIEW")
+                transitioned_to = updated.get("stage")
             print(json.dumps({
                 "status": "passed",
                 "task_dir": str(task_dir),
                 "mode": "deterministic_only",
                 "risk_level": risk,
                 "llm_audit_required": False,
+                "tdd_required": get_tdd_required(manifest),
+                "transitioned_to": transitioned_to,
                 "gap_report": gap_report,
             }, indent=2))
             return 0
@@ -1722,6 +1732,12 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             model_used=args.model,
         )
         finding_count, blocking_count = _parse_audit_report(report_path, root=_root_for_task_dir(task_dir))
+        # Auto-advance to TDD_REVIEW when tdd_required=true and audit passed.
+        transitioned_to = None
+        manifest = _load_manifest(task_dir)
+        if finding_count == 0 and get_tdd_required(manifest) and manifest.get("stage") == "PLAN_AUDIT":
+            _, updated = transition_task(task_dir, "TDD_REVIEW")
+            transitioned_to = updated.get("stage")
         status = "passed" if finding_count == 0 else "replan_required"
         payload = {
             "status": status,
@@ -1733,6 +1749,8 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             "receipt_path": str(receipt_path),
             "finding_count": finding_count,
             "blocking_count": blocking_count,
+            "tdd_required": get_tdd_required(manifest),
+            "transitioned_to": transitioned_to,
             "gap_report": gap_report,
         }
         print(json.dumps(payload, indent=2))
