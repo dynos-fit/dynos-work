@@ -384,4 +384,4 @@ Task complete. Snapshot branch dynos/task-{id}-snapshot can be deleted if desire
 
 ## Standalone use (no active task)
 
-If no active task is found, run the 4 universal auditors on `git diff --name-only HEAD`. Skip Step 5 (no DONE state to write). Print results and stop.
+If no active task is found, run the 5 universal auditors on `git diff --name-only HEAD`. Skip Step 5 (no DONE state to write). Print results and stop.

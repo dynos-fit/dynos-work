@@ -176,6 +176,7 @@ ROLE_DEFAULT_MODELS: dict[str, str] = {
     "performance-auditor": "haiku",
     "db-schema-auditor": "haiku",
     "ui-auditor": "haiku",
+    "claude-md-auditor": "sonnet",
 }
 
 
@@ -586,7 +587,7 @@ def _parse_model_from_patterns(path: Path, role: str, task_type: str) -> str | N
 # Skip decisions
 # ---------------------------------------------------------------------------
 
-SKIP_EXEMPT = {"security-auditor", "spec-completion-auditor"}
+SKIP_EXEMPT = {"security-auditor", "spec-completion-auditor", "claude-md-auditor"}
 DEFAULT_SKIP_THRESHOLD = _DEFAULT_SKIP_THRESHOLD
 
 
@@ -805,8 +806,8 @@ _DEFAULT_ENSEMBLE_ESCALATION_MODEL = "opus"
 
 # Default auditor registry — overridable via .dynos/config/auditors.json
 _DEFAULT_AUDITOR_REGISTRY = {
-    "always": ["spec-completion-auditor", "security-auditor"],
-    "fast_track": ["spec-completion-auditor", "security-auditor"],
+    "always": ["spec-completion-auditor", "security-auditor", "claude-md-auditor"],
+    "fast_track": ["spec-completion-auditor", "security-auditor", "claude-md-auditor"],
     "domain_conditional": {
         "ui": ["ui-auditor", "code-quality-auditor"],
         "db": ["db-schema-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
