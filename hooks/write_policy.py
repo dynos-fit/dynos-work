@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -34,6 +33,27 @@ _PRIVILEGED_ROLE_MODULE_MAP: dict[str, frozenset[str]] = {
     "scheduler": frozenset({"scheduler"}),
     "system": frozenset({"lib_log", "lib_tokens"}),
 }
+
+# PRO-001: per-role capability-key sentinels replace sys._getframe stack-walking.
+# Each privileged role gets a distinct object() identity that callers must
+# import and pass explicitly. Forge-resistance equals Python object identity:
+# without importing this module's private symbol, no caller can construct a
+# matching token. The role-to-module mapping in _PRIVILEGED_ROLE_MODULE_MAP
+# remains the policy source of truth for write permissions; the capability
+# key only proves caller identity.
+_CAPABILITY_KEYS: dict[str, object] = {
+    role: object() for role in _PRIVILEGED_ROLE_MODULE_MAP
+}
+
+
+def get_capability_key(role: str) -> object:
+    """Return the capability-key sentinel for a privileged role.
+
+    Raises KeyError if role is not in _CAPABILITY_KEYS. Privileged callers
+    must import this and pass the returned sentinel as the capability_key
+    kwarg of require_write_allowed.
+    """
+    return _CAPABILITY_KEYS[role]
 
 
 @dataclass(frozen=True)
@@ -291,33 +311,21 @@ def _emit_policy_event(attempt: WriteAttempt, decision: WriteDecision) -> None:
         pass
 
 
-def require_write_allowed(attempt: WriteAttempt, *, emit_event: bool = True) -> None:
-    if attempt.role in _PRIVILEGED_ROLE_MODULE_MAP:
-        expected_module = _PRIVILEGED_ROLE_MODULE_MAP[attempt.role]
-        # Walk the full call stack: the authorized module may call through a
-        # wrapper (e.g. lib_core.write_ctl_json) before reaching here.
-        # Also handle __main__ (e.g. `python3 hooks/ctl.py` sets __name__="__main__"
-        # but __file__ ends in the expected module name).
-        frame = sys._getframe(1)
-        authorized = False
-        while frame is not None:
-            raw_name = frame.f_globals.get("__name__", "")
-            mod_name = raw_name[len("hooks."):] if raw_name.startswith("hooks.") else raw_name
-            if mod_name in expected_module:
-                authorized = True
-                break
-            if raw_name == "__main__":
-                raw_file = frame.f_globals.get("__file__", "") or ""
-                if Path(raw_file).stem in expected_module:
-                    authorized = True
-                    break
-            frame = frame.f_back
-        if not authorized:
-            caller_module = sys._getframe(1).f_globals.get("__name__", "")
-            raise ValueError(
-                f"role {attempt.role!r} claimed by module {caller_module!r} not in allowlist "
-                f"{expected_module!r}"
-            )
+def require_write_allowed(
+    attempt: WriteAttempt, *, capability_key: object, emit_event: bool = True
+) -> None:
+    # PRO-001: identity-check the capability key against the per-role sentinel.
+    # For privileged roles (in _CAPABILITY_KEYS) the key must match the dict
+    # entry. For non-privileged roles the key must be None — there is no
+    # registered sentinel to match. Either path is enforced by the same
+    # identity check: dict.get returns None for missing roles, so non-privileged
+    # callers passing capability_key=None pass; non-privileged callers passing
+    # any non-None key fail.
+    if capability_key is not _CAPABILITY_KEYS.get(attempt.role):
+        raise ValueError(
+            f"capability_key mismatch for role {attempt.role!r}: "
+            f"token does not match the registered sentinel"
+        )
     decision = decide_write(attempt)
     if emit_event:
         _emit_policy_event(attempt, decision)

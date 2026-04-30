@@ -42,6 +42,10 @@ from lib_core import (
     write_json,
 )
 
+# Resolve binaries at import time via PATH; never trust repo-relative paths.
+_PYTHON3: str = shutil.which("python3") or _sys.executable
+_GIT: str | None = shutil.which("git")
+
 
 def _home() -> Path:
     import os
@@ -425,7 +429,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         if patterns_py.exists():
             try:
                 subprocess.run(
-                    ["python3", str(patterns_py), "--root", str(main_root)],
+                    [_PYTHON3, str(patterns_py), "--root", str(main_root)],
                     check=False, capture_output=True, text=True, timeout=60,
                 )
                 applied["project_rules_regenerated"] = True
@@ -438,7 +442,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         registry_py = Path(__file__).parent / "registry.py"
         if registry_py.exists():
             subprocess.run(
-                ["python3", str(registry_py), "unregister", str(source_original_path)],
+                [_PYTHON3, str(registry_py), "unregister", str(source_original_path)],
                 check=False, capture_output=True, text=True, timeout=10,
             )
             applied["registry_unregistered"] = str(source_original_path)

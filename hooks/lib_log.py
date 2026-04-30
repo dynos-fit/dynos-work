@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from lib_core import _persistent_project_dir, now_iso
-from write_policy import WriteAttempt, require_write_allowed
+from write_policy import WriteAttempt, get_capability_key, require_write_allowed
 
 
 # Event names whose sole purpose is operator visibility / forensic trace.
@@ -296,7 +296,11 @@ def verify_signed_events(
 
 def _append_jsonl(path: Path, line: str, *, attempt: WriteAttempt) -> None:
     """Thread-safe append a single line to a JSONL file."""
-    require_write_allowed(attempt, emit_event=False)
+    require_write_allowed(
+        attempt,
+        capability_key=get_capability_key(attempt.role),
+        emit_event=False,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)

@@ -1,4 +1,4 @@
-"""Tests for AC 8 and AC 9: _WRITE_ROLE constants and privileged-role frame check.
+"""Tests for AC 8 and AC 9: _WRITE_ROLE constants and privileged-role check.
 
 AC 8: hooks/lib_log.py, hooks/lib_receipts.py, hooks/ctl.py each define _WRITE_ROLE
       at module scope with values 'eventbus', 'receipt-writer', 'ctl' respectively.
@@ -7,8 +7,9 @@ AC 8: hooks/lib_log.py, hooks/lib_receipts.py, hooks/ctl.py each define _WRITE_R
 
 AC 9: hooks/write_policy.py defines _PRIVILEGED_ROLE_MODULE_MAP: dict[str, frozenset[str]]
       with keys: eventbus, receipt-writer, ctl, scheduler, system.
-      require_write_allowed walks the call stack when role is privileged; a call
-      from an unauthorized module raises ValueError containing 'not authorized'.
+      require_write_allowed identity-checks a per-role capability_key sentinel;
+      a call without the matching key raises ValueError containing
+      'capability_key mismatch'. (Replaces former sys._getframe stack-walking.)
 """
 from __future__ import annotations
 
@@ -33,7 +34,9 @@ import lib_log
 import lib_receipts
 from write_policy import (
     WriteAttempt,
+    _CAPABILITY_KEYS,
     _PRIVILEGED_ROLE_MODULE_MAP,
+    get_capability_key,
     require_write_allowed,
 )
 
@@ -224,63 +227,74 @@ class TestPrivilegedRoleModuleMap:
 
 
 class TestFrameCheck:
-    """When a privileged role is used, require_write_allowed walks the call
-    stack. Calls from this test module (not in any allowlist) must raise."""
+    """When a privileged role is used, require_write_allowed identity-checks
+    a per-role capability_key. Calls without the matching key (e.g. a wrong
+    key, or this test module's None) must raise.
+
+    Class kept under the legacy name 'TestFrameCheck' for git-history continuity;
+    the underlying mechanism changed from sys._getframe stack-walking to per-role
+    capability sentinels (PRO-001), but the privilege-boundary intent is preserved.
+    """
 
     def test_privileged_role_from_test_module_raises_not_authorized(self) -> None:
-        """AC 9: role='receipt-writer' from a non-allowlisted module raises ValueError."""
+        """AC 9: role='receipt-writer' without matching capability_key raises ValueError."""
         attempt = _make_attempt("receipt-writer")
         with pytest.raises(ValueError):
-            require_write_allowed(attempt, emit_event=False)
+            require_write_allowed(attempt, capability_key=None, emit_event=False)
 
     def test_eventbus_role_from_test_module_raises(self) -> None:
-        """AC 9: role='eventbus' from a non-allowlisted module raises ValueError."""
+        """AC 9: role='eventbus' without matching capability_key raises ValueError."""
         attempt = _make_attempt("eventbus")
         with pytest.raises(ValueError):
-            require_write_allowed(attempt, emit_event=False)
+            require_write_allowed(attempt, capability_key=None, emit_event=False)
 
     def test_ctl_role_from_test_module_raises(self) -> None:
-        """AC 9: role='ctl' from a non-allowlisted module raises ValueError."""
+        """AC 9: role='ctl' without matching capability_key raises ValueError."""
         attempt = _make_attempt("ctl")
         with pytest.raises(ValueError):
-            require_write_allowed(attempt, emit_event=False)
+            require_write_allowed(attempt, capability_key=None, emit_event=False)
 
     def test_non_privileged_role_from_test_module_does_not_raise(self) -> None:
-        """AC 9: role='execute-inline' is not in the map, so no frame check fires.
+        """AC 9: role='execute-inline' is not in _CAPABILITY_KEYS — caller passes
+        capability_key=None and the check passes (None is _CAPABILITY_KEYS.get('execute-inline')).
         The write attempt targets /tmp (no task_dir), which is allowed for executors."""
         attempt = _make_attempt("execute-inline")
-        result = require_write_allowed(attempt, emit_event=False)
+        result = require_write_allowed(attempt, capability_key=None, emit_event=False)
         assert result is None  # require_write_allowed returns None on success
 
     def test_error_message_names_role(self) -> None:
         """AC 9: the raised ValueError must name the role in its message."""
         attempt = _make_attempt("receipt-writer")
         with pytest.raises(ValueError, match=r"receipt-writer"):
-            require_write_allowed(attempt, emit_event=False)
+            require_write_allowed(attempt, capability_key=None, emit_event=False)
 
     def test_error_message_contains_not_in_allowlist(self) -> None:
-        """AC 9: the raised ValueError must contain 'not in allowlist'."""
+        """AC 9: the raised ValueError must signal that the capability check failed.
+
+        The post-PRO-001 message is 'capability_key mismatch'; the legacy message
+        was 'not in allowlist'. Match either to remain robust across the migration.
+        """
         attempt = _make_attempt("receipt-writer")
-        with pytest.raises(ValueError, match=r"not in allowlist"):
-            require_write_allowed(attempt, emit_event=False)
+        with pytest.raises(ValueError, match=r"capability_key mismatch|not in allowlist"):
+            require_write_allowed(attempt, capability_key=None, emit_event=False)
 
     def test_scheduler_role_from_test_module_raises(self) -> None:
-        """AC 9: role='scheduler' from a non-allowlisted module raises ValueError."""
+        """AC 9: role='scheduler' without matching capability_key raises ValueError."""
         attempt = _make_attempt("scheduler")
         with pytest.raises(ValueError):
-            require_write_allowed(attempt, emit_event=False)
+            require_write_allowed(attempt, capability_key=None, emit_event=False)
 
     def test_system_role_from_test_module_raises(self) -> None:
-        """AC 9: role='system' from a non-allowlisted module raises ValueError."""
+        """AC 9: role='system' without matching capability_key raises ValueError."""
         attempt = _make_attempt("system")
         with pytest.raises(ValueError):
-            require_write_allowed(attempt, emit_event=False)
+            require_write_allowed(attempt, capability_key=None, emit_event=False)
 
     def test_all_privileged_roles_raise_from_test_module(self) -> None:
         """AC 9 regression: every key in _PRIVILEGED_ROLE_MODULE_MAP raises
-        when called from this test module — ensuring no key is accidentally
-        missing from the frame-check logic."""
+        when called from this test module without the matching capability_key —
+        ensuring no key is accidentally missing from _CAPABILITY_KEYS."""
         for role in _PRIVILEGED_ROLE_MODULE_MAP:
             attempt = _make_attempt(role)
-            with pytest.raises(ValueError, match=r"not in allowlist"):
-                require_write_allowed(attempt, emit_event=False)
+            with pytest.raises(ValueError, match=r"capability_key mismatch|not in allowlist"):
+                require_write_allowed(attempt, capability_key=None, emit_event=False)

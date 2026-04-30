@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from write_policy import WriteAttempt, require_write_allowed
+from write_policy import WriteAttempt, get_capability_key, require_write_allowed
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,8 @@ def write_ctl_json(task_dir: Path, path: Path, data: Any) -> None:
             path=path,
             operation="modify" if path.exists() else "create",
             source="ctl",
-        )
+        ),
+        capability_key=get_capability_key("ctl"),
     )
     write_json(path, data)
 

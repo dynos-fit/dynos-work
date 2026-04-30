@@ -141,7 +141,8 @@ def test_require_write_allowed_emits_denial_event(tmp_path: Path) -> None:
                 path=task_dir / "manifest.json",
                 operation="modify",
                 source="agent",
-            )
+            ),
+            capability_key=None,
         )
     except ValueError:
         pass

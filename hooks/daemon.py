@@ -8,11 +8,14 @@ import argparse
 import fcntl
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+_PYTHON3: str = shutil.which("python3") or sys.executable
 
 from lib_core import load_json, write_json, now_iso, _persistent_project_dir
 from lib_log import log_event
@@ -294,7 +297,7 @@ def write_status(root: Path, payload: dict) -> None:
 def run_python(root: Path, script_name: str, *args: str) -> tuple[subprocess.CompletedProcess[str], dict | None]:
     hooks_dir = Path(__file__).resolve().parent
     completed = subprocess.run(
-        ["python3", str(hooks_dir / script_name), *args],
+        [_PYTHON3, str(hooks_dir / script_name), *args],
         cwd=root,
         text=True,
         capture_output=True,
@@ -488,7 +491,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         hooks_dir = Path(__file__).resolve().parent
         poll_seconds = int(args.poll_seconds or maintainer_policy(root)["maintainer_poll_seconds"])
         cmd = [
-            "python3",
+            _PYTHON3,
             str(hooks_dir / "daemon.py"),
             "run-loop",
             "--root",
