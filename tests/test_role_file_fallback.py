@@ -243,7 +243,7 @@ class TestRoleResolutionChain:
         import io
         fake_stdin = json.dumps({
             "tool_name": "Bash",
-            "tool_input": {"command": "echo hi"},
+            "tool_input": {"command": "echo hi > /tmp/role-fallback-probe.txt"},
             "cwd": str(task_dir),
         })
         old_stdin = sys.stdin
@@ -299,7 +299,7 @@ class TestRoleResolutionChain:
         import io
         fake_stdin = json.dumps({
             "tool_name": "Bash",
-            "tool_input": {"command": "echo hi"},
+            "tool_input": {"command": "echo hi > /tmp/role-fallback-probe.txt"},
             "cwd": str(task_dir),
         })
         old_stdin = sys.stdin
@@ -363,7 +363,7 @@ class TestRoleResolutionChain:
         import io
         fake_stdin = json.dumps({
             "tool_name": "Bash",
-            "tool_input": {"command": "echo hi"},
+            "tool_input": {"command": "echo hi > /tmp/role-fallback-probe.txt"},
             "cwd": str(task_dir),
         })
         old_stdin = sys.stdin
@@ -430,7 +430,7 @@ class TestRoleResolutionChain:
         import io
         fake_stdin = json.dumps({
             "tool_name": "Bash",
-            "tool_input": {"command": "echo hi"},
+            "tool_input": {"command": "echo hi > /tmp/role-fallback-probe.txt"},
             "cwd": str(task_dir),
         })
         old_stdin = sys.stdin
@@ -494,7 +494,7 @@ class TestRoleResolutionChain:
         import io
         fake_stdin = json.dumps({
             "tool_name": "Bash",
-            "tool_input": {"command": "echo hi"},
+            "tool_input": {"command": "echo hi > /tmp/role-fallback-probe.txt"},
             "cwd": str(task_dir),
         })
         old_stdin = sys.stdin
