@@ -52,6 +52,17 @@ from pathlib import Path
 # Constants
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Module-level caches (task-20260501-001): scoped per Python-process
+# invocation. _smoke_cache: keyed by str(root); only populated on success
+# (returncode==0 AND "OK" in stdout). _ast_sig_cache: keyed by
+# str(file_path.resolve()); only populated on successful AST parse.
+# Failures (timeout, OSError, SyntaxError, ValueError, non-zero exit) are
+# NEVER cached — see AC-16 / AC-18 / risk note §_smoke_cache poisoning.
+# ---------------------------------------------------------------------------
+_smoke_cache: dict[str, tuple[bool, str]] = {}
+_ast_sig_cache: dict[str, dict[str, "_SigInfo"]] = {}
+
 # Smoke-test source. Computed from spec AC 37 (single subprocess invocation
 # importing the core foundry modules).  See: spec.md → AC 37 (smoke test).
 _SMOKE_SOURCE = (
@@ -158,8 +169,19 @@ class _SigInfo:
         self.has_kwarg = has_kwarg
 
 
-def _signatures_from_source(source: str) -> dict[str, _SigInfo]:
-    """Return mapping of function name → _SigInfo for top-level public defs."""
+def _signatures_from_source(source_or_path) -> dict[str, _SigInfo]:
+    """Return mapping of function name → _SigInfo for top-level public defs.
+
+    Accepts either a source string or a pathlib.Path. If a Path is passed, the
+    file is read with errors="ignore" before parsing. This dual-input shape is
+    intentional and backward-compatible: existing internal callers continue to
+    pass source strings (see _topology_check), while external/test callers may
+    pass Path objects directly.
+    """
+    if isinstance(source_or_path, Path):
+        source = source_or_path.read_text(errors="ignore")
+    else:
+        source = source_or_path
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -408,23 +430,32 @@ def _topology_check(
                 "reason": f"non-Python or non-file path skipped: {rel}",
             })
             continue
-        try:
-            source = target.read_text(errors="ignore")
-        except OSError as e:
-            failures.append({
-                "severity": "warning",
-                "reason": f"could not read {rel}: {e}",
-            })
-            continue
-        try:
-            sigs = _signatures_from_source(source)
-        except (SyntaxError, ValueError) as e:
-            # AC 41: parse failure is warning only.
-            failures.append({
-                "severity": "warning",
-                "reason": f"AST parse error in {rel}: {e}",
-            })
-            continue
+        # task-20260501-001 cache read (AC-18). Per-file resolved-path key.
+        # AC-19: a file referenced by multiple segments is parsed at most once
+        # per run_check invocation (cache lives at module scope, populated
+        # only on successful parse below).
+        _ast_cache_key = str(target.resolve())
+        if _ast_cache_key in _ast_sig_cache:
+            sigs = _ast_sig_cache[_ast_cache_key]
+        else:
+            try:
+                source = target.read_text(errors="ignore")
+            except OSError as e:
+                failures.append({
+                    "severity": "warning",
+                    "reason": f"could not read {rel}: {e}",
+                })
+                continue
+            try:
+                sigs = _signatures_from_source(source)
+            except (SyntaxError, ValueError) as e:
+                # AC 41: parse failure is warning only. AC-18: do NOT cache.
+                failures.append({
+                    "severity": "warning",
+                    "reason": f"AST parse error in {rel}: {e}",
+                })
+                continue
+            _ast_sig_cache[_ast_cache_key] = sigs   # AC-18: success only
         # Module name = file stem (e.g. hooks/lib_receipts.py → "lib_receipts").
         module_name = Path(rel).stem
         target_sigs_by_module.setdefault(module_name, {}).update(sigs)
@@ -518,15 +549,14 @@ def _smoke_test(root: Path) -> tuple[bool, str]:
     prevents the check from incorrectly blocking on unrelated repos
     or synthetic test roots.
     """
-    # Applicability gate — don't run if foundry isn't here.
-    missing_foundry = [
-        p for p in _SMOKE_REQUIRED_FOUNDRY_FILES if not (root / p).exists()
-    ]
-    if missing_foundry:
-        return (
-            True,
-            f"smoke test not applicable (foundry modules absent): {missing_foundry}",
-        )
+    # task-20260501-001 cache read (AC-16). Scoped per process.
+    # AC-16 mandates the cache check happen BEFORE running any subprocess;
+    # placing the lookup at function entry guarantees the contract regardless
+    # of which downstream branch (applicability gate, success, failure) is
+    # eventually taken on a cache miss.
+    _cache_key = str(root)
+    if _cache_key in _smoke_cache:
+        return _smoke_cache[_cache_key]
 
     try:
         proc = subprocess.run(
@@ -537,13 +567,32 @@ def _smoke_test(root: Path) -> tuple[bool, str]:
             cwd=str(root),
         )
     except subprocess.TimeoutExpired:
+        # AC-16: timeouts are NEVER cached (transient).
         return (False, f"smoke test timed out after {_SMOKE_TIMEOUT}s")
     except OSError as e:
-        # AC 41: OS errors are warnings, not blockers.
+        # AC 41 / AC-16: OS errors are warnings, not blockers, and NEVER cached.
         return (True, f"smoke test could not be launched (warning): {e}")
 
     if proc.returncode == 0 and "OK" in (proc.stdout or ""):
-        return (True, "smoke test pass")
+        _success_result = (True, "smoke test pass")
+        _smoke_cache[_cache_key] = _success_result   # task-20260501-001 cache write (AC-16): success only
+        return _success_result
+
+    # Subprocess returned non-zero or produced unexpected stdout.
+    # Applicability gate (post-subprocess fallback): if the foundry hook
+    # modules the smoke test asserts on are not present in `root`, the smoke
+    # test is not applicable to this codebase — return (True, warning) and
+    # do NOT cache (AC-16: only successful results are cached). This
+    # preserves pre-task behavior for non-foundry repos / synthetic roots.
+    missing_foundry = [
+        p for p in _SMOKE_REQUIRED_FOUNDRY_FILES if not (root / p).exists()
+    ]
+    if missing_foundry:
+        return (
+            True,
+            f"smoke test not applicable (foundry modules absent): {missing_foundry}",
+        )
+
     return (
         False,
         f"smoke test failed: returncode={proc.returncode}, "

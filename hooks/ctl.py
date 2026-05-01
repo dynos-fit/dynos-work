@@ -1755,6 +1755,39 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
+        # Signature-check (task-20260501-001): verify spec AC signature claims match plan.
+        _sig_script = Path(__file__).parent / "plan_signature_check.py"
+        if _sig_script.exists():
+            sig_result = subprocess.run(
+                [sys.executable, str(_sig_script), "--root", str(root), "--task-dir", str(task_dir)],
+                capture_output=True, text=True,
+            )
+            if sig_result.returncode != 0:
+                print(json.dumps({
+                    "status": "plan_audit_failed",
+                    "task_dir": str(task_dir),
+                    "error": "signature-check script non-zero exit",
+                    "check_output": sig_result.stderr or sig_result.stdout,
+                }, indent=2))
+                return 1
+            try:
+                sig_payload = json.loads(sig_result.stdout)
+            except json.JSONDecodeError:
+                print(json.dumps({
+                    "status": "ctl_internal_error",
+                    "task_dir": str(task_dir),
+                    "error": "plan_signature_check.py stdout is not valid JSON",
+                }, indent=2))
+                return 1
+            if sig_payload.get("findings"):
+                print(json.dumps({
+                    "status": "plan_audit_failed",
+                    "task_dir": str(task_dir),
+                    "error": "signature mismatch found",
+                    "findings": sig_payload["findings"],
+                }, indent=2))
+                return 1
+
         # Run intermediate-state pipeline check (task-003 PRO-006 capture).
         # Bootstrap: tolerate the script not existing yet; when it exists, failures block.
         _check_script = Path(__file__).parent / "plan_intermediate_state_check.py"
@@ -2077,6 +2110,30 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
                 "status": "respec_required",
                 "task_dir": str(task_dir),
                 "errors": errors,
+            }, indent=2))
+            return 1
+
+        # Spec-lint gate (task-20260501-001): anti-pattern detection for measurement+structural co-location.
+        _lint_script = Path(__file__).parent / "spec_lint.py"
+        lint_result = subprocess.run(
+            [sys.executable, str(_lint_script), "--spec", str(task_dir / "spec.md")],
+            capture_output=True, text=True,
+        )
+        try:
+            lint_payload = json.loads(lint_result.stdout)
+        except json.JSONDecodeError:
+            print(json.dumps({
+                "status": "ctl_internal_error",
+                "task_dir": str(task_dir),
+                "error": "spec_lint.py stdout is not valid JSON",
+            }, indent=2))
+            return 1
+        unacked_findings = [f for f in lint_payload.get("findings", []) if f not in lint_payload.get("acked", [])]
+        if unacked_findings:
+            print(json.dumps({
+                "status": "respec_required",
+                "task_dir": str(task_dir),
+                "errors": [f.get("message", str(f)) for f in unacked_findings],
             }, indent=2))
             return 1
 

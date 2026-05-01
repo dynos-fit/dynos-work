@@ -52,10 +52,19 @@ This command reads `manifest.json`, derives the audit plan, writes `.dynos/task-
 
 When spawning auditors, tell them to attack the implementation, not narrate it. Favor findings with proof over summaries with tone.
 
+## Auditor Prompt Discipline (default fallback)
+
+For any auditor that does NOT have a `## Turn Budget Discipline` section in its agent file, the orchestrator applies these defaults when constructing the spawn prompt:
+
+- Final message MUST contain only a JSON code block matching the canonical audit-report schema. No prose, no commentary, no markdown around the JSON.
+- Tool-use budget: haiku ≤ 15, sonnet ≤ 20, opus ≤ 25 tool uses.
+- When within 3 tool uses of the budget, stop and emit the report.
+
 For each auditor in the plan:
 - If `action: "skip"`: log `{timestamp} [SKIP] {name} — {reason}` and do not spawn
 - If `action: "spawn"`: spawn with the specified `model` (null = default)
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
+- For the plan-auditor: For each AC in spec.md naming a function signature, verify plan.md's Component section names the same signature. Mismatch is a partial finding.
 
 **Pre-load diff context (run once, write to sidecar, reference by path):** Using `diff_base` from the audit plan output, write the context ONCE to a sidecar file and reference its path in each auditor's base prompt. Do NOT capture the full content into a shell variable and append it to every prompt — that pattern multiplies (auditors × cascade-models × context-size) input tokens, which is exactly the regression the 2026-04-30 latency investigation flagged in CG-013 (the mislabeled "perf:" commit).
 
@@ -63,6 +72,10 @@ For each auditor in the plan:
 AUDIT_CONTEXT_PATH=".dynos/task-{id}/audit-context.md"
 python3 "${PLUGIN_HOOKS}/build_prompt_context.py" --diff {diff_base} --root . --sidecar "$AUDIT_CONTEXT_PATH"
 ```
+
+<!-- pre-resolved-context-start -->
+
+<!-- pre-resolved-context-end -->
 
 In each auditor's base prompt, include a single line referencing the sidecar:
 

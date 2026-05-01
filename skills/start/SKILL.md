@@ -325,6 +325,7 @@ Read raw-input.md, discovery-notes.md, and design-decisions.md.
 Also read the actual implementation files referenced in the task (e.g., the files that will be modified). Verify runtime semantics directly from the code — do not assume template engines, escaping conventions, or generation mechanisms without reading the relevant functions. Include specific function signatures, data flow paths, and module boundaries in the spec.
 Write a spec that leaves executors zero room to hand-wave. Name the exact behavior, exact boundaries, exact failure modes, and exact evidence needed to prove completion.
 Write spec.md.
+See docs/spec-writing-rules.md for known spec-writing anti-patterns.
 ```
 
 If the spec still contains vague adjectives, missing states, or unstated boundary behavior after normalization, send it back again.
