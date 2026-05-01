@@ -415,107 +415,21 @@ def get_tdd_required(manifest: dict, *, strict: bool = False) -> bool:
     return bool(classification.get("tdd_required", False))
 
 
-def require_receipts_for_done(task_dir: Path) -> list[str]:
-    """Return list of receipt-gap strings preventing transition to DONE.
+def _check_audit_routing_receipt(
+    task_dir: Path,
+    registry_eligible: set[str],
+) -> tuple[list[str], dict[str, dict]]:
+    """Check (a) audit-routing presence + (b) registry-eligible cross-check
+    + legacy spawn-without-registry check.
 
-    Hard checks (in order):
-      a) ``audit-routing`` receipt MUST be present.
-      b) Re-derive the registry-eligible auditor set from
-         ``_load_auditor_registry(root)`` + ``manifest.classification.domains``
-         + ``manifest.fast_track`` (mirrors ``build_audit_plan`` logic):
-           * Every registry-eligible auditor MUST appear in
-             ``audit-routing.auditors``. Missing → gap error.
-           * Registry-eligible entries with ``action: "skip"`` require a
-             non-empty ``reason`` string; missing/empty reason → gap error.
-           * Registry-eligible entries with ``action: "spawn"`` require a
-             non-None ``read_receipt(task_dir, f"audit-{name}", min_version=2)``.
-         Routing entries that are NOT in the registry-eligible set are
-         accepted without error (treated as extras).
-      c) Ensemble voting (AC 7): when a routing entry has
-         ``ensemble: true``, look for per-model receipts
-         ``audit-{name}-{model}`` at min_version=2 for every model in
-         ``voting_models``. Fall back to single-receipt
-         ``audit-{name}`` with ``model_used == <model>`` for compat.
-         Accept iff EITHER every voting-model receipt reports
-         ``blocking_count == 0`` OR an escalation receipt exists whose
-         ``model_used == escalation_model``. Each found receipt's
-         ``model_used`` MUST be in ``voting_models ∪ {escalation_model}``;
-         otherwise a gap error.
-      d) Either ``postmortem-generated`` OR ``postmortem-skipped`` MUST be
-         present.
-      e) When ``postmortem-generated`` is present AND
-         (``anomaly_count != 0`` OR ``anomaly_count_unknown`` (coercion
-         failed or key missing) OR ``task-retrospective.json``
-         ``quality_score < 0.8``), THEN ``postmortem-analysis`` OR
-         ``postmortem-skipped`` is required. Fail-CLOSED anomaly_count
-         (AC 11): non-int / missing ``anomaly_count`` forces the
-         analysis/skipped requirement.
-
-    Returns an empty list when all gates pass.
+    Returns ``(gap_list, routing_by_name)``. The ``routing_by_name`` dict
+    is the entry index keyed by auditor name; it flows downstream to
+    ``_check_ensemble_voting`` so that helper does not have to re-read
+    the receipt. Tuple-return is required for that downstream wiring.
     """
     from lib_receipts import read_receipt
 
     gaps: list[str] = []
-
-    # Derive registry-eligible auditor set (AC 6) from authoritative sources.
-    manifest_path = task_dir / "manifest.json"
-    manifest: dict = {}
-    if manifest_path.exists():
-        try:
-            manifest = load_json(manifest_path)
-        except (json.JSONDecodeError, OSError, ValueError):
-            manifest = {}
-    classification = manifest.get("classification") if isinstance(manifest, dict) else {}
-    if not isinstance(classification, dict):
-        classification = {}
-    domains = classification.get("domains", [])
-    if not isinstance(domains, list):
-        domains = []
-    fast_track = bool(manifest.get("fast_track", False)) if isinstance(manifest, dict) else False
-
-    registry_eligible: set[str] = set()
-    try:
-        # Deferred import: hooks.router imports from lib_core transitively.
-        # Importing at call time keeps the module graph acyclic.
-        from router import _load_auditor_registry, _DEFAULT_AUDITOR_REGISTRY  # type: ignore
-    except Exception:
-        _load_auditor_registry = None  # type: ignore
-        _DEFAULT_AUDITOR_REGISTRY = {
-            "always": ["spec-completion-auditor", "security-auditor"],
-            "fast_track": ["spec-completion-auditor", "security-auditor"],
-            "domain_conditional": {
-                "ui": ["ui-auditor", "code-quality-auditor"],
-                "db": ["db-schema-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
-                "backend": ["performance-auditor", "dead-code-auditor", "code-quality-auditor"],
-                "ml": ["code-quality-auditor"],
-                "testing": ["code-quality-auditor"],
-                "refactor": ["code-quality-auditor"],
-                "infra": ["code-quality-auditor"],
-                "security": ["code-quality-auditor"],
-            },
-        }
-    try:
-        root = task_dir.parent.parent
-        registry = _load_auditor_registry(root) if _load_auditor_registry else _DEFAULT_AUDITOR_REGISTRY
-        if not isinstance(registry, dict):
-            registry = _DEFAULT_AUDITOR_REGISTRY
-    except Exception:
-        registry = _DEFAULT_AUDITOR_REGISTRY
-
-    if fast_track:
-        eligible_list = list(registry.get("fast_track", _DEFAULT_AUDITOR_REGISTRY["fast_track"]))
-    else:
-        eligible_list = list(registry.get("always", _DEFAULT_AUDITOR_REGISTRY["always"]))
-        domain_map = registry.get("domain_conditional", _DEFAULT_AUDITOR_REGISTRY["domain_conditional"])
-        if not isinstance(domain_map, dict):
-            domain_map = _DEFAULT_AUDITOR_REGISTRY["domain_conditional"]
-        for domain in domains:
-            if not isinstance(domain, str):
-                continue
-            for auditor in domain_map.get(domain, []) or []:
-                if isinstance(auditor, str) and auditor and auditor not in eligible_list:
-                    eligible_list.append(auditor)
-    registry_eligible = {a for a in eligible_list if isinstance(a, str) and a}
 
     # (a) audit-routing must exist
     audit_routing = read_receipt(task_dir, "audit-routing")
@@ -584,9 +498,24 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
         if read_receipt(task_dir, f"audit-{name}", min_version=2) is None:
             gaps.append(f"audit-{name} missing")
 
-    # (c) ensemble voting enforcement (AC 7). Runs across ALL spawn
-    # entries flagged ensemble=true, whether registry-eligible or not —
-    # the voting contract is identical.
+    return gaps, routing_by_name
+
+
+def _check_ensemble_voting(
+    task_dir: Path,
+    routing_by_name: dict[str, dict],
+    registry_eligible: set[str],  # noqa: ARG001 — kept for API symmetry
+) -> list[str]:
+    """Check (c) ensemble voting enforcement (AC 7).
+
+    Runs across ALL spawn entries flagged ``ensemble=true``, whether
+    registry-eligible or not — the voting contract is identical.
+    Returns the list of gap strings (possibly empty).
+    """
+    from lib_receipts import read_receipt
+
+    gaps: list[str] = []
+
     for name, entry in routing_by_name.items():
         if entry.get("action") != "spawn":
             continue
@@ -670,6 +599,19 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
                     f"(non-zero blocking) and no escalation receipt for {escalation_model!r}"
                 )
 
+    return gaps
+
+
+def _check_postmortem_receipts(task_dir: Path) -> list[str]:
+    """Check (d) postmortem-generated/skipped presence and (e) the
+    fail-CLOSED ``anomaly_count`` rule.
+
+    Returns the list of gap strings (possibly empty).
+    """
+    from lib_receipts import read_receipt
+
+    gaps: list[str] = []
+
     # (d) postmortem-generated OR postmortem-skipped required
     pm_generated = read_receipt(task_dir, "postmortem-generated")
     pm_skipped = read_receipt(task_dir, "postmortem-skipped")
@@ -716,6 +658,198 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
     return gaps
 
 
+def require_receipts_for_done(task_dir: Path) -> list[str]:
+    """Return list of receipt-gap strings preventing transition to DONE.
+
+    Hard checks (in order):
+      a) ``audit-routing`` receipt MUST be present.
+      b) Re-derive the registry-eligible auditor set from
+         ``_load_auditor_registry(root)`` + ``manifest.classification.domains``
+         + ``manifest.fast_track`` (mirrors ``build_audit_plan`` logic):
+           * Every registry-eligible auditor MUST appear in
+             ``audit-routing.auditors``. Missing → gap error.
+           * Registry-eligible entries with ``action: "skip"`` require a
+             non-empty ``reason`` string; missing/empty reason → gap error.
+           * Registry-eligible entries with ``action: "spawn"`` require a
+             non-None ``read_receipt(task_dir, f"audit-{name}", min_version=2)``.
+         Routing entries that are NOT in the registry-eligible set are
+         accepted without error (treated as extras).
+      c) Ensemble voting (AC 7): when a routing entry has
+         ``ensemble: true``, look for per-model receipts
+         ``audit-{name}-{model}`` at min_version=2 for every model in
+         ``voting_models``. Fall back to single-receipt
+         ``audit-{name}`` with ``model_used == <model>`` for compat.
+         Accept iff EITHER every voting-model receipt reports
+         ``blocking_count == 0`` OR an escalation receipt exists whose
+         ``model_used == escalation_model``. Each found receipt's
+         ``model_used`` MUST be in ``voting_models ∪ {escalation_model}``;
+         otherwise a gap error.
+      d) Either ``postmortem-generated`` OR ``postmortem-skipped`` MUST be
+         present.
+      e) When ``postmortem-generated`` is present AND
+         (``anomaly_count != 0`` OR ``anomaly_count_unknown`` (coercion
+         failed or key missing) OR ``task-retrospective.json``
+         ``quality_score < 0.8``), THEN ``postmortem-analysis`` OR
+         ``postmortem-skipped`` is required. Fail-CLOSED anomaly_count
+         (AC 11): non-int / missing ``anomaly_count`` forces the
+         analysis/skipped requirement.
+
+    Returns an empty list when all gates pass.
+    """
+    # Derive registry-eligible auditor set (AC 6) from authoritative sources.
+    manifest_path = task_dir / "manifest.json"
+    manifest: dict = {}
+    if manifest_path.exists():
+        try:
+            manifest = load_json(manifest_path)
+        except (json.JSONDecodeError, OSError, ValueError):
+            manifest = {}
+    classification = manifest.get("classification") if isinstance(manifest, dict) else {}
+    if not isinstance(classification, dict):
+        classification = {}
+    domains = classification.get("domains", [])
+    if not isinstance(domains, list):
+        domains = []
+    fast_track = bool(manifest.get("fast_track", False)) if isinstance(manifest, dict) else False
+
+    try:
+        # Deferred import: hooks.router imports from lib_core transitively.
+        # Importing at call time keeps the module graph acyclic.
+        from router import _load_auditor_registry, _DEFAULT_AUDITOR_REGISTRY  # type: ignore
+    except Exception:
+        _load_auditor_registry = None  # type: ignore
+        _DEFAULT_AUDITOR_REGISTRY = {
+            "always": ["spec-completion-auditor", "security-auditor"],
+            "fast_track": ["spec-completion-auditor", "security-auditor"],
+            "domain_conditional": {
+                "ui": ["ui-auditor", "code-quality-auditor"],
+                "db": ["db-schema-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+                "backend": ["performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+                "ml": ["code-quality-auditor"],
+                "testing": ["code-quality-auditor"],
+                "refactor": ["code-quality-auditor"],
+                "infra": ["code-quality-auditor"],
+                "security": ["code-quality-auditor"],
+            },
+        }
+    try:
+        root = task_dir.parent.parent
+        registry = _load_auditor_registry(root) if _load_auditor_registry else _DEFAULT_AUDITOR_REGISTRY
+        if not isinstance(registry, dict):
+            registry = _DEFAULT_AUDITOR_REGISTRY
+    except Exception:
+        registry = _DEFAULT_AUDITOR_REGISTRY
+
+    if fast_track:
+        eligible_list = list(registry.get("fast_track", _DEFAULT_AUDITOR_REGISTRY["fast_track"]))
+    else:
+        eligible_list = list(registry.get("always", _DEFAULT_AUDITOR_REGISTRY["always"]))
+        domain_map = registry.get("domain_conditional", _DEFAULT_AUDITOR_REGISTRY["domain_conditional"])
+        if not isinstance(domain_map, dict):
+            domain_map = _DEFAULT_AUDITOR_REGISTRY["domain_conditional"]
+        for domain in domains:
+            if not isinstance(domain, str):
+                continue
+            for auditor in domain_map.get(domain, []) or []:
+                if isinstance(auditor, str) and auditor and auditor not in eligible_list:
+                    eligible_list.append(auditor)
+    registry_eligible: set[str] = {a for a in eligible_list if isinstance(a, str) and a}
+
+    # Run the three receipt-gap checks. Tuple-unpack the first call so
+    # routing_by_name can flow into the ensemble check without a re-read
+    # of audit-routing.
+    routing_gaps, routing_by_name = _check_audit_routing_receipt(task_dir, registry_eligible)
+    ensemble_gaps = _check_ensemble_voting(task_dir, routing_by_name, registry_eligible)
+    postmortem_gaps = _check_postmortem_receipts(task_dir)
+
+    return routing_gaps + ensemble_gaps + postmortem_gaps
+
+
+def _human_approval_err(
+    task_dir: Path,
+    current_stage: str | None,
+    next_stage: str,
+    stage_label: str,
+    artifact_path: Path,
+) -> str | None:
+    """Mirror of ``_check_human_approval`` (nested in
+    ``_replay_gates_for_transition``) — returns an error string on
+    failure rather than raising. Promoted from a closure in
+    ``_compute_bypassed_gates_for_force`` so the captured variables
+    (``task_dir``, ``current_stage``, ``next_stage``) become explicit
+    parameters. Never raises: any internal exception → return None
+    (treat as no-error so the forced transition still proceeds).
+    """
+    try:
+        from lib_receipts import read_receipt, hash_file, _receipts_dir
+    except Exception:
+        return None
+    try:
+        receipt_step = f"human-approval-{stage_label}"
+        receipt_path = _receipts_dir(task_dir) / f"{receipt_step}.json"
+        receipt = read_receipt(task_dir, receipt_step)
+        if receipt is None:
+            return (
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing receipt {receipt_step} at {receipt_path} "
+                f"(artifact: {artifact_path})"
+            )
+        if not artifact_path.exists():
+            return (
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"receipt {receipt_step} present at {receipt_path} but "
+                f"artifact missing at {artifact_path}"
+            )
+        expected = receipt.get("artifact_sha256") or ""
+        actual = hash_file(artifact_path)
+        if not isinstance(expected, str) or expected != actual:
+            return (
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"hash mismatch for receipt {receipt_step} "
+                f"(receipt: {receipt_path}, artifact: {artifact_path}) "
+                f"expected={(expected or '')[:12]} actual={actual[:12]}"
+            )
+    except Exception:
+        return None
+    return None
+
+
+def _rules_check_err(
+    task_dir: Path,
+    current_stage: str | None,
+    next_stage: str,
+) -> str | None:
+    """Mirror of ``_check_rules_check_passed`` — returns an error
+    string when the ``rules-check-passed`` receipt is missing or its
+    ``error_violations`` is non-zero. Promoted from a closure in
+    ``_compute_bypassed_gates_for_force`` so the captured variables
+    become explicit parameters. Never raises.
+    """
+    try:
+        from lib_receipts import read_receipt
+    except Exception:
+        return None
+    try:
+        receipt = read_receipt(task_dir, "rules-check-passed")
+        receipt_path = task_dir / "receipts" / "rules-check-passed.json"
+        if receipt is None:
+            return (
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing or failed rules-check-passed receipt at "
+                f"{receipt_path} (error_violations=missing)"
+            )
+        if receipt.get("error_violations", 1) != 0:
+            n = receipt.get("error_violations", "missing")
+            return (
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing or failed rules-check-passed receipt at "
+                f"{receipt_path} (error_violations={n})"
+            )
+    except Exception:
+        return None
+    return None
+
+
 def _compute_bypassed_gates_for_force(
     *,
     task_dir: Path,
@@ -740,7 +874,6 @@ def _compute_bypassed_gates_for_force(
     try:
         from lib_receipts import (
             read_receipt,
-            hash_file,
             _receipts_dir,
             plan_validated_receipt_matches,
             plan_audit_matches,
@@ -750,68 +883,15 @@ def _compute_bypassed_gates_for_force(
 
     errs: list[str] = []
 
-    # Mirror of _check_human_approval — returns an error string on failure
-    # rather than raising.
-    def _human_approval_err(stage_label: str, artifact_path: Path) -> str | None:
-        try:
-            receipt_step = f"human-approval-{stage_label}"
-            receipt_path = _receipts_dir(task_dir) / f"{receipt_step}.json"
-            receipt = read_receipt(task_dir, receipt_step)
-            if receipt is None:
-                return (
-                    f"Cannot transition {current_stage} -> {next_stage}: "
-                    f"missing receipt {receipt_step} at {receipt_path} "
-                    f"(artifact: {artifact_path})"
-                )
-            if not artifact_path.exists():
-                return (
-                    f"Cannot transition {current_stage} -> {next_stage}: "
-                    f"receipt {receipt_step} present at {receipt_path} but "
-                    f"artifact missing at {artifact_path}"
-                )
-            expected = receipt.get("artifact_sha256") or ""
-            actual = hash_file(artifact_path)
-            if not isinstance(expected, str) or expected != actual:
-                return (
-                    f"Cannot transition {current_stage} -> {next_stage}: "
-                    f"hash mismatch for receipt {receipt_step} "
-                    f"(receipt: {receipt_path}, artifact: {artifact_path}) "
-                    f"expected={(expected or '')[:12]} actual={actual[:12]}"
-                )
-        except Exception:
-            return None
-        return None
-
-    def _rules_check_err() -> str | None:
-        try:
-            receipt = read_receipt(task_dir, "rules-check-passed")
-            receipt_path = task_dir / "receipts" / "rules-check-passed.json"
-            if receipt is None:
-                return (
-                    f"Cannot transition {current_stage} -> {next_stage}: "
-                    f"missing or failed rules-check-passed receipt at "
-                    f"{receipt_path} (error_violations=missing)"
-                )
-            if receipt.get("error_violations", 1) != 0:
-                n = receipt.get("error_violations", "missing")
-                return (
-                    f"Cannot transition {current_stage} -> {next_stage}: "
-                    f"missing or failed rules-check-passed receipt at "
-                    f"{receipt_path} (error_violations={n})"
-                )
-        except Exception:
-            return None
-        return None
-
     # ---- AC 3: SPEC_REVIEW -> PLANNING
     if current_stage == "SPEC_REVIEW" and next_stage == "PLANNING":
-        err = _human_approval_err("SPEC_REVIEW", task_dir / "spec.md")
+        err = _human_approval_err(task_dir, current_stage, next_stage, "SPEC_REVIEW", task_dir / "spec.md")
         if err:
             errs.append(err)
 
     # ---- AC 4: PLAN_REVIEW -> PLAN_AUDIT
     if current_stage == "PLAN_REVIEW" and next_stage == "PLAN_AUDIT":
-        err = _human_approval_err("PLAN_REVIEW", task_dir / "plan.md")
+        err = _human_approval_err(task_dir, current_stage, next_stage, "PLAN_REVIEW", task_dir / "plan.md")
         if err:
             errs.append(err)
 
@@ -844,6 +924,7 @@ def _compute_bypassed_gates_for_force(
     # ---- AC 6: TDD_REVIEW -> PRE_EXECUTION_SNAPSHOT
     if current_stage == "TDD_REVIEW" and next_stage == "PRE_EXECUTION_SNAPSHOT":
         err = _human_approval_err(
+            task_dir, current_stage, next_stage,
             "TDD_REVIEW", task_dir / "evidence" / "tdd-tests.md"
         )
         if err:
@@ -984,11 +1065,11 @@ def _compute_bypassed_gates_for_force(
 
     # ---- rules-check-passed at TEST_EXECUTION entry and CHECKPOINT_AUDIT -> DONE.
     if next_stage == "TEST_EXECUTION":
-        err = _rules_check_err()
+        err = _rules_check_err(task_dir, current_stage, next_stage)
         if err:
             errs.append(err)
     if current_stage == "CHECKPOINT_AUDIT" and next_stage == "DONE":
-        err = _rules_check_err()
+        err = _rules_check_err(task_dir, current_stage, next_stage)
         if err:
             errs.append(err)
 
@@ -1149,6 +1230,975 @@ def _write_pre_repair_blocking_snapshot(task_dir: Path) -> Path | None:
     return target
 
 
+def _validate_force_justification(
+    force: bool,
+    force_reason: str | None,
+    force_approver: str | None,
+) -> None:
+    """Validate ``force_reason`` / ``force_approver`` when ``force=True``.
+
+    Raises ``ValueError`` whose message names the FIRST offending kwarg —
+    reason is checked before approver so the error surfaces the
+    earlier-missing arg. ``None`` / empty / non-string / whitespace-only
+    values are all rejected. When ``force=False`` this is a no-op (the
+    justification kwargs are accepted for call-site uniformity but
+    ignored).
+
+    Validation MUST run BEFORE any gate-replay or receipt-write work so
+    a malformed break-glass call cannot ever reach the receipt writer.
+    """
+    if not force:
+        return
+    from lib_validate import require_nonblank  # noqa: PLC0415 (local import avoids circular dep)
+    try:
+        require_nonblank(force_reason if isinstance(force_reason, str) else "", field_name="force_reason")
+    except (TypeError, ValueError):
+        raise ValueError(
+            "force_reason must be a non-empty string when force=True "
+            "(whitespace-only values are rejected — whitespace carries no "
+            "human-readable justification)"
+        )
+    try:
+        require_nonblank(force_approver if isinstance(force_approver, str) else "", field_name="force_approver")
+    except (TypeError, ValueError):
+        raise ValueError(
+            "force_approver must be a non-empty string when force=True "
+            "(whitespace-only values are rejected)"
+        )
+
+
+def _backfill_tdd_required(
+    task_dir: Path,
+    manifest: dict,
+    manifest_path: Path,
+) -> dict:
+    """Backfill ``classification.tdd_required`` for any post-classify
+    manifest that has a classification but no ``tdd_required`` field.
+
+    Runs OUTSIDE the ``if not force:`` block in ``transition_task`` so
+    even forced transitions get the backfill — the fail-closed gates
+    (and downstream code) require the field to be populated by the time
+    they read the manifest.
+
+    Best-effort: any exception → emit ``tdd_required_backfill_failed``
+    event and return the original (un-backfilled) manifest. Returns the
+    manifest dict (possibly re-read after a successful backfill).
+    """
+    try:
+        _classification = manifest.get("classification") if isinstance(manifest, dict) else None
+        _stage = manifest.get("stage") if isinstance(manifest, dict) else None
+        _SKIP_BACKFILL_STAGES = {"FOUNDRY_INITIALIZED", "CLASSIFY_AND_SPEC"}
+        if (
+            isinstance(_classification, dict)
+            and _classification.get("tdd_required") is None
+            and _stage not in _SKIP_BACKFILL_STAGES
+        ):
+            from lib_validate import apply_fast_track  # deferred import; lib_validate imports from lib_core
+            apply_fast_track(task_dir)
+            # Re-read manifest so subsequent gate code sees the backfilled field.
+            return load_json(manifest_path)
+    except Exception as _backfill_exc:
+        try:
+            from lib_log import log_event as _log_backfill
+            _log_backfill(
+                task_dir.parent.parent,
+                "tdd_required_backfill_failed",
+                task=task_dir.name,
+                error=str(_backfill_exc),
+            )
+        except Exception:
+            pass  # Logging failure must never block the transition.
+    return manifest
+
+
+def _replay_gates_for_transition(
+    task_dir: Path,
+    manifest: dict,
+    current_stage: str | None,
+    next_stage: str,
+    force: bool,
+) -> None:
+    """Replay the receipt-based transition gates that fire on the
+    ``force=False`` path.
+
+    When ``force=True`` this is a no-op (gates are bypassed; observability
+    is handled by ``_dispatch_force_override_observability``).
+    When ``force=False`` this raises ``ValueError`` (via the nested
+    ``_refuse`` closure) on the first hard refusal, or aggregates
+    ``gate_errors`` and raises one combined ``ValueError`` at the end.
+
+    The nested closures (``_refuse``, ``_check_human_approval``,
+    ``_check_tdd_tests``, ``_check_rules_check_passed``) intentionally
+    stay nested — they share ``task_dir``, ``current_stage``,
+    ``next_stage``, ``manifest_path`` via closure, and ``_refuse`` calls
+    ``_log_event`` with bound ``_root``. Promoting them would require
+    threading those arguments through every call site and risk silently
+    changing refusal semantics.
+    """
+    if force:
+        return
+
+    manifest_path = task_dir / "manifest.json"
+
+    from lib_receipts import (
+        read_receipt,
+        hash_file,
+        plan_validated_receipt_matches,
+        plan_audit_matches,
+    )
+    from lib_log import log_event as _log_event
+    gate_errors: list[str] = []
+    _root = task_dir.parent.parent
+
+    def _refuse(reason: str) -> "None":
+        """Emit gate_refused event then raise ValueError(reason)."""
+        try:
+            _log_event(
+                _root,
+                "gate_refused",
+                task=task_dir.name,
+                stage_from=current_stage,
+                stage_to=next_stage,
+                reason=reason,
+            )
+        except Exception:
+            pass  # Logging must never block the refusal itself.
+        raise ValueError(reason)
+
+    def _check_human_approval(stage_label: str, artifact_path: Path) -> None:
+        """Refuse the current transition unless an approval receipt for
+        ``stage_label`` exists and its ``artifact_sha256`` matches the
+        current hash of ``artifact_path``."""
+        from lib_receipts import _receipts_dir  # type: ignore
+
+        receipt_step = f"human-approval-{stage_label}"
+        receipt_path = _receipts_dir(task_dir) / f"{receipt_step}.json"
+        receipt = read_receipt(task_dir, receipt_step)
+        if receipt is None:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing receipt {receipt_step} at {receipt_path} "
+                f"(artifact: {artifact_path})"
+            )
+        if not artifact_path.exists():
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"receipt {receipt_step} present at {receipt_path} but "
+                f"artifact missing at {artifact_path}"
+            )
+        expected = receipt.get("artifact_sha256") or ""
+        actual = hash_file(artifact_path)
+        if not isinstance(expected, str) or expected != actual:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"hash mismatch for receipt {receipt_step} "
+                f"(receipt: {receipt_path}, artifact: {artifact_path}) "
+                f"expected={(expected or '')[:12]} actual={actual[:12]}"
+            )
+
+    def _check_tdd_tests(
+        task_dir: Path, current_stage: str, next_stage: str
+    ) -> None:
+        """Refuse the current transition unless — when the manifest says
+        ``classification.tdd_required == True`` — a ``tdd-tests`` receipt
+        exists at ``min_version=2`` AND its
+        ``tests_evidence_sha256`` matches the live sha256 of
+        ``evidence/tdd-tests.md``.
+
+        When ``tdd_required != True`` this check returns without
+        refusing (gate is inert). Mirrors the ``_check_human_approval``
+        pattern: missing receipt names the receipt path; hash drift
+        emits a message containing the literal substrings
+        ``tdd-tests`` and ``hash mismatch`` plus the 12-char prefixes
+        of expected / actual digests.
+        """
+        from lib_receipts import read_receipt, hash_file, _receipts_dir  # type: ignore
+
+        # Re-read manifest inline so downstream upstream edits to the
+        # classification dict are visible to this gate without leaking
+        # state through the outer closure.
+        try:
+            mf = load_json(task_dir / "manifest.json")
+        except (json.JSONDecodeError, OSError, ValueError):
+            mf = {}
+        cls = mf.get("classification") if isinstance(mf, dict) else None
+        if not isinstance(cls, dict):
+            return
+        if cls.get("tdd_required") is not True:
+            return
+
+        receipt_path = _receipts_dir(task_dir) / "tdd-tests.json"
+        receipt = read_receipt(task_dir, "tdd-tests", min_version=2)
+        if receipt is None:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing receipt tdd-tests at {receipt_path} "
+                f"(classification.tdd_required=true requires tdd-tests receipt)"
+            )
+        evidence_path = task_dir / "evidence" / "tdd-tests.md"
+        if not evidence_path.exists():
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"receipt tdd-tests present at {receipt_path} but "
+                f"evidence missing at {evidence_path}"
+            )
+        expected = receipt.get("tests_evidence_sha256") or ""
+        try:
+            actual = hash_file(evidence_path)
+        except (FileNotFoundError, OSError) as exc:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"receipt tdd-tests hash mismatch (unable to hash "
+                f"{evidence_path}: {exc})"
+            )
+            return
+        if not isinstance(expected, str) or expected != actual:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"tdd-tests hash mismatch "
+                f"(receipt: {receipt_path}, evidence: {evidence_path}) "
+                f"expected={(expected or '')[:12]} actual={actual[:12]}"
+            )
+
+    def _check_rules_check_passed(
+        task_dir: Path, current_stage: str, next_stage: str
+    ) -> None:
+        """Refuse the current transition unless a ``rules-check-passed``
+        receipt exists and reports ``error_violations == 0``.
+
+        Fail-closed semantics: when the receipt is missing entirely the
+        count is reported as ``"missing"`` in the refusal message, and
+        when the ``error_violations`` key is absent from the receipt the
+        default value used is ``1`` so a malformed receipt still refuses
+        the transition.
+        """
+        from lib_receipts import read_receipt, hash_file as _hash_file  # noqa: F811 — lazy re-import per spec
+
+        receipt_path = task_dir / "receipts" / "rules-check-passed.json"
+        receipt = read_receipt(task_dir, "rules-check-passed")
+        if receipt is None:
+            n = "missing"
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing or failed rules-check-passed receipt at "
+                f"{receipt_path} (error_violations={n})"
+            )
+        if receipt.get("error_violations", 1) != 0:
+            n = receipt.get("error_violations", "missing")
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing or failed rules-check-passed receipt at "
+                f"{receipt_path} (error_violations={n})"
+            )
+
+        # AC 16: live-hash drift check. After confirming error_violations
+        # == 0 above, recompute the live sha256 of prevention-rules.json
+        # and compare against the receipt-recorded hash. A mismatch means
+        # the rules file has changed since the receipt was written; the
+        # receipt is stale and rules-check must be re-run.
+        try:
+            live_rules_hash = _hash_file(_persistent_project_dir(task_dir.parent.parent) / "prevention-rules.json")
+        except FileNotFoundError:
+            live_rules_hash = "none"
+        receipt_rules_hash = receipt.get("rules_file_sha256", "none")
+        if not isinstance(receipt_rules_hash, str) or not receipt_rules_hash:
+            receipt_rules_hash = "none"
+        if receipt_rules_hash != live_rules_hash:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"rules_file drift "
+                f"(receipt={receipt_rules_hash[:12]}, live={live_rules_hash[:12]}); "
+                f"rerun rules-check"
+            )
+
+    # ---- AC 9: CLASSIFY_AND_SPEC -> SPEC_NORMALIZATION requires
+    # classification.tdd_required to be explicitly set (True or False)
+    # when risk_level ∈ {"high", "critical"}. Absent tdd_required on a
+    # high-risk task is refused so the operator cannot accidentally
+    # skip the TDD decision. Low/medium risk: tdd_required is optional.
+    if current_stage == "CLASSIFY_AND_SPEC" and next_stage == "SPEC_NORMALIZATION":
+        classification = manifest.get("classification") or {}
+        if not isinstance(classification, dict):
+            classification = {}
+        risk_level = classification.get("risk_level")
+        if risk_level in {"high", "critical"} and classification.get("tdd_required") is None:
+            _refuse(
+                f"CLASSIFY_AND_SPEC -> SPEC_NORMALIZATION refused: "
+                f"classification.tdd_required must be set (True or False) "
+                f"for risk_level={risk_level}; manifest={manifest_path}"
+            )
+
+    # ---- AC 3: SPEC_REVIEW -> PLANNING requires human-approval-SPEC_REVIEW
+    # whose artifact_sha256 matches sha256(spec.md).
+    if current_stage == "SPEC_REVIEW" and next_stage == "PLANNING":
+        _check_human_approval("SPEC_REVIEW", task_dir / "spec.md")
+
+    # ---- AC 4: PLAN_REVIEW -> PLAN_AUDIT requires human-approval-PLAN_REVIEW
+    # whose artifact_sha256 matches sha256(plan.md).
+    if current_stage == "PLAN_REVIEW" and next_stage == "PLAN_AUDIT":
+        _check_human_approval("PLAN_REVIEW", task_dir / "plan.md")
+
+    # ---- F6: planner-spec receipt required at SPEC_NORMALIZATION ->
+    # SPEC_REVIEW (skipped when manifest.fast_track is True — fast-track
+    # writes only a planner-plan receipt for the combined Spec+Plan
+    # spawn). Fast-track detection mirrors hooks/planner.py:
+    # manifest.get("fast_track", False), with a fallback through
+    # classification["fast_track"] for any older manifests that stored
+    # the flag under the classification subtree.
+    _classification = manifest.get("classification") or {}
+    _fast_track_flag = bool(
+        manifest.get("fast_track", False)
+        or (
+            isinstance(_classification, dict)
+            and _classification.get("fast_track", False)
+        )
+    )
+    if (
+        current_stage == "SPEC_NORMALIZATION"
+        and next_stage == "SPEC_REVIEW"
+        and not _fast_track_flag
+    ):
+        if read_receipt(task_dir, "planner-spec") is None:
+            gate_errors.append(
+                "receipt: planner-spec (planner spec spawn was never recorded)"
+            )
+
+    # ---- F6: planner-plan receipt required at PLANNING -> PLAN_REVIEW.
+    # Applies to both normal and fast-track paths (fast-track writes a
+    # planner-plan receipt for the combined Spec+Plan spawn).
+    if current_stage == "PLANNING" and next_stage == "PLAN_REVIEW":
+        if read_receipt(task_dir, "planner-plan") is None:
+            gate_errors.append(
+                "receipt: planner-plan (planner plan spawn was never recorded)"
+            )
+
+    # ---- AC 6: TDD_REVIEW -> PRE_EXECUTION_SNAPSHOT requires
+    # human-approval-TDD_REVIEW whose artifact_sha256 matches
+    # sha256(evidence/tdd-tests.md).
+    if current_stage == "TDD_REVIEW" and next_stage == "PRE_EXECUTION_SNAPSHOT":
+        _check_human_approval("TDD_REVIEW", task_dir / "evidence" / "tdd-tests.md")
+
+    # ---- AC 11 + tdd_required gate: EXIT from PLAN_AUDIT.
+    # (a) high/critical risk tasks MUST have a plan-audit-check receipt
+    #     before leaving PLAN_AUDIT towards either TDD_REVIEW or
+    #     PRE_EXECUTION_SNAPSHOT.
+    # (b) When tdd_required=true, PLAN_AUDIT MUST route through TDD_REVIEW
+    #     — direct PLAN_AUDIT -> PRE_EXECUTION_SNAPSHOT is refused.
+    if current_stage == "PLAN_AUDIT" and next_stage in {"TDD_REVIEW", "PRE_EXECUTION_SNAPSHOT"}:
+        classification = manifest.get("classification") or {}
+        risk_level = classification.get("risk_level") if isinstance(classification, dict) else None
+        if risk_level in {"high", "critical"}:
+            from lib_receipts import _receipts_dir  # type: ignore
+            pa_path = _receipts_dir(task_dir) / "plan-audit-check.json"
+            # Hash-bound freshness: the presence of a plan-audit-check
+            # receipt is necessary but no longer sufficient. The audit
+            # must have been computed over the current spec.md /
+            # plan.md / execution-graph.json. plan_audit_matches
+            # returns True (fresh), str (drift reason), or False
+            # (missing/legacy).
+            audit_result = plan_audit_matches(task_dir)
+            if audit_result is True:
+                pass  # fresh audit; gate passes.
+            elif isinstance(audit_result, str):
+                gate_errors.append(f"plan-audit-check: {audit_result}")
+            else:
+                # Preserve the existing missing-receipt refuse path
+                # (raises immediately via _refuse).
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"missing receipt plan-audit-check at {pa_path} "
+                    f"(risk_level={risk_level} requires plan-audit-check)"
+                )
+        if next_stage == "PRE_EXECUTION_SNAPSHOT" and get_tdd_required(manifest):
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"manifest.classification.tdd_required=true requires "
+                f"routing through TDD_REVIEW (manifest: {task_dir / 'manifest.json'})"
+            )
+
+    # AC 8 (task-006): PRE_EXECUTION_SNAPSHOT -> EXECUTION requires a
+    # tdd-tests receipt whose tests_evidence_sha256 matches the current
+    # evidence/tdd-tests.md, but ONLY when
+    # classification.tdd_required == true. Inert otherwise.
+    if current_stage == "PRE_EXECUTION_SNAPSHOT" and next_stage == "EXECUTION":
+        _check_tdd_tests(task_dir, current_stage, next_stage)
+
+    # EXECUTION requires plan-validated receipt AND the captured artifact
+    # hashes MUST match current disk. Presence alone is insufficient —
+    # a stale receipt whose plan.md/spec.md/execution-graph.json have
+    # drifted since validation cannot authorize the transition.
+    # plan_validated_receipt_matches returns:
+    #   True         -> all artifacts unchanged; gate passes.
+    #   str (reason) -> a tracked artifact drifted (e.g. "plan.md hash
+    #                   drift"); append prefixed error.
+    #   False        -> receipt missing or malformed; legacy message.
+    if next_stage == "EXECUTION":
+        match_result = plan_validated_receipt_matches(task_dir)
+        if match_result is True:
+            pass  # fresh receipt; gate passes.
+        elif isinstance(match_result, str):
+            gate_errors.append(f"plan-validated: {match_result}")
+        else:
+            gate_errors.append(
+                "receipt: plan-validated (plan was never validated)"
+            )
+
+        # Re-verify plan.md against the human-approval-PLAN_REVIEW receipt.
+        # The plan-validated receipt is re-writable (validate_task_artifacts
+        # auto-emits it after passing validation), so an executor can mutate
+        # plan.md, re-run validation, and launder the mutation through a
+        # fresh plan-validated receipt. The human-approval receipt is stored
+        # in receipts/ which executor roles cannot write, so its hash is the
+        # immutable anchor. A mismatch here means plan.md changed after the
+        # human approved it — block regardless of plan-validated state.
+        from lib_receipts import hash_file, read_receipt  # noqa: PLC0415
+        approval_receipt = read_receipt(task_dir, "human-approval-PLAN_REVIEW")
+        if approval_receipt is not None:
+            approved_sha = approval_receipt.get("artifact_sha256", "")
+            plan_path = task_dir / "plan.md"
+            try:
+                current_sha = hash_file(plan_path)
+            except OSError:
+                current_sha = ""
+            if approved_sha and current_sha and approved_sha != current_sha:
+                gate_errors.append(
+                    "plan.md was mutated after human approval at PLAN_REVIEW "
+                    f"(approved={approved_sha[:12]}… current={current_sha[:12]}…); "
+                    "restore plan.md to its approved state before advancing to EXECUTION"
+                )
+
+    # CHECKPOINT_AUDIT requires executor-routing receipt + per-segment
+    # executor-{seg_id} receipts proving every planned segment actually
+    # completed. The per-segment enforcement only fires for transitions
+    # from TEST_EXECUTION or REPAIR_EXECUTION (the stages where
+    # per-segment completion is required). If executor-routing itself
+    # is missing we emit only the routing-missing message (no
+    # double-complaint). An empty segments list is treated as
+    # "no per-segment receipts required" and passes.
+    #
+    # SEC-002 hardening: cross-check executor-routing.segments against
+    # execution-graph.json. The graph is the plan's authoritative source
+    # of truth; executor-routing is what the router actually recorded.
+    # A tampered/truncated routing receipt can NOT drop segments off
+    # the required-receipt list. We require executor-{seg_id} receipts
+    # for the UNION of (graph segments ∪ routing segments).
+    if next_stage == "CHECKPOINT_AUDIT":
+        routing_payload = read_receipt(task_dir, "executor-routing")
+        if routing_payload is None:
+            gate_errors.append("receipt: executor-routing (executor routing was never recorded)")
+        elif current_stage in {"TEST_EXECUTION", "REPAIR_EXECUTION"}:
+            required_seg_ids: list[str] = []
+            seen: set[str] = set()
+
+            def _add_seg(seg_id: object) -> None:
+                if isinstance(seg_id, str) and seg_id and seg_id not in seen:
+                    required_seg_ids.append(seg_id)
+                    seen.add(seg_id)
+
+            # Primary source: execution-graph.json (authoritative plan).
+            graph_path = task_dir / "execution-graph.json"
+            if graph_path.exists():
+                try:
+                    graph = load_json(graph_path)
+                except (OSError, ValueError):
+                    graph = None
+                if isinstance(graph, dict):
+                    graph_segments = graph.get("segments")
+                    if isinstance(graph_segments, list):
+                        for entry in graph_segments:
+                            if isinstance(entry, dict):
+                                _add_seg(entry.get("id"))
+
+            # Secondary source: routing receipt (union, never subset).
+            routing_segments = routing_payload.get("segments")
+            if isinstance(routing_segments, list):
+                for entry in routing_segments:
+                    if isinstance(entry, dict):
+                        _add_seg(entry.get("segment_id"))
+
+            for seg_id in required_seg_ids:
+                if read_receipt(task_dir, f"executor-{seg_id}") is None:
+                    gate_errors.append(
+                        f"receipt: executor-{seg_id} (segment {seg_id} never completed)"
+                    )
+
+    # REPAIR_PLANNING requires no finding has exceeded max retries.
+    # This is the deterministic hard cap: the LLM cannot loop past 3
+    # repair attempts because the state machine itself refuses the
+    # transition. Code enforces; prompts advise.
+    MAX_REPAIR_RETRIES = 3
+    if next_stage == "REPAIR_PLANNING" and current_stage == "REPAIR_EXECUTION":
+        repair_log_path = task_dir / "repair-log.json"
+        if repair_log_path.exists():
+            repair_log = load_json(repair_log_path)
+            exhausted: list[str] = []
+            for batch in repair_log.get("batches", []):
+                for task_entry in batch.get("tasks", []):
+                    fid = task_entry.get("finding_id", "unknown")
+                    retries = task_entry.get("retry_count", 0)
+                    if retries >= MAX_REPAIR_RETRIES:
+                        exhausted.append(f"{fid} (retry_count={retries})")
+            if exhausted:
+                gate_errors.append(
+                    f"repair cap exceeded (max {MAX_REPAIR_RETRIES} retries) "
+                    f"for finding(s): {', '.join(exhausted)}. "
+                    f"Transition to FAILED instead — human review needed."
+                )
+
+    # DONE requires retrospective + audit reports (post-completion receipt
+    # is written AFTER the transition by the event bus, so cannot be gated here)
+    if next_stage == "DONE":
+        if not (task_dir / "task-retrospective.json").exists():
+            gate_errors.append("task-retrospective.json (run /dynos-work:audit to generate)")
+        if not list(task_dir.glob("audit-reports/*.json")):
+            gate_errors.append("audit-reports/ (no audit reports found — audit was never run)")
+        if read_receipt(task_dir, "retrospective") is None:
+            gate_errors.append("receipt: retrospective (reward was never computed via receipts)")
+
+        # AC 10 + AC 19: receipt-based DONE gates (audit-routing + per-auditor
+        # spawn receipts + postmortem trio). Refuses on FIRST gap with
+        # explicit log_event so the operator can see exactly which
+        # receipt is missing. Only fires when reaching DONE from
+        # CHECKPOINT_AUDIT or FINAL_AUDIT.
+        if current_stage in {"CHECKPOINT_AUDIT", "FINAL_AUDIT"}:
+            done_gaps = require_receipts_for_done(task_dir)
+            if done_gaps:
+                from lib_receipts import _receipts_dir  # type: ignore
+                rd = _receipts_dir(task_dir)
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"receipt gaps in {rd}: " + "; ".join(done_gaps)
+                )
+
+    # AC 23 + AC 10: DONE -> CALIBRATED requires EITHER a
+    # calibration-applied OR calibration-noop receipt (whichever has
+    # the later ts wins), AND the receipt's policy hash
+    # (``policy_sha256_after`` for applied, ``policy_sha256`` for
+    # noop) must match a LIVE re-computation of the policy hash at
+    # transition time. A drift refuses the transition — this is the
+    # defence against stale/forged calibration receipts.
+    if current_stage == "DONE" and next_stage == "CALIBRATED":
+        from lib_receipts import _receipts_dir  # type: ignore
+        ca_path = _receipts_dir(task_dir) / "calibration-applied.json"
+        cn_path = _receipts_dir(task_dir) / "calibration-noop.json"
+        applied = read_receipt(task_dir, "calibration-applied")
+        noop = read_receipt(task_dir, "calibration-noop")
+        if applied is None and noop is None:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"missing calibration receipt (expected one of "
+                f"{ca_path} or {cn_path})"
+            )
+        # Pick the later-ts receipt. If tied (or ts missing), prefer
+        # calibration-noop per spec direction.
+        chosen = None
+        chosen_is_noop = False
+        if applied is not None and noop is not None:
+            ts_a = applied.get("ts") if isinstance(applied, dict) else None
+            ts_n = noop.get("ts") if isinstance(noop, dict) else None
+            if isinstance(ts_n, str) and isinstance(ts_a, str) and ts_n >= ts_a:
+                chosen, chosen_is_noop = noop, True
+            elif isinstance(ts_n, str) and not isinstance(ts_a, str):
+                chosen, chosen_is_noop = noop, True
+            else:
+                chosen, chosen_is_noop = applied, False
+        elif noop is not None:
+            chosen, chosen_is_noop = noop, True
+        else:
+            chosen, chosen_is_noop = applied, False
+
+        # Extract the receipt-side hash.
+        if chosen_is_noop:
+            receipt_hash = chosen.get("policy_sha256") if isinstance(chosen, dict) else None
+        else:
+            receipt_hash = chosen.get("policy_sha256_after") if isinstance(chosen, dict) else None
+        if not isinstance(receipt_hash, str) or not receipt_hash:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"calibration receipt missing policy hash "
+                f"(receipt: {cn_path if chosen_is_noop else ca_path})"
+            )
+
+        # Live-compute the policy hash.
+        try:
+            from eventbus import _compute_policy_hash  # type: ignore
+            live_hash = _compute_policy_hash(_root)
+        except Exception as exc:
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"failed to compute live policy hash: {exc}"
+            )
+            live_hash = ""  # unreachable, but satisfies type checker
+
+        if receipt_hash != live_hash:
+            receipt_name = "calibration-noop" if chosen_is_noop else "calibration-applied"
+            _refuse(
+                f"Cannot transition {current_stage} -> {next_stage}: "
+                f"{receipt_name} policy hash mismatch "
+                f"(receipt={receipt_hash[:12]} live={live_hash[:12]}). "
+                f"The persistent policy has drifted since the calibration "
+                f"receipt was written — re-run calibration."
+            )
+
+    # AC 19: rules-check-passed receipt required at two transition points.
+    # Fires AFTER all other gate clauses so existing checks order is
+    # preserved. Bypassed by force=True (we are inside `if not force:`).
+    if next_stage == "TEST_EXECUTION":
+        _check_rules_check_passed(task_dir, current_stage, next_stage)
+    if current_stage == "CHECKPOINT_AUDIT" and next_stage == "DONE":
+        _check_rules_check_passed(task_dir, current_stage, next_stage)
+
+    if gate_errors:
+        raise ValueError(
+            f"Cannot transition to {next_stage} — missing required artifacts:\n"
+            + "\n".join(f"  - {e}" for e in gate_errors)
+        )
+
+    # ---- task-20260419-002 G4: deferred-findings TTL gate on DONE ----
+    # Fire AFTER every other gate has passed. If ANY deferred finding
+    # whose `files` intersects THIS task's changed files has exceeded
+    # its TTL without re-acknowledgment, refuse the transition. The
+    # check module is imported inline (not subprocess) for test
+    # determinism; a missing module (broken install) is fail-open so
+    # a busted framework does not wedge unrelated DONE transitions.
+    if next_stage == "DONE":
+        try:
+            from check_deferred_findings import (
+                check_deferred_findings as _check_deferred,
+            )
+        except ImportError as exc:
+            # F1 AC13: surface the fail-open silent-skip via an
+            # observability event BEFORE flipping _check_deferred to
+            # None. D3 contract: log_event failures must never block
+            # the fail-open path, so wrap the emit in a best-effort
+            # try/except.
+            try:
+                from lib_log import log_event as _log_cdf_unavail
+                _log_cdf_unavail(
+                    task_dir.parent.parent,
+                    "deferred_findings_check_unavailable",
+                    task=task_dir.name,
+                    reason="import_error",
+                    error=str(exc),
+                )
+            except Exception:
+                pass  # log_event must never block the fail-open.
+            _check_deferred = None  # type: ignore
+
+        if _check_deferred is not None:
+            # Build the changed-files list. Primary source: the
+            # executor-{seg} receipts' files_expected payloads (the
+            # routing receipt names the segments that actually ran).
+            # Fallback source: execution-graph.json's segments — so
+            # the gate still fires when the executor receipt schema
+            # did not yet carry files_expected at the time those
+            # segments ran.
+            changed_files: list[str] = []
+            seen_files: set[str] = set()
+
+            def _add_files(paths: object) -> None:
+                if not isinstance(paths, list):
+                    return
+                for p in paths:
+                    if isinstance(p, str) and p and p not in seen_files:
+                        seen_files.add(p)
+                        changed_files.append(p)
+
+            # (1) Walk executor-routing → executor-{seg} receipts.
+            try:
+                _exec_routing = read_receipt(task_dir, "executor-routing")
+            except Exception:
+                _exec_routing = None
+            if isinstance(_exec_routing, dict):
+                _routing_segments = _exec_routing.get("segments")
+                if isinstance(_routing_segments, list):
+                    # SEC-002 hardening: seg_id is interpolated into the
+                    # receipt step_name. Validate against a strict slug
+                    # regex so a crafted routing payload cannot inject
+                    # path separators or unexpected chars into the
+                    # receipt filename construction.
+                    import re as _re_seg
+                    _SEG_RE = r"^[A-Za-z0-9][A-Za-z0-9_.-]*$"
+                    for _entry in _routing_segments:
+                        if not isinstance(_entry, dict):
+                            continue
+                        _seg_id = _entry.get("segment_id")
+                        if not isinstance(_seg_id, str) or not _seg_id:
+                            continue
+                        if not _re_seg.match(_SEG_RE, _seg_id):
+                            # Crafted / invalid seg_id — skip silently.
+                            # A legitimate segment follows the slug rule.
+                            continue
+                        try:
+                            _seg_receipt = read_receipt(
+                                task_dir, f"executor-{_seg_id}"
+                            )
+                        except Exception:
+                            _seg_receipt = None
+                        if isinstance(_seg_receipt, dict):
+                            _add_files(_seg_receipt.get("files_expected"))
+
+            # (2) Fallback: execution-graph.json segments.
+            _graph_path = task_dir / "execution-graph.json"
+            if _graph_path.exists():
+                try:
+                    _graph = load_json(_graph_path)
+                except (OSError, ValueError):
+                    _graph = None
+                if isinstance(_graph, dict):
+                    _graph_segments = _graph.get("segments")
+                    if isinstance(_graph_segments, list):
+                        for _entry in _graph_segments:
+                            if isinstance(_entry, dict):
+                                _add_files(_entry.get("files_expected"))
+
+            try:
+                _expired = _check_deferred(
+                    task_dir.parent.parent, changed_files
+                )
+            except Exception as exc:
+                # check_deferred_findings is designed to never raise;
+                # if it does (unforeseen bug), treat as no signal and
+                # fail open rather than wedge the DONE gate.
+                # F1 AC14: surface the fail-open silent-skip via an
+                # observability event BEFORE the fail-open
+                # assignment. D3 contract: swallow log_event
+                # failures so a broken logger does not block the
+                # fail-open path.
+                try:
+                    from lib_log import log_event as _log_cdf_err
+                    _log_cdf_err(
+                        task_dir.parent.parent,
+                        "deferred_findings_check_errored",
+                        task=task_dir.name,
+                        error=str(exc),
+                    )
+                except Exception:
+                    pass  # log_event must never block the fail-open.
+                _expired = []
+
+            if _expired:
+                _ids = [
+                    str(e.get("id", ""))
+                    for e in _expired
+                    if isinstance(e, dict)
+                ]
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"deferred findings expired: {_ids}. "
+                    f"Close them, re-acknowledge via "
+                    f".dynos/deferred-findings.json, or use --force "
+                    f"(which writes a force_override receipt)."
+                )
+
+
+def _dispatch_force_override_observability(
+    task_dir: Path,
+    manifest: dict,
+    current_stage: str | None,
+    next_stage: str,
+    force_reason: str | None,
+    force_approver: str | None,
+) -> None:
+    """Compute bypassed-gate strings, emit ``force_override`` event, and
+    write the ``force-override-{from}-{to}`` receipt.
+
+    All errors are swallowed: the forced transition MUST proceed even
+    when observability writes fail (force is a break-glass door and
+    observability cannot wedge recovery).
+    """
+    bypassed_gates: list[str] = _compute_bypassed_gates_for_force(
+        task_dir=task_dir,
+        manifest=manifest,
+        current_stage=current_stage,
+        next_stage=next_stage,
+    )
+    _root_force = task_dir.parent.parent
+    _task_id_force = manifest.get("task_id") or task_dir.name
+    try:
+        from lib_log import log_event as _log_force
+        _log_force(
+            _root_force,
+            "force_override",
+            task=_task_id_force,
+            task_id=_task_id_force,
+            from_stage=current_stage,
+            to_stage=next_stage,
+            bypassed_gates=list(bypassed_gates),
+            reason=force_reason,
+            approver=force_approver,
+        )
+    except Exception:
+        pass  # Logging must never block the forced transition.
+    try:
+        from lib_receipts import receipt_force_override
+        receipt_force_override(
+            task_dir,
+            from_stage=current_stage or "UNKNOWN",
+            to_stage=next_stage,
+            bypassed_gates=list(bypassed_gates),
+            reason=force_reason,
+            approver=force_approver,
+        )
+    except OSError as _force_rcpt_exc:
+        try:
+            from lib_log import log_event as _log_force_fail
+            _log_force_fail(
+                _root_force,
+                "force_override_receipt_write_failed",
+                task=_task_id_force,
+                task_id=_task_id_force,
+                error=str(_force_rcpt_exc),
+            )
+        except Exception:
+            pass
+    except Exception as _force_rcpt_unexpected:
+        # Non-OSError receipt-write failures are ALSO non-blocking
+        # (e.g. validation bugs should not lock out recovery) — we
+        # log best-effort and proceed. CQ-003: include str(exc) so
+        # the event payload carries the actual failure detail
+        # (the OSError branch above already does).
+        try:
+            from lib_log import log_event as _log_force_fail
+            _log_force_fail(
+                _root_force,
+                "force_override_receipt_write_failed",
+                task=_task_id_force,
+                task_id=_task_id_force,
+                error=f"unexpected: {_force_rcpt_unexpected}",
+            )
+        except Exception:
+            pass
+
+
+def _flush_and_record_transition(
+    task_dir: Path,
+    manifest: dict,
+    next_stage: str,
+) -> None:
+    """Apply the post-gate side effects of a transition.
+
+    In order:
+      1. On DONE: copy retrospective into the persistent project dir
+         (best-effort).
+      2. Mutate the manifest dict (stage, completion_at, blocked_reason).
+      3. Persist the manifest via ``write_ctl_json``.
+      4. Update the active-task pointer (None on terminal stages).
+      5. On REPAIR_PLANNING: write the pre-repair blocking snapshot
+         (best-effort).
+      6. Auto-append to execution-log.md.
+      7. Emit ``stage_transition`` event (best-effort).
+      8. Record a ``stage-transition`` token-ledger entry (best-effort).
+
+    The manifest dict is mutated by reference so the caller sees the
+    updated stage/completion_at fields. ``manifest_path`` is derived
+    internally as ``task_dir / "manifest.json"`` — callers do not pass
+    it. Caller passes ``current_stage`` separately because we no longer
+    need it after the manifest mutation; it is computed for the auto-log
+    line via the previous manifest stage. Errors in steps 1, 4, 5, 6,
+    7, 8 are swallowed — the state-machine mutation in step 3 is the
+    source of truth and observability layers cannot wedge it.
+    """
+    # Snapshot the pre-mutation stage so the auto-log line can name the
+    # source stage. Once we mutate manifest["stage"] = next_stage the
+    # original is gone.
+    _pre_stage = manifest.get("stage")
+    manifest_path = task_dir / "manifest.json"
+
+    # ---- F10: Retrospective flush on DONE ----
+    if next_stage == "DONE":
+        _flush_retrospective_on_done(task_dir=task_dir, manifest=manifest)
+
+    manifest["stage"] = next_stage
+    if next_stage == "DONE":
+        manifest["completion_at"] = now_iso()
+    if next_stage == "FAILED" and manifest.get("blocked_reason") is None:
+        manifest["blocked_reason"] = "transitioned to FAILED"
+    write_ctl_json(task_dir, manifest_path, manifest)
+
+    # ---- Active-task pointer for O(1) SubagentStop attribution ----
+    try:
+        _pointer_path = task_dir.parent / "active-task.json"
+        _terminal = next_stage in {"DONE", "FAILED", "CANCELLED"}
+        _pointer_data: dict = {"task_id": None} if _terminal else {
+            "task_id": manifest.get("task_id") or task_dir.name,
+            "task_dir": str(task_dir),
+            "stage": next_stage,
+        }
+        write_json(_pointer_path, _pointer_data)
+    except Exception:
+        pass  # Never block a completed transition.
+
+    # ---- AC 15 side-effect: pre-repair blocking snapshot ----
+    if next_stage == "REPAIR_PLANNING":
+        try:
+            _write_pre_repair_blocking_snapshot(task_dir)
+        except Exception as exc:  # snapshot must never block transition
+            try:
+                from lib_log import log_event as _log_snapshot
+                _log_snapshot(
+                    task_dir.parent.parent,
+                    "pre_repair_snapshot_failed",
+                    task=task_dir.name,
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+
+    # ---- Auto-append to execution-log.md ----
+    # The forced flag is intentionally always False here: the live
+    # transition_task() now owns the (forced) tag via _auto_log called
+    # from itself — we keep the behavior under this helper signature,
+    # but the caller dispatches the auto-log invocation. We still emit
+    # the stage_transition event below.
+    _auto_log(task_dir, _pre_stage, next_stage, False)
+
+    # ---- Log stage transition to events.jsonl ----
+    try:
+        from lib_log import log_event
+        log_event(
+            task_dir.parent.parent,
+            "stage_transition",
+            task=manifest["task_id"],
+            from_stage=_pre_stage,
+            to_stage=next_stage,
+            forced=False,
+        )
+    except Exception:
+        pass  # log_event must never block a completed transition.
+
+    # ---- Auto-emit stage-transition event to per-task token ledger ----
+    try:
+        from lib_tokens import record_tokens, phase_for_stage
+        record_tokens(
+            task_dir=task_dir,
+            agent="transition_task",
+            model="none",
+            input_tokens=0,
+            output_tokens=0,
+            phase=phase_for_stage(next_stage),
+            stage=next_stage,
+            event_type="stage-transition",
+            detail=f"{_pre_stage} → {next_stage}",
+        )
+    except Exception:
+        pass  # Never block a stage transition for a logging failure
+
+
+def _fire_done_pipeline(task_dir: Path, manifest: dict) -> None:
+    """Fire the post-completion pipeline on DONE — emits the synchronous
+    event and dispatches the detached drain. No-op on non-DONE
+    transitions. Errors are swallowed: post-completion observability
+    must never block a completed transition.
+    """
+    if manifest.get("stage") != "DONE":
+        return
+    try:
+        _fire_task_completed(task_dir)
+    except Exception:
+        pass  # post-completion drain must never block the return.
+
+
 def transition_task(
     task_dir: Path,
     next_stage: str,
@@ -1169,69 +2219,43 @@ def transition_task(
     call-site uniformity but ignored — the gate-replay path is the same
     as the pre-F1 contract.
     """
-    # F1: validate force-justification kwargs BEFORE any other work so
-    # a malformed break-glass call cannot race past early-returns or
-    # reach the receipt writer. Order matters: reason first, then
-    # approver, so the ValueError names the first missing arg.
-    if force:
-        from lib_validate import require_nonblank  # noqa: PLC0415 (local import avoids circular dep)
-        try:
-            require_nonblank(force_reason if isinstance(force_reason, str) else "", field_name="force_reason")
-        except (TypeError, ValueError):
-            raise ValueError(
-                "force_reason must be a non-empty string when force=True "
-                "(whitespace-only values are rejected — whitespace carries no "
-                "human-readable justification)"
-            )
-        try:
-            require_nonblank(force_approver if isinstance(force_approver, str) else "", field_name="force_approver")
-        except (TypeError, ValueError):
-            raise ValueError(
-                "force_approver must be a non-empty string when force=True "
-                "(whitespace-only values are rejected)"
-            )
+    _validate_force_justification(force, force_reason, force_approver)
 
     manifest_path = task_dir / "manifest.json"
     manifest = load_json(manifest_path)
-
-    # ---- AC 2 entry hook: backfill tdd_required for any post-classify
-    # manifest that has a classification but no tdd_required field.
-    # Runs OUTSIDE the `if not force:` block so even forced transitions get
-    # the backfill — the new fail-closed gates (and downstream code) require
-    # the field to be populated by the time they read the manifest.
-    # Best-effort: failures emit a `tdd_required_backfill_failed` event but
-    # never block the transition.
-    try:
-        _classification = manifest.get("classification") if isinstance(manifest, dict) else None
-        _stage = manifest.get("stage") if isinstance(manifest, dict) else None
-        _SKIP_BACKFILL_STAGES = {"FOUNDRY_INITIALIZED", "CLASSIFY_AND_SPEC"}
-        if (
-            isinstance(_classification, dict)
-            and _classification.get("tdd_required") is None
-            and _stage not in _SKIP_BACKFILL_STAGES
-        ):
-            from lib_validate import apply_fast_track  # deferred import; lib_validate imports from lib_core
-            apply_fast_track(task_dir)
-            # Re-read manifest so subsequent gate code sees the backfilled field.
-            manifest = load_json(manifest_path)
-    except Exception as _backfill_exc:
-        try:
-            from lib_log import log_event as _log_backfill
-            _log_backfill(
-                task_dir.parent.parent,
-                "tdd_required_backfill_failed",
-                task=task_dir.name,
-                error=str(_backfill_exc),
-            )
-        except Exception:
-            pass  # Logging failure must never block the transition.
+    manifest = _backfill_tdd_required(task_dir, manifest, manifest_path)
 
     current_stage = manifest.get("stage")
     if next_stage not in ALLOWED_STAGE_TRANSITIONS:
         raise ValueError(f"Unknown stage: {next_stage}")
     if not force and next_stage not in ALLOWED_STAGE_TRANSITIONS.get(current_stage, set()):
         raise ValueError(f"Illegal stage transition: {current_stage} -> {next_stage}")
-    # ---- Receipt-based transition gates (unmissable) ----
+
+    _replay_gates_for_transition(task_dir, manifest, current_stage, next_stage, force)
+
+    if force:
+        _dispatch_force_override_observability(
+            task_dir, manifest, current_stage, next_stage, force_reason, force_approver
+        )
+
+    _flush_and_record_transition(task_dir, manifest, next_stage)
+    _fire_done_pipeline(task_dir, manifest)
+
+    return current_stage, manifest
+
+
+def _LEGACY_transition_task_BODY_BELOW_FOR_REMOVAL(  # pragma: no cover
+    task_dir: Path,
+    next_stage: str,
+    *,
+    force: bool = False,
+    force_reason: str | None = None,
+    force_approver: str | None = None,
+) -> tuple[str, dict]:
+    """Placeholder for the legacy body — to be deleted with the next
+    edit so we can write the new transition_task without bumping
+    against duplicate-function definitions.
+    """
     if not force:
         from lib_receipts import (
             read_receipt,

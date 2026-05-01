@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -1753,6 +1754,27 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
                 "gap_report": gap_report,
             }, indent=2))
             return 1
+
+        # Run intermediate-state pipeline check (task-003 PRO-006 capture).
+        # Bootstrap: tolerate the script not existing yet; when it exists, failures block.
+        _check_script = Path(__file__).parent / "plan_intermediate_state_check.py"
+        if _check_script.exists():
+            check_result = subprocess.run(
+                [sys.executable, str(_check_script), "--root", str(root), "--task-dir", str(task_dir)],
+                capture_output=True, text=True,
+            )
+            if check_result.returncode != 0:
+                try:
+                    check_payload = json.loads(check_result.stdout)
+                except json.JSONDecodeError:
+                    check_payload = {"status": "blocked", "error": check_result.stderr or check_result.stdout}
+                print(json.dumps({
+                    "status": "plan_audit_failed",
+                    "task_dir": str(task_dir),
+                    "error": "intermediate-state check blocked",
+                    "check_output": check_payload,
+                }, indent=2))
+                return 1
 
         risk = _risk_level_for_task(task_dir)
         if risk not in {"high", "critical"}:
@@ -3992,10 +4014,9 @@ def cmd_calibration(args: argparse.Namespace) -> int:
     return 1
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
+def register_task_lifecycle_parsers(subparsers: argparse._SubParsersAction) -> None:
+    """Register task-lifecycle subcommands: validate-task, transition, approve-stage,
+    amend-artifact, next-command, active-task."""
     validate_parser = subparsers.add_parser("validate-task", help="Validate a task directory")
     validate_parser.add_argument("task_dir")
     validate_parser.add_argument("--strict", action="store_true")
@@ -4052,18 +4073,159 @@ def build_parser() -> argparse.ArgumentParser:
     active_parser.add_argument("--root", default=".")
     active_parser.set_defaults(func=cmd_active_task)
 
+
+def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
+    """Register planning-stage subcommands: run-start-classification, run-spec-ready,
+    run-planning-mode, run-planning, run-plan-audit, plan-validated-receipt,
+    plan-audit-receipt, planner-receipt."""
+    run_start_classification_parser = subparsers.add_parser(
+        "run-start-classification",
+        help="Validate classification, apply fast-track, and advance to SPEC_NORMALIZATION when ready",
+    )
+    run_start_classification_parser.add_argument("task_dir")
+    run_start_classification_parser.set_defaults(func=cmd_run_start_classification)
+
+    run_spec_ready_parser = subparsers.add_parser(
+        "run-spec-ready",
+        help="Validate spec.md, write spec-validated receipt, and advance to SPEC_REVIEW when ready",
+    )
+    run_spec_ready_parser.add_argument("task_dir")
+    run_spec_ready_parser.set_defaults(func=cmd_run_spec_ready)
+
+    run_planning_mode_parser = subparsers.add_parser(
+        "run-planning-mode",
+        help="Choose planning mode deterministically from manifest.fast_track, risk, and AC count",
+    )
+    run_planning_mode_parser.add_argument("task_dir")
+    run_planning_mode_parser.set_defaults(func=cmd_run_planning_mode)
+
+    run_planning_parser = subparsers.add_parser(
+        "run-planning",
+        help="Validate planning artifacts, write receipt, and advance to PLAN_REVIEW when ready",
+    )
+    run_planning_parser.add_argument("task_dir")
+    run_planning_parser.set_defaults(func=cmd_run_planning)
+
+    run_plan_audit_parser = subparsers.add_parser(
+        "run-plan-audit",
+        help="Run deterministic plan-audit logic and optional high-risk LLM audit finalization",
+    )
+    run_plan_audit_parser.add_argument("task_dir")
+    run_plan_audit_parser.add_argument(
+        "--report-path",
+        default=None,
+        help="Path to spec-completion auditor report for high/critical-risk tasks.",
+    )
+    run_plan_audit_parser.add_argument(
+        "--tokens-used",
+        type=int,
+        default=0,
+        help="Tokens consumed by the spec-completion auditor run.",
+    )
+    run_plan_audit_parser.add_argument(
+        "--model",
+        default=None,
+        help="Model used by the spec-completion auditor.",
+    )
+    run_plan_audit_parser.set_defaults(func=cmd_run_plan_audit)
+
+    plan_validated_receipt_parser = subparsers.add_parser(
+        "plan-validated-receipt",
+        help="Write the plan-validated receipt deterministically",
+    )
+    plan_validated_receipt_parser.add_argument("task_dir")
+    plan_validated_receipt_parser.add_argument(
+        "--no-gap",
+        dest="run_gap",
+        action="store_false",
+        help="Skip plan_gap_analysis during validation before writing the receipt.",
+    )
+    plan_validated_receipt_parser.set_defaults(run_gap=True)
+    plan_validated_receipt_parser.set_defaults(func=cmd_plan_validated_receipt)
+
+    plan_audit_receipt_parser = subparsers.add_parser(
+        "plan-audit-receipt",
+        help="Write the plan-audit spawn receipt deterministically",
+    )
+    plan_audit_receipt_parser.add_argument("task_dir")
+    plan_audit_receipt_parser.add_argument("--tokens-used", type=int, required=True)
+    plan_audit_receipt_parser.add_argument("--model", default=None)
+    plan_audit_receipt_parser.set_defaults(func=cmd_plan_audit_receipt)
+
+    planner_receipt_parser = subparsers.add_parser(
+        "planner-receipt",
+        help="Write a planner spawn receipt deterministically from sidecar proof",
+    )
+    planner_receipt_parser.add_argument("task_dir")
+    planner_receipt_parser.add_argument("phase", choices=("discovery", "spec", "plan"))
+    planner_receipt_parser.add_argument("--tokens-used", type=int, required=True)
+    planner_receipt_parser.add_argument("--model", default=None)
+    planner_receipt_parser.add_argument("--agent-name", default=None)
+    planner_receipt_parser.add_argument("--injected-prompt-sha256", required=True)
+    planner_receipt_parser.set_defaults(func=cmd_planner_receipt)
+
+
+def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
+    """Register execution-stage subcommands: run-execute-setup, run-execution-batch-plan,
+    run-execution-segment-done, run-execution-finish, run-execution-verify-evidence,
+    check-ownership, write-execute-handoff."""
+    run_execute_setup_parser = subparsers.add_parser(
+        "run-execute-setup",
+        help="Validate execution preflight, advance to EXECUTION, and write executor-routing receipt",
+    )
+    run_execute_setup_parser.add_argument("task_dir")
+    run_execute_setup_parser.set_defaults(func=cmd_run_execute_setup)
+
+    run_execution_batch_plan_parser = subparsers.add_parser(
+        "run-execution-batch-plan",
+        help="Compute deterministic execution segment state, cache eligibility, and runnable batches",
+    )
+    run_execution_batch_plan_parser.add_argument("task_dir")
+    run_execution_batch_plan_parser.set_defaults(func=cmd_run_execution_batch_plan)
+
+    run_execution_segment_done_parser = subparsers.add_parser(
+        "run-execution-segment-done",
+        help="Verify ownership/evidence, write executor receipt, and update manifest execution_progress",
+    )
+    run_execution_segment_done_parser.add_argument("task_dir")
+    run_execution_segment_done_parser.add_argument("segment_id")
+    run_execution_segment_done_parser.add_argument(
+        "--injected-prompt-sha256",
+        required=True,
+        help="Digest captured from receipts/_injected-prompts/{segment}.sha256",
+    )
+    run_execution_segment_done_parser.add_argument("--model", default=None)
+    run_execution_segment_done_parser.add_argument("--agent-name", default=None)
+    run_execution_segment_done_parser.add_argument("--executor-type", default=None)
+    run_execution_segment_done_parser.add_argument("--evidence-path", default=None)
+    run_execution_segment_done_parser.add_argument("--tokens-used", type=int, default=None)
+    run_execution_segment_done_parser.add_argument(
+        "--files",
+        nargs="*",
+        default=None,
+        help="Files to ownership-check; defaults to execution-graph files_expected for the segment.",
+    )
+    run_execution_segment_done_parser.set_defaults(func=cmd_run_execution_segment_done)
+
+    run_execution_finish_parser = subparsers.add_parser(
+        "run-execution-finish",
+        help="Advance EXECUTION -> TEST_EXECUTION only when no pending segments remain",
+    )
+    run_execution_finish_parser.add_argument("task_dir")
+    run_execution_finish_parser.set_defaults(func=cmd_run_execution_finish)
+
+    run_execution_verify_evidence_parser = subparsers.add_parser(
+        "run-execution-verify-evidence",
+        help="Verify evidence files and files_expected exist for all non-cached segments (replaces model narrative in Step 5)",
+    )
+    run_execution_verify_evidence_parser.add_argument("task_dir")
+    run_execution_verify_evidence_parser.set_defaults(func=cmd_run_execution_verify_evidence)
+
     ownership_parser = subparsers.add_parser("check-ownership", help="Check that files belong to a segment")
     ownership_parser.add_argument("task_dir")
     ownership_parser.add_argument("segment_id")
     ownership_parser.add_argument("files", nargs="+")
     ownership_parser.set_defaults(func=cmd_check_ownership)
-
-    retro_integrity_parser = subparsers.add_parser(
-        "check-retro-integrity",
-        help="Report persistent retros with no matching flush event; exits non-zero if any found",
-    )
-    retro_integrity_parser.add_argument("--root", required=True, help="Project root directory")
-    retro_integrity_parser.set_defaults(func=cmd_check_retro_integrity)
 
     execute_handoff_parser = subparsers.add_parser(
         "write-execute-handoff",
@@ -4072,37 +4234,52 @@ def build_parser() -> argparse.ArgumentParser:
     execute_handoff_parser.add_argument("task_dir")
     execute_handoff_parser.set_defaults(func=cmd_write_execute_handoff)
 
-    graph_write_parser = subparsers.add_parser(
-        "write-execution-graph",
-        help="Validate, normalize, and atomically write execution-graph.json",
-    )
-    graph_write_parser.add_argument("task_dir")
-    graph_write_parser.add_argument("--from", dest="from_path", required=True)
-    graph_write_parser.set_defaults(func=cmd_write_execution_graph)
 
-    repair_write_parser = subparsers.add_parser(
-        "write-repair-log",
-        help="Validate, normalize, and atomically write repair-log.json",
+def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
+    """Register audit-stage subcommands: run-audit-setup, run-audit-findings-gate,
+    run-audit-repair-cycle-plan, run-audit-reaudit-plan, run-audit-summary,
+    audit-receipt, run-rules-check."""
+    run_audit_setup_parser = subparsers.add_parser(
+        "run-audit-setup",
+        help="Build audit-plan.json and diff scope deterministically for CHECKPOINT_AUDIT",
     )
-    repair_write_parser.add_argument("task_dir")
-    repair_write_parser.add_argument("--from", dest="from_path", required=True)
-    repair_write_parser.set_defaults(func=cmd_write_repair_log)
+    run_audit_setup_parser.add_argument("task_dir")
+    run_audit_setup_parser.add_argument(
+        "--no-head-fallback",
+        dest="allow_head_fallback",
+        action="store_false",
+        help="Do not fall back to git diff HEAD when snapshot.head_sha is missing.",
+    )
+    run_audit_setup_parser.set_defaults(allow_head_fallback=True)
+    run_audit_setup_parser.set_defaults(func=cmd_run_audit_setup)
 
-    classification_write_parser = subparsers.add_parser(
-        "write-classification",
-        help="Validate, normalize, and atomically write classification.json plus synced manifest state",
+    run_audit_findings_gate_parser = subparsers.add_parser(
+        "run-audit-findings-gate",
+        help="Summarize current audit reports and decide deterministically whether repair is required",
     )
-    classification_write_parser.add_argument("task_dir")
-    classification_write_parser.add_argument("--from", dest="from_path", required=True)
-    classification_write_parser.set_defaults(func=cmd_write_classification)
+    run_audit_findings_gate_parser.add_argument("task_dir")
+    run_audit_findings_gate_parser.set_defaults(func=cmd_run_audit_findings_gate)
 
-    stamp_role_parser = subparsers.add_parser(
-        "stamp-role",
-        help="Stamp the active-segment-role file under role=ctl (refuses audit-* roles)",
+    run_audit_repair_cycle_plan_parser = subparsers.add_parser(
+        "run-audit-repair-cycle-plan",
+        help="Build the deterministic repair queue, retry counts, and phase label from current audit reports",
     )
-    stamp_role_parser.add_argument("task_dir")
-    stamp_role_parser.add_argument("--role", required=True, help="Executor role to stamp (allowlist enforced)")
-    stamp_role_parser.set_defaults(func=cmd_stamp_role)
+    run_audit_repair_cycle_plan_parser.add_argument("task_dir")
+    run_audit_repair_cycle_plan_parser.set_defaults(func=cmd_run_audit_repair_cycle_plan)
+
+    run_audit_reaudit_plan_parser = subparsers.add_parser(
+        "run-audit-reaudit-plan",
+        help="Build deterministic re-audit file scope and auditor set from repair-log plus existing reports",
+    )
+    run_audit_reaudit_plan_parser.add_argument("task_dir")
+    run_audit_reaudit_plan_parser.set_defaults(func=cmd_run_audit_reaudit_plan)
+
+    run_audit_summary_parser = subparsers.add_parser(
+        "run-audit-summary",
+        help="Aggregate audit reports and write audit-summary.json deterministically",
+    )
+    run_audit_summary_parser.add_argument("task_dir")
+    run_audit_summary_parser.set_defaults(func=cmd_run_audit_summary)
 
     audit_receipt_parser = subparsers.add_parser(
         "audit-receipt",
@@ -4148,191 +4325,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit_receipt_parser.set_defaults(func=cmd_audit_receipt)
 
-    planner_receipt_parser = subparsers.add_parser(
-        "planner-receipt",
-        help="Write a planner spawn receipt deterministically from sidecar proof",
-    )
-    planner_receipt_parser.add_argument("task_dir")
-    planner_receipt_parser.add_argument("phase", choices=("discovery", "spec", "plan"))
-    planner_receipt_parser.add_argument("--tokens-used", type=int, required=True)
-    planner_receipt_parser.add_argument("--model", default=None)
-    planner_receipt_parser.add_argument("--agent-name", default=None)
-    planner_receipt_parser.add_argument("--injected-prompt-sha256", required=True)
-    planner_receipt_parser.set_defaults(func=cmd_planner_receipt)
-
-    plan_validated_receipt_parser = subparsers.add_parser(
-        "plan-validated-receipt",
-        help="Write the plan-validated receipt deterministically",
-    )
-    plan_validated_receipt_parser.add_argument("task_dir")
-    plan_validated_receipt_parser.add_argument(
-        "--no-gap",
-        dest="run_gap",
-        action="store_false",
-        help="Skip plan_gap_analysis during validation before writing the receipt.",
-    )
-    plan_validated_receipt_parser.set_defaults(run_gap=True)
-    plan_validated_receipt_parser.set_defaults(func=cmd_plan_validated_receipt)
-
-    plan_audit_receipt_parser = subparsers.add_parser(
-        "plan-audit-receipt",
-        help="Write the plan-audit spawn receipt deterministically",
-    )
-    plan_audit_receipt_parser.add_argument("task_dir")
-    plan_audit_receipt_parser.add_argument("--tokens-used", type=int, required=True)
-    plan_audit_receipt_parser.add_argument("--model", default=None)
-    plan_audit_receipt_parser.set_defaults(func=cmd_plan_audit_receipt)
-
-    run_planning_parser = subparsers.add_parser(
-        "run-planning",
-        help="Validate planning artifacts, write receipt, and advance to PLAN_REVIEW when ready",
-    )
-    run_planning_parser.add_argument("task_dir")
-    run_planning_parser.set_defaults(func=cmd_run_planning)
-
-    run_plan_audit_parser = subparsers.add_parser(
-        "run-plan-audit",
-        help="Run deterministic plan-audit logic and optional high-risk LLM audit finalization",
-    )
-    run_plan_audit_parser.add_argument("task_dir")
-    run_plan_audit_parser.add_argument(
-        "--report-path",
-        default=None,
-        help="Path to spec-completion auditor report for high/critical-risk tasks.",
-    )
-    run_plan_audit_parser.add_argument(
-        "--tokens-used",
-        type=int,
-        default=0,
-        help="Tokens consumed by the spec-completion auditor run.",
-    )
-    run_plan_audit_parser.add_argument(
-        "--model",
-        default=None,
-        help="Model used by the spec-completion auditor.",
-    )
-    run_plan_audit_parser.set_defaults(func=cmd_run_plan_audit)
-
-    run_start_classification_parser = subparsers.add_parser(
-        "run-start-classification",
-        help="Validate classification, apply fast-track, and advance to SPEC_NORMALIZATION when ready",
-    )
-    run_start_classification_parser.add_argument("task_dir")
-    run_start_classification_parser.set_defaults(func=cmd_run_start_classification)
-
-    run_external_solution_gate_parser = subparsers.add_parser(
-        "run-external-solution-gate",
-        help="Write external-solution-gate.json from deterministic task heuristics",
-    )
-    run_external_solution_gate_parser.add_argument("task_dir")
-    run_external_solution_gate_parser.set_defaults(func=cmd_run_external_solution_gate)
-
-    write_search_receipt_parser = subparsers.add_parser(
-        "write-search-receipt",
-        help="Write search-conducted receipt after executor performs gate-recommended research",
-    )
-    write_search_receipt_parser.add_argument("task_dir")
-    write_search_receipt_parser.add_argument(
-        "--query",
-        required=True,
-        help="The search query string actually used",
-    )
-    write_search_receipt_parser.set_defaults(func=cmd_write_search_receipt)
-
-    run_spec_ready_parser = subparsers.add_parser(
-        "run-spec-ready",
-        help="Validate spec.md, write spec-validated receipt, and advance to SPEC_REVIEW when ready",
-    )
-    run_spec_ready_parser.add_argument("task_dir")
-    run_spec_ready_parser.set_defaults(func=cmd_run_spec_ready)
-
-    run_planning_mode_parser = subparsers.add_parser(
-        "run-planning-mode",
-        help="Choose planning mode deterministically from manifest.fast_track, risk, and AC count",
-    )
-    run_planning_mode_parser.add_argument("task_dir")
-    run_planning_mode_parser.set_defaults(func=cmd_run_planning_mode)
-
-    run_audit_setup_parser = subparsers.add_parser(
-        "run-audit-setup",
-        help="Build audit-plan.json and diff scope deterministically for CHECKPOINT_AUDIT",
-    )
-    run_audit_setup_parser.add_argument("task_dir")
-    run_audit_setup_parser.add_argument(
-        "--no-head-fallback",
-        dest="allow_head_fallback",
-        action="store_false",
-        help="Do not fall back to git diff HEAD when snapshot.head_sha is missing.",
-    )
-    run_audit_setup_parser.set_defaults(allow_head_fallback=True)
-    run_audit_setup_parser.set_defaults(func=cmd_run_audit_setup)
-
-    run_audit_findings_gate_parser = subparsers.add_parser(
-        "run-audit-findings-gate",
-        help="Summarize current audit reports and decide deterministically whether repair is required",
-    )
-    run_audit_findings_gate_parser.add_argument("task_dir")
-    run_audit_findings_gate_parser.set_defaults(func=cmd_run_audit_findings_gate)
-
-    run_audit_repair_cycle_plan_parser = subparsers.add_parser(
-        "run-audit-repair-cycle-plan",
-        help="Build the deterministic repair queue, retry counts, and phase label from current audit reports",
-    )
-    run_audit_repair_cycle_plan_parser.add_argument("task_dir")
-    run_audit_repair_cycle_plan_parser.set_defaults(func=cmd_run_audit_repair_cycle_plan)
-
-    run_audit_reaudit_plan_parser = subparsers.add_parser(
-        "run-audit-reaudit-plan",
-        help="Build deterministic re-audit file scope and auditor set from repair-log plus existing reports",
-    )
-    run_audit_reaudit_plan_parser.add_argument("task_dir")
-    run_audit_reaudit_plan_parser.set_defaults(func=cmd_run_audit_reaudit_plan)
-
-    run_audit_summary_parser = subparsers.add_parser(
-        "run-audit-summary",
-        help="Aggregate audit reports and write audit-summary.json deterministically",
-    )
-    run_audit_summary_parser.add_argument("task_dir")
-    run_audit_summary_parser.set_defaults(func=cmd_run_audit_summary)
-
-    run_execute_setup_parser = subparsers.add_parser(
-        "run-execute-setup",
-        help="Validate execution preflight, advance to EXECUTION, and write executor-routing receipt",
-    )
-    run_execute_setup_parser.add_argument("task_dir")
-    run_execute_setup_parser.set_defaults(func=cmd_run_execute_setup)
-
-    run_execution_batch_plan_parser = subparsers.add_parser(
-        "run-execution-batch-plan",
-        help="Compute deterministic execution segment state, cache eligibility, and runnable batches",
-    )
-    run_execution_batch_plan_parser.add_argument("task_dir")
-    run_execution_batch_plan_parser.set_defaults(func=cmd_run_execution_batch_plan)
-
-    run_execution_segment_done_parser = subparsers.add_parser(
-        "run-execution-segment-done",
-        help="Verify ownership/evidence, write executor receipt, and update manifest execution_progress",
-    )
-    run_execution_segment_done_parser.add_argument("task_dir")
-    run_execution_segment_done_parser.add_argument("segment_id")
-    run_execution_segment_done_parser.add_argument(
-        "--injected-prompt-sha256",
-        required=True,
-        help="Digest captured from receipts/_injected-prompts/{segment}.sha256",
-    )
-    run_execution_segment_done_parser.add_argument("--model", default=None)
-    run_execution_segment_done_parser.add_argument("--agent-name", default=None)
-    run_execution_segment_done_parser.add_argument("--executor-type", default=None)
-    run_execution_segment_done_parser.add_argument("--evidence-path", default=None)
-    run_execution_segment_done_parser.add_argument("--tokens-used", type=int, default=None)
-    run_execution_segment_done_parser.add_argument(
-        "--files",
-        nargs="*",
-        default=None,
-        help="Files to ownership-check; defaults to execution-graph files_expected for the segment.",
-    )
-    run_execution_segment_done_parser.set_defaults(func=cmd_run_execution_segment_done)
-
     run_rules_check_parser = subparsers.add_parser(
         "run-rules-check",
         help="Run prevention-rules engine and write rules-check-passed receipt (required before run-execution-finish)",
@@ -4344,20 +4336,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_rules_check_parser.set_defaults(func=cmd_run_rules_check)
 
-    run_execution_finish_parser = subparsers.add_parser(
-        "run-execution-finish",
-        help="Advance EXECUTION -> TEST_EXECUTION only when no pending segments remain",
-    )
-    run_execution_finish_parser.add_argument("task_dir")
-    run_execution_finish_parser.set_defaults(func=cmd_run_execution_finish)
 
-    run_execution_verify_evidence_parser = subparsers.add_parser(
-        "run-execution-verify-evidence",
-        help="Verify evidence files and files_expected exist for all non-cached segments (replaces model narrative in Step 5)",
-    )
-    run_execution_verify_evidence_parser.add_argument("task_dir")
-    run_execution_verify_evidence_parser.set_defaults(func=cmd_run_execution_verify_evidence)
-
+def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:
+    """Register repair-stage subcommands: run-repair-execution-ready, run-repair-log-build,
+    run-repair-batch-plan, run-repair-q-update, run-repair-retry, write-repair-log."""
     run_repair_execution_ready_parser = subparsers.add_parser(
         "run-repair-execution-ready",
         help="Validate repair-log.json and advance REPAIR_PLANNING -> REPAIR_EXECUTION",
@@ -4392,6 +4374,73 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_repair_retry_parser.add_argument("task_dir")
     run_repair_retry_parser.set_defaults(func=cmd_run_repair_retry)
+
+    repair_write_parser = subparsers.add_parser(
+        "write-repair-log",
+        help="Validate, normalize, and atomically write repair-log.json",
+    )
+    repair_write_parser.add_argument("task_dir")
+    repair_write_parser.add_argument("--from", dest="from_path", required=True)
+    repair_write_parser.set_defaults(func=cmd_write_repair_log)
+
+
+def register_artifact_parsers(subparsers: argparse._SubParsersAction) -> None:
+    """Register artifact-write subcommands: write-execution-graph, write-classification,
+    write-search-receipt, run-external-solution-gate, check-retro-integrity."""
+    graph_write_parser = subparsers.add_parser(
+        "write-execution-graph",
+        help="Validate, normalize, and atomically write execution-graph.json",
+    )
+    graph_write_parser.add_argument("task_dir")
+    graph_write_parser.add_argument("--from", dest="from_path", required=True)
+    graph_write_parser.set_defaults(func=cmd_write_execution_graph)
+
+    classification_write_parser = subparsers.add_parser(
+        "write-classification",
+        help="Validate, normalize, and atomically write classification.json plus synced manifest state",
+    )
+    classification_write_parser.add_argument("task_dir")
+    classification_write_parser.add_argument("--from", dest="from_path", required=True)
+    classification_write_parser.set_defaults(func=cmd_write_classification)
+
+    write_search_receipt_parser = subparsers.add_parser(
+        "write-search-receipt",
+        help="Write search-conducted receipt after executor performs gate-recommended research",
+    )
+    write_search_receipt_parser.add_argument("task_dir")
+    write_search_receipt_parser.add_argument(
+        "--query",
+        required=True,
+        help="The search query string actually used",
+    )
+    write_search_receipt_parser.set_defaults(func=cmd_write_search_receipt)
+
+    run_external_solution_gate_parser = subparsers.add_parser(
+        "run-external-solution-gate",
+        help="Write external-solution-gate.json from deterministic task heuristics",
+    )
+    run_external_solution_gate_parser.add_argument("task_dir")
+    run_external_solution_gate_parser.set_defaults(func=cmd_run_external_solution_gate)
+
+    retro_integrity_parser = subparsers.add_parser(
+        "check-retro-integrity",
+        help="Report persistent retros with no matching flush event; exits non-zero if any found",
+    )
+    retro_integrity_parser.add_argument("--root", required=True, help="Project root directory")
+    retro_integrity_parser.set_defaults(func=cmd_check_retro_integrity)
+
+
+def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
+    """Register meta/utility subcommands: stamp-role, run-audit-reflect, run-audit-finish,
+    repair-plan, repair-update, compute-reward, validate-contract, validate-receipts,
+    validate-chain, list-pending, approve, stats-dora, stats-usage, bus, calibration, config."""
+    stamp_role_parser = subparsers.add_parser(
+        "stamp-role",
+        help="Stamp the active-segment-role file under role=ctl (refuses audit-* roles)",
+    )
+    stamp_role_parser.add_argument("task_dir")
+    stamp_role_parser.add_argument("--role", required=True, help="Executor role to stamp (allowlist enforced)")
+    stamp_role_parser.set_defaults(func=cmd_stamp_role)
 
     run_audit_reflect_parser = subparsers.add_parser(
         "run-audit-reflect",
@@ -4487,6 +4536,17 @@ def build_parser() -> argparse.ArgumentParser:
     config_parser.add_argument("--root", default=".", help="Project root")
     config_parser.set_defaults(func=cmd_config)
 
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    register_task_lifecycle_parsers(subparsers)
+    register_planning_parsers(subparsers)
+    register_execution_parsers(subparsers)
+    register_audit_parsers(subparsers)
+    register_repair_parsers(subparsers)
+    register_artifact_parsers(subparsers)
+    register_meta_parsers(subparsers)
     return parser
 
 

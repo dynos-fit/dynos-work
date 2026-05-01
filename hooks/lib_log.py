@@ -83,6 +83,15 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # Forensic trace — records when an observed_floor overrides the planner's
     # risk_level upward. No gate or state machine blocks on this event.
     "risk_level_upgrade_blocked",
+    # Inject-prompt size guardrail (router.cmd_planner_inject_prompt /
+    # cmd_audit_inject_prompt). Non-blocking warning emitted when the
+    # injected prompt exceeds _MAX_INJECTED_PROMPT_BYTES (100 KB). Forensic
+    # trace for prompt-size regressions; no gate or state machine blocks.
+    "planner_prompt_oversize",
+    # Pre-existing forensic trace from lib_receipts.py auditor receipt
+    # writer. Emitted when an auditor's spawn-log.jsonl is missing during
+    # receipt write; observability only, no gate blocks on it.
+    "audit_receipt_spawn_log_missing",
 })
 
 
