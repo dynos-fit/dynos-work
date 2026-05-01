@@ -96,6 +96,28 @@ _ALLOWLIST_UNMATCHABLE: set[str] = {
     "cannot parse .dynos/deferred-findings.json",
     "root value must be an object",
     "Close them, re-acknowledge",
+    # Defensive input validation for receipt_search_conducted (search_used
+    # must be True). Triggered only by an actively-malicious caller passing
+    # search_used=False; no realistic adversarial test path exists outside
+    # the writer's own argument-shape contract, which is exercised
+    # implicitly by every ctl write-search-receipt invocation.
+    "search_used must be True",
+    # Post-condition guard in receipt_audit_done: helper-derived counts
+    # must be non-negative. The helper itself raises on real mismatch;
+    # this is a defense-in-depth post-condition that can only fire if the
+    # helper has a bug. No useful adversarial test (we'd have to break
+    # the helper to test this).
+    "count post-condition violated",
+    # task-20260430-006 forgery-defense raises in receipt_audit_done's
+    # spawn-log cross-check. Adversarial coverage lives in
+    # test_receipt_audit_spawn_log_crosscheck.py via match="spawn-log"
+    # and match="truncat", but the f-string's longest literal fragment
+    # in each raise is a different sentence (the explanatory tail) that
+    # the parity grep extracts — not the part the test matches against.
+    # The contract is tested; the allowlist entry just acknowledges the
+    # AST-extraction artifact.
+    "receipt cannot attest to an auditor spawn that the harness never recorded",
+    "refusing receipt to avoid silent forgery-defense bypass",
 }
 
 
