@@ -72,6 +72,21 @@ READER_SEARCH_DIRS = [
 # step_name and the justification.
 # ---------------------------------------------------------------------------
 _INTENTIONALLY_WRITE_ONLY: dict[str, str] = {
+    # Written by receipt_search_conducted (hooks/lib_receipts.py:receipt_search_conducted).
+    # Consumed by validate_chain via a loop variable: the external-solution
+    # gate (commit f725198 / a848461) appends "search-conducted" to the
+    # `required` list at lib_receipts.py:613-615, and validate_chain
+    # iterates `for receipt_name in required: read_receipt(..., receipt_name)`.
+    # Literal-grep parity check cannot see the variable dispatch and reports
+    # the writer as orphaned; allowlist the step with the validate_chain
+    # rationale.
+    "search-conducted": (
+        "consumed by validate_chain via loop variable; the external-solution "
+        "gate appends 'search-conducted' to validate_chain's required list "
+        "(lib_receipts.py:613-615) and validate_chain reads it through "
+        "`for receipt_name in required: read_receipt(...)` which the parity "
+        "grep cannot detect"
+    ),
     # Written by receipt_plan_routing (hooks/lib_receipts.py:receipt_plan_routing).
     # Observability-only: captures which agent the plan skill routed to so
     # the audit trail records the routing decision. No runtime gate reads
