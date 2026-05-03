@@ -316,3 +316,545 @@ def test_empty_secret_nonstrict_returns_records_and_logs_event(
         "non-strict + empty secret must emit a verify_signed_events_no_secret "
         f"event; observed event names={event_names!r}"
     )
+
+
+# ===========================================================================
+# NEW TESTS — task-20260501-003: per-task HMAC key derivation
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# AC 1: _derive_per_task_secret — pure derivation helper
+# ---------------------------------------------------------------------------
+def test_derive_per_task_secret_deterministic() -> None:
+    """_derive_per_task_secret(project_secret, task_id) returns a stable 32-char
+    hex string. A hardcoded expected value catches wrong HMAC argument order."""
+    fn = getattr(lib_log, "_derive_per_task_secret", None)
+    assert fn is not None, (
+        "_derive_per_task_secret must be exported from lib_log; "
+        "production code not yet implemented"
+    )
+
+    result1 = fn("project-secret", "task-A")
+    result2 = fn("project-secret", "task-A")
+
+    # Must be a 32-character lowercase hex string.
+    assert isinstance(result1, str), "return type must be str"
+    assert len(result1) == 32, f"expected 32-char hex string, got len={len(result1)}"
+    int(result1, 16)  # raises ValueError if not valid hex
+
+    # Must be stable across two calls (pure function, no randomness).
+    assert result1 == result2, "_derive_per_task_secret must be deterministic"
+
+    # Must match a manually computed HMAC-SHA256[:32] — catches wrong arg order.
+    # If project_secret and task_id are swapped the digest differs.
+    expected = hmac.new(
+        b"project-secret",
+        b"task-A",
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    assert result1 == expected, (
+        f"_derive_per_task_secret returned wrong digest; "
+        f"got {result1!r}, expected {expected!r}. "
+        "This likely indicates swapped hmac.new arguments (key vs message)."
+    )
+
+    # Sanity: different task_id produces a different secret.
+    result_b = fn("project-secret", "task-B")
+    assert result1 != result_b, (
+        "_derive_per_task_secret must produce distinct secrets for distinct task IDs"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 2: _resolve_event_secret with and without task_id
+# ---------------------------------------------------------------------------
+def test_resolve_event_secret_with_task_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When task_id is a non-empty string, _resolve_event_secret returns the
+    per-task derivation (not the raw project secret)."""
+    fn = getattr(lib_log, "_resolve_event_secret", None)
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert fn is not None, "_resolve_event_secret must exist"
+    assert derive is not None, "_derive_per_task_secret must exist"
+
+    proj_secret = "proj-secret-ac2"
+    monkeypatch.setenv("DYNOS_EVENT_SECRET", proj_secret)
+
+    root = tmp_path / "proj"
+    root.mkdir()
+
+    result = fn(root, task_id="task-X")
+    expected = derive(proj_secret, "task-X")
+
+    assert result == expected, (
+        f"_resolve_event_secret with task_id='task-X' must return the per-task "
+        f"derivation. Got {result!r}, expected {expected!r}"
+    )
+    assert result != proj_secret, (
+        "_resolve_event_secret with task_id must NOT return the raw project secret"
+    )
+    assert len(result) == 32, "per-task secret must be 32 hex chars"
+
+
+def test_resolve_event_secret_no_task_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When task_id is None, _resolve_event_secret returns the project secret
+    unchanged (identical to pre-change behaviour)."""
+    fn = getattr(lib_log, "_resolve_event_secret", None)
+    assert fn is not None, "_resolve_event_secret must exist"
+
+    proj_secret = "proj-secret-no-task"
+    monkeypatch.setenv("DYNOS_EVENT_SECRET", proj_secret)
+
+    root = tmp_path / "proj"
+    root.mkdir()
+
+    result = fn(root)  # no task_id kwarg — should use default (None)
+    assert result == proj_secret, (
+        f"_resolve_event_secret with no task_id must return the project secret "
+        f"unchanged. Got {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 3: sign_event with task_id differs from without
+# ---------------------------------------------------------------------------
+def test_sign_event_with_task_id_differs_from_without() -> None:
+    """sign_event(payload, secret, task_id='task-A') must produce a different
+    digest than sign_event(payload, secret). Pure unit test — no I/O."""
+    record = {"event": "test_evt", "ts": "2026-01-01T00:00:00Z"}
+    secret = "some-project-secret"
+
+    sig_with_task = lib_log.sign_event(record, secret, task_id="task-A")
+    sig_without_task = lib_log.sign_event(record, secret)
+
+    assert sig_with_task != sig_without_task, (
+        "sign_event with task_id='task-A' must produce a digest distinct from "
+        "sign_event without task_id — per-task namespace isolation broken"
+    )
+
+    # Also verify different task IDs produce different sigs.
+    sig_task_b = lib_log.sign_event(record, secret, task_id="task-B")
+    assert sig_with_task != sig_task_b, (
+        "sign_event must produce distinct signatures for distinct task IDs"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 4: log_event uses per-task secret when task kwarg is provided
+# ---------------------------------------------------------------------------
+def test_log_event_task_scoped_signature_uses_per_task_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Events written by log_event(task=task_id) must be signed with the
+    per-task HMAC secret, not the raw project secret."""
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert derive is not None, "_derive_per_task_secret must exist"
+
+    root, task_dir, task_id = _make_project(tmp_path)
+    proj_secret = "proj-secret-ac4"
+    monkeypatch.setenv("DYNOS_EVENT_SECRET", proj_secret)
+
+    lib_log.log_event(root, "ac4_event", task=task_id, payload_key="ac4_value")
+
+    events_path = task_dir / "events.jsonl"
+    assert events_path.exists()
+    records = _read_jsonl(events_path)
+    assert len(records) == 1
+    rec = records[0]
+    assert "_sig" in rec
+
+    stored_sig = rec["_sig"]
+
+    # Recompute: per-task secret is derived from proj_secret + task_id.
+    per_task_secret = derive(proj_secret, task_id)
+    # sign_event strips _sig before hashing, so pass the full record.
+    expected_sig = lib_log.sign_event(rec, per_task_secret)
+
+    assert stored_sig == expected_sig, (
+        f"log_event must sign with the per-task secret (derived from "
+        f"project_secret + task_id). "
+        f"Stored: {stored_sig!r}, expected: {expected_sig!r}. "
+        "This means log_event is still using the raw project secret."
+    )
+
+    # Confirm it does NOT match a signature made with the raw project secret.
+    project_sig = lib_log.sign_event(rec, proj_secret)
+    assert stored_sig != project_sig, (
+        "The stored _sig must NOT equal a signature made with the raw project "
+        "secret — cross-task namespace isolation requires per-task derivation"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 5: verify_signed_events accepts per-task-signed records; rejects
+#        project-signed records in strict mode
+# ---------------------------------------------------------------------------
+def test_verify_accepts_per_task_signed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record signed with the per-task secret must pass verify_signed_events."""
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert derive is not None
+
+    # Build task_dir with name "task-ac5"
+    task_dir = tmp_path / "task-ac5"
+    task_dir.mkdir()
+
+    proj_secret = "proj-secret-ac5"
+    per_task_secret = derive(proj_secret, "task-ac5")
+
+    record = {"event": "ac5_event", "ts": "2026-01-01T00:00:00Z", "data": "x"}
+    record["_sig"] = lib_log.sign_event(record, per_task_secret)
+
+    events_path = task_dir / "events.jsonl"
+    events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    verified = lib_log.verify_signed_events(task_dir, proj_secret)
+    assert len(verified) == 1, (
+        f"verify_signed_events must accept per-task-signed records; got {verified!r}"
+    )
+    assert verified[0].get("event") == "ac5_event"
+
+
+def test_verify_rejects_project_signed_in_strict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record signed with the raw project secret (not per-task) must be
+    rejected with ValueError in strict mode."""
+    task_dir = tmp_path / "task-ac5-strict"
+    task_dir.mkdir()
+
+    proj_secret = "proj-secret-ac5-strict"
+
+    record = {"event": "old_style_event", "ts": "2026-01-01T00:00:00Z"}
+    # Sign with the raw project secret only (legacy, pre-derivation)
+    record["_sig"] = lib_log.sign_event(record, proj_secret)
+
+    events_path = task_dir / "events.jsonl"
+    events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        lib_log.verify_signed_events(task_dir, proj_secret, strict=True)
+
+    assert "legacy_project_secret_in_strict_mode" in str(exc_info.value), (
+        f"strict mode must raise ValueError with 'legacy_project_secret_in_strict_mode' "
+        f"for project-signed records; got {exc_info.value!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 6: migration rewrites events.jsonl atomically; failure emits event
+# ---------------------------------------------------------------------------
+def test_migration_rewrites_events_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After verify_signed_events in non-strict mode finds a project-secret-signed
+    record, it must atomically rewrite events.jsonl so the record is now signed
+    with the per-task secret."""
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert derive is not None
+
+    # task_dir must have a non-empty name so per-task derivation applies.
+    task_dir = tmp_path / "task-migrate"
+    task_dir.mkdir()
+
+    proj_secret = "proj-secret-migrate"
+    per_task_secret = derive(proj_secret, "task-migrate")
+
+    # Write a record signed with the raw project secret (legacy format).
+    record = {"event": "legacy_event", "ts": "2026-01-01T00:00:00Z", "x": 1}
+    record["_sig"] = lib_log.sign_event(record, proj_secret)
+
+    events_path = task_dir / "events.jsonl"
+    events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    # Verify in non-strict mode — should accept AND trigger migration.
+    verified = lib_log.verify_signed_events(task_dir, proj_secret, strict=False)
+    assert len(verified) == 1, (
+        "non-strict verify must return the project-secret-signed record"
+    )
+
+    # Read back the file — it must now be signed with the per-task secret.
+    rewritten = _read_jsonl(events_path)
+    assert len(rewritten) == 1, (
+        f"migration must not change the number of records; got {len(rewritten)}"
+    )
+    migrated_rec = rewritten[0]
+    assert "_sig" in migrated_rec
+
+    # Recompute the expected per-task signature.
+    expected_sig = lib_log.sign_event(migrated_rec, per_task_secret)
+    assert migrated_rec["_sig"] == expected_sig, (
+        f"migrated record _sig must equal per-task-signed digest. "
+        f"Got {migrated_rec['_sig']!r}, expected {expected_sig!r}. "
+        "Migration rewrote with wrong secret."
+    )
+
+    # Confirm the project-secret signature is gone.
+    project_sig = lib_log.sign_event(migrated_rec, proj_secret)
+    assert migrated_rec["_sig"] != project_sig, (
+        "migrated record must not still be signed with the raw project secret"
+    )
+
+
+def test_migration_failure_emits_event_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the atomic rewrite (os.replace) raises, verify_signed_events must:
+    - emit verify_signed_events_migration_failed to the event log
+    - return the accepted records without raising
+    """
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert derive is not None
+
+    # We need a proper project structure so log_event can emit the failure event.
+    root = tmp_path / "proj-migfail"
+    root.mkdir()
+    (root / ".dynos").mkdir()
+    task_dir = root / ".dynos" / "task-migfail"
+    task_dir.mkdir()
+
+    proj_secret = "proj-secret-migfail"
+    monkeypatch.setenv("DYNOS_EVENT_SECRET", proj_secret)
+
+    # Write a project-secret-signed record to trigger migration.
+    record = {"event": "legacy_for_fail", "ts": "2026-01-01T00:00:00Z"}
+    record["_sig"] = lib_log.sign_event(record, proj_secret)
+    events_path = task_dir / "events.jsonl"
+    events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    # Monkeypatch os.replace to raise OSError so the atomic write fails.
+    import os as _os
+    monkeypatch.setattr(_os, "replace", lambda *a, **kw: (_ for _ in ()).throw(OSError("injected failure")))
+
+    # verify_signed_events must NOT raise — soft failure only.
+    result = lib_log.verify_signed_events(task_dir, proj_secret, strict=False)
+    assert len(result) >= 1, (
+        "verify_signed_events must return the accepted records even when migration fails"
+    )
+
+    # The failure event must have been emitted somewhere — either the global log
+    # or an ancestor log. Since log_event uses task_dir.parent.parent = root, it
+    # falls back to the global .dynos/events.jsonl.
+    global_log = root / ".dynos" / "events.jsonl"
+    # Also check the task's own log as a fallback path.
+    all_logged_events: list[dict] = []
+    if global_log.exists():
+        all_logged_events.extend(_read_jsonl(global_log))
+    if events_path.exists():
+        all_logged_events.extend(_read_jsonl(events_path))
+
+    event_names = [e.get("event") for e in all_logged_events]
+    assert "verify_signed_events_migration_failed" in event_names, (
+        f"verify_signed_events_migration_failed must be emitted when the atomic "
+        f"rewrite fails. Observed event names: {event_names!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 7: cross-task replay is rejected (load-bearing test)
+# ---------------------------------------------------------------------------
+def test_cross_task_replay_rejected_non_strict(tmp_path: Path) -> None:
+    """An event signed for task-A, injected into task-B's log, must be EXCLUDED
+    (return []) by verify_signed_events in non-strict mode.
+
+    This is the core cross-task isolation property. Both the per-task secret
+    and the raw project secret must fail — task-A-derived secret != task-B secret
+    and task-A-derived secret != raw project secret."""
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert derive is not None
+
+    proj_secret = "proj-secret-replay"
+    task_a_secret = derive(proj_secret, "task-A")
+
+    # Create task-B's directory.
+    task_b_dir = tmp_path / "task-B"
+    task_b_dir.mkdir()
+
+    # Sign the record as if it belongs to task-A.
+    record = {"event": "task_a_event", "ts": "2026-01-01T00:00:00Z", "owner": "A"}
+    record["_sig"] = lib_log.sign_event(record, task_a_secret)
+
+    # Inject task-A's signed record into task-B's events.jsonl.
+    events_path = task_b_dir / "events.jsonl"
+    events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    # task-B's verify must reject it — both per-task-B secret and project secret
+    # do not match the task-A-derived signature.
+    result = lib_log.verify_signed_events(task_b_dir, proj_secret, strict=False)
+    assert result == [], (
+        f"Cross-task replay must be rejected: task-A-signed record injected "
+        f"into task-B's log must not appear in verify_signed_events output. "
+        f"Got: {result!r}. "
+        "The per-task isolation is broken — verify is accepting wrong-task records."
+    )
+
+
+def test_cross_task_replay_rejected_strict(tmp_path: Path) -> None:
+    """An event signed for task-A, injected into task-B's log, must cause
+    verify_signed_events to raise ValueError in strict mode."""
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert derive is not None
+
+    proj_secret = "proj-secret-replay-strict"
+    task_a_secret = derive(proj_secret, "task-A")
+
+    task_b_dir = tmp_path / "task-B"
+    task_b_dir.mkdir()
+
+    record = {"event": "task_a_event_strict", "ts": "2026-01-01T00:00:00Z"}
+    record["_sig"] = lib_log.sign_event(record, task_a_secret)
+
+    events_path = task_b_dir / "events.jsonl"
+    events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        lib_log.verify_signed_events(task_b_dir, proj_secret, strict=True)
+
+    # The error must name the mismatch — "signature_mismatch" since neither
+    # per-task-B nor project secret matches the task-A-derived signature.
+    assert "signature_mismatch" in str(exc_info.value) or "invalid" in str(exc_info.value), (
+        f"strict mode must raise ValueError for cross-task replay; "
+        f"got {exc_info.value!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 8: global fallback (no task kwarg) signs with raw project secret
+# ---------------------------------------------------------------------------
+def test_global_fallback_signs_with_project_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """log_event without a task kwarg must sign with the project secret (not
+    a per-task derivation). The global .dynos/events.jsonl is verified via
+    a task_dir whose .name is '.dynos' — falling back to the project secret."""
+    root = tmp_path / "proj-global"
+    root.mkdir()
+    (root / ".dynos").mkdir()
+
+    proj_secret = "proj-secret-global"
+    monkeypatch.setenv("DYNOS_EVENT_SECRET", proj_secret)
+
+    # log_event with no task — goes to .dynos/events.jsonl.
+    lib_log.log_event(root, "global_event", some_field="global_val")
+
+    global_events_path = root / ".dynos" / "events.jsonl"
+    assert global_events_path.exists(), ".dynos/events.jsonl must be created"
+
+    records = _read_jsonl(global_events_path)
+    assert len(records) >= 1
+    rec = [r for r in records if r.get("event") == "global_event"]
+    assert len(rec) == 1
+    assert "_sig" in rec[0]
+
+    # Verify the global event is signed with the project secret.
+    # The global path is .dynos/ which has .name == ".dynos" — per spec,
+    # verify_signed_events must use task_dir.name as task_id, but ".dynos"
+    # is a non-empty string so it will derive a per-task secret for ".dynos".
+    # However, log_event without task uses the project secret directly.
+    # So we verify using the project secret directly by checking the sig field.
+    stored_sig = rec[0]["_sig"]
+    expected_project_sig = lib_log.sign_event(rec[0], proj_secret)
+
+    assert stored_sig == expected_project_sig, (
+        f"Global log_event (no task) must sign with the raw project secret. "
+        f"Got {stored_sig!r}, expected {expected_project_sig!r}. "
+        "log_event without task is using per-task derivation (regression)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 9: empty string and None task_id both fall back to project-secret behavior
+# ---------------------------------------------------------------------------
+def test_empty_task_id_falls_back_to_project_secret() -> None:
+    """sign_event(r, s, task_id='') and sign_event(r, s, task_id=None) must
+    both produce the same digest as sign_event(r, s). Pure unit test."""
+    record = {"event": "ac9_event", "ts": "2026-01-01T00:00:00Z"}
+    secret = "project-secret-ac9"
+
+    sig_baseline = lib_log.sign_event(record, secret)
+    sig_empty_str = lib_log.sign_event(record, secret, task_id="")
+    sig_none = lib_log.sign_event(record, secret, task_id=None)
+
+    assert sig_empty_str == sig_baseline, (
+        f"sign_event with task_id='' must equal baseline (no task_id). "
+        f"Got {sig_empty_str!r} vs {sig_baseline!r}. "
+        "Empty string task_id must fall back to project-secret (falsy check required)."
+    )
+    assert sig_none == sig_baseline, (
+        f"sign_event with task_id=None must equal baseline (no task_id). "
+        f"Got {sig_none!r} vs {sig_baseline!r}."
+    )
+
+    # Confirm these are NOT equal to a non-empty task_id signature
+    # (ensures the empty/None fallback is not accidentally the same as derivation).
+    sig_task_a = lib_log.sign_event(record, secret, task_id="task-A")
+    assert sig_baseline != sig_task_a, (
+        "Sanity: the baseline must differ from task_id='task-A'"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 10: verify_signed_events two-positional-args caller compatibility
+# ---------------------------------------------------------------------------
+def test_verify_signed_events_caller_compat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verify_signed_events(task_dir, secret) with only two positional args
+    must work correctly — simulating the call shape at lib_receipts.py:1661."""
+    derive = getattr(lib_log, "_derive_per_task_secret", None)
+    assert derive is not None
+
+    task_dir = tmp_path / "task-compat"
+    task_dir.mkdir()
+
+    proj_secret = "proj-secret-compat"
+    per_task_secret = derive(proj_secret, "task-compat")
+
+    record = {"event": "compat_event", "ts": "2026-01-01T00:00:00Z"}
+    record["_sig"] = lib_log.sign_event(record, per_task_secret)
+
+    events_path = task_dir / "events.jsonl"
+    events_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    # Call with only two positional arguments — exactly as lib_receipts.py does.
+    result = lib_log.verify_signed_events(task_dir, proj_secret)
+
+    assert len(result) == 1, (
+        f"Two-positional-arg call must verify per-task-signed records correctly. "
+        f"Got {result!r}"
+    )
+    assert result[0].get("event") == "compat_event"
+
+
+# ---------------------------------------------------------------------------
+# AC 12: migration event names present in DIAGNOSTIC_ONLY_EVENTS
+# ---------------------------------------------------------------------------
+def test_migration_event_names_in_diagnostic_only() -> None:
+    """Both new migration event names must be in DIAGNOSTIC_ONLY_EVENTS.
+    Existing entries must not have been removed."""
+    doe = lib_log.DIAGNOSTIC_ONLY_EVENTS
+
+    assert "verify_signed_events_migration_attempted" in doe, (
+        "'verify_signed_events_migration_attempted' must be in DIAGNOSTIC_ONLY_EVENTS"
+    )
+    assert "verify_signed_events_migration_failed" in doe, (
+        "'verify_signed_events_migration_failed' must be in DIAGNOSTIC_ONLY_EVENTS"
+    )
+
+    # Spot-check that no pre-existing entries were removed.
+    pre_existing_sample = {
+        "verify_signed_events_mismatch",
+        "receipt_written",
+        "stage_transition",
+        "gate_refused",
+        "audit_receipt_content_paired",
+    }
+    for entry in pre_existing_sample:
+        assert entry in doe, (
+            f"Pre-existing DIAGNOSTIC_ONLY_EVENTS entry {entry!r} was removed — "
+            "AC 12 forbids removing existing entries"
+        )
