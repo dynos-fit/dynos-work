@@ -115,6 +115,11 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # with JSON embedded; strict sha256 equality between the two would
     # always fail.
     "audit_receipt_content_paired",
+    # Task-receipt-chain (task-20260503-001) — tamper-detection for the
+    # full per-stage receipt sequence. Diagnostic-only — no gate blocks.
+    "task_receipt_chain_extension_failed",
+    "task_receipt_chain_write_failed",
+    "task_receipt_chain_validated",
 })
 
 

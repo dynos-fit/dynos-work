@@ -434,6 +434,22 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
             file=_sys.stderr,
         )
 
+    # Task-receipt-chain extension (task-20260503-001). Best-effort: any
+    # exception is logged via task_receipt_chain_extension_failed and
+    # never propagates. Receipt write durability is already guaranteed
+    # above by _atomic_write_text.
+    try:
+        from lib_chain import extend_chain_for_receipt
+        extend_chain_for_receipt(task_dir, step_name, receipt_path)
+    except Exception as _chain_exc:
+        try:
+            log_event(
+                root, "task_receipt_chain_extension_failed",
+                task=task_id, step=step_name, error=str(_chain_exc),
+            )
+        except Exception:
+            pass
+
     return receipt_path
 
 
