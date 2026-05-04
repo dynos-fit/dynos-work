@@ -114,22 +114,48 @@ def _read_tail_prev_sha(chain_path: Path) -> str:
     """Compute prev_sha256 for the next entry: hash of last line's
     canonical_json (sans _sig), or the genesis constant if file is
     empty/absent. Caller must hold LOCK_EX before invoking.
+
+    Reverse-seek implementation (perf-003): reads the file backwards in
+    4KB chunks until a newline is found, avoiding O(N) read of long chains.
     """
     if not chain_path.exists():
         return _GENESIS_PREV_SHA256
     try:
-        text = chain_path.read_text(encoding="utf-8")
+        size = chain_path.stat().st_size
     except OSError:
         return _GENESIS_PREV_SHA256
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if not lines:
+    if size == 0:
         return _GENESIS_PREV_SHA256
-    last = lines[-1]
+
+    chunk_size = 4096
+    chunks: list[bytes] = []
+    offset = size
+    last_line: str | None = None
     try:
-        record = json.loads(last)
+        with chain_path.open("rb") as f:
+            while offset > 0:
+                read_size = min(chunk_size, offset)
+                offset -= read_size
+                f.seek(offset)
+                chunks.append(f.read(read_size))
+                buf = b"".join(reversed(chunks))
+                stripped = buf.rstrip(b"\n")
+                if not stripped:
+                    return _GENESIS_PREV_SHA256
+                idx = stripped.rfind(b"\n")
+                if idx >= 0:
+                    last_line = stripped[idx + 1:].decode("utf-8", errors="replace")
+                    break
+            else:
+                last_line = stripped.decode("utf-8", errors="replace")
+            if last_line is None:
+                last_line = stripped.decode("utf-8", errors="replace")
+    except OSError:
+        return _GENESIS_PREV_SHA256
+
+    try:
+        record = json.loads(last_line)
     except json.JSONDecodeError:
-        # Malformed last line — return genesis so a new chain can recover.
-        # validate_chain will surface the corruption separately.
         return _GENESIS_PREV_SHA256
     return hashlib.sha256(_canonical_json(record).encode("utf-8")).hexdigest()
 
@@ -159,6 +185,7 @@ def _append_entry_unlocked(task_dir: Path, step: str, kind: str, file_path: Path
     Caller MUST hold an exclusive lock on the chain file already (e.g.
     cmd_run_task_receipt_chain holds an outer lock across batch appends).
     Use _append_entry for the locked path.
+    Does NOT call fsync — caller is responsible for durability.
     """
     chain_path = task_dir / _CHAIN_FILENAME
     chain_path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,10 +207,16 @@ def _append_entry_unlocked(task_dir: Path, step: str, kind: str, file_path: Path
     with chain_path.open("a", encoding="utf-8") as f:
         f.write(line)
         f.flush()
-        try:
+
+
+def _fsync_chain(chain_path: Path) -> None:
+    """Fsync the chain file for durability. Swallows OSError to match
+    existing tolerance — fsync failure is non-fatal in this codebase."""
+    try:
+        with chain_path.open("a", encoding="utf-8") as f:
             os.fsync(f.fileno())
-        except OSError:
-            pass
+    except OSError:
+        pass
 
 
 def _append_entry(task_dir: Path, step: str, kind: str, file_path: Path) -> None:
@@ -196,14 +229,15 @@ def _append_entry(task_dir: Path, step: str, kind: str, file_path: Path) -> None
     if not chain_path.exists():
         chain_path.touch()
 
-    # Mandatory lock-then-compute-then-write order. Computing prev_sha256
-    # OUTSIDE the lock is a TOCTOU bug.
+    # Mandatory lock-then-compute-then-write order.
     with chain_path.open("a", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
             _append_entry_unlocked(task_dir, step, kind, file_path)
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    # fsync AFTER unlock for perf-001 (lock-hold-time reduction).
+    _fsync_chain(chain_path)
 
 
 def extend_chain_for_receipt(task_dir: Path, step: str, receipt_path: Path) -> None:

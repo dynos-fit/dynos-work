@@ -3936,7 +3936,7 @@ def cmd_run_task_receipt_chain(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
         import fcntl as _fcntl
-        from lib_chain import _CHAIN_FILENAME, _append_entry_unlocked
+        from lib_chain import _CHAIN_FILENAME, _append_entry_unlocked, _fsync_chain
     except Exception as exc:
         print(f"lib_chain import failed: {exc}", file=sys.stderr)
         return 1
@@ -4001,6 +4001,8 @@ def cmd_run_task_receipt_chain(args: argparse.Namespace) -> int:
                     _append_entry_unlocked(task_dir, step, kind, fp)
                 except Exception:
                     pass
+            # perf-002: fsync ONCE for the entire batch instead of N times.
+            _fsync_chain(chain_path)
         finally:
             _fcntl.flock(lock_f.fileno(), _fcntl.LOCK_UN)
 
