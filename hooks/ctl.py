@@ -2077,6 +2077,136 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
     return 0
 
 
+# task-20260504-001: stages where record-snapshot is permitted.
+_SNAPSHOT_ALLOWED_STAGES: frozenset[str] = frozenset({
+    "FOUNDRY_INITIALIZED", "CLASSIFY_AND_SPEC", "SPEC_NORMALIZATION",
+    "SPEC_REVIEW", "PLANNING", "PLAN_REVIEW", "PLAN_AUDIT", "TDD_REVIEW",
+    "PRE_EXECUTION_SNAPSHOT", "EXECUTION_GRAPH_BUILD",
+})
+
+
+def cmd_record_snapshot(args: argparse.Namespace) -> int:
+    """task-20260504-001: record manifest.snapshot.head_sha via an audited
+    ctl path. Replaces the lib_core.write_ctl_json bypass.
+
+    Stage gate: refused at or beyond EXECUTION.
+    Idempotency: same head_sha = no-op (already_recorded). Different
+    head_sha = refused (no --force flag).
+    """
+    import re as _re
+    import subprocess as _sub
+
+    task_dir = Path(args.task_dir).resolve()
+    task_id = task_dir.name
+    root = _root_for_task_dir(task_dir)
+    manifest_path = task_dir / "manifest.json"
+
+    if not manifest_path.exists():
+        print(f"manifest.json not found: {manifest_path}", file=sys.stderr)
+        return 1
+
+    # 1. Resolve head_sha (explicit arg wins; else git rev-parse HEAD)
+    head_sha = args.head_sha
+    if head_sha is None:
+        try:
+            r = _sub.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if r.returncode != 0:
+                print(
+                    f"cannot auto-detect HEAD SHA: git rev-parse failed "
+                    f"(returncode={r.returncode}); provide --head-sha",
+                    file=sys.stderr,
+                )
+                return 1
+            head_sha = r.stdout.strip()
+        except (OSError, _sub.TimeoutExpired) as exc:
+            print(f"git auto-detect failed: {exc}; provide --head-sha", file=sys.stderr)
+            return 1
+
+    # 2. Validate head_sha format
+    if not _re.fullmatch(r"[0-9a-f]{40}", head_sha or ""):
+        print(f"invalid head_sha: {head_sha!r} (must be 40 hex chars, lowercase)", file=sys.stderr)
+        return 1
+
+    # 3. Resolve branch (explicit arg wins; else git symbolic-ref; else fallback)
+    branch = args.branch
+    if branch is None:
+        try:
+            r = _sub.run(
+                ["git", "-C", str(root), "symbolic-ref", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            branch = r.stdout.strip() if r.returncode == 0 else ""
+        except (OSError, _sub.TimeoutExpired):
+            branch = ""
+        if not branch:
+            branch = f"dynos/{task_id}-snapshot"
+
+    # 4. Validate branch
+    branch = branch if isinstance(branch, str) else ""
+    branch_stripped = branch.strip()
+    if not branch_stripped:
+        print(f"invalid branch: {branch!r} (must be non-empty after strip)", file=sys.stderr)
+        return 1
+    if len(branch_stripped) > 200:
+        print(f"invalid branch: too long ({len(branch_stripped)} chars; max 200)", file=sys.stderr)
+        return 1
+    branch = branch_stripped
+
+    # 5. Stage gate
+    try:
+        manifest = _load_manifest(task_dir)
+    except Exception as exc:
+        print(f"failed to load manifest: {exc}", file=sys.stderr)
+        return 1
+
+    stage = manifest.get("stage", "")
+    if stage not in _SNAPSHOT_ALLOWED_STAGES:
+        print(f"cannot record snapshot: task is already at stage {stage}", file=sys.stderr)
+        return 1
+
+    # 6. Idempotency check
+    existing = manifest.get("snapshot")
+    if isinstance(existing, dict):
+        existing_sha = existing.get("head_sha")
+        if isinstance(existing_sha, str) and existing_sha == head_sha:
+            print(json.dumps({"status": "already_recorded", "head_sha": head_sha}))
+            return 0
+        if isinstance(existing_sha, str) and existing_sha and existing_sha != head_sha:
+            print(
+                f"cannot record snapshot: already recorded at {existing_sha}; "
+                f"re-recording with a different SHA is not supported",
+                file=sys.stderr,
+            )
+            return 1
+
+    # 7. Build payload + write
+    recorded_at = now_iso()
+    manifest["snapshot"] = {
+        "head_sha": head_sha,
+        "branch": branch,
+        "recorded_at": recorded_at,
+    }
+    try:
+        _write_ctl_json(task_dir, manifest_path, manifest)
+    except Exception as exc:
+        print(f"failed to write manifest: {exc}", file=sys.stderr)
+        return 1
+
+    # 8. Chain extension (manifest.json is in _FIXED_CHAIN_ARTIFACTS)
+    _try_extend_chain_for_artifact(task_dir, manifest_path)
+
+    print(json.dumps({
+        "status": "recorded",
+        "head_sha": head_sha,
+        "branch": branch,
+        "recorded_at": recorded_at,
+    }))
+    return 0
+
+
 def cmd_run_spec_ready(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -4712,6 +4842,22 @@ def register_artifact_parsers(subparsers: argparse._SubParsersAction) -> None:
     classification_write_parser.add_argument("task_dir")
     classification_write_parser.add_argument("--from", dest="from_path", required=True)
     classification_write_parser.set_defaults(func=cmd_write_classification)
+
+    record_snapshot_parser = subparsers.add_parser(
+        "record-snapshot",
+        help="Record manifest.snapshot.head_sha (auto-detected from git or via --head-sha)",
+    )
+    record_snapshot_parser.add_argument("task_dir")
+    record_snapshot_parser.add_argument(
+        "--head-sha", dest="head_sha", default=None,
+        help="40-char lowercase hex SHA. Auto-detected via git rev-parse HEAD when omitted.",
+    )
+    record_snapshot_parser.add_argument(
+        "--branch", dest="branch", default=None,
+        help="Branch name. Auto-detected via git symbolic-ref --short HEAD when omitted; "
+             "detached HEAD falls back to dynos/{task_id}-snapshot.",
+    )
+    record_snapshot_parser.set_defaults(func=cmd_record_snapshot)
 
     write_search_receipt_parser = subparsers.add_parser(
         "write-search-receipt",
