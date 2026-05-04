@@ -2452,6 +2452,86 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
         return 1
 
 
+def _collect_latest_audit_reports(audit_dir: Path) -> dict[str, Path]:
+    """Return {auditor_key: winning_path} by selecting the highest-precedence report per auditor.
+
+    Visits only top-level *.json files (no recursion).
+    Returns an empty dict if audit_dir does not exist or contains no *.json files.
+
+    Precedence (highest wins):
+      1. is_reaudit  — 1 for -reaudit- files, 0 for -checkpoint- or legacy
+      2. cycle       — int parsed from reaudit-cycle-{N}-, else 0
+      3. ts          — string between separator and .json, else ""
+      4. mtime       — Path.stat().st_mtime
+      5. filename    — lexicographic (deterministic final tie-break)
+    """
+    if not audit_dir.exists():
+        return {}
+
+    # Group files by auditor key.
+    groups: dict[str, list[tuple[int, int, str, float, str, Path]]] = {}
+    for p in audit_dir.glob("*.json"):
+        name = p.name
+        stem = p.stem  # filename without .json
+
+        # Determine separator and parse (auditor_key, is_reaudit, cycle, ts).
+        reaudit_sep = "-reaudit-"
+        checkpoint_sep = "-checkpoint-"
+
+        reaudit_idx = name.find(reaudit_sep)
+        checkpoint_idx = name.find(checkpoint_sep)
+
+        if reaudit_idx != -1:
+            # Pattern: {auditor}-reaudit-cycle-{N}-{ts}.json
+            auditor_key = name[:reaudit_idx]
+            is_reaudit = 1
+            after = name[reaudit_idx + len(reaudit_sep):]  # "cycle-{N}-{ts}.json"
+            cycle = 0
+            ts = ""
+            if after.startswith("cycle-"):
+                rest = after[len("cycle-"):]  # "{N}-{ts}.json"
+                dash_idx = rest.find("-")
+                if dash_idx != -1:
+                    cycle_str = rest[:dash_idx]
+                    try:
+                        cycle = int(cycle_str)
+                    except ValueError:
+                        cycle = 0
+                    ts_part = rest[dash_idx + 1:]  # "{ts}.json"
+                    if ts_part.endswith(".json"):
+                        ts = ts_part[:-5]
+        elif checkpoint_idx != -1:
+            # Pattern: {auditor}-checkpoint-{ts}.json
+            auditor_key = name[:checkpoint_idx]
+            is_reaudit = 0
+            cycle = 0
+            after = name[checkpoint_idx + len(checkpoint_sep):]  # "{ts}.json"
+            if after.endswith(".json"):
+                ts = after[:-5]
+            else:
+                ts = ""
+        else:
+            # Legacy / non-conforming: use full stem as key.
+            auditor_key = stem
+            is_reaudit = 0
+            cycle = 0
+            ts = ""
+
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+
+        entry = (is_reaudit, cycle, ts, mtime, name, p)
+        groups.setdefault(auditor_key, []).append(entry)
+
+    result: dict[str, Path] = {}
+    for auditor_key, candidates in groups.items():
+        winner = max(candidates, key=lambda info: (info[0], info[1], info[2], info[3], info[4]))
+        result[auditor_key] = winner[5]
+    return result
+
+
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -2461,7 +2541,7 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
         findings_by_auditor: dict[str, dict[str, int]] = {}
 
         audit_dir = task_dir / "audit-reports"
-        for report_path in sorted(audit_dir.glob("*.json")):
+        for report_path in _collect_latest_audit_reports(audit_dir).values():
             data = load_json(report_path)
             findings = data.get("findings", []) if isinstance(data, dict) else []
             if not isinstance(findings, list):
@@ -2524,7 +2604,7 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
         blocking_findings: list[dict] = []
         critical_spec_finding_ids: set[str] = set()
         audit_dir = task_dir / "audit-reports"
-        for report_path in sorted(audit_dir.glob("*.json")):
+        for report_path in _collect_latest_audit_reports(audit_dir).values():
             data = load_json(report_path)
             findings = data.get("findings", []) if isinstance(data, dict) else []
             if not isinstance(findings, list):
@@ -2754,7 +2834,7 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
         live_findings: dict[str, dict[str, str]] = {}
         audit_dir = task_dir / "audit-reports"
         if audit_dir.is_dir():
-            for report_path in sorted(audit_dir.glob("*.json")):
+            for report_path in _collect_latest_audit_reports(audit_dir).values():
                 try:
                     data = load_json(report_path)
                 except Exception:
@@ -2951,6 +3031,7 @@ def cmd_run_audit_reaudit_plan(args: argparse.Namespace) -> int:
         matched_auditors: set[str] = set()
         audit_dir = task_dir / "audit-reports"
         if audit_dir.exists():
+            # Broad scan intentional: must find all reports that ever contained a repaired finding, not just the latest.
             for report_path in sorted(audit_dir.glob("*.json")):
                 data = load_json(report_path)
                 findings = data.get("findings", []) if isinstance(data, dict) else []
@@ -2998,8 +3079,11 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
         total_blocking = 0
 
         if reports_dir.exists():
-            for report_path in sorted(reports_dir.glob("*.json")):
-                data = load_json(report_path)
+            for report_path in _collect_latest_audit_reports(reports_dir).values():
+                try:
+                    data = load_json(report_path)
+                except Exception:
+                    continue
                 findings = data.get("findings", []) if isinstance(data, dict) else []
                 if not isinstance(findings, list):
                     findings = []
