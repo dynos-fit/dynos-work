@@ -35,12 +35,22 @@ Read `spec.md`, `plan.md`, and `execution-graph.json`. Ensure you understand the
 ### Step 2 — Snapshot the Base
 
 Before any modification starts:
-1. Capture the current HEAD SHA.
-2. Create a temporary git branch `dynos/task-{id}-snapshot`.
+1. Create a temporary git branch and return to the working branch:
+   ```
+   git checkout -b dynos/task-{id}-snapshot && git checkout -
+   ```
+2. Record the snapshot SHA into manifest.snapshot via the audited ctl wrapper:
+   ```
+   python3 hooks/ctl.py record-snapshot .dynos/task-{id}
+   ```
+   The command auto-detects HEAD SHA and branch from git. It accepts optional
+   `--head-sha SHA` and `--branch NAME` to override. Stage gate refuses anything
+   at or beyond `EXECUTION`. Re-run with the same SHA is a no-op
+   (`status: already_recorded`); a different SHA is refused.
 
-Append to log:
+Read the printed JSON for `head_sha` and `branch`. Append to log:
 ```
-{timestamp} [DECISION] snapshot created — branch dynos/task-{id}-snapshot at {head_sha}
+{timestamp} [DECISION] snapshot recorded — branch {branch} at {head_sha}
 ```
 
 ### Step 3 — Execute segments (Optimized Scheduler)
