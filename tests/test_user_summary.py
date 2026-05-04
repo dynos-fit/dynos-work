@@ -176,6 +176,7 @@ def test_derive_em_dash_codepoint():
     result = derive_user_summary(summary)
     # The em-dash codepoint is —
     assert "—" in result, "em-dash U+2014 must be present in header"
+    assert any(ord(c) == 0x2014 for c in result), "codepoint must be U+2014 specifically"
     # Not the en-dash
     assert "–" not in result
 
