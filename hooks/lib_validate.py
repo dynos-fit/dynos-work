@@ -186,6 +186,57 @@ def detect_cycle(graph: dict) -> bool:
     return any(walk(node_id) for node_id in by_id)
 
 
+def derive_user_summary(audit_summary: dict) -> str:
+    """Derive the verbatim user-facing summary from audit-summary.json content.
+
+    Pure function — no I/O, no env reads, no logging. Reads task_id and reports
+    from audit_summary. Returns multi-line string WITHOUT a trailing newline.
+
+    Format (em-dash is U+2014). Per-auditor lines aggregate by auditor_name
+    (handles multi-cycle reaudit reports). Skipped auditors are absent because
+    they don't appear in reports. Empty reports yields header + blank + footer.
+    """
+    task_id = str(audit_summary.get("task_id", ""))
+    reports = audit_summary.get("reports", []) or []
+
+    by_auditor: dict[str, int] = {}
+    for r in reports:
+        if not isinstance(r, dict):
+            continue
+        name = str(r.get("auditor_name") or r.get("auditor") or "")
+        if not name:
+            continue
+        by_auditor[name] = by_auditor.get(name, 0) + int(r.get("blocking_count", 0) or 0)
+
+    total_blocking = sum(by_auditor.values())
+
+    if total_blocking == 0:
+        header = "Audit complete — ALL PASSED"
+    else:
+        header = f"Audit complete — FAILED — {total_blocking} blocking findings"
+
+    auditor_lines: list[str] = []
+    for name in sorted(by_auditor.keys()):
+        bc = by_auditor[name]
+        if bc == 0:
+            auditor_lines.append(f"  {name}: PASS")
+        else:
+            auditor_lines.append(f"  {name}: FAIL ({bc} blocking)")
+
+    footer = (
+        f"Task complete. Snapshot branch dynos/{task_id}-snapshot "
+        f"can be deleted if desired."
+    )
+
+    parts: list[str] = [header]
+    if auditor_lines:
+        parts.append("")
+        parts.extend(auditor_lines)
+    parts.append("")
+    parts.append(footer)
+    return "\n".join(parts)
+
+
 def _collect_audit_findings(task_dir: Path) -> dict[str, dict]:
     """Return audit findings keyed by finding id from live audit reports."""
     findings_by_id: dict[str, dict] = {}

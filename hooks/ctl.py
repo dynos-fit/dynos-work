@@ -2905,6 +2905,11 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
             "total_blocking": total_blocking,
             "audit_result": "pass" if total_blocking == 0 else "fail",
         }
+        # task-20260503-002: derive user_summary BEFORE persisting audit-summary.json
+        # so the chain entry's sha256 captures it. cmd_run_audit_finish reads this
+        # field (via load_json of audit-summary.json) and copies it verbatim.
+        from lib_validate import derive_user_summary
+        summary["user_summary"] = derive_user_summary(summary)
         summary_path = task_dir / "audit-summary.json"
         write_json(summary_path, summary)
         print(json.dumps({
@@ -3673,12 +3678,15 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
             _try_extend_chain_for_artifact(task_dir, completion_path)
 
         _, updated = transition_task(task_dir, "DONE")
+        # task-20260503-002: emit user_summary in stdout JSON (read verbatim from
+        # the just-copied completion.json — no re-derivation).
         print(json.dumps({
             "status": "done",
             "task_dir": str(task_dir),
             "stage": updated.get("stage"),
             "completion_path": str(completion_path),
             "completed_at": updated.get("completed_at"),
+            "user_summary": completion.get("user_summary"),
         }, indent=2))
         return 0
     except Exception as exc:
@@ -3787,6 +3795,72 @@ def cmd_run_task_receipt_chain(args: argparse.Namespace) -> int:
         "appended": len(pending),
     }, indent=2))
     return 0
+
+
+def cmd_verify_audit_summary_text(args: argparse.Namespace) -> int:
+    """task-20260503-002: verify completion.json::user_summary matches a fresh
+    re-derivation from audit-summary.json. Byte-exact compare.
+
+    Exit codes:
+      0 — match
+      1 — mismatch (stderr JSON: stored_sha, derived_sha, diff_first_line)
+      2 — completion.json or audit-summary.json missing
+      3 — completion.json has no user_summary key (legacy task)
+    """
+    task_dir = Path(args.task_dir).resolve()
+    completion_path = task_dir / "completion.json"
+    summary_path = task_dir / "audit-summary.json"
+
+    if not completion_path.exists() or not summary_path.exists():
+        print(json.dumps({
+            "error": "missing_file",
+            "completion_exists": completion_path.exists(),
+            "audit_summary_exists": summary_path.exists(),
+        }), file=sys.stderr)
+        return 2
+
+    try:
+        completion = load_json(completion_path)
+        audit_summary = load_json(summary_path)
+    except Exception as exc:
+        print(json.dumps({"error": "unparseable_json", "detail": str(exc)}), file=sys.stderr)
+        return 2
+
+    stored = completion.get("user_summary") if isinstance(completion, dict) else None
+    if stored is None:
+        print(json.dumps({"error": "legacy_completion_missing_user_summary"}), file=sys.stderr)
+        return 3
+
+    from lib_validate import derive_user_summary
+    derived = derive_user_summary(audit_summary if isinstance(audit_summary, dict) else {})
+
+    if stored == derived:
+        print(json.dumps({"status": "match"}))
+        return 0
+
+    import hashlib as _hashlib
+    stored_sha = _hashlib.sha256(stored.encode("utf-8")).hexdigest()
+    derived_sha = _hashlib.sha256(derived.encode("utf-8")).hexdigest()
+    stored_lines = stored.splitlines()
+    derived_lines = derived.splitlines()
+    diff_first_line = None
+    for i, (s, d) in enumerate(zip(stored_lines, derived_lines)):
+        if s != d:
+            diff_first_line = stored_lines[i] if i < len(stored_lines) else None
+            break
+    else:
+        # All shared lines match; the longer one diverges at its tail.
+        if len(stored_lines) != len(derived_lines):
+            idx = min(len(stored_lines), len(derived_lines))
+            diff_first_line = stored_lines[idx] if idx < len(stored_lines) else None
+
+    print(json.dumps({
+        "error": "mismatch",
+        "stored_sha": stored_sha,
+        "derived_sha": derived_sha,
+        "diff_first_line": diff_first_line,
+    }), file=sys.stderr)
+    return 1
 
 
 def cmd_validate_task_receipt_chain(args: argparse.Namespace) -> int:
@@ -4705,6 +4779,13 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     chain_validate_parser.add_argument("task_dir")
     chain_validate_parser.set_defaults(func=cmd_validate_task_receipt_chain)
+
+    verify_summary_parser = subparsers.add_parser(
+        "verify-audit-summary-text",
+        help="Verify completion.json::user_summary matches a fresh derivation from audit-summary.json (exit 0/1/2/3)",
+    )
+    verify_summary_parser.add_argument("task_dir")
+    verify_summary_parser.set_defaults(func=cmd_verify_audit_summary_text)
 
     rp_parser = subparsers.add_parser("repair-plan", help="Q-learning repair plan (reads findings from stdin)")
     rp_parser.add_argument("--root", default=".")
