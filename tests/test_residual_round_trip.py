@@ -136,6 +136,21 @@ def _call_cmd_run_audit_finish(task_dir: Path, monkeypatch: pytest.MonkeyPatch |
 # ---------------------------------------------------------------------------
 
 
+def _make_noop_transition_task(task_dir: Path) -> object:
+    """Return a patched transition_task that skips receipt-chain integrity checks.
+
+    Updates manifest.json to the requested stage and returns the same
+    (prev_stage, manifest) shape as the real transition_task.
+    """
+    def _noop_transition_task(td, stage, **kwargs):
+        manifest = json.loads((td / "manifest.json").read_text())
+        prev_stage = manifest.get("stage", "FINAL_AUDIT")
+        manifest["stage"] = stage
+        (td / "manifest.json").write_text(json.dumps(manifest))
+        return prev_stage, manifest
+    return _noop_transition_task
+
+
 def test_cmd_run_audit_finish_updates_residual_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Synthetic task dir with manifest(FINAL_AUDIT), audit-summary, retro, and raw-input.md
     containing <!-- residual-id: {some-id} -->.  Pre-existing in_progress row in queue.
@@ -156,7 +171,12 @@ def test_cmd_run_audit_finish_updates_residual_row(tmp_path: Path, monkeypatch: 
     row = _make_row(row_id=residual_id, status="in_progress", attempts=1)
     _pre_populate_queue(root, [row])
 
-    rc = _call_cmd_run_audit_finish(task_dir)
+    import ctl as _ctl
+    monkeypatch.setattr(_ctl, "transition_task", _make_noop_transition_task(task_dir))
+
+    cmd_run_audit_finish = _import_cmd_run_audit_finish()
+    args = argparse.Namespace(task_dir=str(task_dir))
+    rc = cmd_run_audit_finish(args)
     assert rc == 0, f"cmd_run_audit_finish returned non-zero: {rc}"
 
     q = load_queue(queue_path(root))
@@ -241,7 +261,12 @@ def test_cmd_run_audit_finish_no_raw_input(tmp_path: Path, monkeypatch: pytest.M
     unrelated_row = _make_row(row_id="unrelated-row-001", status="in_progress")
     _pre_populate_queue(root, [unrelated_row])
 
-    rc = _call_cmd_run_audit_finish(task_dir)
+    import ctl as _ctl
+    monkeypatch.setattr(_ctl, "transition_task", _make_noop_transition_task(task_dir))
+
+    cmd_run_audit_finish = _import_cmd_run_audit_finish()
+    args = argparse.Namespace(task_dir=str(task_dir))
+    rc = cmd_run_audit_finish(args)
     assert rc == 0
 
     # Queue must be unchanged (no row was updated)
@@ -269,8 +294,11 @@ def test_cmd_run_audit_finish_ingest_failure_does_not_block(tmp_path: Path, monk
 
     import ctl as _ctl
     monkeypatch.setattr(_ctl.lib_residuals, "ingest_findings", _always_raise)
+    monkeypatch.setattr(_ctl, "transition_task", _make_noop_transition_task(task_dir))
 
-    rc = _call_cmd_run_audit_finish(task_dir)
+    cmd_run_audit_finish = _import_cmd_run_audit_finish()
+    args = argparse.Namespace(task_dir=str(task_dir))
+    rc = cmd_run_audit_finish(args)
     assert rc == 0, (
         "cmd_run_audit_finish must exit 0 even when ingest_findings raises"
     )
@@ -298,7 +326,12 @@ def test_cmd_run_audit_finish_no_residual_id_in_raw_input(tmp_path: Path, monkey
     row = _make_row(row_id="some-pending-row", status="in_progress")
     _pre_populate_queue(root, [row])
 
-    rc = _call_cmd_run_audit_finish(task_dir)
+    import ctl as _ctl
+    monkeypatch.setattr(_ctl, "transition_task", _make_noop_transition_task(task_dir))
+
+    cmd_run_audit_finish = _import_cmd_run_audit_finish()
+    args = argparse.Namespace(task_dir=str(task_dir))
+    rc = cmd_run_audit_finish(args)
     assert rc == 0
 
     q = load_queue(queue_path(root))

@@ -35,6 +35,7 @@ User-facing skills (invoked directly via `/dynos-work:<name>`):
 - `status` — show current task state
 - `resume` — continue interrupted work
 - `dashboard` — generate/serve the project dashboard
+- `residual` — list or drain non-blocking findings captured during audit
 
 Internal skills (spawned by the system, not invoked directly by users):
 
