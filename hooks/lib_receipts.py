@@ -17,7 +17,7 @@ from typing import Any
 
 from lib_core import now_iso, append_execution_log, _persistent_project_dir
 from lib_log import log_event, verify_signed_events
-from lib_validate import require_nonblank
+from lib_validate import require_nonblank, require_nonblank_str
 from write_policy import WriteAttempt, get_capability_key, require_write_allowed
 
 
@@ -715,8 +715,7 @@ def receipt_search_conducted(task_dir: Path, *, query: str, search_used: bool = 
     so a caller cannot write a vacuous "search conducted" receipt without having
     done any search.
     """
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("receipt_search_conducted: query must be a non-empty string")
+    require_nonblank_str(query, field_name="receipt_search_conducted: query")
     if not search_used:
         raise ValueError(
             "receipt_search_conducted: search_used must be True — "
@@ -987,8 +986,7 @@ def receipt_executor_done(
     determined the segment was legitimately a no-op. Must be a bool; raises
     ``ValueError`` on type violation.
     """
-    if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
-        raise ValueError("injected_prompt_sha256 must be a non-empty string")
+    require_nonblank_str(injected_prompt_sha256, field_name="injected_prompt_sha256")
 
     if not isinstance(diff_verified_files, list) or not all(
         isinstance(f, str) for f in diff_verified_files
@@ -1124,8 +1122,7 @@ def _validate_audit_done_args(
     "no report -> default to zero" rule). Raises ValueError or TypeError
     with identical existing messages on any violation.
     """
-    if not isinstance(route_mode, str) or not route_mode:
-        raise ValueError("route_mode must be a non-empty string")
+    require_nonblank_str(route_mode, field_name="route_mode")
     if injected_agent_sha256 is None and route_mode != "generic":
         raise ValueError(
             f"injected_agent_sha256 may be None only when route_mode=='generic' "
@@ -1788,11 +1785,10 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
 
     # Sidecar assertion — unconditional now. Every caller must first run
     # `hooks/router.py planner-inject-prompt` and pass the captured digest.
-    if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
-        raise ValueError(
-            "receipt_planner_spawn: injected_prompt_sha256 must be a "
-            "non-empty string"
-        )
+    require_nonblank_str(
+        injected_prompt_sha256,
+        field_name="receipt_planner_spawn: injected_prompt_sha256",
+    )
     sidecar_file = (
         task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR
         / f"{phase}.sha256"
@@ -1926,12 +1922,10 @@ def receipt_tdd_tests(
         isinstance(p, str) for p in test_file_paths
     ):
         raise ValueError("test_file_paths must be a list[str]")
-    if not isinstance(tests_evidence_sha256, str) or not tests_evidence_sha256:
-        raise ValueError("tests_evidence_sha256 must be a non-empty string")
+    require_nonblank_str(tests_evidence_sha256, field_name="tests_evidence_sha256")
     if not isinstance(tokens_used, int) or tokens_used < 0:
         raise ValueError("tokens_used must be a non-negative int")
-    if not isinstance(model_used, str) or not model_used:
-        raise ValueError("model_used must be a non-empty string")
+    require_nonblank_str(model_used, field_name="model_used")
 
     if tokens_used > 0:
         _record_tokens(task_dir, "tdd-tests", model_used, tokens_used)
@@ -1965,12 +1959,10 @@ def receipt_human_approval(
     (no path separators), `artifact_sha256` must be a non-empty string,
     `approver` defaults to "human".
     """
-    if not isinstance(stage, str) or not stage:
-        raise ValueError("stage must be a non-empty string")
+    require_nonblank_str(stage, field_name="stage")
     if "/" in stage or "\\" in stage or stage.startswith("."):
         raise ValueError(f"stage must not contain path separators: {stage!r}")
-    if not isinstance(artifact_sha256, str) or not artifact_sha256:
-        raise ValueError("artifact_sha256 must be a non-empty string")
+    require_nonblank_str(artifact_sha256, field_name="artifact_sha256")
     try:
         require_nonblank(approver, field_name="approver")
     except (TypeError, ValueError):
@@ -2133,8 +2125,7 @@ def receipt_postmortem_skipped(
             f"invalid postmortem skip reason: {reason!r} "
             f"(allowed: {', '.join(sorted(_POSTMORTEM_SKIP_REASONS))})"
         )
-    if not isinstance(retrospective_sha256, str) or not retrospective_sha256:
-        raise ValueError("retrospective_sha256 must be a non-empty string")
+    require_nonblank_str(retrospective_sha256, field_name="retrospective_sha256")
 
     # Rule (a): subsumed_by must be a list. `isinstance(..., list)`
     # rejects tuples, sets, dicts, strings, None, ints, etc. — the
@@ -2221,10 +2212,8 @@ def receipt_calibration_applied(
         raise ValueError("retros_consumed must be a non-negative int")
     if not isinstance(scores_updated, int) or scores_updated < 0:
         raise ValueError("scores_updated must be a non-negative int")
-    if not isinstance(policy_sha256_before, str) or not policy_sha256_before:
-        raise ValueError("policy_sha256_before must be a non-empty string")
-    if not isinstance(policy_sha256_after, str) or not policy_sha256_after:
-        raise ValueError("policy_sha256_after must be a non-empty string")
+    require_nonblank_str(policy_sha256_before, field_name="policy_sha256_before")
+    require_nonblank_str(policy_sha256_after, field_name="policy_sha256_after")
     if retros_consumed > 0 and policy_sha256_before == policy_sha256_after:
         raise ValueError(
             f"receipt_calibration_applied REFUSES to write: retros_consumed="
@@ -2263,8 +2252,7 @@ def receipt_calibration_noop(
             f"invalid calibration-noop reason: {reason!r} "
             f"(allowed: {sorted(_CALIBRATION_NOOP_REASONS)})"
         )
-    if not isinstance(policy_sha256, str) or not policy_sha256:
-        raise ValueError("policy_sha256 must be a non-empty string")
+    require_nonblank_str(policy_sha256, field_name="policy_sha256")
     return write_receipt(
         task_dir,
         "calibration-noop",
@@ -2401,10 +2389,8 @@ def receipt_force_override(
         encode human intent (break-glass rationale + operator identity)
         that is not derivable from on-disk state.
     """
-    if not isinstance(from_stage, str) or not from_stage:
-        raise ValueError("from_stage must be a non-empty string")
-    if not isinstance(to_stage, str) or not to_stage:
-        raise ValueError("to_stage must be a non-empty string")
+    require_nonblank_str(from_stage, field_name="from_stage")
+    require_nonblank_str(to_stage, field_name="to_stage")
     # SEC-002 hardening: stage names MUST be strict uppercase identifier
     # slugs. Prevents path traversal via crafted manifest["stage"] values
     # like "../../etc/x" reaching the receipt filename.
@@ -2488,10 +2474,8 @@ def receipt_scheduler_refused(
         entry MUST be a string. Any other container type or non-string
         entry raises ``ValueError``.
     """
-    if not isinstance(current_stage, str) or not current_stage:
-        raise ValueError("current_stage must be a non-empty string")
-    if not isinstance(proposed_stage, str) or not proposed_stage:
-        raise ValueError("proposed_stage must be a non-empty string")
+    require_nonblank_str(current_stage, field_name="current_stage")
+    require_nonblank_str(proposed_stage, field_name="proposed_stage")
     # SEC-002 hardening: stage names MUST be strict uppercase identifier
     # slugs. Prevents path traversal / event-payload injection via crafted
     # manifest stage values reaching the receipt/event surface.

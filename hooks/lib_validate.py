@@ -39,6 +39,26 @@ def require_nonblank(value: str, *, field_name: str) -> str:
     return stripped
 
 
+def require_nonblank_str(value, *, field_name: str) -> str:
+    """Raise ValueError if value is not a non-empty string. Returns stripped value.
+
+    Use this when migrating inline raise patterns of the form
+    `if not isinstance(X, str) or not X: raise ValueError("X must be a non-empty string")`.
+
+    Differs from require_nonblank() in that non-string inputs raise ValueError
+    (not TypeError), preserving compatibility with code paths that use
+    `pytest.raises(ValueError)` on the original inline pattern.
+
+    Raises:
+        ValueError: if value is not a str OR is empty/whitespace-only.
+    Returns:
+        The stripped string.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
 REQUIRED_SPEC_HEADINGS: list[str] = [
     "Task Summary",
     "User Context",
