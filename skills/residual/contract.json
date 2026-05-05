@@ -1,0 +1,56 @@
+{
+  "version": "1.0.0",
+  "skill": "residual",
+  "description": "Inspect and drain the proactive-residual queue (.dynos/proactive-findings.json). Two subcommands: list and run-next.",
+  "subcommands": {
+    "list": {
+      "description": "Print every row in the proactive-findings queue (all statuses, oldest first), one row per line, plain text.",
+      "input_schema": {
+        "proactive-findings.json": {
+          "type": "object",
+          "required": false,
+          "source": "{root}/.dynos/proactive-findings.json (root = current project root, the directory containing .dynos/)"
+        }
+      },
+      "output_schema": {
+        "queue_listing": {
+          "type": "string",
+          "description": "Plain-text listing. One line per row containing id, status, attempts, source_auditor, title (truncated to 60 chars), created_at. If the file is missing or findings is empty, prints exactly: 'dynos-work: no residuals queued'."
+        }
+      }
+    },
+    "run-next": {
+      "description": "Pick the oldest pending row with attempts < 3, mark it in_progress, invoke /dynos-work:start with a residual-id sentinel, poll the spawned task's manifest.json until terminal stage, then report the round-trip outcome.",
+      "input_schema": {
+        "proactive-findings.json": {
+          "type": "object",
+          "required": true,
+          "source": "{root}/.dynos/proactive-findings.json"
+        }
+      },
+      "output_schema": {
+        "round_trip_status": {
+          "type": "string",
+          "description": "One of: 'dynos-work: residual queue empty', 'dynos-work: residual in_progress — run-next already active', 'residual {id} → done', 'residual {id} → pending', 'residual {id} → pending (round-trip missing, reverted)', or 'residual {id} → failed'."
+        }
+      }
+    }
+  },
+  "input_schema": {
+    "proactive-findings.json": {
+      "type": "object",
+      "required": false,
+      "source": "{root}/.dynos/proactive-findings.json"
+    }
+  },
+  "output_schema": {
+    "stdout": {
+      "type": "string",
+      "description": "Plain-text output. Subcommand-specific. Never JSON, never ANSI-coloured."
+    },
+    "queue_mutation": {
+      "type": "object",
+      "description": "run-next mutates {root}/.dynos/proactive-findings.json via lib_residuals.update_row_status (LOCK_EX atomic write)."
+    }
+  }
+}

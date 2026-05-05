@@ -43,6 +43,12 @@ from lib_receipts import (
 from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, validate_task_artifacts
 from write_policy import WriteAttempt, get_capability_key, require_write_allowed
 
+# task-20260504-007: residuals queue producer + run-next consumer.
+# Imported as a module (not `from lib_residuals import ...`) so tests
+# can monkeypatch `_ctl.lib_residuals.ingest_findings` and have the
+# patch reach the call site here.
+import lib_residuals
+
 
 _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
     # review_stage -> (relative artifact path, next stage)
@@ -3848,6 +3854,48 @@ def cmd_run_audit_reflect(args: argparse.Namespace) -> int:
         return 1
 
 
+def _residual_update_for_target(root: Path, residual_id: str, target: str) -> None:
+    """Apply the residual-queue status update implied by ``target``.
+
+    task-20260504-007 (AC-6d, AC-10).
+
+    target == "DONE":
+        update_row_status(root, residual_id, "done")
+    target == "FAILED":
+        Look up the row's ``attempts`` counter (read-only via load_queue):
+          - attempts < 3 → update_row_status(root, residual_id, "pending")
+          - attempts >= 3 → update_row_status(root, residual_id, "failed")
+
+    Any other target is a no-op. The current ``cmd_run_audit_finish``
+    body only ever transitions to DONE; the FAILED branch is implemented
+    here for forward-compatibility per AC-10 so a future caller that
+    introduces conditional DONE/FAILED need not duplicate this logic.
+
+    All exceptions raised by lib_residuals are propagated; the caller
+    is responsible for catching and logging so the DONE transition is
+    not blocked by a queue-update failure.
+    """
+    if target == "DONE":
+        lib_residuals.update_row_status(root, residual_id, "done")
+        return
+    if target == "FAILED":
+        # Read row.attempts via load_queue. Missing/non-int attempts is
+        # treated as 0 — the consumer (run-next) is the only writer of
+        # attempts and always materializes it as int, but defend anyway.
+        q = lib_residuals.load_queue(lib_residuals.queue_path(root))
+        attempts = 0
+        for row in q.get("findings", []):
+            if isinstance(row, dict) and row.get("id") == residual_id:
+                a = row.get("attempts")
+                if isinstance(a, int):
+                    attempts = a
+                break
+        new_status = "pending" if attempts < 3 else "failed"
+        lib_residuals.update_row_status(root, residual_id, new_status)
+        return
+    # Any other target: no-op.
+
+
 def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -3892,6 +3940,54 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
                 pass
         else:
             _try_extend_chain_for_artifact(task_dir, completion_path)
+
+        # task-20260504-007 (AC-5): residuals producer. Append admitted
+        # findings from this task's audit-summary.json to the project-level
+        # queue. A producer failure must NEVER block the DONE transition;
+        # we catch broadly and log to stderr.
+        try:
+            lib_residuals.ingest_findings(task_dir, root, completion)
+        except Exception as _ingest_exc:  # noqa: BLE001 — must not block DONE
+            print(
+                f"warning: lib_residuals.ingest_findings failed: {_ingest_exc}",
+                file=sys.stderr,
+            )
+
+        # task-20260504-007 (AC-6, AC-10): residual-id round-trip. If this
+        # task was spawned from a queue row, its raw-input.md begins with
+        # `<!-- residual-id: {id} -->`. Update that row's status BEFORE
+        # transition_task is invoked. The ordering is load-bearing: once
+        # transition_task commits the stage change the function may return
+        # before any post-transition work executes, so the queue update
+        # must precede it. A failure here is logged and swallowed; the DONE
+        # transition still runs.
+        raw_input_path = task_dir / "raw-input.md"
+        if raw_input_path.exists():
+            try:
+                _raw_text = raw_input_path.read_text(encoding="utf-8")
+            except OSError as _read_exc:
+                print(
+                    f"warning: could not read {raw_input_path}: {_read_exc}",
+                    file=sys.stderr,
+                )
+                _raw_text = None
+            if _raw_text is not None:
+                _residual_id = lib_residuals.extract_residual_id(_raw_text)
+                if _residual_id is not None:
+                    # Current cmd_run_audit_finish body only ever transitions
+                    # to DONE — there is no conditional DONE/FAILED branch.
+                    # Therefore the target is unconditionally "DONE" here.
+                    # AC-10's FAILED branch is implemented in
+                    # _residual_update_for_target for forward compatibility.
+                    _target = "DONE"
+                    try:
+                        _residual_update_for_target(root, _residual_id, _target)
+                    except Exception as _upd_exc:  # noqa: BLE001 — must not block DONE
+                        print(
+                            f"warning: residual-id round-trip failed for "
+                            f"{_residual_id!r}: {_upd_exc}",
+                            file=sys.stderr,
+                        )
 
         _, updated = transition_task(task_dir, "DONE")
         # task-20260503-002: emit user_summary in stdout JSON (read verbatim from

@@ -45,6 +45,7 @@ After the task, it learns from what went wrong and builds prevention rules for n
 /dynos-work:status             check where your task is
 /dynos-work:resume             continue after interruption
 /dynos-work:investigate [bug]  deep bug investigation
+/dynos-work:residual           inspect or drain non-blocking findings
 ```
 
 ## Requirements

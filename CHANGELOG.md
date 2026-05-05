@@ -11,6 +11,21 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.3.0] - 2026-05-04
+### "Residual Drain": Non-Blocking Findings Become an Overnight Backlog
+
+The theme of 7.3.0 is giving non-blocking audit findings somewhere to go. Instead of disappearing into the audit report, advisory-grade findings now flow into a persistent backlog that can be inspected on demand and drained autonomously while you sleep.
+
+### Added
+- **Producer hook in audit-finish**: every audit cycle now appends its non-blocking findings to `proactive-findings.json`, so advisory-grade signals survive past the task they were found in.
+- **`/dynos-work:residual` skill**: new user-facing skill with `list` and `run-next` subcommands for inspecting the residual queue and draining one item at a time.
+- **Overnight drain pattern**: pair the residual skill with the `/loop` runner (`/loop 1h /dynos-work:residual run-next`) to autonomously chip away at the backlog between active sessions.
+
+### Plugin / Distribution
+- Bump `package.json` and `.claude-plugin/plugin.json` to `7.3.0`.
+
+---
+
 ## [7.2.0] - 2026-04-21
 ### "Write Boundaries": Control-Plane Ownership, Wrapper Persistence, Task Diagnostics
 
