@@ -29,6 +29,29 @@ _GHOST_TEST_ALLOWLIST: dict[str, str] = {
         "Facade re-export contract: verifies lib.is_pid_running is callable after import. "
         "Meaningful because the facade could accidentally export a non-callable alias."
     ),
+    "test_source_filter_downstream.py::test_policy_engine_never_calls_with_include_unverified_true": (
+        "Static AST guard delegating to _assert_no_include_unverified_true helper. The helper "
+        "asserts internally; the wrapping test's job is to bind module path → guard. "
+        "Hygiene check counts asserts in the test function only and cannot follow the helper call."
+    ),
+    "test_source_filter_downstream.py::test_agent_generator_never_calls_with_include_unverified_true": (
+        "Static AST guard delegating to _assert_no_include_unverified_true helper. Same justification "
+        "as the policy_engine variant — wrapper binds module path → guard, helper holds the assert."
+    ),
+    "test_source_filter_downstream.py::test_postmortem_improve_never_calls_with_include_unverified_true": (
+        "Static AST guard delegating to _assert_no_include_unverified_true helper. Same justification "
+        "as the policy_engine variant — wrapper binds module path → guard, helper holds the assert."
+    ),
+    "test_lib_chain_perf.py::test_append_entry_function_exists": (
+        "Crash-guard precondition for the perf-001 / perf-002 sibling tests in TestPerf001And002. "
+        "Asserts _append_entry is found by _find_function; if the function is renamed or removed, "
+        "this test fails fast with a clear message rather than letting the sibling tests fail "
+        "with confusing AST-walk errors. Tautological-looking but load-bearing as a rename canary."
+    ),
+    "test_lib_chain_perf.py::test_cmd_function_exists": (
+        "Crash-guard precondition for the perf-002 sibling tests. Same justification as "
+        "test_append_entry_function_exists — rename canary for cmd_run_task_receipt_chain."
+    ),
 }
 
 _BANNED_SNIPPETS = (
