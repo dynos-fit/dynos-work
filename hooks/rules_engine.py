@@ -64,6 +64,7 @@ __all__ = [
     "ScanScope",
     "Violation",
     "run_checks",
+    "run_checks_with_stats",
     "main",
 ]
 
@@ -1008,6 +1009,46 @@ def run_checks(
 
     violations.sort(key=lambda v: (v.file, int(v.line), v.rule_id))
     return violations
+
+
+def run_checks_with_stats(
+    root: Path,
+    mode: str = "all",
+) -> "tuple[list[Violation], int, int]":
+    """Like run_checks but also returns loaded and skipped rule counts.
+
+    Returns (violations, loaded_count, skipped_count) where:
+      - loaded_count: number of Rule objects successfully constructed by
+        _rule_from_dict (entries that returned a non-None Rule).
+      - skipped_count: number of raw entries for which _rule_from_dict
+        returned None.
+      - violations: result of run_checks(root, mode) — callers of
+        run_checks continue to work unchanged and monkeypatching
+        run_checks in tests propagates through this function.
+
+    Implementation note: the loaded/skipped counts are derived from a
+    single read of the rules file inside this function. The violation
+    list comes from run_checks (which does its own read). This design
+    lets receipt_rules_check_passed obtain both counts and violations
+    from one call without a separate file read in the caller
+    (TOCTOU-safe at the caller boundary).
+    """
+    root = Path(root)
+    raw_rules, _ = _load_rules_file(root)
+    loaded_count = 0
+    skipped_count = 0
+    for raw in raw_rules:
+        rule = _rule_from_dict(raw)
+        if rule is None:
+            skipped_count += 1
+        else:
+            loaded_count += 1
+
+    # Delegate to run_checks so monkeypatching run_checks in tests is
+    # respected (the receipt writer calls run_checks_with_stats, but
+    # test stubs that only patch run_checks still take effect here).
+    violations = run_checks(root, mode)
+    return violations, loaded_count, skipped_count
 
 
 # ---------------------------------------------------------------------------
