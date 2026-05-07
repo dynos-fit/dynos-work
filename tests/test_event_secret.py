@@ -98,7 +98,7 @@ def test_env_var_present_returned_no_file_created(
 def test_no_env_no_file_creates_secret_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No env var, no file → creates event-secret at persistent dir with mode 0o600; value is 32 hex chars."""
+    """No env var, no file → creates event-secret at persistent dir with mode 0o600; value is 64 hex chars."""
     dynos_home = tmp_path / "dynos-home"
     dynos_home.mkdir()
     monkeypatch.setenv("DYNOS_HOME", str(dynos_home))
@@ -108,8 +108,8 @@ def test_no_env_no_file_creates_secret_file(
 
     result = lib_log._resolve_event_secret(root)
 
-    # Must be 32 hex chars
-    assert len(result) == 32, f"Expected 32-char derived secret, got {len(result)!r}"
+    # Must be 64 hex chars
+    assert len(result) == 64, f"Expected 64-char derived secret, got {len(result)!r}"
     int(result, 16)  # raises if not valid hex
 
     # File must exist somewhere under dynos-home

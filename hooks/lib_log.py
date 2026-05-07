@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 import os
-import platform
+import secrets
 import sys
 import tempfile
 from pathlib import Path
@@ -144,12 +144,23 @@ _EVENT_SECRET_CACHE: dict[str, str] = {}
 
 
 def _derive_per_task_secret(project_secret: str, task_id: str) -> str:
-    """Derive a per-task HMAC secret from project secret + task_id."""
-    return hmac.new(
-        project_secret.encode(),
-        task_id.encode(),
+    """Derive a per-task HMAC secret via RFC 5869 HKDF-SHA256.
+
+    Salt is the task_id; info is a versioned domain-separation label.
+    Single expand block since output length (32 bytes) equals SHA256
+    digest size.
+    """
+    prk = hmac.new(
+        task_id.encode("utf-8"),
+        project_secret.encode("utf-8"),
         hashlib.sha256,
-    ).hexdigest()[:32]
+    ).digest()
+    okm = hmac.new(
+        prk,
+        b"dynos-work/v1/per-task-event-secret" + b"\x01",
+        hashlib.sha256,
+    ).digest()
+    return okm.hex()
 
 
 def _resolve_event_secret(root: Path, *, task_id: str | None = None) -> str:
@@ -160,9 +171,9 @@ def _resolve_event_secret(root: Path, *, task_id: str | None = None) -> str:
     (b) In-process cache keyed on str(root.resolve()).
     (c) Cache file at _persistent_project_dir(root)/'event-secret' with strict
         0o600 permission check.
-    (d) Derive from sha256(f'{root.resolve()}:{platform.node()}')[:32], write
-        atomically via os.open(O_WRONLY|O_CREAT|O_EXCL, 0o600), handle
-        FileExistsError by re-reading (branch c).
+    (d) Generate a fresh secrets.token_hex(32) and write atomically via
+        os.open(O_WRONLY|O_CREAT|O_EXCL, 0o600), handle FileExistsError by
+        re-reading (branch c).
 
     When ``task_id`` is a non-empty string the resolved project secret is
     further derived via :func:`_derive_per_task_secret` so each task's events
@@ -197,10 +208,10 @@ def _resolve_event_secret(root: Path, *, task_id: str | None = None) -> str:
             return _derive_per_task_secret(secret, task_id)
         return secret
 
-    # Derive a deterministic secret for this project+host combination.
-    secret = hashlib.sha256(
-        f"{root.resolve()}:{platform.node()}".encode("utf-8")
-    ).hexdigest()[:32]
+    # Generate a fresh random secret for this project. The atomic O_EXCL
+    # write below ensures only one process wins on first-run; concurrent
+    # processes fall through the FileExistsError path and re-read.
+    secret = secrets.token_hex(32)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     try:

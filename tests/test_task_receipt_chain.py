@@ -50,22 +50,27 @@ def _project_secret(monkeypatch) -> str:
 def test_hmac_arg_order_canary():
     """AC 14: hardcoded expected hex catches HMAC key/message swap.
 
-    Computed at spec time:
-      hmac.new(b"fixed-project-secret", b"task-20260503-001",
-               hashlib.sha256).hexdigest()[:32]
+    Updated for task-20260507-001: _derive_per_task_secret now uses
+    RFC 5869 HKDF-SHA256. The pinned vector is:
+      prk = hmac.new(b"task-20260503-001", b"fixed-project-secret",
+                     hashlib.sha256).digest()
+      okm = hmac.new(prk, b"dynos-work/v1/per-task-event-secret" + b"\x01",
+                     hashlib.sha256).digest()
+      expected = okm.hex()  # 64-char hex string
     """
     from lib_log import _derive_per_task_secret
 
-    expected = "4b8b355f91d44cc282a1c48777424d17"
+    # Compute HKDF expected value inline so the canary stays self-verifying.
+    prk = hmac.new(
+        b"task-20260503-001", b"fixed-project-secret", hashlib.sha256
+    ).digest()
+    expected = hmac.new(
+        prk, b"dynos-work/v1/per-task-event-secret" + b"\x01", hashlib.sha256
+    ).hexdigest()
+
     actual = _derive_per_task_secret("fixed-project-secret", "task-20260503-001")
     assert actual == expected, f"HMAC arg-order swap detected: got {actual!r}"
-
-    # Also verify the actual computation matches (confirms our hardcoded
-    # value isn't drifting from the formula).
-    formula = hmac.new(
-        b"fixed-project-secret", b"task-20260503-001", hashlib.sha256
-    ).hexdigest()[:32]
-    assert formula == expected
+    assert len(actual) == 64, f"HKDF output must be 64 hex chars; got {len(actual)}"
 
 
 # --- AC 1: module public API ---
