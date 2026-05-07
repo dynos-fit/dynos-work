@@ -503,14 +503,29 @@ def _accept_finding(finding: Any, auditor_name: str) -> bool:
     if severity == "info":
         return False
 
-    # Drop "no-change-required" findings: an auditor recorded its review of a
-    # subsystem but found nothing actionable. These slip past the severity
-    # filter as severity:minor + blocking:false, then bloat the residual
-    # queue with non-actionable rows. Detect by remediation text.
+    # Schema-shape filter: real findings carry a concrete `remediation`
+    # field. Auditor review notes ("Reviewed X — no exploit found") are
+    # often emitted as severity:minor + blocking:false with empty or
+    # absent remediation, polluting the queue with non-actionable rows.
+    # Two checks:
+    #   (a) any severity: explicit "no change/action/fix required"
+    #       remediation text means the auditor itself classified the row
+    #       as informational. Drop it.
+    #   (b) severity:minor: require a non-empty remediation field. Real
+    #       minor bugs have a fix; review notes don't. Critical/major
+    #       findings keep through this gate even without remediation
+    #       because the severity already justifies follow-up.
     remediation = finding.get("remediation")
     if isinstance(remediation, str):
-        rem_lower = remediation.strip().lower()
+        rem_stripped = remediation.strip()
+        rem_lower = rem_stripped.lower()
         if rem_lower.startswith(("no change required", "no action required", "no fix required")):
+            return False
+        if severity == "minor" and not rem_stripped:
+            return False
+    else:
+        # remediation absent entirely
+        if severity == "minor":
             return False
 
     category = finding.get("category")

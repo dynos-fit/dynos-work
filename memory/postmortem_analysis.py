@@ -955,23 +955,18 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
     except (FileNotFoundError, OSError, ValueError) as exc:
         log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
 
-    # v7.4.0: ingest rules with actionable enforcement (test/lint/static-check/
-    # ci-gate/runtime-guard) into the residual queue so they surface as
-    # buildable follow-ups, not just policy entries. Defensive — a queue
-    # write failure must NOT abort the postmortem.
+    # Removed: postmortem rules used to be ingested into the residual queue
+    # via lib_residuals.ingest_prevention_rules. The path was triple-counting
+    # work (audit-finding row + registry rule + residual row for the same
+    # underlying issue). Once a rule is in prevention-rules.json the engine
+    # enforces it at commit time; the residual is redundant.
+    #
+    # If the underlying violation needs explicit follow-up tracking, the
+    # original audit finding (already ingested by ingest_findings at
+    # audit-finish) is the canonical row. The lib_residuals function itself
+    # is preserved for tests and any external callers, but apply_analysis
+    # no longer fires it.
     queue_ingested = 0
-    if just_merged_rules:
-        try:
-            from lib_residuals import ingest_prevention_rules
-            queue_ingested = ingest_prevention_rules(root, just_merged_rules)
-        except Exception as _exc:  # noqa: BLE001 — defensive
-            log_event(
-                root,
-                "postmortem_residual_ingest_failed",
-                task=task_id,
-                task_id=task_id,
-                error=str(_exc),
-            )
 
     return {
         "task_id": task_id,

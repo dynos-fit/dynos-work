@@ -797,9 +797,16 @@ def test_filter_accepts_security_auditor(tmp_path: Path):
 
 
 def test_filter_accepts_performance_auditor(tmp_path: Path):
-    """v7.4.0: non-blocking performance finding is admitted."""
+    """v7.4.0: non-blocking performance finding is admitted.
+
+    task-005 schema-shape filter: severity:minor findings now require a
+    non-empty remediation field to be admitted (review notes without
+    remediation are dropped). Use severity:major here so the test
+    continues to assert the auditor allowlist without pulling in the
+    minor-needs-remediation gate.
+    """
     assert _ingest_one(tmp_path, "performance-auditor",
-                       severity="minor", category="performance") == 1
+                       severity="major", category="performance") == 1
 
 
 def test_filter_accepts_code_quality_auditor(tmp_path: Path):
