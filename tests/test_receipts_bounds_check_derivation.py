@@ -211,6 +211,23 @@ def _collect_derivation_violations(source_text: str, rel_path: str) -> list[str]
     return violations
 
 
+def _is_pattern_b_compliant(node: ast.expr) -> bool:
+    """Return True iff *node* is a direct Call to _persistent_project_dir,
+    or an ast.BinOp whose .left chain (recursing through nested BinOps)
+    terminates in such a Call. Mirrors the canonical
+    _persistent_project_dir(...) / "x" [/ "y" ...] grammar in approval.py.
+    """
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_persistent_project_dir"
+    ):
+        return True
+    if isinstance(node, ast.BinOp):
+        return _is_pattern_b_compliant(node.left)
+    return False
+
+
 def _classify_rhs(rhs: ast.expr) -> bool:
     """Return True if *rhs* matches Pattern A (task_dir-rooted) or Pattern B
     (persistent-dir-rooted).
@@ -222,7 +239,8 @@ def _classify_rhs(rhs: ast.expr) -> bool:
       - rhs.func.value.func is ast.Name with id == "Path"
       - rhs.func.value has exactly one positional arg that is ast.Name id == "task_dir"
 
-    Pattern B: any BinOp or Call subtree containing a Call to _persistent_project_dir
+    Pattern B: direct Call to _persistent_project_dir, OR BinOp whose .left chain
+      (recursing through nested BinOps) terminates in such a Call
     """
     # Pattern A
     if (
@@ -238,15 +256,13 @@ def _classify_rhs(rhs: ast.expr) -> bool:
     ):
         return True
 
-    # Pattern B: depth-first walk for any _persistent_project_dir Call node
-    if isinstance(rhs, (ast.BinOp, ast.Call)):
-        for sub in ast.walk(rhs):
-            if (
-                isinstance(sub, ast.Call)
-                and isinstance(sub.func, ast.Name)
-                and sub.func.id == "_persistent_project_dir"
-            ):
-                return True
+    # Pattern B: direct Call to _persistent_project_dir, OR a BinOp whose
+    # .left chain (recursing through nested BinOps) terminates in such a Call.
+    # Tightened from the prior ast.walk-over-subtree form (which accepted any
+    # descendant Call and was bypassable via wrapper Calls / IfExp / lambda
+    # discards / helper-arg passthrough; see SEAL-001 from task-20260506-005).
+    if _is_pattern_b_compliant(rhs):
+        return True
 
     return False
 
@@ -400,4 +416,72 @@ def no_bounds_check(task_dir, report_path):
     assert violations == [], (
         f"Expected zero violations for a function with no .relative_to() call, "
         f"but got: {violations}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 (AC-6, AC-7): Parametrized negative tests — bypass shapes are flagged
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "param_id,source",
+    [
+        (
+            "bypass_max_wrapper",
+            """\
+def bad_checker(task_dir, some_unsafe_path):
+    root = task_dir.parent.parent
+    pm = max(some_unsafe_path, _persistent_project_dir(root))
+    resolved_pm = pm.resolve()
+    x.relative_to(resolved_pm)
+""",
+        ),
+        (
+            "bypass_ifexp",
+            """\
+def bad_checker(task_dir, some_unsafe_path, cond):
+    root = task_dir.parent.parent
+    pm = _persistent_project_dir(root) if cond else some_unsafe_path
+    resolved_pm = pm.resolve()
+    x.relative_to(resolved_pm)
+""",
+        ),
+        (
+            "bypass_lambda",
+            """\
+def bad_checker(task_dir, some_unsafe_path):
+    root = task_dir.parent.parent
+    pm = (lambda p: some_unsafe_path)(_persistent_project_dir(root))
+    resolved_pm = pm.resolve()
+    x.relative_to(resolved_pm)
+""",
+        ),
+        (
+            "bypass_helper_arg",
+            """\
+def bad_checker(task_dir, some_unsafe_path):
+    root = task_dir.parent.parent
+    pm = some_helper(_persistent_project_dir(root))
+    resolved_pm = pm.resolve()
+    x.relative_to(resolved_pm)
+""",
+        ),
+    ],
+    ids=["bypass_max_wrapper", "bypass_ifexp", "bypass_lambda", "bypass_helper_arg"],
+)
+def test_static_check_flags_pattern_b_bypass_shapes(
+    param_id: str, source: str
+) -> None:
+    """Each bypass shape must be flagged as a violation by the tightened
+    Pattern B classifier. The tightened helper (_is_pattern_b_compliant)
+    only accepts a direct Call to _persistent_project_dir or a BinOp whose
+    .left chain terminates in such a Call — rejecting all four bypass shapes.
+    """
+    violations = _collect_derivation_violations(source, "hooks/receipts/fake.py")
+
+    assert violations != [], (
+        f"Expected at least one violation for bypass shape '{param_id}', "
+        f"but the tightened classifier produced no violations. "
+        f"This means the classifier incorrectly accepted a bypass shape as compliant."
     )
