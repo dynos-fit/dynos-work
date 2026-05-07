@@ -5530,6 +5530,79 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_residual_close(args: argparse.Namespace) -> int:
+    """Close a residual without running the full /dynos-work:start lifecycle.
+
+    Use for residuals that are one-liners, registry-only edits, or
+    informational notes that don't need spec/plan/audit/repair. The caller
+    is responsible for actually performing the work; this just marks the
+    queue row as terminal so it stops being eligible for run-next.
+
+    Required: a non-empty --reason describing what was done (or why the
+    row is being closed without code changes — e.g. "duplicate of <id>",
+    "informational; no action").
+    """
+    import json as _json
+
+    root = Path(args.root).resolve()
+    reason = (args.reason or "").strip()
+    if not reason:
+        print("--reason is required and must be non-empty", file=sys.stderr)
+        return 1
+    if len(reason) > 500:
+        print("--reason exceeds 500 chars", file=sys.stderr)
+        return 1
+    target_status = args.status
+    if target_status not in ("done", "wontfix"):
+        print(f"--status must be 'done' or 'wontfix' (got {target_status!r})", file=sys.stderr)
+        return 1
+
+    qpath = lib_residuals.queue_path(root)
+    if not qpath.exists():
+        print(f"residual queue not found at {qpath}", file=sys.stderr)
+        return 1
+
+    import fcntl, os as _os
+    with open(qpath, "r+b") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        raw = fh.read()
+        try:
+            data = _json.loads(raw.decode("utf-8")) if raw.strip() else {"findings": []}
+        except _json.JSONDecodeError as exc:
+            print(f"corrupt queue: {exc}", file=sys.stderr)
+            return 1
+        target = None
+        for r in data.get("findings", []):
+            if r.get("id") == args.residual_id:
+                target = r
+                break
+        if target is None:
+            print(f"residual id not found: {args.residual_id}", file=sys.stderr)
+            return 1
+        if target.get("status") in ("done", "wontfix"):
+            print(_json.dumps({
+                "status": "noop",
+                "residual_id": args.residual_id,
+                "current_status": target.get("status"),
+                "message": "already closed",
+            }, indent=2))
+            return 0
+        target["status"] = target_status
+        target["closed_at"] = lib_residuals._now_iso_z()
+        target["close_reason"] = reason
+        fh.seek(0); fh.truncate()
+        fh.write(_json.dumps(data, indent=2).encode("utf-8"))
+        fh.flush(); _os.fsync(fh.fileno())
+
+    print(_json.dumps({
+        "status": "closed",
+        "residual_id": args.residual_id,
+        "new_status": target_status,
+        "reason": reason,
+    }, indent=2))
+    return 0
+
+
 def cmd_stats_dora(args: argparse.Namespace) -> int:
     """Compute DORA metrics from all retrospectives."""
     import json as _json
@@ -6332,6 +6405,16 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     cal_json = cal_sub.add_parser("json", help="Dump full registry as JSON")
     cal_json.add_argument("--root", default=".")
     cal_parser.set_defaults(func=cmd_calibration)
+
+    residual_close_parser = subparsers.add_parser(
+        "residual-close",
+        help="Close a residual without running the /dynos-work:start lifecycle (for one-liners or non-actionable rows)",
+    )
+    residual_close_parser.add_argument("residual_id", help="Residual UUID from proactive-findings.json")
+    residual_close_parser.add_argument("--reason", required=True, help="Why this is being closed (1-500 chars)")
+    residual_close_parser.add_argument("--status", default="done", help="Final status: done or wontfix")
+    residual_close_parser.add_argument("--root", default=".", help="Project root")
+    residual_close_parser.set_defaults(func=cmd_residual_close)
 
     config_parser = subparsers.add_parser("config", help="Get or set project policy values")
     config_parser.add_argument("action", choices=["get", "set"], help="Action: get or set")
