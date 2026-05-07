@@ -133,10 +133,10 @@ def _collect_derivation_violations(source_text: str, rel_path: str) -> list[str]
         if not relative_to_calls:
             continue
 
-        # Pre-collect all Assign statements in this function body once
-        assign_stmts: list[ast.Assign] = []
+        # Pre-collect all Assign / AnnAssign / AugAssign statements in this function body
+        assign_stmts: list[ast.Assign | ast.AnnAssign | ast.AugAssign] = []
         for inner in ast.walk(node):
-            if isinstance(inner, ast.Assign):
+            if isinstance(inner, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 assign_stmts.append(inner)
 
         for call in relative_to_calls:
@@ -165,12 +165,40 @@ def _collect_derivation_violations(source_text: str, rel_path: str) -> list[str]
 
             # Step 5: find the assignment for arg_name in this function scope
             def _find_rhs(name: str) -> ast.expr | None:
-                """Return the RHS of the first Assign that sets *name*, or None."""
+                """Return the RHS of the LAST Assign / AnnAssign / AugAssign that
+                binds *name* in this function scope, or None if no binding found.
+
+                LAST-match-wins is load-bearing: an AugAssign that rebinds a name
+                previously assigned to a compliant value must override the earlier
+                compliant binding so the violation fires.
+                """
+                found_rhs: ast.expr | None = None
                 for stmt in assign_stmts:
-                    for target in stmt.targets:
-                        if isinstance(target, ast.Name) and target.id == name:
-                            return stmt.value
-                return None
+                    if isinstance(stmt, ast.Assign):
+                        for target in stmt.targets:
+                            if isinstance(target, ast.Name) and target.id == name:
+                                found_rhs = stmt.value
+                                break
+                            if isinstance(target, (ast.Tuple, ast.List)):
+                                for elt in target.elts:
+                                    if isinstance(elt, ast.Name) and elt.id == name:
+                                        found_rhs = stmt.value
+                                        break
+                    elif isinstance(stmt, ast.AnnAssign):
+                        # Bare annotation `x: int` has value=None — not a binding.
+                        if (
+                            stmt.value is not None
+                            and isinstance(stmt.target, ast.Name)
+                            and stmt.target.id == name
+                        ):
+                            found_rhs = stmt.value
+                    elif isinstance(stmt, ast.AugAssign):
+                        if isinstance(stmt.target, ast.Name) and stmt.target.id == name:
+                            # Strict interpretation: AugAssign rebinds to .value
+                            # (an operand, not the synthesized BinOp). _classify_rhs
+                            # will not match Pattern A or B → violation fires.
+                            found_rhs = stmt.value
+                return found_rhs
 
             rhs = _find_rhs(arg_name)
 
@@ -484,4 +512,101 @@ def test_static_check_flags_pattern_b_bypass_shapes(
         f"Expected at least one violation for bypass shape '{param_id}', "
         f"but the tightened classifier produced no violations. "
         f"This means the classifier incorrectly accepted a bypass shape as compliant."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 (AC-7, AC-8, AC-11): AnnAssign compliant roots — accepted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "param_id,source",
+    [
+        (
+            "annassign_pattern_a_compliant",
+            """\
+def check(task_dir, other):
+    pm: Path = Path(task_dir).resolve()
+    x = something()
+    x.relative_to(pm)
+""",
+        ),
+        (
+            "annassign_pattern_b_compliant",
+            """\
+def check(root, pm):
+    safe_dir: Path = _persistent_project_dir(root) / "postmortems"
+    resolved_safe = safe_dir.resolve()
+    pm.relative_to(resolved_safe)
+""",
+        ),
+    ],
+    ids=["annassign_pattern_a_compliant", "annassign_pattern_b_compliant"],
+)
+def test_static_check_accepts_annassign_compliant_roots(
+    param_id: str, source: str
+) -> None:
+    """AnnAssign-bound Pattern A and Pattern B roots must produce zero violations.
+
+    Pattern A: pm: Path = Path(task_dir).resolve() — annotated assignment.
+    Pattern B: safe_dir: Path = _persistent_project_dir(root) / "postmortems"
+    followed by resolved_safe = safe_dir.resolve() (Step-5 intermediate peel).
+    """
+    violations = _collect_derivation_violations(source, "hooks/receipts/fake.py")
+
+    assert violations == [], (
+        f"Expected zero violations for AnnAssign compliant case '{param_id}', "
+        f"but got: {violations}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8 (AC-9, AC-10, AC-12): AugAssign and AnnAssign unclassified — flagged
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "param_id,source",
+    [
+        (
+            "augassign_violation",
+            """\
+def check(root, x):
+    pm = _persistent_project_dir(root)
+    pm /= "postmortems"
+    x.relative_to(pm)
+""",
+        ),
+        (
+            "annassign_unclassified_violation",
+            """\
+def check(some_config_path, x):
+    bad_root: Path = some_config_path.resolve()
+    x.relative_to(bad_root)
+""",
+        ),
+    ],
+    ids=["augassign_violation", "annassign_unclassified_violation"],
+)
+def test_static_check_flags_augassign_and_annassign_unclassified(
+    param_id: str, source: str
+) -> None:
+    """AugAssign rebinding and AnnAssign with unclassified RHS must each produce
+    at least one violation.
+
+    augassign_violation: pm is initially Pattern B-compliant, then rebound via
+    pm /= "postmortems". LAST-match-wins returns Constant("postmortems") as the
+    RHS, which is neither Pattern A nor Pattern B. Violation fires.
+
+    annassign_unclassified_violation: bad_root: Path = some_config_path.resolve()
+    — the receiver of .resolve() is some_config_path (a Name with no assignment
+    in scope), so classification falls through to unclassified. Violation fires.
+    """
+    violations = _collect_derivation_violations(source, "hooks/receipts/fake.py")
+
+    assert violations != [], (
+        f"Expected at least one violation for case '{param_id}', "
+        f"but the checker produced no violations. "
+        f"This means the checker incorrectly accepted an unsafe binding."
     )
