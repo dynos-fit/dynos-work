@@ -326,7 +326,7 @@ def test_empty_secret_nonstrict_returns_records_and_logs_event(
 # AC 1: _derive_per_task_secret — pure derivation helper
 # ---------------------------------------------------------------------------
 def test_derive_per_task_secret_deterministic() -> None:
-    """_derive_per_task_secret(project_secret, task_id) returns a stable 32-char
+    """_derive_per_task_secret(project_secret, task_id) returns a stable 64-char
     hex string. A hardcoded expected value catches wrong HMAC argument order."""
     fn = getattr(lib_log, "_derive_per_task_secret", None)
     assert fn is not None, (
@@ -337,21 +337,20 @@ def test_derive_per_task_secret_deterministic() -> None:
     result1 = fn("project-secret", "task-A")
     result2 = fn("project-secret", "task-A")
 
-    # Must be a 32-character lowercase hex string.
+    # Must be a 64-character lowercase hex string.
     assert isinstance(result1, str), "return type must be str"
-    assert len(result1) == 32, f"expected 32-char hex string, got len={len(result1)}"
+    assert len(result1) == 64, f"expected 64-char hex string, got len={len(result1)}"
     int(result1, 16)  # raises ValueError if not valid hex
 
     # Must be stable across two calls (pure function, no randomness).
     assert result1 == result2, "_derive_per_task_secret must be deterministic"
 
-    # Must match a manually computed HMAC-SHA256[:32] — catches wrong arg order.
-    # If project_secret and task_id are swapped the digest differs.
-    expected = hmac.new(
-        b"project-secret",
-        b"task-A",
-        hashlib.sha256,
-    ).hexdigest()[:32]
+    # Must match the HKDF-SHA256 expected value — catches wrong construction.
+    # extract PRK: HMAC-SHA256(salt=task_id, IKM=project_secret)
+    # expand: HMAC-SHA256(PRK, info + b"\x01")
+    prk = hmac.new(b"task-A", b"project-secret", hashlib.sha256).digest()
+    okm = hmac.new(prk, b"dynos-work/v1/per-task-event-secret" + b"\x01", hashlib.sha256).digest()
+    expected = okm.hex()
     assert result1 == expected, (
         f"_derive_per_task_secret returned wrong digest; "
         f"got {result1!r}, expected {expected!r}. "
@@ -394,7 +393,7 @@ def test_resolve_event_secret_with_task_id(
     assert result != proj_secret, (
         "_resolve_event_secret with task_id must NOT return the raw project secret"
     )
-    assert len(result) == 32, "per-task secret must be 32 hex chars"
+    assert len(result) == 64, "per-task secret must be 64 hex chars"
 
 
 def test_resolve_event_secret_no_task_id(

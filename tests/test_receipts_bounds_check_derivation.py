@@ -59,6 +59,10 @@ source:
   The "must have a bounds check" rule is owned by PR #171 / PR #175; this
   check only validates derivation quality when a .relative_to() call is
   present.
+- Branch-unaware binding resolution. An unsafe binding in one branch of an
+  if/elif/else that coexists with a compliant binding in another branch will
+  suppress the violation (LAST-match-wins returns whichever binding appears
+  last in source order). Branch-level control-flow analysis is out of scope.
 
 ## Negative-case approach
 
@@ -71,6 +75,7 @@ PR #171 and PR #175.
 """
 
 import ast
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -87,10 +92,44 @@ _TRACKED_ROOTS: frozenset[str] = frozenset({
     "_persistent_project_dir(...) — Pattern B: persistent-dir-rooted derivation",
 })
 
+_SCOPE_BOUNDARY: frozenset[type] = frozenset({
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+})
+
 
 # ---------------------------------------------------------------------------
 # Shared checker implementation
 # ---------------------------------------------------------------------------
+
+
+def _iter_function_body(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> Iterator[ast.AST]:
+    """Yield all descendant AST nodes within *func_node*'s lexical scope.
+
+    Iterative stack-based DFS that visits every node reachable from
+    func_node.body, INCLUDING the descendants of compound statements
+    (If/For/While/With/Try blocks). Stops at nested function-like
+    boundaries: FunctionDef / AsyncFunctionDef / Lambda / ClassDef nodes
+    are yielded (so a callsite can still see them) but their children
+    are NOT pushed onto the stack — preventing inner-scope assignments
+    from leaking into outer-scope binding resolution.
+
+    Children are pushed in REVERSE order so that LIFO popping yields
+    them in forward source order; this preserves LAST-match-wins
+    correctness in _collect_derivation_violations's caller.
+    """
+    stack: list[ast.AST] = list(reversed(list(func_node.body)))
+    while stack:
+        node = stack.pop()
+        yield node
+        if type(node) in _SCOPE_BOUNDARY:
+            continue  # yielded but do NOT recurse into nested scope
+        for child in reversed(list(ast.iter_child_nodes(node))):
+            stack.append(child)
 
 
 def _collect_derivation_violations(source_text: str, rel_path: str) -> list[str]:
@@ -121,7 +160,7 @@ def _collect_derivation_violations(source_text: str, rel_path: str) -> list[str]
 
         # Step 3: collect .relative_to() call nodes in this function
         relative_to_calls: list[ast.Call] = []
-        for inner in ast.walk(node):
+        for inner in _iter_function_body(node):
             if (
                 isinstance(inner, ast.Call)
                 and isinstance(inner.func, ast.Attribute)
@@ -135,7 +174,7 @@ def _collect_derivation_violations(source_text: str, rel_path: str) -> list[str]
 
         # Pre-collect all Assign / AnnAssign / AugAssign statements in this function body
         assign_stmts: list[ast.Assign | ast.AnnAssign | ast.AugAssign] = []
-        for inner in ast.walk(node):
+        for inner in _iter_function_body(node):
             if isinstance(inner, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 assign_stmts.append(inner)
 
@@ -495,8 +534,29 @@ def bad_checker(task_dir, some_unsafe_path):
     x.relative_to(resolved_pm)
 """,
         ),
+        (
+            "bypass_nested_funcdef",
+            """\
+def outer(task_dir, some_unsafe_path):
+    root = task_dir.parent.parent
+    pm = some_unsafe_path
+    def inner():
+        pm = _persistent_project_dir(root)
+    x.relative_to(pm)
+""",
+        ),
+        (
+            "bypass_lambda_walrus",
+            """\
+def outer(task_dir, some_unsafe_path):
+    root = task_dir.parent.parent
+    pm = some_unsafe_path
+    fn = lambda: (pm := _persistent_project_dir(root))
+    x.relative_to(pm)
+""",
+        ),
     ],
-    ids=["bypass_max_wrapper", "bypass_ifexp", "bypass_lambda", "bypass_helper_arg"],
+    ids=["bypass_max_wrapper", "bypass_ifexp", "bypass_lambda", "bypass_helper_arg", "bypass_nested_funcdef", "bypass_lambda_walrus"],
 )
 def test_static_check_flags_pattern_b_bypass_shapes(
     param_id: str, source: str
