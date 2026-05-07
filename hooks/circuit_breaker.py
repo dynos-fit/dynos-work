@@ -4,8 +4,8 @@ Encodes runtime conditions under which a task should be hard-aborted or
 downgraded. Live-enforceable (EXECUTION) conditions:
 
     1. wasted_spawns_abort       (>= 3 wasted spawns; via ctl.py check-spawn-budget)
-    2. small_task_token_overrun  (> 1_000_000 tokens on a small bugfix/feature task)
-    3. bugfix_token_overrun      (> 5_000_000 tokens on a bugfix)
+    2. small_task_token_overrun  (>= 1_000_000 tokens on a small bugfix/feature task)
+    3. bugfix_token_overrun      (>= 5_000_000 tokens on a bugfix)
     4. small_task_token_downgrade  (>= 800_000 but < 1_000_000)
     5. bugfix_token_downgrade      (>= 4_000_000 but < 5_000_000)
 
@@ -20,12 +20,13 @@ is a follow-up task.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 
 # Resolved interpreter path — required by the repo-wide
@@ -218,13 +219,25 @@ def _opus_zero_yield_count(task_dir: Path) -> int:
     return zero_yield
 
 
+_SAFE_AGENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _lookup_audit_report(audit_reports_dir: Path, agent: str) -> Optional[dict]:
     """Find an audit report whose filename starts with the agent name.
 
     The audit-report writer commonly names files `<agent>.json` or
     `<agent>-<round>.json`; we accept either.
+
+    The ``agent`` value originates from token-usage.json events which are
+    operator-side state, but a malformed entry containing path separators,
+    `..`, or glob metacharacters could escape ``audit_reports_dir`` (POSIX
+    pathlib does not reject these in joins) or cause the glob to match
+    unintended files. Reject any ``agent`` that does not match
+    ``^[A-Za-z0-9_-]+$``.
     """
     if not audit_reports_dir.exists() or not audit_reports_dir.is_dir():
+        return None
+    if not isinstance(agent, str) or not _SAFE_AGENT_RE.match(agent):
         return None
 
     direct = audit_reports_dir / f"{agent}.json"
@@ -524,6 +537,3 @@ __all__ = [
     "check_circuit_breakers",
     "_apply_abort",
 ]
-
-
-_ = Any  # keep typing import semantically used without enabling import-time work
