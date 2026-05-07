@@ -423,18 +423,21 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     """Write receipt proving a rules-check pass (no error-severity violations).
 
     Signature (AC 1): takes only ``(task_dir, mode)``. All counts and
-    hashes are computed internally from a fresh ``rules_engine.run_checks``
-    call — callers no longer supply (and therefore cannot falsify) the
-    violation totals.
+    hashes are computed internally from a fresh
+    ``rules_engine.run_checks_with_stats`` call — callers no longer
+    supply (and therefore cannot falsify) the violation totals,
+    rules_loaded, or rules_skipped.
 
     Refuses with ValueError if the rules engine reports any
     error-severity violation. Rules-check pipeline must branch to the
     failure path in that case; this writer proves the clean outcome only.
 
     Payload shape (every value computed here):
-      - rules_evaluated:    count of entries in ``rules`` list of
-                            prevention-rules.json
-      - violations_count:   len(violations) returned by run_checks
+      - rules_evaluated:    rules_loaded + rules_skipped (total raw entries)
+      - rules_loaded:       Rule objects successfully constructed (AC 11)
+      - rules_skipped:      raw entries for which _rule_from_dict returned
+                            None (AC 11)
+      - violations_count:   len(violations) returned by run_checks_with_stats
       - error_violations:   count where Violation.severity == "error"
       - advisory_violations: count where Violation.severity == "warn"
       - engine_version:     "1" (bootstrap-safe hardcode)
@@ -451,14 +454,18 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     # Deferred import: rules_engine imports lib_core, and lib_core is
     # imported at module load of this file. Importing rules_engine here
     # (at call time) keeps the import graph acyclic.
-    from rules_engine import run_checks  # noqa: PLC0415
+    import rules_engine as _rules_engine  # noqa: PLC0415
     from lib_core import _persistent_project_dir  # noqa: PLC0415
 
     root = task_dir.parent.parent
 
-    # Run the engine. This is the source of truth for counts — callers
-    # cannot lie about what the engine found.
-    violations = run_checks(root, mode)
+    # Run the engine via run_checks_with_stats — single authoritative call
+    # that returns violations plus loaded/skipped rule counts.
+    # Callers cannot supply (and therefore cannot falsify) any of these
+    # values. Using run_checks_with_stats avoids a second file read in
+    # this function for the loaded/skipped counts (TOCTOU-safe at the
+    # caller boundary — AC 12).
+    violations, rules_loaded, rules_skipped = _rules_engine.run_checks_with_stats(root, mode)
     violations_count = len(violations)
     error_violations = sum(1 for v in violations if getattr(v, "severity", None) == "error")
     advisory_violations = sum(1 for v in violations if getattr(v, "severity", None) == "warn")
@@ -472,10 +479,12 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
             f"violations_count={violations_count}, mode={mode!r}"
         )
 
-    # Count rules from the file. If the file is missing, count is 0 and
+    # Hash the rules file for the receipt payload. If the file is missing,
     # the hash is the literal string "none" (matches legacy schema).
+    # rules_evaluated is the total raw entry count (loaded + skipped) —
+    # AC 13 invariant: rules_evaluated == rules_loaded + rules_skipped.
     rules_file = _persistent_project_dir(root) / "prevention-rules.json"
-    rules_evaluated = 0
+    rules_evaluated = rules_loaded + rules_skipped
     rules_file_sha256: str = "none"
     if rules_file.exists():
         try:
@@ -485,23 +494,13 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
                 f"receipt_rules_check_passed: cannot hash prevention-rules "
                 f"file at {rules_file}: {exc}"
             ) from exc
-        try:
-            with rules_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                f"receipt_rules_check_passed: cannot parse prevention-rules "
-                f"at {rules_file}: {exc}"
-            ) from exc
-        if isinstance(data, dict):
-            rules = data.get("rules", [])
-            if isinstance(rules, list):
-                rules_evaluated = len(rules)
 
     return write_receipt(
         task_dir,
         "rules-check-passed",
         rules_evaluated=rules_evaluated,
+        rules_loaded=rules_loaded,
+        rules_skipped=rules_skipped,
         violations_count=violations_count,
         error_violations=error_violations,
         advisory_violations=advisory_violations,

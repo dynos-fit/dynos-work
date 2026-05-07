@@ -1,0 +1,51 @@
+{
+  "rules": [
+    {
+      "rule_id": "secu-35cfa937fa69",
+      "rule": "Do not call os.exit() in library code",
+      "category": "security",
+      "template": "pattern_must_not_appear",
+      "params": {
+        "regex": "os\\.exit\\(",
+        "scope": "*.py"
+      },
+      "enforcement": "ci-gate",
+      "executor": "all",
+      "rationale": "os.exit() bypasses cleanup and signals; use sys.exit() or raise SystemExit.",
+      "source_finding": "test-finding-001",
+      "added_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "rule_id": "qual-52fc5b45b6e7",
+      "rule": "Every new hook must be co-modified with its test",
+      "category": "quality",
+      "template": "co_modification_required",
+      "params": {
+        "trigger_glob": "hooks/*.py",
+        "must_modify_glob": "tests/test_*.py"
+      },
+      "enforcement": "ci-gate",
+      "executor": "all",
+      "rationale": "Hook changes without corresponding test updates break the trust chain.",
+      "source_finding": "test-finding-002",
+      "added_at": "2026-01-02T00:00:00Z"
+    },
+    {
+      "rule_id": "stab-f16489b1f7cf",
+      "rule": "Function signatures must not be changed without updating callers",
+      "category": "stability",
+      "template": "signature_lock",
+      "params": {
+        "module": "hooks.rules_engine",
+        "function": "run_checks",
+        "expected_params": ["root", "mode", "rule_filter"]
+      },
+      "enforcement": "static-check",
+      "executor": "all",
+      "rationale": "Callers of run_checks must not silently break when signature changes.",
+      "source_finding": "test-finding-003",
+      "added_at": "2026-01-03T00:00:00Z"
+    }
+  ],
+  "updated_at": "2026-01-03T00:00:00Z"
+}

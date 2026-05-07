@@ -186,7 +186,13 @@ def test_normalization_drops_emit_events(tmp_path: Path):
 def test_silent_drop_produces_promotion_dropped_event(tmp_path: Path):
     """The PR-130 self-proof bug: LLM emits rules that all fail
     normalization. Result: rules_added=0. apply_analysis MUST emit a
-    `postmortem_rule_promotion_dropped` event naming the input count."""
+    `postmortem_rule_promotion_dropped` event naming the input count.
+
+    Note: empty-rule-text dicts (``{}`` or ``{"rule": ""}``) now raise
+    ValueError at apply-analysis time (AC 3 of task-20260507-004), so
+    this test uses string inputs that still silent-drop during
+    normalization to preserve the original test intent.
+    """
     root = _project(tmp_path)
     td = _task_dir(root)
     analysis = {
@@ -194,8 +200,8 @@ def test_silent_drop_produces_promotion_dropped_event(tmp_path: Path):
         "derived_rules": [
             "junk-a",
             "junk-b",
-            {},
-            {"rule": ""},
+            "junk-c",
+            "junk-d",
         ],
     }
     result = apply_analysis(td, analysis)

@@ -1,0 +1,31 @@
+{
+  "rules": [
+    {
+      "rule": "Never use eval() in production code",
+      "category": "security",
+      "template": "pattern_must_not_appear",
+      "params": {
+        "regex": "eval\\(",
+        "scope": "*.py"
+      },
+      "enforcement": "ci-gate",
+      "executor": "all",
+      "rationale": "Missing rule_id — this entry is invalid.",
+      "source_finding": "test-bad-001",
+      "added_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "rule_id": "test-deadbeef0001",
+      "rule": "Never import from unknown modules",
+      "category": "quality",
+      "template": "fictional_template",
+      "params": {},
+      "enforcement": "prompt-constraint",
+      "executor": "all",
+      "rationale": "Unknown template — this entry is invalid.",
+      "source_finding": "test-bad-002",
+      "added_at": "2026-01-02T00:00:00Z"
+    }
+  ],
+  "updated_at": "2026-01-02T00:00:00Z"
+}

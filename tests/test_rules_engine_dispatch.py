@@ -172,3 +172,42 @@ def test_run_checks_dispatches_all_templates_once(tmp_path, monkeypatch, capsys)
     # template name, no violation emitted under r-adv).
     err = capsys.readouterr().err
     assert "unknown template" not in err
+
+
+def test_run_checks_with_stats_returns_loaded_skipped(tmp_path: Path) -> None:
+    """run_checks_with_stats returns (violations, loaded, skipped) — added
+    in task-20260507-004 to surface load-time skip counts to the
+    rules-check-passed receipt without a separate file read."""
+    from rules_engine import run_checks_with_stats  # noqa: PLC0415
+
+    persistent = tmp_path / ".dynos" / "projects" / "p"
+    persistent.mkdir(parents=True)
+    rules_file = persistent / "prevention-rules.json"
+    rules_file.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "rule_id": "test-1",
+                        "template": "advisory",
+                        "params": {},
+                        "rule": "advisory rule body",
+                    },
+                    {"rule": "no rule_id, gets skipped"},
+                ]
+            }
+        )
+    )
+    import rules_engine as _re  # noqa: PLC0415
+
+    orig = _re._persistent_project_dir
+    _re._persistent_project_dir = lambda root: persistent  # type: ignore[assignment]
+    try:
+        result = run_checks_with_stats(tmp_path, mode="all")
+    finally:
+        _re._persistent_project_dir = orig  # type: ignore[assignment]
+
+    assert isinstance(result, tuple) and len(result) == 3
+    _violations, loaded, skipped = result
+    assert isinstance(loaded, int) and isinstance(skipped, int)
+    assert loaded == 1 and skipped == 1

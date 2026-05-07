@@ -16,6 +16,7 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,25 @@ VALID_EXECUTORS = {
     "ml-executor",
     "all",
 }
+
+MAX_PREVENTION_RULES = 500
+
+
+def _generate_rule_id(rule_text: str, category: str) -> str:
+    """Generate a deterministic rule ID from rule text and category.
+
+    Output format: ^[a-z0-9]{1,4}-[0-9a-f]{12}$
+    Prefix: first 4 chars of category.lower(), falling back to 'unkn' if
+    category is empty or None.
+    Hash: first 12 hex characters of sha256(rule_text.encode('utf-8')).
+    """
+    if not category:
+        prefix = "unkn"
+    else:
+        prefix = category.lower()[:4]
+    digest = hashlib.sha256(rule_text.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
 
 # Mirrors `hooks.rules_engine.TEMPLATE_SCHEMAS`. Kept inline here to keep
 # postmortem writes independent of the rules_engine module (which is
@@ -668,6 +688,18 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 log_event(root, "postmortem_analysis_skip_receipt_failed", task=task_id, error=str(exc))
         return {"task_id": task_id, "rules_added": 0, "analysis_written": False, "skipped": True, "skip_reason": "no-findings"}
 
+    # AC 3: reject any rule entry with empty rule text (after normalization)
+    # before any normalization silently drops it. Check both prevention_rules
+    # and derived_rules keys since _normalize_analysis ingests both.
+    _raw_rule_items: list[object] = list(analysis.get("prevention_rules", []))
+    if isinstance(analysis.get("derived_rules"), list):
+        _raw_rule_items.extend(analysis["derived_rules"])
+    for _raw_item in _raw_rule_items:
+        if isinstance(_raw_item, dict):
+            _raw_text = _clean_str(_raw_item.get("rule"), 100)
+            if not _raw_text:
+                raise ValueError("empty rule text after migration")
+
     # Sanitize model output before persisting or promoting rules.
     sanitized = _normalize_analysis(analysis)
     sanitized["analyzed_at"] = now_iso()
@@ -823,10 +855,12 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 text = rule.get("rule", "").strip()
                 if not text or text.lower() in existing_rule_texts:
                     continue
+                category = rule.get("category", "unknown")
                 merged = {
                     "executor": rule.get("executor", "all"),
-                    "category": rule.get("category", "unknown"),
+                    "category": category,
                     "rule": text,
+                    "rule_id": _generate_rule_id(text, category),
                     "source_task": task_id,
                     "source_finding": rule.get("source_finding", ""),
                     "rationale": rule.get("rationale", ""),
@@ -850,6 +884,24 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                     "enforcement": merged["enforcement"],
                     "source_finding": merged["source_finding"],
                 })
+
+            # AC 17: FIFO trim — if the registry exceeds the cap, sort by
+            # added_at ASC and remove from the front until len == cap. Each
+            # trimmed entry gets a log_event so no drop is silent.
+            trimmed_entries: list[dict] = []
+            if len(current_rules) > MAX_PREVENTION_RULES:
+                current_rules.sort(key=lambda r: r.get("added_at", ""))
+                trimmed_entries = current_rules[: len(current_rules) - MAX_PREVENTION_RULES]
+                current_rules = current_rules[len(current_rules) - MAX_PREVENTION_RULES :]
+                for trimmed in trimmed_entries:
+                    log_event(
+                        root,
+                        "prevention_rules_trimmed",
+                        rule_id=trimmed.get("rule_id", ""),
+                        category=trimmed.get("category", ""),
+                        added_at=trimmed.get("added_at", ""),
+                        source_task=trimmed.get("source_task", ""),
+                    )
 
             if added:
                 write_json(rules_path, {"rules": current_rules, "updated_at": now_iso()})
