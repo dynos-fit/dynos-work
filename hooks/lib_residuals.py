@@ -503,6 +503,16 @@ def _accept_finding(finding: Any, auditor_name: str) -> bool:
     if severity == "info":
         return False
 
+    # Drop "no-change-required" findings: an auditor recorded its review of a
+    # subsystem but found nothing actionable. These slip past the severity
+    # filter as severity:minor + blocking:false, then bloat the residual
+    # queue with non-actionable rows. Detect by remediation text.
+    remediation = finding.get("remediation")
+    if isinstance(remediation, str):
+        rem_lower = remediation.strip().lower()
+        if rem_lower.startswith(("no change required", "no action required", "no fix required")):
+            return False
+
     category = finding.get("category")
     if not isinstance(category, str):
         return False
