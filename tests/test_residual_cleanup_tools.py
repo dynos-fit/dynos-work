@@ -71,15 +71,51 @@ def test_accept_finding_admits_real_remediation():
     assert lib_residuals._accept_finding(f, "security-auditor") is True
 
 
-def test_accept_finding_admits_when_remediation_missing():
+def test_accept_finding_drops_minor_without_remediation():
+    """severity:minor with no remediation field is a review note, not a
+    real finding. Drop. (task-005 schema-shape filter.)"""
     f = _make_finding("")  # empty remediation
     f.pop("remediation")
+    f["severity"] = "minor"
+    assert lib_residuals._accept_finding(f, "security-auditor") is False
+
+
+def test_accept_finding_drops_minor_with_empty_remediation():
+    f = _make_finding("")  # empty string remediation
+    f["severity"] = "minor"
+    assert lib_residuals._accept_finding(f, "security-auditor") is False
+
+
+def test_accept_finding_drops_minor_with_null_remediation():
+    f = _make_finding("")
+    f["severity"] = "minor"
+    f["remediation"] = None
+    assert lib_residuals._accept_finding(f, "security-auditor") is False
+
+
+def test_accept_finding_admits_major_without_remediation():
+    """severity:major / severity:critical findings are admitted even
+    without remediation — the severity alone justifies a queue row.
+    Only severity:minor needs the remediation gate."""
+    f = _make_finding("")
+    f.pop("remediation")
+    f["severity"] = "major"
     assert lib_residuals._accept_finding(f, "security-auditor") is True
 
 
-def test_accept_finding_admits_when_remediation_not_a_string():
+def test_accept_finding_admits_critical_without_remediation():
     f = _make_finding("")
-    f["remediation"] = None
+    f.pop("remediation")
+    f["severity"] = "critical"
+    assert lib_residuals._accept_finding(f, "security-auditor") is True
+
+
+def test_accept_finding_admits_minor_with_real_remediation():
+    """severity:minor + concrete remediation is a legitimate small bug."""
+    f = _make_finding(
+        "Add input validation: reject any value containing path separators."
+    )
+    f["severity"] = "minor"
     assert lib_residuals._accept_finding(f, "security-auditor") is True
 
 
@@ -182,3 +218,60 @@ def test_residual_close_rejects_invalid_status(tmp_path: Path):
         cwd=tmp_path,
     )
     assert res.returncode == 1
+
+
+# ---- apply_analysis no longer ingests prevention rules ---------------------
+
+
+def test_apply_analysis_does_not_call_ingest_prevention_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """task-005 architectural fix: apply_analysis previously triple-counted
+    work by adding rules to prevention-rules.json AND emitting a residual
+    row for each rule via ingest_prevention_rules. The residual row was
+    redundant — once the rule is in the registry, the engine enforces it
+    on every commit. This test pins the removal: ingest_prevention_rules
+    must not be called from the apply_analysis code path. The function
+    itself remains importable for any other callers / tests."""
+    sys.path.insert(0, str(ROOT / "memory"))
+    import postmortem_analysis as pa  # noqa: PLC0415
+    import lib_residuals as lr  # noqa: PLC0415
+
+    calls: list[tuple] = []
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 0
+
+    # The `apply_analysis` import does `from lib_residuals import
+    # ingest_prevention_rules` lazily inside the function body. Patch the
+    # source attribute so any deferred import resolves to the spy.
+    monkeypatch.setattr(lr, "ingest_prevention_rules", spy)
+
+    # Seed minimal task dir + a synthetic analysis with a rule that WOULD
+    # have been promoted under the old behavior (enforcement=ci-gate).
+    project = tmp_path / "proj"
+    (project / ".dynos").mkdir(parents=True)
+    task_dir = project / ".dynos" / "task-test"
+    task_dir.mkdir()
+    (task_dir / "manifest.json").write_text(json.dumps({"task_id": "task-test"}))
+    (task_dir / "task-retrospective.json").write_text(json.dumps({"quality_score": 0.9}))
+    (project / ".dynos" / "events.jsonl").touch()
+
+    analysis = {
+        "summary": "test",
+        "prevention_rules": [{
+            "rule": "every breaker must read events via verify_signed_events",
+            "rationale": "raw reads are forgeable",
+            "executor": "backend-executor",
+            "category": "sec",
+            "enforcement": "ci-gate",
+            "template": "advisory",
+        }],
+    }
+
+    monkeypatch.chdir(project)
+    pa.apply_analysis(task_dir, analysis)
+
+    assert calls == [], (
+        f"ingest_prevention_rules must NOT be called from apply_analysis "
+        f"(task-005 fix); was called with: {calls}"
+    )
