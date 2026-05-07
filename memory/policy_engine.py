@@ -7,11 +7,12 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 import argparse
 import json
 import math
+import os
 import statistics
 from pathlib import Path
 
 from lib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json, VALID_EXECUTORS
-from lib_log import log_event
+from lib_log import log_event, verify_signed_events
 from lib_registry import ensure_learned_registry
 
 DEFAULT_TASK_TYPES = ["feature", "bugfix", "refactor", "migration", "ml", "full-stack"]
@@ -144,50 +145,42 @@ def _build_events_by_task(
     root: Path,
     task_ids: set[str] | None = None,
 ) -> dict[str, list[dict]]:
-    """Build {task_id -> [event, ...]} by streaming `.dynos/events.jsonl`.
+    """Build {task_id -> [event, ...]} using per-task HMAC-verified reads.
 
-    When ``task_ids`` is provided, events whose ``task_id`` is NOT in the
-    set are dropped during streaming. This caps memory at O(events-for-
-    needed-tasks) instead of O(all-events) — essential on long-lived
-    projects where events.jsonl grows unbounded (PERF-001).
+    When ``task_ids`` is ``None`` or empty, returns ``{}`` immediately
+    without reading any file. This is the conservative/secure behavior:
+    the caller cannot safely enumerate all task directories without
+    scanning, and returning an empty dict causes every ``learned:X``
+    source to be reclassified as generic (the correct conservative
+    outcome).
 
-    When ``task_ids`` is None, all events with a string task_id are
-    retained (legacy behavior). Callers that know their retrospective set
-    should always pass the filter.
+    For each task_id in ``task_ids``, resolves ``root / ".dynos" /
+    task_id``. If that directory does not exist, the task_id is omitted
+    from the result — **no fallback to the project-global**
+    ``events.jsonl`` occurs. If the directory exists,
+    :func:`verify_signed_events` is called with ``strict=False`` to
+    return only HMAC-verified records. Events that fail signature
+    verification are silently dropped.
 
-    Malformed lines are silently skipped. Entries without a string
-    ``task_id`` key are skipped. When the file does not exist, returns an
-    empty dict — callers that want the legacy (no-cross-check) path of
-    :func:`_extract_quads` should pass ``events_by_task=None`` explicitly;
-    passing ``{}`` means "cross-check opted-in; no events; everything
-    unmatched."
+    ``task_dir missing → zero events (no global fallback)`` is the
+    documented contract. Any future caller expecting cross-check
+    behavior on a missing task directory should be treated as a caller
+    error, not as a signal to fall back to the global log.
     """
-    events_by_task: dict[str, list[dict]] = {}
-    events_path = root / ".dynos" / "events.jsonl"
-    if not events_path.exists():
-        return events_by_task
-    try:
-        with events_path.open("r", encoding="utf-8") as fh:
-            for raw_line in fh:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(entry, dict):
-                    continue
-                task_id = entry.get("task_id")
-                if not isinstance(task_id, str) or not task_id:
-                    continue
-                if task_ids is not None and task_id not in task_ids:
-                    continue
-                events_by_task.setdefault(task_id, []).append(entry)
-    except OSError:
-        # File became unreadable after exists() — treat as "no events."
+    if not task_ids:
         return {}
-    return events_by_task
+    secret = os.environ.get("DYNOS_EVENT_SECRET", "")
+    result: dict[str, list[dict]] = {}
+    for task_id in task_ids:
+        task_dir = root / ".dynos" / task_id
+        if not task_dir.is_dir():
+            continue
+        try:
+            verified = verify_signed_events(task_dir, secret, strict=False)
+        except OSError:
+            continue
+        result[task_id] = verified
+    return result
 
 
 def _extract_quads(
