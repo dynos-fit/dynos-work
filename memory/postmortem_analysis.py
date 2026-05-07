@@ -256,6 +256,21 @@ def _normalize_rule(item: object) -> dict | None:
     enforcement = _clean_str(item.get("enforcement"), 32).lower()
     if enforcement not in VALID_ENFORCEMENT:
         enforcement = "prompt-constraint"
+
+    template = item.get("template")
+
+    # Enforcement audit (mirrors the pass scripts/backfill_prevention_rules.py
+    # applies to legacy entries): an `advisory` template never fires in the
+    # engine, so a non-prompt enforcement label like ci-gate/static-check
+    # is dishonest. Demote to prompt-constraint at write-time so future
+    # postmortem-derived rules don't accumulate the same drift the backfill
+    # had to clean up. Closes the regression caught by
+    # tests/test_prevention_rules_validate.py::test_validate_rules_live_registry.
+    if template == "advisory" and enforcement in {
+        "ci-gate", "static-check", "runtime-guard", "lint", "test",
+    }:
+        enforcement = "prompt-constraint"
+
     normalized: dict = {
         "executor": _normalize_executor(item.get("executor")) or "all",
         "category": _normalize_category(item.get("category")),
@@ -268,7 +283,7 @@ def _normalize_rule(item: object) -> dict | None:
     # template-aware routing. We deliberately keep the raw LLM values so
     # the validator can reject ill-formed rules with a precise reason.
     if "template" in item:
-        normalized["template"] = item.get("template")
+        normalized["template"] = template
     if isinstance(item.get("params"), dict):
         normalized["params"] = item.get("params")
     return normalized

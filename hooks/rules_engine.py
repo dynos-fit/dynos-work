@@ -46,9 +46,18 @@ from typing import Any, Callable, Literal, Optional
 # lib_core lives in the same package (hooks/). When this file is executed as
 # a script rather than imported, the package context isn't set up, so we add
 # the hooks/ dir to sys.path before attempting the import.
+#
+# We ALSO add the repo root (parent of hooks/). Rules use module names like
+# `hooks.scheduler` and `hooks.rules_engine` in their `params.module`, and
+# importlib.import_module needs the repo root on sys.path for those dotted
+# imports to resolve to the namespace package. Without the repo root, every
+# such rule silently no-ops with a WARN ("No module named 'hooks'") at
+# load time.
 _HOOKS_DIR = Path(__file__).resolve().parent
-if str(_HOOKS_DIR) not in sys.path:
-    sys.path.insert(0, str(_HOOKS_DIR))
+_REPO_ROOT = _HOOKS_DIR.parent
+for _p in (str(_REPO_ROOT), str(_HOOKS_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from lib_core import _persistent_project_dir  # noqa: E402
 

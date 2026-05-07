@@ -211,3 +211,24 @@ def test_run_checks_with_stats_returns_loaded_skipped(tmp_path: Path) -> None:
     _violations, loaded, skipped = result
     assert isinstance(loaded, int) and isinstance(skipped, int)
     assert loaded == 1 and skipped == 1
+
+
+def test_rules_engine_puts_repo_root_on_sys_path() -> None:
+    """rules_engine.py must put the repo root on sys.path at import time so
+    rules using dotted module names (e.g. params.module='hooks.scheduler')
+    can resolve via importlib.import_module. Without this, every such rule
+    silently no-ops with WARN 'No module named hooks'."""
+    import sys
+    import importlib
+
+    import rules_engine  # noqa: F401  — already imported above; re-import is no-op
+
+    repo_root = Path(rules_engine.__file__).resolve().parent.parent
+    assert str(repo_root) in sys.path, (
+        f"rules_engine did not put repo root {repo_root!r} on sys.path; "
+        f"dotted-module imports like 'hooks.X' will fail at rule-eval time"
+    )
+
+    # Confirm the canonical 'hooks.rules_engine' import path resolves.
+    mod = importlib.import_module("hooks.rules_engine")
+    assert hasattr(mod, "run_checks")

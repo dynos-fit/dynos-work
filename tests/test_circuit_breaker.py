@@ -336,6 +336,36 @@ def test_small_task_token_downgrade_warning(
     assert "suggestion" in result
 
 
+def test_bugfix_token_downgrade_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Counterpart to test_small_task_token_downgrade_warning. Bugfix
+    classification at >= 4M tokens but below 5M LIMIT must produce a
+    downgrade decision (not an abort, not None). Closes residual
+    5de91777 from cq-002 of task-20260507-003."""
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    _make_manifest(task_dir, classification_type="bugfix")
+    _write(task_dir / "token-usage.json", {"total": 4_500_000, "events": []})
+    # Bugfix path: more than SMALL_TASK_FILES_THRESHOLD files so the
+    # small-task arms don't shadow the bugfix arms.
+    _write(
+        task_dir / "execution-graph.json",
+        {"segments": [{"files_expected": ["a.py", "b.py", "c.py", "d.py"]}]},
+    )
+    _stub_check_spawn_budget(monkeypatch, {"status": "ok", "count": 0, "threshold": 2})
+
+    result = cb.check_circuit_breakers(task_dir, "EXECUTION")
+    assert isinstance(result, dict)
+    assert result.get("action") == "downgrade"
+    assert result.get("trigger") == "bugfix_token_downgrade"
+    assert "abort" not in result
+    assert result.get("limit_warned") == cb.BUGFIX_TOKEN_DOWNGRADE_THRESHOLD
+    assert result.get("limit_abort") == cb.BUGFIX_TOKEN_LIMIT
+    assert result.get("actual") == 4_500_000
+    assert "suggestion" in result
+
+
 def test_apply_abort_skips_transition_on_downgrade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
