@@ -56,6 +56,13 @@ from write_policy import WriteAttempt, _get_capability_key, require_write_allowe
 # patch reach the call site here.
 import lib_residuals
 
+# task-20260508-002: circuit-breaker observe-only wiring.
+# Imported at module level (not inside functions) so tests can monkeypatch
+# ctl.check_circuit_breakers and ctl._dispatch_breaker_decision. This
+# import is safe because circuit_breaker.py only imports ctl lazily
+# inside _check_spawn_budget (not at module load time).
+from circuit_breaker import check_circuit_breakers, _dispatch_breaker_decision
+
 
 _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
     # review_stage -> (relative artifact path, next stage)
@@ -3871,6 +3878,9 @@ def _collect_latest_audit_reports(audit_dir: Path) -> dict[str, Path]:
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
+        _decision = check_circuit_breakers(task_dir, "AUDITING")
+        _dispatch_breaker_decision(task_dir, "AUDITING", _decision, task_id=task_dir.name)
+
         reports: list[dict] = []
         blocking_findings: list[dict] = []
         critical_spec_findings: list[dict] = []
@@ -4490,6 +4500,9 @@ def cmd_run_execute_setup(args: argparse.Namespace) -> int:
                 "error": f"unexpected stage for execute setup: {stage}",
             }, indent=2))
             return 1
+
+        _decision = check_circuit_breakers(task_dir, "EXECUTION")
+        _dispatch_breaker_decision(task_dir, "EXECUTION", _decision, task_id=task_dir.name)
 
         classification = manifest.get("classification")
         if not isinstance(classification, dict):
