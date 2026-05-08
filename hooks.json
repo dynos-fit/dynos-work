@@ -42,6 +42,16 @@
             "async": false
           }
         ]
+      },
+      {
+        "matcher": "WebSearch|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" web-tool-log",
+            "async": false
+          }
+        ]
       }
     ],
     "SessionStart": [

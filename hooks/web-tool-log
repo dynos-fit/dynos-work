@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# PostToolUse hook for WebSearch and WebFetch tools.
+# Reads the Claude Code hook payload from stdin and appends a JSONL line
+# to <task_dir>/web-tool-log.jsonl via the Python implementation.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "${SCRIPT_DIR}/web_tool_log.py" "$@"

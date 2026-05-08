@@ -244,6 +244,7 @@ def _compute_external_solution_gate(task_dir: Path) -> dict:
             "local_bug_matches": local_bug_matches[:8],
             "file_scoped": file_scoped,
         },
+        "written_at": now_iso(),
     }
     return gate
 
@@ -2998,6 +2999,19 @@ def cmd_run_external_solution_gate(args: argparse.Namespace) -> int:
         return 1
 
 
+def _parse_urls_consulted(raw_urls: list[str] | None) -> list[str]:
+    """Flatten and split comma-separated URL strings into a single list."""
+    if not raw_urls:
+        return []
+    result: list[str] = []
+    for item in raw_urls:
+        for part in item.split(","):
+            part = part.strip()
+            if part:
+                result.append(part)
+    return result
+
+
 def cmd_write_search_receipt(args: argparse.Namespace) -> int:
     """Write a search-conducted receipt after the executor performs research.
 
@@ -3014,8 +3028,79 @@ def cmd_write_search_receipt(args: argparse.Namespace) -> int:
             "error": "--query must be a non-empty string describing the search conducted",
         }, indent=2), file=sys.stderr)
         return 1
+
+    # Load gate to determine whether validation of new fields is required.
+    gate_path = task_dir / "external-solution-gate.json"
+    gate: dict = {}
+    if gate_path.exists():
+        try:
+            gate = load_json(gate_path)
+        except Exception:
+            gate = {}
+    search_recommended = gate.get("search_recommended") is True
+
+    urls_consulted: list[str] | None = None
+    findings_summary: str | None = None
+
+    if search_recommended:
+        # Collect and flatten --urls-consulted values (each may be comma-separated)
+        raw_urls = getattr(args, "urls_consulted", None) or []
+        urls_consulted = _parse_urls_consulted(raw_urls)
+
+        if not urls_consulted:
+            print(
+                "validation error: --urls-consulted is required when "
+                "search_recommended=true; provide at least one URL",
+                file=sys.stderr,
+            )
+            return 1
+
+        # Validate each URL matches ^https?://
+        import re as _re
+        _url_pattern = _re.compile(r"^https?://")
+        for url in urls_consulted:
+            if not _url_pattern.match(url):
+                print(
+                    f"validation error: urls_consulted entry does not match ^https?://: {url}",
+                    file=sys.stderr,
+                )
+                return 1
+
+        # Validate findings_summary
+        raw_summary = getattr(args, "findings_summary", None) or ""
+        findings_summary = raw_summary.strip() if raw_summary else ""
+        if not findings_summary:
+            print(
+                "validation error: --findings-summary is required when "
+                "search_recommended=true; provide a non-empty findings summary",
+                file=sys.stderr,
+            )
+            return 1
+        if len(findings_summary) < 200:
+            print(
+                f"validation error: findings_summary must be at least 200 characters "
+                f"(got {len(findings_summary)}, minimum 200)",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        # search_recommended=false: fields are optional
+        raw_urls = getattr(args, "urls_consulted", None) or []
+        parsed_urls = _parse_urls_consulted(raw_urls)
+        if parsed_urls:
+            urls_consulted = parsed_urls
+        raw_summary = getattr(args, "findings_summary", None) or ""
+        raw_summary = raw_summary.strip() if raw_summary else ""
+        if raw_summary:
+            findings_summary = raw_summary
+
     try:
-        receipt_path = receipt_search_conducted(task_dir, query=query)
+        receipt_path = receipt_search_conducted(
+            task_dir,
+            query=query,
+            urls_consulted=urls_consulted,
+            findings_summary=findings_summary,
+        )
         print(json.dumps({
             "status": "search_receipt_written",
             "task_dir": str(task_dir),
@@ -3270,6 +3355,107 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_web_tool_evidence(
+    task_dir: Path,
+    gate: dict,
+    receipt: dict,
+) -> str | None:
+    """Return None if at least one web-tool-log entry falls within the
+    gate.written_at → receipt.ts window.  Return an error string otherwise.
+
+    The window is gate.written_at <= entry_ts <= receipt.ts (inclusive).
+    Entries missing a parseable ``ts`` field are skipped silently.
+    """
+    log_path = task_dir / "web-tool-log.jsonl"
+    if not log_path.exists():
+        return (
+            "web_search_evidence missing: web-tool-log.jsonl not found; "
+            "0 qualifying web-tool entries in window"
+        )
+
+    try:
+        gate_ts_str = gate.get("written_at", "")
+        gate_dt = datetime.fromisoformat(gate_ts_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None  # malformed written_at — skip (caller already logged)
+
+    receipt_ts_str = receipt.get("ts", "")
+    try:
+        receipt_dt = datetime.fromisoformat(receipt_ts_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        receipt_dt = None
+
+    qualifying = 0
+    try:
+        with log_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                # AC 9: only WebSearch / WebFetch entries qualify. Any other
+                # tool (or a missing tool field) is not evidence of research.
+                if entry.get("tool") not in ("WebSearch", "WebFetch"):
+                    continue
+                entry_ts_str = entry.get("ts", "")
+                if not entry_ts_str:
+                    continue
+                try:
+                    entry_dt = datetime.fromisoformat(entry_ts_str.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+                if entry_dt < gate_dt:
+                    continue
+                if receipt_dt is not None and entry_dt > receipt_dt:
+                    continue
+                qualifying += 1
+                # AC 9: ≥1 qualifying entry is sufficient — early exit.
+                break
+    except OSError as exc:
+        return f"web_search_evidence: cannot read web-tool-log.jsonl: {exc}"
+
+    if qualifying == 0:
+        return (
+            f"web_search_evidence: 0 qualifying web-tool entries in window "
+            f"[{gate_ts_str} → {receipt_ts_str}]; "
+            "search evidence must appear after gate was written"
+        )
+    return None
+
+
+def _check_receipt_structure(receipt: dict) -> str | None:
+    """Return None if receipt carries valid urls_consulted and findings_summary.
+    Return an error string on any violation.
+    """
+    import re as _re
+    urls = receipt.get("urls_consulted")
+    if urls is None:
+        return "receipt_structure: urls_consulted is missing from search-conducted receipt"
+    if not isinstance(urls, list) or len(urls) == 0:
+        return "receipt_structure: urls_consulted must be a non-empty list"
+    _url_pattern = _re.compile(r"^https?://")
+    for url in urls:
+        if not isinstance(url, str) or not _url_pattern.match(url):
+            return (
+                f"receipt_structure: urls_consulted entry does not match ^https?://: {url!r}"
+            )
+    summary = receipt.get("findings_summary")
+    if summary is None:
+        return "receipt_structure: findings_summary is missing from search-conducted receipt"
+    if not isinstance(summary, str) or len(summary) < 200:
+        actual = len(summary) if isinstance(summary, str) else 0
+        return (
+            f"receipt_structure: findings_summary must be at least 200 characters "
+            f"(got {actual}, minimum 200)"
+        )
+    return None
+
+
 def cmd_run_spec_ready(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -3300,8 +3486,8 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
                 gate = {}
             if gate.get("search_recommended") is True:
                 receipts_dir = task_dir / "receipts"
-                search_receipt = receipts_dir / "search-conducted.json"
-                if not search_receipt.exists():
+                search_receipt_path = receipts_dir / "search-conducted.json"
+                if not search_receipt_path.exists():
                     print(json.dumps({
                         "status": "search_required",
                         "task_dir": str(task_dir),
@@ -3313,9 +3499,62 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
                             f".dynos/task-{{id}} --query '<your search query>'"
                         ),
                         "gate_path": str(gate_path),
-                        "missing_receipt": str(search_receipt),
+                        "missing_receipt": str(search_receipt_path),
                     }, indent=2), file=sys.stderr)
                     return 1
+
+                # AC 11: backward-compat — if gate.written_at is absent or
+                # malformed (raises on parse), skip the cross-checks and log.
+                written_at_raw = gate.get("written_at")
+                gate_written_at_dt = None
+                if written_at_raw is None:
+                    # AC 11: exact log format "[GATE] external-solution-cross-check skipped: legacy gate file"
+                    print(
+                        "[GATE] external-solution-cross-check skipped: legacy gate file",
+                        flush=True,
+                    )
+                else:
+                    try:
+                        gate_written_at_dt = datetime.fromisoformat(
+                            str(written_at_raw).replace("Z", "+00:00")
+                        )
+                    except (ValueError, AttributeError):
+                        print(
+                            f"[GATE] external-solution-cross-check skipped: legacy gate file: "
+                            f"malformed written_at ({written_at_raw!r})",
+                            flush=True,
+                        )
+                        gate_written_at_dt = None
+                        written_at_raw = None  # treat as absent
+
+                if gate_written_at_dt is not None:
+                    # Load receipt for cross-checks
+                    try:
+                        search_receipt_data = load_json(search_receipt_path)
+                    except Exception:
+                        search_receipt_data = {}
+
+                    # AC 9: temporal cross-check
+                    web_evidence_err = _check_web_tool_evidence(
+                        task_dir, gate, search_receipt_data
+                    )
+                    if web_evidence_err is not None:
+                        print(json.dumps({
+                            "status": "search_evidence_required",
+                            "task_dir": str(task_dir),
+                            "error": web_evidence_err,
+                        }, indent=2), file=sys.stderr)
+                        return 1
+
+                    # AC 10: receipt structure cross-check
+                    structure_err = _check_receipt_structure(search_receipt_data)
+                    if structure_err is not None:
+                        print(json.dumps({
+                            "status": "receipt_structure_invalid",
+                            "task_dir": str(task_dir),
+                            "error": structure_err,
+                        }, indent=2), file=sys.stderr)
+                        return 1
 
         errors = validate_task_artifacts(task_dir, strict=False, run_gap=False)
         errors = [e for e in errors if not e.startswith("plan ") and "execution-graph" not in e]
@@ -6268,6 +6507,19 @@ def register_artifact_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--query",
         required=True,
         help="The search query string actually used",
+    )
+    write_search_receipt_parser.add_argument(
+        "--urls-consulted",
+        dest="urls_consulted",
+        action="append",
+        default=None,
+        help="URL consulted during the search (may be repeated; comma-separated values accepted)",
+    )
+    write_search_receipt_parser.add_argument(
+        "--findings-summary",
+        dest="findings_summary",
+        default=None,
+        help="Text summary of search findings (minimum 200 characters when search_recommended=true)",
     )
     write_search_receipt_parser.set_defaults(func=cmd_write_search_receipt)
 

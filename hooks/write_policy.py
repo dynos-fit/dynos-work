@@ -247,6 +247,20 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             "deny",
         )
 
+    if rel_posix == "web-tool-log.jsonl":
+        # web-tool-log.jsonl is hook-owned. The web-tool-log hook subprocess
+        # appends to it directly via Python file I/O (bypassing this policy
+        # entirely because hook subprocesses do not invoke harness tools).
+        # No agent role can claim it via Write/Edit/MultiEdit/Bash — those
+        # paths all flow through this policy and are denied here. This mirrors
+        # the spawn-log.jsonl enforcement pattern.
+        return WriteDecision(
+            False,
+            "web-tool-log.jsonl is hook-owned harness telemetry; only the "
+            "web-tool-log hook subprocess may append to it",
+            "deny",
+        )
+
     if rel_posix is not None and rel_posix.startswith("receipts/"):
         if attempt.role == "receipt-writer":
             return WriteDecision(True, "receipts are receipt-writer-owned control-plane state", "direct")
