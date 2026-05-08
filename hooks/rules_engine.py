@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import ast
 import fnmatch
+from functools import lru_cache
 import importlib
 import inspect
 import json
@@ -365,12 +366,35 @@ def _resolve_files(root: Path, mode: str) -> tuple[Path, ...]:
     return tuple(sorted(files))
 
 
+@lru_cache(maxsize=None)
+def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Translate a glob pattern to a compiled regex that handles '**' recursively.
+
+    Translation order (must not be changed):
+      1. re.escape the full pattern
+      2. Replace \\*\\*/ with (?:[^/]+/)* (zero-or-more path segments with trailing /)
+      3. Replace /\\*\\* with (?:/[^/]+)* (zero-or-more path segments with leading /)
+      4. Replace remaining \\*\\* with .*
+      5. Replace \\* with [^/]*
+      6. Replace \\? with [^/]
+      7. Wrap with ^ and $ anchors
+    """
+    result = re.escape(pattern)
+    result = result.replace(r"\*\*/", "(?:[^/]+/)*")
+    result = result.replace(r"/\*\*", "(?:/[^/]+)*")
+    result = result.replace(r"\*\*", ".*")
+    result = result.replace(r"\*", "[^/]*")
+    result = result.replace(r"\?", "[^/]")
+    result = "^" + result + "$"
+    return re.compile(result)
+
+
 def _glob_match(file: Path, root: Path, pattern: str) -> bool:
     """Match a file against a repo-relative glob using fnmatch semantics."""
     rel = _relative_path(root, file)
     # fnmatch does not treat '/' specially; for glob-like behaviour we test
     # against the relative path directly.
-    if fnmatch.fnmatch(rel, pattern):
+    if _glob_to_regex(pattern).fullmatch(rel):
         return True
     # Also match against the basename for simple patterns like "*.py".
     if fnmatch.fnmatch(file.name, pattern):
