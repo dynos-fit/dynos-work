@@ -94,7 +94,7 @@ def _setup_done_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # callers pass only (task_dir, mode). Stub run_checks to a clean pass.
     import rules_engine
     _orig_run_checks = rules_engine.run_checks
-    rules_engine.run_checks = lambda root, mode: []
+    rules_engine.run_checks = lambda root, mode, **kw: []
     try:
         receipt_rules_check_passed(td, "all")
     finally:

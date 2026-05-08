@@ -84,7 +84,7 @@ def _setup_done_ready(
     receipt_retrospective(td)
     import rules_engine  # noqa: PLC0415
     _orig = rules_engine.run_checks
-    rules_engine.run_checks = lambda root, mode: []
+    rules_engine.run_checks = lambda root, mode, **kw: []
     try:
         receipt_rules_check_passed(td, "all")
     finally:

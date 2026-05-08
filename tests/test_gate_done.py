@@ -43,7 +43,7 @@ def _stub_run_checks(monkeypatch):
     """receipt_rules_check_passed self-computes via rules_engine.run_checks.
     Stub it to return [] so the writer always succeeds in these tests."""
     import rules_engine
-    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode: [])
+    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode, **kw: [])
 
 
 def _setup(tmp_path: Path) -> Path:

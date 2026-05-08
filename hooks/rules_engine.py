@@ -965,6 +965,8 @@ def run_checks(
     root: Path,
     mode: Literal["staged", "all"],
     rule_filter: Optional[str] = None,
+    *,
+    raw_rules: Optional[list[dict]] = None,
 ) -> list[Violation]:
     """Load prevention-rules.json, dispatch each rule, return sorted violations.
 
@@ -973,9 +975,16 @@ def run_checks(
     logging and moving on.
 
     Output is sorted by (file, line, rule_id) for byte-identical determinism.
+
+    Closes residual b2910674 (perf / TOCTOU defense-in-depth): callers may
+    pass an already-loaded ``raw_rules`` list to avoid a second
+    ``_load_rules_file`` invocation. ``run_checks_with_stats`` uses this to
+    guarantee a single read of ``prevention-rules.json`` per
+    ``rules-check-passed`` receipt write.
     """
     root = Path(root)
-    raw_rules, _ = _load_rules_file(root)
+    if raw_rules is None:
+        raw_rules, _ = _load_rules_file(root)
     if not raw_rules:
         return []
 
@@ -1035,12 +1044,10 @@ def run_checks_with_stats(
         run_checks continue to work unchanged and monkeypatching
         run_checks in tests propagates through this function.
 
-    Implementation note: the loaded/skipped counts are derived from a
-    single read of the rules file inside this function. The violation
-    list comes from run_checks (which does its own read). This design
-    lets receipt_rules_check_passed obtain both counts and violations
-    from one call without a separate file read in the caller
-    (TOCTOU-safe at the caller boundary).
+    Implementation note: the rules file is read EXACTLY ONCE per call.
+    The parsed rule list flows through to run_checks via the new
+    ``raw_rules`` kwarg, eliminating the double-read window that
+    residual b2910674 flagged. Closes that residual.
     """
     root = Path(root)
     raw_rules, _ = _load_rules_file(root)
@@ -1053,10 +1060,11 @@ def run_checks_with_stats(
         else:
             loaded_count += 1
 
-    # Delegate to run_checks so monkeypatching run_checks in tests is
-    # respected (the receipt writer calls run_checks_with_stats, but
-    # test stubs that only patch run_checks still take effect here).
-    violations = run_checks(root, mode)
+    # Pass the pre-loaded rules through so run_checks does NOT re-read
+    # the file. Test code that monkey-patches run_checks still takes
+    # effect because the function lookup happens at the call site, not
+    # at parse time.
+    violations = run_checks(root, mode, raw_rules=raw_rules)
     return violations, loaded_count, skipped_count
 
 

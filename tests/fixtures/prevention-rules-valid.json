@@ -38,7 +38,12 @@
       "params": {
         "module": "hooks.rules_engine",
         "function": "run_checks",
-        "expected_params": ["root", "mode", "rule_filter"]
+        "expected_params": [
+          "root",
+          "mode",
+          "rule_filter",
+          "raw_rules"
+        ]
       },
       "enforcement": "static-check",
       "executor": "all",

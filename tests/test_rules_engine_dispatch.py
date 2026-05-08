@@ -232,3 +232,50 @@ def test_rules_engine_puts_repo_root_on_sys_path() -> None:
     # Confirm the canonical 'hooks.rules_engine' import path resolves.
     mod = importlib.import_module("hooks.rules_engine")
     assert hasattr(mod, "run_checks")
+
+
+def test_run_checks_with_stats_reads_rules_file_once(tmp_path: Path, monkeypatch) -> None:
+    """Closes residual b2910674: run_checks_with_stats must read
+    prevention-rules.json EXACTLY ONCE per call. Pre-fix the function
+    called _load_rules_file for stats then delegated to run_checks
+    which re-read the file. After the fix, the parsed list flows
+    through to run_checks via the raw_rules kwarg.
+
+    Seal: count _load_rules_file invocations during one
+    run_checks_with_stats call. Must be exactly 1.
+    """
+    import rules_engine
+    from rules_engine import run_checks_with_stats  # noqa: PLC0415
+
+    persistent = tmp_path / ".dynos" / "projects" / "p"
+    persistent.mkdir(parents=True)
+    rules_file = persistent / "prevention-rules.json"
+    rules_file.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {"rule_id": "r1", "template": "advisory", "params": {}, "rule": "x"},
+                    {"rule_id": "r2", "template": "advisory", "params": {}, "rule": "y"},
+                    {"rule": "missing template — skipped"},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(rules_engine, "_persistent_project_dir", lambda root: persistent)
+
+    counter = {"calls": 0}
+    original_load = rules_engine._load_rules_file
+
+    def counting_load(root, rules_path=None):  # type: ignore[no-untyped-def]
+        counter["calls"] += 1
+        return original_load(root, rules_path=rules_path)
+
+    monkeypatch.setattr(rules_engine, "_load_rules_file", counting_load)
+
+    violations, loaded, skipped = run_checks_with_stats(tmp_path, mode="all")
+    assert counter["calls"] == 1, (
+        f"Expected exactly 1 _load_rules_file call but got {counter['calls']}. "
+        f"residual b2910674 regression — run_checks_with_stats double-read "
+        f"prevention-rules.json (once for counts, once via run_checks)."
+    )
+    assert loaded == 2 and skipped == 1
