@@ -3,11 +3,11 @@
 Encodes runtime conditions under which a task should be hard-aborted or
 downgraded. Live-enforceable (EXECUTION) conditions:
 
-    1. wasted_spawns_abort       (>= 3 wasted spawns; via ctl.py check-spawn-budget)
-    2. small_task_token_overrun  (>= 1_000_000 tokens on a small bugfix/feature task)
-    3. bugfix_token_overrun      (>= 5_000_000 tokens on a bugfix)
-    4. small_task_token_downgrade  (>= 800_000 but < 1_000_000)
-    5. bugfix_token_downgrade      (>= 4_000_000 but < 5_000_000)
+    1. wasted_spawns_abort       (>= 9 wasted spawns; via ctl.py check-spawn-budget)
+    2. small_task_token_overrun  (>= 9_371_185 tokens on a small bugfix/feature task)
+    3. bugfix_token_overrun      (>= 68_283_719 tokens on a bugfix)
+    4. small_task_token_downgrade  (>= 7_496_948 but < 9_371_185)
+    5. bugfix_token_downgrade      (>= 54_626_975 but < 68_283_719)
 
 Audit-time (AUDITING) condition:
 
@@ -77,13 +77,13 @@ _PYTHON3: str = shutil.which("python3") or sys.executable
 # Module-level constants (AC-2..AC-6, AC-35, AC-36)
 # ---------------------------------------------------------------------------
 
-WASTED_SPAWN_ABORT_THRESHOLD: int = 3
-SMALL_TASK_TOKEN_LIMIT: int = 1_000_000
-BUGFIX_TOKEN_LIMIT: int = 5_000_000
+WASTED_SPAWN_ABORT_THRESHOLD: int = 9
+SMALL_TASK_TOKEN_LIMIT: int = 9_371_185
+BUGFIX_TOKEN_LIMIT: int = 68_283_719
 OPUS_AUDITOR_ZERO_YIELD_THRESHOLD: int = 3
 SMALL_TASK_FILES_THRESHOLD: int = 2
-SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD: int = 800_000
-BUGFIX_TOKEN_DOWNGRADE_THRESHOLD: int = 4_000_000
+SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD: int = 7_496_948
+BUGFIX_TOKEN_DOWNGRADE_THRESHOLD: int = 54_626_975
 
 # Activation gate. Default False: the breaker logs decisions via
 # _dispatch_breaker_decision but does NOT call _apply_abort. Flip to
