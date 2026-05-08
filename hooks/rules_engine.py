@@ -792,7 +792,15 @@ def check_signature_lock(rule: Rule, scope: ScanScope) -> list[Violation]:
 
 
 def check_caller_count_required(rule: Rule, scope: ScanScope) -> list[Violation]:
-    """AC 8: sum ast.Call sites for `symbol` across glob ≥ min_count."""
+    """AC 8: sum ast.Call sites for `symbol` across glob ≥ min_count.
+
+    This rule asserts a codebase-wide invariant (symbol X must have at least
+    N call sites across <glob>), so it ALWAYS scans repo-wide regardless of
+    `scope.mode`. In staged mode, `scope.files` is the staged-diff subset and
+    would miss callers outside the diff — using that subset here causes
+    false-positive violations on commits that don't touch the relevant files.
+    The fix mirrors `_resolve_files`'s mode dispatch locally inside the handler.
+    """
     params = rule.params or {}
     symbol = params.get("symbol")
     glob = params.get("scope")
@@ -805,8 +813,13 @@ def check_caller_count_required(rule: Rule, scope: ScanScope) -> list[Violation]
         )
         return []
 
+    if scope.mode == "staged":
+        files = tuple(sorted(_all_tracked_files(scope.root)))
+    else:
+        files = scope.files
+
     total = 0
-    for file in scope.files:
+    for file in files:
         if not _glob_match(file, scope.root, glob):
             continue
         text = _read_text(file)
