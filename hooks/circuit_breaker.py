@@ -13,9 +13,6 @@ Audit-time (AUDITING) condition:
 
     6. opus_auditor_zero_yield   (>= 3 opus audit spawns whose findings are [])
 
-The module is callable but not wired into ctl.py / shell skills; integration
-is a follow-up task.
-
 Trust model
 -----------
 AUDITING arm: every audit-spawn event passing the phase/type/model filters is
@@ -36,6 +33,26 @@ provenance cross-check therefore never races a legitimate audit's receipt
 write — by the time the breaker checks, the receipts/_injected-auditor-
 prompts/ sidecars and receipts/audit-<name>.json files are on disk for
 every legitimate audit dispatched in this checkpoint cycle.
+
+Activation procedure
+--------------------
+BREAKER_ACTIVE=False (default) is observe-only mode. Every checkpoint calls
+_dispatch_breaker_decision, which always logs a ``circuit_breaker_observed``
+event to per-task events.jsonl regardless of the gate value. When
+BREAKER_ACTIVE is False the helper returns immediately after logging — it
+does NOT call _apply_abort and does NOT log circuit_breaker_downgrade_suggested.
+
+To activate the breaker:
+  (a) After N tasks, grep per-task events.jsonl files for
+      ``circuit_breaker_observed`` events and review would_have_aborted /
+      would_have_downgraded fields for false positives.
+  (b) Verify zero false positives across the review window.
+  (c) Flip ``BREAKER_ACTIVE = True`` in a single-line follow-up PR.
+  (d) Threshold calibration (adjusting token limits, spawn thresholds) is a
+      separate task informed by the observed events and is independent of
+      the activation flip.
+
+Closes residual a1c4a97c.
 """
 
 from __future__ import annotations
@@ -68,6 +85,14 @@ SMALL_TASK_FILES_THRESHOLD: int = 2
 SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD: int = 800_000
 BUGFIX_TOKEN_DOWNGRADE_THRESHOLD: int = 4_000_000
 
+# Activation gate. Default False: the breaker logs decisions via
+# _dispatch_breaker_decision but does NOT call _apply_abort. Flip to
+# True only after reviewing circuit_breaker_observed events from the
+# last N tasks and verifying zero false positives. Activation is a
+# one-line PR after operator validation; threshold tuning is a
+# separate task informed by the observed events. Closes residual
+# a1c4a97c.
+BREAKER_ACTIVE: bool = False
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -743,6 +768,79 @@ def _apply_abort(task_dir: Path, decision: dict) -> None:
         )
 
 
+def _dispatch_breaker_decision(
+    task_dir: Path,
+    stage: str,
+    decision: Optional[dict],
+    *,
+    task_id: str,
+) -> None:
+    """Log the circuit-breaker decision as a diagnostic event and optionally act.
+
+    Always logs ``circuit_breaker_observed`` to per-task events.jsonl.
+    When BREAKER_ACTIVE is True:
+      - abort decisions: calls _apply_abort(task_dir, decision)
+      - downgrade decisions: additionally logs ``circuit_breaker_downgrade_suggested``
+    When BREAKER_ACTIVE is False: observes only — no _apply_abort, no downgrade log.
+
+    Fully exception-safe: any error is printed to stderr and None is returned.
+    """
+    try:
+        is_abort = isinstance(decision, dict) and decision.get("abort") is True
+        is_downgrade = (
+            isinstance(decision, dict)
+            and not is_abort
+            and decision.get("action") == "downgrade"
+        )
+        root = task_dir.parent.parent
+
+        log_event(
+            root,
+            "circuit_breaker_observed",
+            task=task_id,
+            stage=stage,
+            decision=decision,
+            would_have_aborted=is_abort,
+            would_have_downgraded=is_downgrade,
+        )
+
+        if BREAKER_ACTIVE is True:
+            if is_abort:
+                _apply_abort(task_dir, decision)
+            elif is_downgrade:
+                log_event(
+                    root,
+                    "circuit_breaker_downgrade_suggested",
+                    task=task_id,
+                    stage=stage,
+                    decision=decision,
+                    would_have_aborted=False,
+                    would_have_downgraded=True,
+                )
+    except Exception as exc:  # noqa: BLE001 — fully exception-safe by spec
+        print(
+            f"[circuit_breaker] _dispatch_breaker_decision failed: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
+# Late import to break the import cycle (lib_log imports write_policy
+# which may import ctl; keeping this at module scope after all definitions
+# avoids circular-import issues while making log_event a module-level name
+# that tests can monkeypatch via cb.log_event).
+try:
+    from lib_log import log_event  # noqa: E402
+except ImportError:  # pragma: no cover — only fails in unusual environments
+
+    def log_event(root, event_type, **kwargs):  # type: ignore[no-redef]
+        """Fallback no-op when lib_log is unavailable."""
+        print(
+            f"[circuit_breaker] lib_log unavailable; would have logged {event_type}",
+            file=sys.stderr,
+        )
+
+
 __all__ = [
     "WASTED_SPAWN_ABORT_THRESHOLD",
     "SMALL_TASK_TOKEN_LIMIT",
@@ -751,6 +849,8 @@ __all__ = [
     "SMALL_TASK_FILES_THRESHOLD",
     "SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD",
     "BUGFIX_TOKEN_DOWNGRADE_THRESHOLD",
+    "BREAKER_ACTIVE",
     "check_circuit_breakers",
     "_apply_abort",
+    "_dispatch_breaker_decision",
 ]

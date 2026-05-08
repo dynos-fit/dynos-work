@@ -128,6 +128,15 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     "task_receipt_chain_extension_failed",
     "task_receipt_chain_write_failed",
     "task_receipt_chain_validated",
+    # Circuit-breaker observe-only events (task-20260508-002). Emitted by
+    # _dispatch_breaker_decision at every EXECUTION and AUDITING checkpoint.
+    # circuit_breaker_observed is always logged regardless of BREAKER_ACTIVE.
+    # circuit_breaker_downgrade_suggested is additionally logged when
+    # BREAKER_ACTIVE=True and the decision action is "downgrade". Neither
+    # event participates in receipts, stage transitions, or any gate —
+    # they are diagnostic-only for operator review before activation.
+    "circuit_breaker_observed",
+    "circuit_breaker_downgrade_suggested",
 })
 
 
