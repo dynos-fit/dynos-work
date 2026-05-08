@@ -1707,6 +1707,147 @@ def _collect_ensemble_auditors(plan: object) -> set:
     return result
 
 
+def compute_spawn_budget_status(
+    task_dir: Path,
+    manifest: dict,
+    *,
+    project_root: Optional[Path] = None,
+) -> dict:
+    """Pure-function variant of cmd_check_spawn_budget — returns the
+    {status, count, threshold, exempt_count, task_class,
+     contributing_auditors} payload WITHOUT writing receipts or
+    mutating manifest.
+
+    Same counting/dedup logic as the CLI command (AC-8a..AC-8e, AC-9).
+    Used by hooks/circuit_breaker.py to avoid the per-call subprocess
+    fork (perf-001 / residual 0fe95494). The CLI command wraps this
+    function and adds the side-effect branch for status=='paused'.
+
+    ``project_root`` defaults to ``Path.cwd()`` to match the CLI
+    behavior; pass an explicit value when calling from a context where
+    cwd may be wrong.
+    """
+    from lib_core import _persistent_project_dir  # noqa: PLC0415
+
+    if project_root is None:
+        project_root = Path.cwd()
+
+    # Inline the existing logic from cmd_check_spawn_budget below the
+    # manifest-load step. Caller is expected to have already validated
+    # manifest is a dict.
+    policy_path = _persistent_project_dir(project_root) / "spawn-budget-policy.json"
+    policy: dict = {}
+    try:
+        raw_policy = load_json(policy_path)
+        if isinstance(raw_policy, dict):
+            policy = raw_policy
+    except Exception:
+        policy = {}
+
+    gf = policy.get("global_fallback")
+    gf_threshold_raw = gf.get("threshold_count") if isinstance(gf, dict) else None
+    global_fallback_threshold: int = (
+        int(gf_threshold_raw) if isinstance(gf_threshold_raw, int) else 2
+    )
+    per_task_class: dict = {}
+    ptc = policy.get("per_task_class")
+    if isinstance(ptc, dict):
+        per_task_class = ptc
+
+    exempt_auditors: set[str] = set()
+    ea = policy.get("exempt_auditors")
+    if isinstance(ea, list):
+        for name in ea:
+            if isinstance(name, str):
+                exempt_auditors.add(name)
+
+    classification = manifest.get("classification") or {}
+    if isinstance(classification, dict):
+        task_type = classification.get("type") or classification.get("task_type")
+    else:
+        task_type = None
+    risk_level = classification.get("risk_level") if isinstance(classification, dict) else None
+    if isinstance(task_type, str) and task_type and isinstance(risk_level, str) and risk_level:
+        task_class = f"{task_type}:{risk_level}"
+    else:
+        task_class = "unknown:unknown"
+
+    task_class_policy = per_task_class.get(task_class)
+    if isinstance(task_class_policy, dict) and isinstance(task_class_policy.get("threshold_count"), int):
+        threshold: int = task_class_policy["threshold_count"]
+    else:
+        threshold = global_fallback_threshold
+
+    ensemble_set: set[str] = set()
+    audit_plan_path = task_dir / "audit-plan.json"
+    try:
+        plan_raw = load_json(audit_plan_path)
+        ensemble_set = _collect_ensemble_auditors(plan_raw)
+    except Exception:
+        ensemble_set = set()
+
+    reports_dir = task_dir / "audit-reports"
+    all_reports: list[tuple[str, list, bool, Path, float]] = []
+    if reports_dir.is_dir():
+        for report_path in reports_dir.glob("*.json"):
+            try:
+                data = load_json(report_path)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            auditor = data.get("auditor")
+            findings = data.get("findings")
+            if not isinstance(auditor, str) or not isinstance(findings, list):
+                continue
+            is_wasted = (findings == [])
+            try:
+                mtime = report_path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            all_reports.append((auditor, findings, is_wasted, report_path, mtime))
+
+    ensemble_by_auditor: dict[str, list[tuple[str, list, bool, Path, float]]] = {}
+    surviving_reports: list[tuple[str, list, bool, Path, float]] = []
+    for entry in all_reports:
+        auditor = entry[0]
+        if auditor in ensemble_set:
+            ensemble_by_auditor.setdefault(auditor, []).append(entry)
+        else:
+            surviving_reports.append(entry)
+    for auditor, entries in ensemble_by_auditor.items():
+        best = max(entries, key=lambda e: (e[4], e[3].name))
+        surviving_reports.append(best)
+
+    count: int = 0
+    exempt_count: int = 0
+    contributing_auditors: set[str] = set()
+    for auditor, _findings, is_wasted, _path, _mtime in surviving_reports:
+        if not is_wasted:
+            continue
+        if auditor in exempt_auditors:
+            exempt_count += 1
+        else:
+            count += 1
+            contributing_auditors.add(auditor)
+
+    if manifest.get("blocked_reason") == "wasted_spawns_exceeded":
+        status = "already_paused"
+    elif count >= threshold:
+        status = "paused"
+    else:
+        status = "ok"
+
+    return {
+        "status": status,
+        "count": count,
+        "threshold": threshold,
+        "exempt_count": exempt_count,
+        "task_class": task_class,
+        "contributing_auditors": sorted(contributing_auditors),
+    }
+
+
 def cmd_check_spawn_budget(args: argparse.Namespace) -> int:
     """Check whether the current task has exhausted its wasted-spawn budget.
 
@@ -1745,127 +1886,18 @@ def cmd_check_spawn_budget(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # AC-8a: read spawn-budget-policy.json; missing/unreadable -> global fallback.
-    policy_path = _persistent_project_dir(Path.cwd()) / "spawn-budget-policy.json"
-    policy: dict = {}
-    try:
-        raw_policy = load_json(policy_path)
-        if isinstance(raw_policy, dict):
-            policy = raw_policy
-    except Exception:
-        policy = {}
+    # perf-001: delegate the read-only counting to compute_spawn_budget_status
+    # (the same function circuit_breaker.py imports — avoids the per-call
+    # subprocess fork on the hot path). The CLI command keeps the side-
+    # effect branch (receipt write + manifest.blocked_reason) below.
+    status_dict = compute_spawn_budget_status(task_dir, manifest)
+    count = status_dict["count"]
+    threshold = status_dict["threshold"]
+    exempt_count = status_dict["exempt_count"]
+    task_class = status_dict["task_class"]
+    contributing_auditors = list(status_dict["contributing_auditors"])
 
-    # AC-1: schema places threshold under policy["global_fallback"]["threshold_count"]
-    # (matching what _build_spawn_budget_policy_data writes in memory/policy_engine.py).
-    # Reading the top-level key would silently always fall to the hardcoded literal 2.
-    gf = policy.get("global_fallback")
-    gf_threshold_raw = gf.get("threshold_count") if isinstance(gf, dict) else None
-    global_fallback_threshold: int = (
-        int(gf_threshold_raw) if isinstance(gf_threshold_raw, int) else 2
-    )
-    per_task_class: dict = {}
-    ptc = policy.get("per_task_class")
-    if isinstance(ptc, dict):
-        per_task_class = ptc
-
-    exempt_auditors: set[str] = set()
-    ea = policy.get("exempt_auditors")
-    if isinstance(ea, list):
-        for name in ea:
-            if isinstance(name, str):
-                exempt_auditors.add(name)
-
-    # AC-8b: extract task_class from manifest.classification. Note that
-    # manifest.classification uses "type" (matching lib_validate.py:308 and
-    # ctl.py:2798) while retrospectives use "task_type" — so the policy
-    # file's per_task_class keys (built from retrospective["task_type"])
-    # share the same string value as manifest classification["type"]
-    # (e.g. both yield "feature"). We accept "task_type" too for forward
-    # compat in case the spec wording becomes the canonical key later.
-    classification = manifest.get("classification") or {}
-    if isinstance(classification, dict):
-        task_type = classification.get("type") or classification.get("task_type")
-    else:
-        task_type = None
-    risk_level = classification.get("risk_level") if isinstance(classification, dict) else None
-    if isinstance(task_type, str) and task_type and isinstance(risk_level, str) and risk_level:
-        task_class = f"{task_type}:{risk_level}"
-    else:
-        task_class = "unknown:unknown"
-
-    # AC-8c: per-task-class threshold lookup.
-    task_class_policy = per_task_class.get(task_class)
-    if isinstance(task_class_policy, dict) and isinstance(task_class_policy.get("threshold_count"), int):
-        threshold: int = task_class_policy["threshold_count"]
-    else:
-        threshold = global_fallback_threshold
-
-    # AC-9: ensemble-cascade dedup — read audit-plan.json permissively.
-    ensemble_set: set[str] = set()
-    audit_plan_path = task_dir / "audit-plan.json"
-    try:
-        plan_raw = load_json(audit_plan_path)
-        ensemble_set = _collect_ensemble_auditors(plan_raw)
-    except Exception:
-        ensemble_set = set()
-
-    # Collect all audit reports from audit-reports/*.json.
-    # Each report dict must have "auditor" (str) and "findings" (list).
-    reports_dir = task_dir / "audit-reports"
-    # list of (auditor, findings, is_wasted, path, mtime)
-    all_reports: list[tuple[str, list, bool, Path, float]] = []
-    if reports_dir.is_dir():
-        for report_path in reports_dir.glob("*.json"):
-            try:
-                data = load_json(report_path)
-            except Exception:
-                continue
-            if not isinstance(data, dict):
-                continue
-            auditor = data.get("auditor")
-            findings = data.get("findings")
-            if not isinstance(auditor, str) or not isinstance(findings, list):
-                continue
-            is_wasted = (findings == [])
-            try:
-                mtime = report_path.stat().st_mtime
-            except OSError:
-                mtime = 0.0
-            all_reports.append((auditor, findings, is_wasted, report_path, mtime))
-
-    # AC-9: apply ensemble dedup — for ensemble auditors, keep only the
-    # report with the greatest mtime; tie-break by filename descending.
-    # Group by auditor for ensemble members.
-    ensemble_by_auditor: dict[str, list[tuple[str, list, bool, Path, float]]] = {}
-    surviving_reports: list[tuple[str, list, bool, Path, float]] = []
-    for entry in all_reports:
-        auditor = entry[0]
-        if auditor in ensemble_set:
-            ensemble_by_auditor.setdefault(auditor, []).append(entry)
-        else:
-            # Non-ensemble auditors always survive.
-            surviving_reports.append(entry)
-
-    for auditor, entries in ensemble_by_auditor.items():
-        # Keep entry with greatest mtime; tie-break: filename descending.
-        best = max(entries, key=lambda e: (e[4], e[3].name))
-        surviving_reports.append(best)
-
-    # AC-8d/e: count wasted-and-not-exempt (count) and wasted-and-exempt (exempt_count).
-    count: int = 0
-    exempt_count: int = 0
-    contributing_auditors: set[str] = set()
-    for auditor, _findings, is_wasted, _path, _mtime in surviving_reports:
-        if not is_wasted:
-            continue
-        if auditor in exempt_auditors:
-            exempt_count += 1
-        else:
-            count += 1
-            contributing_auditors.add(auditor)
-
-    # AC-8h: already_paused branch — no mutation, no receipt.
-    if manifest.get("blocked_reason") == "wasted_spawns_exceeded":
+    if status_dict["status"] == "already_paused":
         print(json.dumps({
             "status": "already_paused",
             "count": count,
@@ -1875,15 +1907,14 @@ def cmd_check_spawn_budget(args: argparse.Namespace) -> int:
         }))
         return 0
 
-    # AC-8g: count >= threshold and not already paused -> write receipt + set blocked_reason.
-    if count >= threshold:
+    if status_dict["status"] == "paused":
         receipt_spawn_budget_paused(
             task_dir,
             count=count,
             threshold=threshold,
             exempt_count=exempt_count,
             task_class=task_class,
-            contributing_auditors=sorted(contributing_auditors),
+            contributing_auditors=contributing_auditors,
         )
         manifest["blocked_reason"] = "wasted_spawns_exceeded"
         write_json(manifest_path, manifest)
@@ -1896,7 +1927,7 @@ def cmd_check_spawn_budget(args: argparse.Namespace) -> int:
         }))
         return 0
 
-    # AC-8i: count < threshold -> status ok.
+    # status == "ok"
     print(json.dumps({
         "status": "ok",
         "count": count,
@@ -1905,6 +1936,7 @@ def cmd_check_spawn_budget(args: argparse.Namespace) -> int:
         "task_class": task_class,
     }))
     return 0
+
 
 
 def cmd_spawn_resume(args: argparse.Namespace) -> int:
