@@ -169,9 +169,24 @@ def _build_events_by_task(
     """
     if not task_ids:
         return {}
+    # Path-safety gate: task_ids originate in retrospective JSON which is
+    # operator-side state but is not HMAC-signed. A crafted task_id like
+    # "../etc" or "task-x/../events" would otherwise resolve outside .dynos
+    # via the path join below and could cause verify_signed_events(strict=False)
+    # to read parseable records from arbitrary readable JSONL files.
+    # Reject anything that doesn't match the safe slug regex BEFORE the join.
+    from lib_core import is_safe_task_id  # noqa: PLC0415 — local to break import cycle
     secret = os.environ.get("DYNOS_EVENT_SECRET", "")
     result: dict[str, list[dict]] = {}
     for task_id in task_ids:
+        if not is_safe_task_id(task_id):
+            log_event(
+                root,
+                "policy_engine_unsafe_task_id_rejected",
+                task=str(task_id) if task_id is not None else None,
+                reason="task_id failed slug validation",
+            )
+            continue
         task_dir = root / ".dynos" / task_id
         if not task_dir.is_dir():
             continue

@@ -7,6 +7,7 @@ import fcntl
 import functools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -248,6 +249,31 @@ def _resolve_git_toplevel(root_str: str) -> Optional[str]:
         return None
     main_worktree = common_path.parent
     return str(main_worktree)
+
+
+# Path-safe task-id slug. Anchored, no path separators, no leading dot.
+# Matches dynos-style ``task-YYYYMMDD-NNN`` plus test ids ``task-T``, ``task-A``.
+# A crafted ``task_id`` like ``../etc`` cannot pass — used by callers that
+# construct ``root / ".dynos" / task_id`` from untrusted input (retrospective
+# JSON, CLI args, etc.).
+_TASK_ID_SLUG_RE: "re.Pattern[str]" = re.compile(
+    r"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$"
+)
+
+
+def is_safe_task_id(task_id: object) -> bool:
+    """Return True if ``task_id`` is a string matching the safe slug regex.
+
+    Use this BEFORE constructing any filesystem path from a task_id that
+    originated outside the harness (retrospective JSON, CLI args, postmortem
+    payloads, etc.). Path-traversal attempts (``../etc``, ``a/b``) and
+    leading-dot components (``..``, ``.hidden``) are rejected.
+
+    The slug pattern is intentionally narrow — it MUST match every legitimate
+    task_id the harness produces. If a future task_id format is introduced,
+    update _TASK_ID_SLUG_RE in lockstep.
+    """
+    return isinstance(task_id, str) and bool(_TASK_ID_SLUG_RE.match(task_id))
 
 
 def _persistent_project_dir(root: Path) -> Path:
