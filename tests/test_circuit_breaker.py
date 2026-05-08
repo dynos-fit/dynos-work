@@ -91,7 +91,7 @@ def test_wasted_spawns_abort_threshold(
     _make_manifest(task_dir, classification_type="bugfix")
     _write(task_dir / "token-usage.json", {"total": 0, "events": []})
     _stub_check_spawn_budget(
-        monkeypatch, {"status": "paused", "count": 3, "threshold": 2}
+        monkeypatch, {"status": "paused", "count": cb.WASTED_SPAWN_ABORT_THRESHOLD, "threshold": 2}
     )
 
     result = cb.check_circuit_breakers(task_dir, "EXECUTION")
@@ -99,7 +99,7 @@ def test_wasted_spawns_abort_threshold(
     assert result.get("abort") is True
     assert result.get("trigger") == "wasted_spawns_abort"
     assert result.get("limit") == cb.WASTED_SPAWN_ABORT_THRESHOLD
-    assert result.get("actual") == 3
+    assert result.get("actual") == cb.WASTED_SPAWN_ABORT_THRESHOLD
     assert "reason" in result
 
 
@@ -109,7 +109,7 @@ def test_small_task_token_overrun(
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     _make_manifest(task_dir, classification_type="bugfix")
-    _write(task_dir / "token-usage.json", {"total": 1_500_000, "events": []})
+    _write(task_dir / "token-usage.json", {"total": cb.SMALL_TASK_TOKEN_LIMIT + 1, "events": []})
     _write(
         task_dir / "execution-graph.json",
         {"segments": [{"files_expected": ["a.py", "b.py"]}]},
@@ -121,13 +121,13 @@ def test_small_task_token_overrun(
     assert result.get("abort") is True
     assert result.get("trigger") == "small_task_token_overrun"
     assert result.get("limit") == cb.SMALL_TASK_TOKEN_LIMIT
-    assert result.get("actual") == 1_500_000
+    assert result.get("actual") == cb.SMALL_TASK_TOKEN_LIMIT + 1
 
     # Multi-segment unique-file count > 2 must NOT fire small-task arm.
     task_dir2 = tmp_path / "task_multi"
     task_dir2.mkdir()
     _make_manifest(task_dir2, classification_type="bugfix")
-    _write(task_dir2 / "token-usage.json", {"total": 1_500_000, "events": []})
+    _write(task_dir2 / "token-usage.json", {"total": cb.SMALL_TASK_TOKEN_LIMIT + 1, "events": []})
     _write(
         task_dir2 / "execution-graph.json",
         {
@@ -148,7 +148,7 @@ def test_bugfix_token_overrun(
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     _make_manifest(task_dir, classification_type="bugfix")
-    _write(task_dir / "token-usage.json", {"total": 6_000_000, "events": []})
+    _write(task_dir / "token-usage.json", {"total": cb.BUGFIX_TOKEN_LIMIT + 1, "events": []})
     _write(
         task_dir / "execution-graph.json",
         {
@@ -167,7 +167,7 @@ def test_bugfix_token_overrun(
     assert result.get("abort") is True
     assert result.get("trigger") == "bugfix_token_overrun"
     assert result.get("limit") == cb.BUGFIX_TOKEN_LIMIT
-    assert result.get("actual") == 6_000_000
+    assert result.get("actual") == cb.BUGFIX_TOKEN_LIMIT + 1
 
 
 def test_opus_zero_yield(tmp_path: Path) -> None:
@@ -331,7 +331,7 @@ def test_small_task_token_downgrade_warning(
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     _make_manifest(task_dir, classification_type="bugfix")
-    _write(task_dir / "token-usage.json", {"total": 850_000, "events": []})
+    _write(task_dir / "token-usage.json", {"total": cb.SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD, "events": []})
     _write(
         task_dir / "execution-graph.json",
         {"segments": [{"files_expected": ["a.py", "b.py"]}]},
@@ -345,7 +345,7 @@ def test_small_task_token_downgrade_warning(
     assert "abort" not in result
     assert result.get("limit_warned") == cb.SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD
     assert result.get("limit_abort") == cb.SMALL_TASK_TOKEN_LIMIT
-    assert result.get("actual") == 850_000
+    assert result.get("actual") == cb.SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD
     assert "suggestion" in result
 
 
@@ -359,7 +359,7 @@ def test_bugfix_token_downgrade_warning(
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     _make_manifest(task_dir, classification_type="bugfix")
-    _write(task_dir / "token-usage.json", {"total": 4_500_000, "events": []})
+    _write(task_dir / "token-usage.json", {"total": cb.BUGFIX_TOKEN_DOWNGRADE_THRESHOLD, "events": []})
     # Bugfix path: more than SMALL_TASK_FILES_THRESHOLD files so the
     # small-task arms don't shadow the bugfix arms.
     _write(
@@ -375,7 +375,7 @@ def test_bugfix_token_downgrade_warning(
     assert "abort" not in result
     assert result.get("limit_warned") == cb.BUGFIX_TOKEN_DOWNGRADE_THRESHOLD
     assert result.get("limit_abort") == cb.BUGFIX_TOKEN_LIMIT
-    assert result.get("actual") == 4_500_000
+    assert result.get("actual") == cb.BUGFIX_TOKEN_DOWNGRADE_THRESHOLD
     assert "suggestion" in result
 
 
