@@ -97,12 +97,24 @@ def _classification_type(manifest: dict) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _token_total(task_dir: Path) -> int:
+def _token_total(
+    task_dir: Path,
+    *,
+    token_usage_data: Optional[dict] = None,
+) -> int:
     """Read token-usage.json total, falling back to input+output sum.
 
     Missing file → 0 (AC-23).
+
+    perf-003 (this PR): caller may pass already-parsed token-usage.json
+    via ``token_usage_data`` to avoid a redundant cold read on the hot
+    path (check_circuit_breakers calls both _token_total AND
+    _opus_zero_yield_count, both of which previously re-parsed the file).
     """
-    data = _read_json(task_dir / "token-usage.json")
+    if token_usage_data is None:
+        data = _read_json(task_dir / "token-usage.json")
+    else:
+        data = token_usage_data
     if not isinstance(data, dict):
         return 0
     total = data.get("total")
@@ -118,20 +130,30 @@ def _token_total(task_dir: Path) -> int:
         return 0
 
 
-def _unique_files_count(task_dir: Path) -> Optional[int]:
+def _unique_files_count(
+    task_dir: Path,
+    *,
+    graph_data: Optional[dict] = None,
+) -> Optional[int]:
     """Count distinct files_expected across all segments (AC-12).
 
     Returns None if execution-graph.json is missing/unreadable (AC-22).
+
+    perf-003 (this PR): caller may pass already-parsed execution-graph.json
+    via ``graph_data`` to avoid a redundant cold read on the hot path.
     """
-    graph_path = task_dir / "execution-graph.json"
-    if not graph_path.exists():
-        print(
-            f"[circuit_breaker] execution-graph.json missing at {graph_path}; "
-            "skipping small-task token condition.",
-            file=sys.stderr,
-        )
-        return None
-    graph = _read_json(graph_path)
+    if graph_data is None:
+        graph_path = task_dir / "execution-graph.json"
+        if not graph_path.exists():
+            print(
+                f"[circuit_breaker] execution-graph.json missing at {graph_path}; "
+                "skipping small-task token condition.",
+                file=sys.stderr,
+            )
+            return None
+        graph = _read_json(graph_path)
+    else:
+        graph = graph_data
     if not isinstance(graph, dict):
         return None
     segments = graph.get("segments")
@@ -150,66 +172,73 @@ def _unique_files_count(task_dir: Path) -> Optional[int]:
     return len(unique)
 
 
-def _check_spawn_budget(task_dir: Path) -> int:
-    """Invoke ctl.py check-spawn-budget; return wasted-spawn count.
+def _check_spawn_budget(task_dir: Path, manifest: Optional[dict] = None) -> int:
+    """Return the wasted-spawn count via in-process call to
+    ``ctl.compute_spawn_budget_status``.
 
-    On any failure (non-zero exit, bad JSON, missing field) log a warning
+    perf-001 (this PR): replaces the per-call subprocess fork that
+    previously paid Python interpreter startup + ctl.py module-import
+    latency on every EXECUTION-stage invocation. The shared counting
+    helper in ctl.py is read-only (no receipt write, no manifest
+    mutation), so the breaker's call has no side effects — _apply_abort
+    still owns the actual transition.
+
+    On any failure (import error, missing manifest, etc.) log a warning
     and return 0 so the wasted_spawns arm does not fire spuriously.
     """
-    cmd = [
-        _PYTHON3,
-        str(_REPO_ROOT / "hooks" / "ctl.py"),
-        "check-spawn-budget",
-        "--task-dir",
-        str(task_dir),
-    ]
+    if manifest is None:
+        manifest = _read_json(task_dir / "manifest.json")
+    if not isinstance(manifest, dict):
+        return 0
     try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(_REPO_ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
+        # Late import to break the import cycle (ctl imports many things;
+        # circuit_breaker is intentionally light-weight at module load).
+        from ctl import compute_spawn_budget_status  # noqa: PLC0415
+    except ImportError as exc:
         print(
-            f"[circuit_breaker] check-spawn-budget subprocess failed: {exc}",
+            f"[circuit_breaker] compute_spawn_budget_status import failed: {exc}",
             file=sys.stderr,
         )
         return 0
-
-    if completed.returncode != 0:
-        print(
-            "[circuit_breaker] check-spawn-budget exited "
-            f"{completed.returncode}: {completed.stderr.strip()}",
-            file=sys.stderr,
-        )
-        return 0
-
     try:
-        payload = json.loads(completed.stdout)
-    except (json.JSONDecodeError, ValueError) as exc:
+        result = compute_spawn_budget_status(
+            task_dir,
+            manifest,
+            project_root=_REPO_ROOT,
+        )
+    except Exception as exc:  # noqa: BLE001 — defensive
         print(
-            f"[circuit_breaker] check-spawn-budget stdout not JSON: {exc}",
+            f"[circuit_breaker] compute_spawn_budget_status failed: {exc}",
             file=sys.stderr,
         )
         return 0
-
-    count = payload.get("count") if isinstance(payload, dict) else None
+    count = result.get("count")
     if not isinstance(count, int):
         return 0
     return count
 
 
-def _opus_zero_yield_count(task_dir: Path) -> int:
+def _opus_zero_yield_count(
+    task_dir: Path,
+    *,
+    token_usage_data: Optional[dict] = None,
+) -> int:
     """Count opus audit spawns whose audit-report has empty findings.
 
     Per AC-15, model is read from the per-event `model` field on the
     events array — not from `by_agent`. Per AC-16, an event without a
     matching audit-report file is skipped.
+
+    perf-002/perf-003 (this PR): caller may pass already-parsed
+    token-usage.json content via ``token_usage_data`` to avoid a cold
+    re-read on the hot path. The audit-reports directory listing is
+    snapshotted once into a stem-keyed cache so repeated lookups don't
+    re-glob.
     """
-    data = _read_json(task_dir / "token-usage.json")
+    if token_usage_data is None:
+        data = _read_json(task_dir / "token-usage.json")
+    else:
+        data = token_usage_data
     if not isinstance(data, dict):
         return 0
     events = data.get("events")
@@ -217,6 +246,23 @@ def _opus_zero_yield_count(task_dir: Path) -> int:
         return 0
 
     audit_reports_dir = task_dir / "audit-reports"
+    # perf-002: snapshot the audit-reports directory listing once.
+    # `name_index` maps stem -> list[Path] for files whose stem starts
+    # with any plausible agent name. _lookup_audit_report walks this
+    # cached list once per agent instead of re-globbing the directory.
+    name_index: Optional[list[Path]] = None
+    try:
+        if audit_reports_dir.is_dir():
+            name_index = [
+                p for p in audit_reports_dir.iterdir()
+                if p.is_file() and p.suffix == ".json"
+            ]
+    except OSError:
+        name_index = None
+
+    # perf-002 secondary: memoize parsed reports across the event loop.
+    report_cache: dict[Path, Optional[dict]] = {}
+
     zero_yield = 0
     for event in events:
         if not isinstance(event, dict):
@@ -232,7 +278,12 @@ def _opus_zero_yield_count(task_dir: Path) -> int:
         if not _validate_audit_event_receipt(event, task_dir):
             continue
         agent = event.get("agent")
-        report = _lookup_audit_report(audit_reports_dir, agent)
+        report = _lookup_audit_report(
+            audit_reports_dir,
+            agent,
+            name_index=name_index,
+            report_cache=report_cache,
+        )
         if report is None:
             # AC-16: missing audit report → skip this event
             continue
@@ -322,7 +373,13 @@ def _validate_audit_event_receipt(event: dict, task_dir: Path) -> bool:
     return False
 
 
-def _lookup_audit_report(audit_reports_dir: Path, agent: str) -> Optional[dict]:
+def _lookup_audit_report(
+    audit_reports_dir: Path,
+    agent: str,
+    *,
+    name_index: Optional[list[Path]] = None,
+    report_cache: Optional[dict[Path, Optional[dict]]] = None,
+) -> Optional[dict]:
     """Find an audit report whose filename starts with the agent name.
 
     The audit-report writer commonly names files `<agent>.json` or
@@ -334,22 +391,52 @@ def _lookup_audit_report(audit_reports_dir: Path, agent: str) -> Optional[dict]:
     pathlib does not reject these in joins) or cause the glob to match
     unintended files. Reject any ``agent`` that does not match
     ``^[A-Za-z0-9_-]+$``.
+
+    perf-002 (this PR): callers iterating many events should pass
+    ``name_index`` (a pre-listed snapshot of the directory's *.json files)
+    and ``report_cache`` (a dict that memoizes parsed report bodies).
+    Both are optional — when omitted, the function falls back to a glob
+    per call (legacy behavior).
     """
-    if not audit_reports_dir.exists() or not audit_reports_dir.is_dir():
-        return None
     if not isinstance(agent, str) or not _SAFE_AGENT_RE.match(agent):
         return None
+    if name_index is None and (not audit_reports_dir.exists() or not audit_reports_dir.is_dir()):
+        return None
+
+    def _read_cached(path: Path) -> Optional[dict]:
+        if report_cache is not None and path in report_cache:
+            return report_cache[path]
+        result = _read_json(path)
+        # Only cache dicts; non-dict results stay None per existing contract.
+        cached = result if isinstance(result, dict) else None
+        if report_cache is not None:
+            report_cache[path] = cached
+        return cached
 
     direct = audit_reports_dir / f"{agent}.json"
-    if direct.exists():
-        return _read_json(direct)
+    if name_index is not None:
+        # perf-002 fast path: O(N) walk of the cached listing per agent
+        # instead of stat + glob per call. Sort candidates so output is
+        # deterministic across platforms (matches the legacy glob+sorted
+        # ordering).
+        prefix = f"{agent}"
+        candidates = sorted(
+            p for p in name_index
+            if p.stem == prefix or p.stem.startswith(prefix)
+        )
+    else:
+        if direct.exists():
+            return _read_cached(direct)
+        try:
+            candidates = sorted(audit_reports_dir.glob(f"{agent}*.json"))
+        except OSError:
+            return None
 
-    try:
-        candidates = sorted(audit_reports_dir.glob(f"{agent}*.json"))
-    except OSError:
-        return None
-    for candidate in candidates:
-        report = _read_json(candidate)
+    # When using name_index we may have the direct match in the candidate
+    # list — try it first to preserve the legacy "exact match wins" rule.
+    direct_first = sorted(candidates, key=lambda p: (p != direct, p))
+    for candidate in direct_first:
+        report = _read_cached(candidate)
         if isinstance(report, dict):
             return report
     return None
@@ -389,14 +476,37 @@ def check_circuit_breakers(task_dir: Path, stage: str) -> Optional[dict]:
         )
         return None
 
+    # perf-003 (this PR): read token-usage.json and execution-graph.json
+    # once at function entry instead of per-helper. _token_total,
+    # _unique_files_count, and _opus_zero_yield_count all take pre-parsed
+    # dicts via keyword args. Each file may be absent (each helper
+    # gracefully degrades to its missing-file branch).
+    token_usage_data = _read_json(task_dir / "token-usage.json")
+    if not isinstance(token_usage_data, dict):
+        token_usage_data = None
+    graph_data = _read_json(task_dir / "execution-graph.json")
+    if not isinstance(graph_data, dict):
+        graph_data = None
+
     if stage == "AUDITING":
-        return _evaluate_auditing(task_dir)
+        return _evaluate_auditing(task_dir, token_usage_data=token_usage_data)
 
     # stage == "EXECUTION"
-    return _evaluate_execution(task_dir, manifest)
+    return _evaluate_execution(
+        task_dir,
+        manifest,
+        token_usage_data=token_usage_data,
+        graph_data=graph_data,
+    )
 
 
-def _evaluate_execution(task_dir: Path, manifest: dict) -> Optional[dict]:
+def _evaluate_execution(
+    task_dir: Path,
+    manifest: dict,
+    *,
+    token_usage_data: Optional[dict] = None,
+    graph_data: Optional[dict] = None,
+) -> Optional[dict]:
     """Evaluate the EXECUTION-stage conditions in deterministic order.
 
     Order (per Implicit-Requirement, AC-9..AC-11, AC-37, AC-38):
@@ -407,7 +517,7 @@ def _evaluate_execution(task_dir: Path, manifest: dict) -> Optional[dict]:
         5. bugfix_token_downgrade
     """
     # 1. wasted_spawns_abort (AC-9, AC-34)
-    wasted = _check_spawn_budget(task_dir)
+    wasted = _check_spawn_budget(task_dir, manifest=manifest)
     if wasted >= WASTED_SPAWN_ABORT_THRESHOLD:
         return {
             "abort": True,
@@ -421,8 +531,8 @@ def _evaluate_execution(task_dir: Path, manifest: dict) -> Optional[dict]:
         }
 
     classification_type = _classification_type(manifest)
-    tokens = _token_total(task_dir)
-    unique_files = _unique_files_count(task_dir)
+    tokens = _token_total(task_dir, token_usage_data=token_usage_data)
+    unique_files = _unique_files_count(task_dir, graph_data=graph_data)
 
     is_small_eligible = (
         classification_type in {"bugfix", "feature"}
@@ -459,12 +569,14 @@ def _evaluate_execution(task_dir: Path, manifest: dict) -> Optional[dict]:
             "actual": tokens,
         }
 
-    # 4. small_task_token_downgrade (AC-37)
+    # 4. small_task_token_downgrade (AC-37). Strict `<` upper bound:
+    # rule comp-f4ce7158af74 — abort arm at `>= LIMIT` catches the
+    # boundary, so the downgrade arm uses an exclusive upper bound.
     if (
         is_small_eligible
         and SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD
         <= tokens
-        <= SMALL_TASK_TOKEN_LIMIT
+        < SMALL_TASK_TOKEN_LIMIT
     ):
         return {
             "action": "downgrade",
@@ -479,10 +591,11 @@ def _evaluate_execution(task_dir: Path, manifest: dict) -> Optional[dict]:
             "actual": tokens,
         }
 
-    # 5. bugfix_token_downgrade (AC-38)
+    # 5. bugfix_token_downgrade (AC-38). Strict `<` upper bound — same
+    # rule as small_task above (comp-f4ce7158af74).
     if (
         classification_type == "bugfix"
-        and BUGFIX_TOKEN_DOWNGRADE_THRESHOLD <= tokens <= BUGFIX_TOKEN_LIMIT
+        and BUGFIX_TOKEN_DOWNGRADE_THRESHOLD <= tokens < BUGFIX_TOKEN_LIMIT
     ):
         return {
             "action": "downgrade",
@@ -500,9 +613,13 @@ def _evaluate_execution(task_dir: Path, manifest: dict) -> Optional[dict]:
     return None  # AC-8
 
 
-def _evaluate_auditing(task_dir: Path) -> Optional[dict]:
+def _evaluate_auditing(
+    task_dir: Path,
+    *,
+    token_usage_data: Optional[dict] = None,
+) -> Optional[dict]:
     """Evaluate AUDITING-stage condition: opus zero-yield only (AC-13)."""
-    zero_yield = _opus_zero_yield_count(task_dir)
+    zero_yield = _opus_zero_yield_count(task_dir, token_usage_data=token_usage_data)
     if zero_yield >= OPUS_AUDITOR_ZERO_YIELD_THRESHOLD:
         return {
             "abort": True,

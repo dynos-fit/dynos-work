@@ -47,19 +47,20 @@ def _make_manifest(task_dir: Path, classification_type: str = "bugfix") -> None:
 
 
 def _stub_check_spawn_budget(monkeypatch: pytest.MonkeyPatch, payload: dict) -> None:
-    """Patch subprocess.run so any check-spawn-budget call returns `payload`.
+    """Patch the in-process spawn-budget helper to return ``payload``.
 
-    Other commands fall through to a benign success result.
+    Pre-perf-001 (residual 0fe95494) this stub patched ``subprocess.run``
+    because the breaker forked ctl.py via subprocess. After the refactor
+    the breaker calls ``compute_spawn_budget_status`` in-process, so we
+    patch ``cb._check_spawn_budget`` directly to return the ``count``
+    from the fake payload — same behavioral contract.
     """
 
-    def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
-        if any("check-spawn-budget" in str(part) for part in cmd):
-            return subprocess.CompletedProcess(
-                cmd, returncode=0, stdout=json.dumps(payload), stderr=""
-            )
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+    def fake_check(task_dir, manifest=None):  # type: ignore[no-untyped-def]
+        count = payload.get("count")
+        return int(count) if isinstance(count, int) else 0
 
-    monkeypatch.setattr(cb.subprocess, "run", fake_run)
+    monkeypatch.setattr(cb, "_check_spawn_budget", fake_check)
 
 
 # ---------------------------------------------------------------------------
@@ -707,3 +708,145 @@ def test_opus_zero_yield_rejects_sidecar_mismatch(
         f"Expected None (sidecar mismatch blocked) but got {result!r}. "
         "The cross-check is not yet wired — this test is intentionally RED."
     )
+
+
+# ---------------------------------------------------------------------------
+# Perf bundle (residuals 0fe95494, 6130ca57, dc99b61c)
+# ---------------------------------------------------------------------------
+
+
+def test_check_spawn_budget_uses_in_process_helper_not_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """perf-001 / residual 0fe95494: _check_spawn_budget must NOT fork
+    a subprocess. It calls compute_spawn_budget_status in-process. We
+    seal this by asserting subprocess.run is never called when
+    _check_spawn_budget runs.
+    """
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    _make_manifest(task_dir, classification_type="bugfix")
+
+    calls: list[list[str]] = []
+
+    def forbidden_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append([str(part) for part in cmd])
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cb.subprocess, "run", forbidden_run)
+
+    # Call the helper directly. It must complete without forking python3
+    # to invoke ctl.py — that was the perf-001 cost. Other subprocess
+    # calls (e.g., `git rev-parse --git-common-dir` from
+    # _persistent_project_dir) are unrelated and acceptable.
+    result = cb._check_spawn_budget(task_dir)
+    assert isinstance(result, int)
+    python_ctl_calls = [
+        c for c in calls
+        if any("python" in part for part in c)
+        and any("ctl.py" in part for part in c)
+    ]
+    assert python_ctl_calls == [], (
+        f"Expected zero python+ctl.py subprocess calls but got "
+        f"{python_ctl_calls!r}. perf-001 regression — _check_spawn_budget "
+        f"forked the ctl.py CLI instead of calling "
+        f"compute_spawn_budget_status in-process."
+    )
+
+
+def test_lookup_audit_report_reuses_cached_directory_listing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """perf-002 / residual 6130ca57: when iterating many opus events,
+    _opus_zero_yield_count snapshots audit-reports/ once into a name
+    index. _lookup_audit_report consumes that index instead of re-globbing
+    per call. Seal: count Path.iterdir invocations on audit-reports/ —
+    must be exactly 1 even when 5 events resolve.
+    """
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    _make_manifest(task_dir, classification_type="feature")
+
+    # Seed 5 opus audit-spawn events, all with valid receipts (route_mode=generic).
+    agents = ["A1", "A2", "A3", "A4", "A5"]
+    events = [
+        {"phase": "audit", "type": "spawn", "model": "opus", "agent": a}
+        for a in agents
+    ]
+    _write(task_dir / "token-usage.json", {"total": 0, "events": events})
+    receipts_dir = task_dir / "receipts"
+    receipts_dir.mkdir()
+    audit_reports_dir = task_dir / "audit-reports"
+    audit_reports_dir.mkdir()
+    for agent in agents:
+        _write(
+            audit_reports_dir / f"{agent}.json",
+            {"auditor": agent, "findings": []},
+        )
+        _write(
+            receipts_dir / f"audit-{agent}.json",
+            {"route_mode": "generic"},
+        )
+
+    # Wrap Path.iterdir on audit_reports_dir to count invocations.
+    original_iterdir = Path.iterdir
+    counter = {"calls": 0}
+
+    def counting_iterdir(self):  # type: ignore[no-untyped-def]
+        if self == audit_reports_dir:
+            counter["calls"] += 1
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+    cb._opus_zero_yield_count(task_dir)
+    assert counter["calls"] == 1, (
+        f"Expected exactly 1 iterdir on audit-reports/ but got {counter['calls']}. "
+        "perf-002 regression — directory listing is being re-read per agent."
+    )
+
+
+def test_check_circuit_breakers_reads_each_input_file_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """perf-003 / residual dc99b61c: check_circuit_breakers reads
+    manifest.json + token-usage.json + execution-graph.json once at
+    function entry, then passes parsed dicts to helpers via kwargs.
+    Seal: count _read_json invocations per input file across one
+    EXECUTION-stage call. Must be exactly 1 each.
+    """
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    _make_manifest(task_dir, classification_type="bugfix")
+    _write(task_dir / "token-usage.json", {"total": 100_000, "events": []})
+    _write(
+        task_dir / "execution-graph.json",
+        {"segments": [{"files_expected": ["a.py", "b.py"]}]},
+    )
+    _stub_check_spawn_budget(monkeypatch, {"status": "ok", "count": 0, "threshold": 2})
+
+    targets = {
+        "manifest.json": 0,
+        "token-usage.json": 0,
+        "execution-graph.json": 0,
+    }
+    original_read = cb._read_json
+
+    def counting_read(path):  # type: ignore[no-untyped-def]
+        name = Path(path).name
+        if name in targets:
+            targets[name] += 1
+        return original_read(path)
+
+    monkeypatch.setattr(cb, "_read_json", counting_read)
+
+    cb.check_circuit_breakers(task_dir, "EXECUTION")
+    for name, count in targets.items():
+        assert count <= 1, (
+            f"perf-003 regression — {name} read {count} times in one "
+            f"check_circuit_breakers call, expected at most 1. Hot-path "
+            f"file reads must be amortized."
+        )
