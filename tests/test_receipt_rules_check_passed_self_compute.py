@@ -100,7 +100,7 @@ def test_error_violations_positive_refuses(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         rules_engine,
         "run_checks",
-        lambda root, mode: [
+        lambda root, mode, **kw: [
             SimpleNamespace(severity="error", rule_id="r1"),
             SimpleNamespace(severity="warn", rule_id="r2"),
         ],
@@ -122,7 +122,7 @@ def test_zero_errors_records_correct_counts(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         rules_engine,
         "run_checks",
-        lambda root, mode: [
+        lambda root, mode, **kw: [
             SimpleNamespace(severity="warn", rule_id=f"r{i}")
             for i in range(3)
         ],
@@ -142,7 +142,7 @@ def test_rules_file_hash_computed_when_present(tmp_path: Path, monkeypatch):
     and rules_evaluated counts the 'rules' list length."""
     td = _make_task(tmp_path)
     import rules_engine
-    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode: [])
+    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode, **kw: [])
 
     # Create a persistent dir with a prevention-rules.json
     home = tmp_path / "dynos-home"
@@ -166,7 +166,7 @@ def test_rules_file_absent_uses_none_sentinel(tmp_path: Path, monkeypatch):
     """AC 1: when no rules file, rules_file_sha256 literal 'none' and count=0."""
     td = _make_task(tmp_path)
     import rules_engine
-    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode: [])
+    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode, **kw: [])
     monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
 
     out = receipt_rules_check_passed(td, "all")

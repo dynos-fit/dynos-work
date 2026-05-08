@@ -157,7 +157,7 @@ def test_every_writer_in_all_embeds_contract_version_five(tmp_path: Path, monkey
     td = _td(tmp_path)
     # receipt_rules_check_passed needs run_checks stubbed.
     import rules_engine
-    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode: [])
+    monkeypatch.setattr(rules_engine, "run_checks", lambda root, mode, **kw: [])
     monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
 
     writer_names = [n for n in lib_receipts.__all__ if n.startswith("receipt_")]
