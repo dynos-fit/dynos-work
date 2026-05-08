@@ -850,3 +850,275 @@ def test_check_circuit_breakers_reads_each_input_file_once(
             f"check_circuit_breakers call, expected at most 1. Hot-path "
             f"file reads must be amortized."
         )
+
+
+# ---------------------------------------------------------------------------
+# task-20260508-002: _dispatch_breaker_decision unit tests (AC-2, AC-4..AC-6, AC-10)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_breaker_observe_only_with_no_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4, AC-10: decision=None + BREAKER_ACTIVE=False.
+
+    log_event fires exactly once with would_have_aborted=False and
+    would_have_downgraded=False. _apply_abort is NOT called.
+    """
+    task_dir = tmp_path / "task-obs-none"
+    task_dir.mkdir(parents=True)
+
+    log_calls: list[tuple] = []
+
+    def fake_log_event(root, event_type, **kwargs):  # type: ignore[no-untyped-def]
+        log_calls.append((root, event_type, kwargs))
+
+    apply_abort_calls: list[tuple] = []
+
+    def fake_apply_abort(td, dec):  # type: ignore[no-untyped-def]
+        apply_abort_calls.append((td, dec))
+
+    monkeypatch.setattr(cb, "log_event", fake_log_event)
+    monkeypatch.setattr(cb, "_apply_abort", fake_apply_abort)
+    # Ensure gate is False (it is by default, but be explicit)
+    monkeypatch.setattr(cb, "BREAKER_ACTIVE", False)
+
+    cb._dispatch_breaker_decision(task_dir, "EXECUTION", None, task_id="task-obs-none")
+
+    assert len(log_calls) == 1, f"Expected 1 log_event call, got {len(log_calls)}"
+    _root, event_type, kwargs = log_calls[0]
+    assert event_type == "circuit_breaker_observed"
+    assert kwargs["would_have_aborted"] is False
+    assert kwargs["would_have_downgraded"] is False
+    assert kwargs["stage"] == "EXECUTION"
+    assert kwargs["decision"] is None
+    assert len(apply_abort_calls) == 0, "_apply_abort must NOT be called when BREAKER_ACTIVE=False"
+
+
+def test_dispatch_breaker_observe_only_with_abort_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5, AC-10: Critical seal — abort dict + BREAKER_ACTIVE=False.
+
+    log_event fires once with would_have_aborted=True.
+    _apply_abort is NOT called (the False gate must suppress the abort path).
+    """
+    task_dir = tmp_path / "task-obs-abort"
+    task_dir.mkdir(parents=True)
+
+    abort_decision = {
+        "abort": True,
+        "trigger": "wasted_spawns_abort",
+        "reason": "too many wasted spawns",
+        "limit": 3,
+        "actual": 5,
+    }
+
+    log_calls: list[tuple] = []
+
+    def fake_log_event(root, event_type, **kwargs):  # type: ignore[no-untyped-def]
+        log_calls.append((root, event_type, kwargs))
+
+    apply_abort_calls: list[tuple] = []
+
+    def fake_apply_abort(td, dec):  # type: ignore[no-untyped-def]
+        apply_abort_calls.append((td, dec))
+
+    monkeypatch.setattr(cb, "log_event", fake_log_event)
+    monkeypatch.setattr(cb, "_apply_abort", fake_apply_abort)
+    monkeypatch.setattr(cb, "BREAKER_ACTIVE", False)
+
+    cb._dispatch_breaker_decision(task_dir, "EXECUTION", abort_decision, task_id="task-obs-abort")
+
+    assert len(log_calls) == 1, f"Expected 1 log_event call, got {len(log_calls)}"
+    _root, event_type, kwargs = log_calls[0]
+    assert event_type == "circuit_breaker_observed"
+    assert kwargs["would_have_aborted"] is True
+    assert kwargs["would_have_downgraded"] is False
+    assert len(apply_abort_calls) == 0, (
+        "_apply_abort MUST NOT be called when BREAKER_ACTIVE=False, even with abort=True"
+    )
+
+
+def test_dispatch_breaker_observe_only_with_downgrade_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-4, AC-6, AC-10: downgrade dict + BREAKER_ACTIVE=False.
+
+    log_event fires exactly once (circuit_breaker_observed only —
+    circuit_breaker_downgrade_suggested must NOT be logged when gate is off).
+    _apply_abort is NOT called.
+    """
+    task_dir = tmp_path / "task-obs-downgrade"
+    task_dir.mkdir(parents=True)
+
+    downgrade_decision = {
+        "action": "downgrade",
+        "trigger": "small_task_token_downgrade",
+        "reason": "approaching token limit",
+        "suggestion": "switch to sonnet",
+        "limit_warned": cb.SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD,
+        "limit_abort": cb.SMALL_TASK_TOKEN_LIMIT,
+        "actual": 850_000,
+    }
+
+    log_calls: list[tuple] = []
+
+    def fake_log_event(root, event_type, **kwargs):  # type: ignore[no-untyped-def]
+        log_calls.append((root, event_type, kwargs))
+
+    apply_abort_calls: list[tuple] = []
+
+    def fake_apply_abort(td, dec):  # type: ignore[no-untyped-def]
+        apply_abort_calls.append((td, dec))
+
+    monkeypatch.setattr(cb, "log_event", fake_log_event)
+    monkeypatch.setattr(cb, "_apply_abort", fake_apply_abort)
+    monkeypatch.setattr(cb, "BREAKER_ACTIVE", False)
+
+    cb._dispatch_breaker_decision(
+        task_dir, "EXECUTION", downgrade_decision, task_id="task-obs-downgrade"
+    )
+
+    assert len(log_calls) == 1, (
+        f"Expected 1 log_event call (circuit_breaker_observed only), got {len(log_calls)}: "
+        f"{[et for _, et, _ in log_calls]}"
+    )
+    _root, event_type, kwargs = log_calls[0]
+    assert event_type == "circuit_breaker_observed"
+    assert kwargs["would_have_downgraded"] is True
+    assert kwargs["would_have_aborted"] is False
+
+    second_event_types = [et for _, et, _ in log_calls if et == "circuit_breaker_downgrade_suggested"]
+    assert second_event_types == [], (
+        "circuit_breaker_downgrade_suggested must NOT fire when BREAKER_ACTIVE=False"
+    )
+    assert len(apply_abort_calls) == 0, "_apply_abort must NOT be called for downgrade"
+
+
+def test_dispatch_breaker_active_calls_apply_abort_on_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-5, AC-10: BREAKER_ACTIVE=True + abort dict.
+
+    _apply_abort IS called exactly once with the correct (task_dir, decision)
+    arguments. Proves BREAKER_ACTIVE is wired (not dead code).
+    """
+    task_dir = tmp_path / "task-active-abort"
+    task_dir.mkdir(parents=True)
+
+    abort_decision = {
+        "abort": True,
+        "trigger": "bugfix_token_overrun",
+        "reason": "token budget exceeded",
+        "limit": cb.BUGFIX_TOKEN_LIMIT,
+        "actual": cb.BUGFIX_TOKEN_LIMIT + 1,
+    }
+
+    log_calls: list[tuple] = []
+
+    def fake_log_event(root, event_type, **kwargs):  # type: ignore[no-untyped-def]
+        log_calls.append((root, event_type, kwargs))
+
+    apply_abort_calls: list[tuple] = []
+
+    def fake_apply_abort(td, dec):  # type: ignore[no-untyped-def]
+        apply_abort_calls.append((td, dec))
+
+    monkeypatch.setattr(cb, "log_event", fake_log_event)
+    monkeypatch.setattr(cb, "_apply_abort", fake_apply_abort)
+    monkeypatch.setattr(cb, "BREAKER_ACTIVE", True)
+
+    cb._dispatch_breaker_decision(
+        task_dir, "EXECUTION", abort_decision, task_id="task-active-abort"
+    )
+
+    assert len(apply_abort_calls) == 1, (
+        f"Expected _apply_abort called exactly once when BREAKER_ACTIVE=True and abort=True, "
+        f"got {len(apply_abort_calls)} calls"
+    )
+    called_task_dir, called_decision = apply_abort_calls[0]
+    assert called_task_dir == task_dir
+    assert called_decision == abort_decision
+
+
+def test_dispatch_breaker_active_logs_downgrade_suggestion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6, AC-10: BREAKER_ACTIVE=True + downgrade dict.
+
+    log_event fires exactly twice: first circuit_breaker_observed,
+    then circuit_breaker_downgrade_suggested. _apply_abort is NOT called.
+    """
+    task_dir = tmp_path / "task-active-downgrade"
+    task_dir.mkdir(parents=True)
+
+    downgrade_decision = {
+        "action": "downgrade",
+        "trigger": "bugfix_token_downgrade",
+        "reason": "approaching bugfix limit",
+        "suggestion": "switch to sonnet",
+        "limit_warned": cb.BUGFIX_TOKEN_DOWNGRADE_THRESHOLD,
+        "limit_abort": cb.BUGFIX_TOKEN_LIMIT,
+        "actual": 4_500_000,
+    }
+
+    log_calls: list[tuple] = []
+
+    def fake_log_event(root, event_type, **kwargs):  # type: ignore[no-untyped-def]
+        log_calls.append((root, event_type, kwargs))
+
+    apply_abort_calls: list[tuple] = []
+
+    def fake_apply_abort(td, dec):  # type: ignore[no-untyped-def]
+        apply_abort_calls.append((td, dec))
+
+    monkeypatch.setattr(cb, "log_event", fake_log_event)
+    monkeypatch.setattr(cb, "_apply_abort", fake_apply_abort)
+    monkeypatch.setattr(cb, "BREAKER_ACTIVE", True)
+
+    cb._dispatch_breaker_decision(
+        task_dir, "EXECUTION", downgrade_decision, task_id="task-active-downgrade"
+    )
+
+    event_types = [et for _, et, _ in log_calls]
+    assert len(log_calls) == 2, (
+        f"Expected 2 log_event calls when BREAKER_ACTIVE=True and downgrade, "
+        f"got {len(log_calls)}: {event_types}"
+    )
+    assert event_types[0] == "circuit_breaker_observed"
+    assert event_types[1] == "circuit_breaker_downgrade_suggested"
+
+    # Verify second event has correct payload shape
+    _root2, _et2, kwargs2 = log_calls[1]
+    assert kwargs2.get("would_have_downgraded") is True
+    assert kwargs2.get("would_have_aborted") is False
+
+    assert len(apply_abort_calls) == 0, (
+        "_apply_abort must NOT be called for downgrade decisions, even when BREAKER_ACTIVE=True"
+    )
+
+
+def test_dispatch_breaker_swallows_exceptions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-2, AC-10: exception safety — if log_event raises, the helper
+    returns None silently and does NOT propagate the exception.
+
+    The test does NOT use pytest.raises — calling without a raises context
+    IS the assertion.
+    """
+    task_dir = tmp_path / "task-swallow"
+    task_dir.mkdir(parents=True)
+
+    def exploding_log_event(root, event_type, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("forced log_event failure")
+
+    monkeypatch.setattr(cb, "log_event", exploding_log_event)
+    monkeypatch.setattr(cb, "BREAKER_ACTIVE", False)
+
+    # Must not raise — returning None silently is the contract
+    result = cb._dispatch_breaker_decision(
+        task_dir, "EXECUTION", None, task_id="task-swallow"
+    )
+    assert result is None
