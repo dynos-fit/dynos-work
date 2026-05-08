@@ -37,7 +37,14 @@ def _hash_artifact(path: Path) -> str | None:
         return None
 
 
-def receipt_search_conducted(task_dir: Path, *, query: str, search_used: bool = True) -> Path:
+def receipt_search_conducted(
+    task_dir: Path,
+    *,
+    query: str,
+    search_used: bool = True,
+    urls_consulted: list[str] | None = None,
+    findings_summary: str | None = None,
+) -> Path:
     """Write receipt proving external research was conducted in response to gate.
 
     Called by ``ctl.py write-search-receipt`` after the executor performs the
@@ -49,6 +56,11 @@ def receipt_search_conducted(task_dir: Path, *, query: str, search_used: bool = 
     ``search_used`` must be ``True``; passing ``False`` raises ``ValueError``
     so a caller cannot write a vacuous "search conducted" receipt without having
     done any search.
+
+    ``urls_consulted``: list of URLs consulted during the search (AC 6/AC 10).
+    ``findings_summary``: text summary of findings (AC 6/AC 10).
+    Both are optional at the receipt-writer level; presence and content
+    validation occurs in cmd_write_search_receipt (AC 6).
     """
     require_nonblank_str(query, field_name="receipt_search_conducted: query")
     if not search_used:
@@ -58,12 +70,18 @@ def receipt_search_conducted(task_dir: Path, *, query: str, search_used: bool = 
         )
     gate_path = task_dir / "external-solution-gate.json"
     gate_sha256 = _hash_artifact(gate_path)
+    extra: dict = {}
+    if urls_consulted is not None:
+        extra["urls_consulted"] = urls_consulted
+    if findings_summary is not None:
+        extra["findings_summary"] = findings_summary
     return write_receipt(
         task_dir,
         "search-conducted",
         query=query,
         search_used=True,
         gate_sha256=gate_sha256,
+        **extra,
     )
 
 

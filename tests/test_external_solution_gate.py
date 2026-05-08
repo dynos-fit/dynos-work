@@ -162,3 +162,30 @@ def test_backward_compat_skip_fires_and_warns_when_written_at_malformed(tmp_path
     assert "malformed written_at" in result.stdout, (
         f"Expected 'malformed written_at' in stdout.\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+def test_check_web_tool_evidence_requires_websearch_or_webfetch_tool(tmp_path: Path):
+    """Regression seal for cq-001 from this task's checkpoint audit:
+    _check_web_tool_evidence must filter on entry.tool in {WebSearch,
+    WebFetch}. A log entry from a different hook (or one missing the tool
+    field) must NOT count as evidence of a WebSearch/WebFetch call.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(ROOT / "hooks"))
+    from ctl import _check_web_tool_evidence  # noqa: PLC0415
+
+    task_dir = tmp_path / "task-fake"
+    task_dir.mkdir()
+    log = task_dir / "web-tool-log.jsonl"
+    # Entry has timestamp inside the window but tool is "Read" (not WebSearch/WebFetch).
+    log.write_text(
+        '{"ts": "2026-05-08T00:00:00Z", "tool": "Read", "url": "x"}\n'
+    )
+    gate = {"written_at": "2026-05-07T00:00:00Z"}
+    receipt = {"ts": "2026-05-09T00:00:00Z"}
+
+    err = _check_web_tool_evidence(task_dir, gate, receipt)
+    assert err is not None, (
+        "non-WebSearch/WebFetch entries must not satisfy the cross-check; "
+        "regression seal for cq-001"
+    )
