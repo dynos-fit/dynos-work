@@ -417,9 +417,8 @@ def test_caller_count_required_sums_across_files(tmp_path):
         f"3 calls summed across both files meets min_count=3; got {out!r}"
     )
 
-    # Now bump the threshold so the SAME files now violate — proves the
-    # sum is what's being compared, not just "is symbol present in some
-    # single file".
+    # Bump the threshold so the SAME files now violate — proves the sum
+    # is what's being compared, not just "is symbol present in some file".
     rule_high = Rule(
         rule_id="r-call-sum-fail",
         template="caller_count_required",
@@ -428,6 +427,72 @@ def test_caller_count_required_sums_across_files(tmp_path):
     out2 = check_caller_count_required(rule_high, _make_scope(tmp_path, [a, b]))
     assert len(out2) == 1
     assert "3 time" in out2[0].message
+
+
+def test_caller_count_required_staged_caller_outside_diff_no_violation(
+    tmp_path, monkeypatch
+):
+    """AC-6: staged-mode scope contains zero callers, but a file outside the
+    staged diff has sufficient callers — the fix escalates to repo-wide so the
+    rule does NOT false-fire."""
+    import rules_engine  # noqa: PLC0415
+
+    # File OUTSIDE the staged diff with 3 callers (meets min_count).
+    outside = tmp_path / "library.py"
+    outside.write_text("def _():\n    foo()\n    obj.foo()\n    foo()\n")
+
+    # Staged file has zero callers and a different name (so glob matches both
+    # but only the unstaged file has the symbol).
+    staged = tmp_path / "unrelated.py"
+    staged.write_text("def x():\n    pass\n")
+
+    # Patch _all_tracked_files (object form) so the handler sees the union.
+    monkeypatch.setattr(
+        rules_engine, "_all_tracked_files", lambda root: [outside, staged]
+    )
+
+    rule = Rule(
+        rule_id="r-call-staged-outside",
+        template="caller_count_required",
+        params={"symbol": "foo", "scope": "*.py", "min_count": 3},
+    )
+    # Staged scope only sees the unrelated file.
+    scope = _make_scope(tmp_path, [staged], mode="staged")
+    out = check_caller_count_required(rule, scope)
+    assert out == [], (
+        "staged-mode scope had 0 callers, but _all_tracked_files exposed a "
+        f"file with 3 callers; expected no violation, got {out!r}"
+    )
+
+
+def test_caller_count_required_staged_union_across_staged_and_unstaged(
+    tmp_path, monkeypatch
+):
+    """AC-7: callers are split across a staged file (1) and an unstaged file
+    (2); the union (3) meets min_count and the rule does NOT fire."""
+    import rules_engine  # noqa: PLC0415
+
+    staged = tmp_path / "a.py"
+    staged.write_text("def _():\n    foo()\n")
+    unstaged = tmp_path / "b.py"
+    unstaged.write_text("def _():\n    foo()\n    obj.foo()\n")
+
+    monkeypatch.setattr(
+        rules_engine, "_all_tracked_files", lambda root: [staged, unstaged]
+    )
+
+    rule = Rule(
+        rule_id="r-call-staged-union",
+        template="caller_count_required",
+        params={"symbol": "foo", "scope": "*.py", "min_count": 3},
+    )
+    # Staged scope only sees `a.py` — but the handler must escalate to
+    # repo-wide and find both files via _all_tracked_files.
+    scope = _make_scope(tmp_path, [staged], mode="staged")
+    out = check_caller_count_required(rule, scope)
+    assert out == [], (
+        f"3 calls across staged + unstaged meets min_count=3; got {out!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
