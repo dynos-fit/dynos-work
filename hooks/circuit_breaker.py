@@ -15,6 +15,27 @@ Audit-time (AUDITING) condition:
 
 The module is callable but not wired into ctl.py / shell skills; integration
 is a follow-up task.
+
+Trust model
+-----------
+AUDITING arm: every audit-spawn event passing the phase/type/model filters is
+cross-checked via _validate_audit_event_receipt before its findings are
+counted. The helper verifies that a receipts/audit-{agent}.json exists and
+that, when route_mode is not "generic", the sidecar sha256 matches the
+receipt's injected_agent_sha256 field. Events failing validation are skipped
+rather than counted, preventing forged token-usage.json entries from
+triggering the zero-yield breaker. Closes SEC-CB-001 from task-20260507-003;
+companion to PR 184's _SAFE_AGENT_RE addition.
+EXECUTION arm: operator-trust boundary enforced by write_policy.py — cite
+manifest.json deny, execution-graph.json wrapper-required, and
+token-usage.json system-only blocks.
+
+Temporal invariant: the breaker's AUDITING checkpoint runs only after all
+auditors have returned and their receipts have been written. The receipt-
+provenance cross-check therefore never races a legitimate audit's receipt
+write — by the time the breaker checks, the receipts/_injected-auditor-
+prompts/ sidecars and receipts/audit-<name>.json files are on disk for
+every legitimate audit dispatched in this checkpoint cycle.
 """
 
 from __future__ import annotations
@@ -206,9 +227,11 @@ def _opus_zero_yield_count(task_dir: Path) -> int:
             continue
         if event.get("model") != "opus":
             continue
-        agent = event.get("agent")
-        if not isinstance(agent, str) or not agent:
+        # AC-6: receipt-provenance cross-check; absorbs the former inline
+        # isinstance(agent, str) guard (now handled inside the helper).
+        if not _validate_audit_event_receipt(event, task_dir):
             continue
+        agent = event.get("agent")
         report = _lookup_audit_report(audit_reports_dir, agent)
         if report is None:
             # AC-16: missing audit report → skip this event
@@ -220,6 +243,83 @@ def _opus_zero_yield_count(task_dir: Path) -> int:
 
 
 _SAFE_AGENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_audit_event_receipt(event: dict, task_dir: Path) -> bool:
+    """Cross-check an audit-spawn event against its on-disk receipt.
+
+    Returns True iff:
+      - event["agent"] is a non-empty string matching _SAFE_AGENT_RE
+      - event["model"] is a non-empty string
+      - a receipt file exists at receipts/audit-{agent}.json (primary) or
+        receipts/audit-{agent}-auditor.json (fallback)
+      - when receipt["injected_agent_sha256"] is a non-empty string, the
+        sidecar at receipts/_injected-auditor-prompts/{agent}-{model}.sha256
+        exists, is non-empty after strip, and its stripped content matches
+        the receipt hash
+      - when receipt["injected_agent_sha256"] is empty/missing AND
+        receipt["route_mode"] == "generic", no sidecar is required
+
+    Returns False on any validation failure; never raises.
+    """
+    # AC-2: validate agent name
+    agent = event.get("agent")
+    if not isinstance(agent, str) or not agent:
+        return False
+    if not _SAFE_AGENT_RE.match(agent):
+        return False
+
+    # Validate model field (needed for sidecar path construction).
+    # Apply the same _SAFE_AGENT_RE clamp as agent — model is interpolated
+    # into the sidecar filename ({agent}-{model}.sha256) and a path-traversal
+    # value like "../../etc" would resolve outside _injected-auditor-prompts/.
+    # Closes SEC-CB-CHK-001 from this task's checkpoint audit.
+    model = event.get("model")
+    if not isinstance(model, str) or not model:
+        return False
+    if not _SAFE_AGENT_RE.match(model):
+        return False
+
+    # AC-3: try primary then fallback receipt filename
+    receipts_dir = task_dir / "receipts"
+    primary = receipts_dir / f"audit-{agent}.json"
+    fallback = receipts_dir / f"audit-{agent}-auditor.json"
+
+    receipt: Optional[dict] = None
+    if primary.exists():
+        receipt = _read_json(primary)
+    elif fallback.exists():
+        receipt = _read_json(fallback)
+
+    if not isinstance(receipt, dict):
+        return False
+
+    # AC-4 / AC-5: decide whether sidecar check is required
+    injected_sha = receipt.get("injected_agent_sha256")
+    route_mode = receipt.get("route_mode")
+
+    if isinstance(injected_sha, str) and injected_sha:
+        # Sidecar check is mandatory — compare contents
+        sidecar_path = (
+            receipts_dir
+            / "_injected-auditor-prompts"
+            / f"{agent}-{model}.sha256"
+        )
+        try:
+            sidecar_content = sidecar_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+        if not sidecar_content:
+            return False
+        return sidecar_content == injected_sha
+
+    # No injected_agent_sha256 (empty or missing)
+    # AC-5: generic route skips sidecar requirement
+    if route_mode == "generic":
+        return True
+
+    # Non-generic route with no injected sha is ambiguous; reject conservatively
+    return False
 
 
 def _lookup_audit_report(audit_reports_dir: Path, agent: str) -> Optional[dict]:
