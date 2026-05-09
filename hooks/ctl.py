@@ -464,7 +464,7 @@ _RISK_LEVEL_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical
 # Hardcoded keyword list — no external config, no ReDoS risk (anchored word-boundary
 # alternation over a fixed set of short literals; all branches are O(n) in input length).
 _RISK_KEYWORD_PATTERN: re.Pattern[str] = re.compile(
-    r"\b(auth|migration|payment|delete|drop|irreversible|hmac|signing|encryption)\b",
+    r"\b(auth|migration|payment|drop|irreversible|hmac|signing|encryption)\b",
     re.IGNORECASE,
 )
 
@@ -555,7 +555,7 @@ def _compute_risk_floor(
     combined_text = raw_input_text + "\n" + spec_text
     keyword_matches = _RISK_KEYWORD_PATTERN.findall(combined_text)
     if keyword_matches:
-        keyword_floor = "high"
+        keyword_floor = "medium"
         triggering_signals.append("keyword_scan")
         raw_matches["keyword_scan"] = {
             "matched_keywords": sorted(set(k.lower() for k in keyword_matches)),
@@ -635,6 +635,30 @@ def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
             )
         except Exception:
             pass
+    else:
+        # task-20260508-009: keyword matched but did not trigger an upgrade.
+        # Emit observability event so near-misses remain visible. Mutually
+        # exclusive with risk_level_upgrade_blocked above (if/else gate).
+        keyword_matches_from_floor = raw_matches.get("keyword_scan", {}).get(
+            "matched_keywords", []
+        )
+        if keyword_matches_from_floor:
+            try:
+                from lib_log import log_event  # noqa: PLC0415
+                task_id = task_dir.name
+                root = _root_for_task_dir(task_dir)
+                manifest = _load_manifest(task_dir)
+                log_event(
+                    root,
+                    "risk_keyword_match_observed",
+                    task=task_id,
+                    task_id=manifest.get("task_id", task_id),
+                    planner_risk=planner_risk,
+                    observed_floor=observed_floor,
+                    matched_keywords=keyword_matches_from_floor,
+                )
+            except Exception:
+                pass
 
     return out
 

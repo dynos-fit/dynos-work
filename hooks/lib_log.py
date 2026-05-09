@@ -97,6 +97,12 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # Forensic trace — records when an observed_floor overrides the planner's
     # risk_level upward. No gate or state machine blocks on this event.
     "risk_level_upgrade_blocked",
+    # Risk keyword match observability (task-20260508-009,
+    # ctl._normalize_classification_payload). Emitted when keyword scan
+    # matches but no risk-level upgrade occurs (planner already at or above
+    # the keyword-only floor). Forensic trace only — no gate or state
+    # machine blocks on this event.
+    "risk_keyword_match_observed",
     # Inject-prompt size guardrail (router.cmd_planner_inject_prompt /
     # cmd_audit_inject_prompt). Non-blocking warning emitted when the
     # injected prompt exceeds _MAX_INJECTED_PROMPT_BYTES (100 KB). Forensic
