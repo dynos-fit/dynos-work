@@ -109,14 +109,23 @@ def _upgrade_events(task_dir: Path) -> list[dict]:
     return [r for r in _read_events(task_dir) if r.get("event") == "risk_level_upgrade_blocked"]
 
 
+def _keyword_observed_events(task_dir: Path) -> list[dict]:
+    return [
+        r
+        for r in _read_events(task_dir)
+        if r.get("event") == "risk_keyword_match_observed"
+    ]
+
+
 # ---------------------------------------------------------------------------
-# (a) planner low + "delete user account" in spec → high, signal=keyword_scan
+# (a) planner low + "auth" in spec → upgraded to medium (keyword floor),
+#     signal=keyword_scan
 # ---------------------------------------------------------------------------
-def test_keyword_scan_upgrades_low_to_high(tmp_path: Path) -> None:
+def test_keyword_scan_upgrades_low_to_medium(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
         raw_input="Short raw input.",
-        spec="We must delete user account records when requested.",
+        spec="We must add an auth flow for the new endpoint.",
     )
     payload = {
         "type": "feature",
@@ -126,8 +135,9 @@ def test_keyword_scan_upgrades_low_to_high(tmp_path: Path) -> None:
 
     out = ctl._normalize_classification_payload(task_dir, payload)
 
-    assert out["risk_level"] == "high", (
-        f"keyword 'delete' in spec must upgrade low → high; got "
+    assert out["risk_level"] == "medium", (
+        f"keyword 'auth' in spec must upgrade low -> medium (keyword-only "
+        f"floor is medium after task-20260508-009); got "
         f"risk_level={out.get('risk_level')!r}"
     )
 
@@ -241,8 +251,8 @@ def test_multiple_signals_emit_single_event(tmp_path: Path) -> None:
     files = [f"src/mod_{i}.py" for i in range(12)]
     task_dir = _build_task_dir(
         tmp_path,
-        raw_input="Includes delete operations.",
-        spec="We will delete user account records and migrate the schema.",
+        raw_input="Touches many modules across the backend.",
+        spec="We will refactor the schema across many modules.",
         files_expected=files,
     )
     payload = {
@@ -252,7 +262,13 @@ def test_multiple_signals_emit_single_event(tmp_path: Path) -> None:
         "files_expected": files,
     }
 
-    ctl._normalize_classification_payload(task_dir, payload)
+    out = ctl._normalize_classification_payload(task_dir, payload)
+
+    # file_domain alone is sufficient to push risk_level to high.
+    assert out["risk_level"] == "high", (
+        f"file_domain (12 files) must upgrade low -> high; got "
+        f"risk_level={out.get('risk_level')!r}"
+    )
 
     events = _upgrade_events(task_dir)
     assert len(events) == 1, (
@@ -260,9 +276,11 @@ def test_multiple_signals_emit_single_event(tmp_path: Path) -> None:
         f"normalization call regardless of how many signals fire; got {len(events)}"
     )
     signals = events[0].get("triggering_signals", [])
-    # Both signals must be recorded in the single event.
-    assert "keyword_scan" in signals
-    assert "file_domain" in signals
+    # file_domain dominates with high; keyword_scan is intentionally absent
+    # because no remaining-set keyword appears in the spec.
+    assert "file_domain" in signals, (
+        f"expected 'file_domain' in triggering_signals; got {signals!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,8 +289,8 @@ def test_multiple_signals_emit_single_event(tmp_path: Path) -> None:
 def test_idempotent_payload_but_one_event_per_call(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
-        raw_input="Must delete user account data.",
-        spec="Please delete user account info on request.",
+        raw_input="Must wire an auth flow for user data.",
+        spec="Please add an auth flow on the next request.",
     )
     payload_1 = {"type": "feature", "domains": ["backend"], "risk_level": "low"}
     # Deep-copy via json so the implementation can't silently mutate ours.
@@ -282,9 +300,10 @@ def test_idempotent_payload_but_one_event_per_call(tmp_path: Path) -> None:
     out_2 = ctl._normalize_classification_payload(task_dir, payload_2)
 
     # Payload outputs are identical — the override is idempotent.
-    assert out_1.get("risk_level") == out_2.get("risk_level") == "high", (
+    assert out_1.get("risk_level") == out_2.get("risk_level") == "medium", (
         f"normalizer must produce the same upgraded risk_level on repeat calls; "
-        f"got {out_1.get('risk_level')!r} vs {out_2.get('risk_level')!r}"
+        f"keyword-only floor is 'medium' after task-20260508-009. Got "
+        f"{out_1.get('risk_level')!r} vs {out_2.get('risk_level')!r}"
     )
 
     # Each call emits exactly one event; side effects accumulate.
@@ -305,21 +324,114 @@ def test_idempotent_payload_but_one_event_per_call(tmp_path: Path) -> None:
 def test_planner_cannot_launder_risk_by_reasserting_low(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
-        raw_input="Will delete user account.",
-        spec="Delete user account data on request.",
+        raw_input="Will wire an auth flow for the user.",
+        spec="Add auth handling on the new request path.",
     )
 
-    # First call upgrades to high.
+    # First call upgrades from low to medium (keyword-only floor is medium
+    # after task-20260508-009).
     out_1 = ctl._normalize_classification_payload(
         task_dir, {"type": "feature", "domains": ["backend"], "risk_level": "low"}
     )
-    assert out_1["risk_level"] == "high"
+    assert out_1["risk_level"] == "medium", (
+        f"keyword 'auth' must upgrade low -> medium on first call; got "
+        f"risk_level={out_1.get('risk_level')!r}"
+    )
 
     # Planner tries again with the same inputs — must still upgrade.
     out_2 = ctl._normalize_classification_payload(
         task_dir, {"type": "feature", "domains": ["backend"], "risk_level": "low"}
     )
-    assert out_2["risk_level"] == "high", (
-        "planner must not be able to launder high-signal task back to low by "
-        "re-asserting a lower risk_level"
+    assert out_2["risk_level"] == "medium", (
+        "planner must not be able to launder a keyword-signal task back to "
+        "low by re-asserting a lower risk_level"
+    )
+
+
+# ---------------------------------------------------------------------------
+# task-20260508-009 AC-21: keyword matches AND planner already at medium
+# (floor_order == planner_order). No upgrade fires; the new diagnostic
+# event ``risk_keyword_match_observed`` is emitted exactly once. The
+# upgrade event is NOT emitted.
+# ---------------------------------------------------------------------------
+def test_keyword_match_observed_event_emitted_no_upgrade(tmp_path: Path) -> None:
+    task_dir = _build_task_dir(
+        tmp_path,
+        raw_input="Short raw input.",
+        spec="We need to add an auth flow on the next request.",
+        files_expected=["src/one.py"],
+    )
+    payload = {
+        "type": "feature",
+        "domains": ["backend"],
+        "risk_level": "medium",
+    }
+
+    out = ctl._normalize_classification_payload(task_dir, payload)
+
+    # Planner is already at medium; keyword floor is also medium; no upgrade.
+    assert out["risk_level"] == "medium", (
+        f"planner=medium and keyword-only floor=medium must produce no "
+        f"upgrade; got risk_level={out.get('risk_level')!r}"
+    )
+
+    upgrades = _upgrade_events(task_dir)
+    assert upgrades == [], (
+        f"no risk_level_upgrade_blocked event must fire when "
+        f"floor_order == planner_order; got {upgrades!r}"
+    )
+
+    observed = _keyword_observed_events(task_dir)
+    assert len(observed) == 1, (
+        f"exactly one risk_keyword_match_observed event must be emitted "
+        f"when keyword matches without an upgrade; got {len(observed)}"
+    )
+    payload_evt = observed[0]
+    assert payload_evt.get("matched_keywords") == ["auth"], (
+        f"matched_keywords must be the sorted/deduped/lowercased list "
+        f"['auth']; got {payload_evt.get('matched_keywords')!r}"
+    )
+    assert payload_evt.get("planner_risk") == "medium", (
+        f"planner_risk in event payload must be 'medium'; got "
+        f"{payload_evt.get('planner_risk')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# task-20260508-009 AC-22: keyword matches AND planner at low
+# (floor_order > planner_order). Upgrade fires; the new diagnostic
+# event ``risk_keyword_match_observed`` is NOT emitted (mutually exclusive
+# with risk_level_upgrade_blocked within a single normalization call).
+# ---------------------------------------------------------------------------
+def test_keyword_match_and_upgrade_no_observed_event(tmp_path: Path) -> None:
+    task_dir = _build_task_dir(
+        tmp_path,
+        raw_input="Short raw input.",
+        spec="We need to add an auth flow on the next request.",
+        files_expected=["src/one.py"],
+    )
+    payload = {
+        "type": "feature",
+        "domains": ["backend"],
+        "risk_level": "low",
+    }
+
+    out = ctl._normalize_classification_payload(task_dir, payload)
+
+    # Planner=low, keyword floor=medium; upgrade fires.
+    assert out["risk_level"] == "medium", (
+        f"keyword 'auth' must upgrade low -> medium; got "
+        f"risk_level={out.get('risk_level')!r}"
+    )
+
+    upgrades = _upgrade_events(task_dir)
+    assert len(upgrades) == 1, (
+        f"exactly one risk_level_upgrade_blocked event must fire when "
+        f"floor_order > planner_order; got {len(upgrades)}"
+    )
+
+    observed = _keyword_observed_events(task_dir)
+    assert observed == [], (
+        f"risk_keyword_match_observed must NOT fire when an upgrade fires "
+        f"(mutually exclusive); got {observed!r}"
     )
