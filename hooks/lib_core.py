@@ -833,8 +833,8 @@ def _human_approval_err(
     """
     try:
         from lib_receipts import read_receipt, hash_file, _receipts_dir
-    except Exception:
-        return None
+    except (ImportError, OSError, json.JSONDecodeError) as exc:
+        return f"Cannot transition {current_stage} -> {next_stage}: validator_failed reason={exc!r}"
     try:
         human_step = f"human-approval-{stage_label}"
         auto_step = f"auto-approval-{stage_label}"
@@ -879,8 +879,8 @@ def _human_approval_err(
                 f"(receipt: {chosen_path}, artifact: {artifact_path}) "
                 f"expected={(expected or '')[:12]} actual={actual[:12]}"
             )
-    except Exception:
-        return None
+    except (ImportError, OSError, json.JSONDecodeError) as exc:
+        return f"Cannot transition {current_stage} -> {next_stage}: validator_failed reason={exc!r}"
     return None
 
 
@@ -897,8 +897,8 @@ def _rules_check_err(
     """
     try:
         from lib_receipts import read_receipt
-    except Exception:
-        return None
+    except (ImportError, OSError, json.JSONDecodeError) as exc:
+        return f"Cannot transition {current_stage} -> {next_stage}: validator_failed reason={exc!r}"
     try:
         receipt = read_receipt(task_dir, "rules-check-passed")
         receipt_path = task_dir / "receipts" / "rules-check-passed.json"
@@ -915,8 +915,8 @@ def _rules_check_err(
                 f"missing or failed rules-check-passed receipt at "
                 f"{receipt_path} (error_violations={n})"
             )
-    except Exception:
-        return None
+    except (ImportError, OSError, json.JSONDecodeError) as exc:
+        return f"Cannot transition {current_stage} -> {next_stage}: validator_failed reason={exc!r}"
     return None
 
 

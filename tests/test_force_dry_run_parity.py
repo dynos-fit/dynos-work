@@ -29,8 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 from lib_core import (  # noqa: E402
     _compute_bypassed_gates_for_force,
+    _human_approval_err,
+    _rules_check_err,
     transition_task,
 )
+import lib_receipts  # noqa: E402  # for monkeypatching the lazy-import target
 
 
 def _task_dir(tmp_path: Path, *, stage: str, risk: str = "medium") -> Path:
@@ -160,3 +163,160 @@ def test_parity_dry_run_returns_empty_when_live_would_pass(tmp_path: Path) -> No
     transition_task(td, "SPEC_NORMALIZATION")
     manifest = _manifest(td)
     assert manifest["stage"] == "SPEC_NORMALIZATION"
+
+
+# ---------------------------------------------------------------------------
+# task-20260509-002 fail-closed regression tests for the four narrowed
+# `except Exception` clauses in `_human_approval_err` / `_rules_check_err`.
+#
+# The lazy `from lib_receipts import read_receipt` inside each validator
+# resolves the attribute on the cached `lib_receipts` module each call,
+# so `monkeypatch.setattr("lib_receipts.read_receipt", ...)` is observed
+# by the next call. Pre-fix all four clauses are `except Exception:
+# return None`, which silently absorbs OSError/KeyError alike, opening
+# the gate. Post-fix only ImportError/OSError/JSONDecodeError are caught
+# (returning a "validator_failed" error string), and KeyError propagates.
+# ---------------------------------------------------------------------------
+
+
+def _raise_oserror(*_args, **_kwargs):
+    raise OSError("simulated disk error")
+
+
+def _raise_keyerror(*_args, **_kwargs):
+    raise KeyError("unexpected")
+
+
+def test_human_approval_err_refuses_on_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 10: when read_receipt raises OSError inside _human_approval_err,
+    the validator must return a non-None string containing
+    'validator_failed' — NOT silently return None and let the gate open.
+    """
+    td = _task_dir(tmp_path, stage="SPEC_REVIEW")
+    spec_path = td / "spec.md"
+    spec_path.write_text("# spec\n")
+
+    monkeypatch.setattr(lib_receipts, "read_receipt", _raise_oserror)
+
+    result = _human_approval_err(
+        td, "SPEC_REVIEW", "PLANNING", "SPEC_REVIEW", spec_path
+    )
+
+    assert result is not None, (
+        "fail-open bug: _human_approval_err swallowed OSError and "
+        "returned None — the gate is silently bypassed"
+    )
+    assert isinstance(result, str)
+    assert "validator_failed" in result, (
+        f"expected 'validator_failed' substring in error string; got {result!r}"
+    )
+
+
+def test_transition_task_refuses_on_human_approval_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 11: a SPEC_REVIEW->PLANNING force-override transition routed
+    through `_compute_bypassed_gates_for_force` must surface the
+    validator_failed error for an OSError on read_receipt — i.e. the
+    bypassed-gates list is non-empty and contains 'validator_failed'.
+
+    The spec text says `transition_task(...)` raises ValueError, but the
+    actual invocation that triggers `_compute_bypassed_gates_for_force`
+    is the force=True observability dispatch which surfaces errors via
+    the bypassed_gates list (logged + receipted), not via ValueError.
+    Asserting on the bypassed_gates list output of
+    `_compute_bypassed_gates_for_force` directly is the highest-fidelity
+    representation of the AC 11 fail-closed contract that is RED at HEAD
+    and GREEN after the fix. The spawn instruction explicitly permits
+    this: "or whatever invocation triggers _compute_bypassed_gates_for_force".
+    """
+    td = _task_dir(tmp_path, stage="SPEC_REVIEW")
+    spec_path = td / "spec.md"
+    spec_path.write_text("# spec\n")
+
+    # Pre-write a valid human-approval-SPEC_REVIEW receipt so the only
+    # remaining failure mode that matters is the OSError-from-read_receipt
+    # the monkeypatch will inject. The receipt body content does not
+    # matter because read_receipt is intercepted, but the file existence
+    # is asserted by the fixture pattern in the rest of the suite.
+    receipts_dir = td / "receipts"
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    (receipts_dir / "human-approval-SPEC_REVIEW.json").write_text(
+        json.dumps({"step": "human-approval-SPEC_REVIEW", "artifact_sha256": "deadbeef"})
+    )
+
+    monkeypatch.setattr(lib_receipts, "read_receipt", _raise_oserror)
+
+    bypassed = _compute_bypassed_gates_for_force(
+        task_dir=td,
+        manifest=_manifest(td),
+        current_stage="SPEC_REVIEW",
+        next_stage="PLANNING",
+    )
+
+    assert any("validator_failed" in entry for entry in bypassed), (
+        f"fail-open bug: bypassed_gates does NOT include validator_failed "
+        f"after read_receipt raised OSError. Got: {bypassed!r}. The forced "
+        f"transition would silently proceed with no record of the failed "
+        f"gate validation."
+    )
+
+
+def test_rules_check_err_refuses_on_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 12: when read_receipt raises OSError inside _rules_check_err,
+    the validator must return a non-None string containing
+    'validator_failed' — NOT silently return None.
+    """
+    td = _task_dir(tmp_path, stage="SPEC_NORMALIZATION")
+
+    monkeypatch.setattr(lib_receipts, "read_receipt", _raise_oserror)
+
+    result = _rules_check_err(td, "SPEC_NORMALIZATION", "SPEC_REVIEW")
+
+    assert result is not None, (
+        "fail-open bug: _rules_check_err swallowed OSError and "
+        "returned None — the rules-check gate is silently bypassed"
+    )
+    assert isinstance(result, str)
+    assert "validator_failed" in result, (
+        f"expected 'validator_failed' substring in error string; got {result!r}"
+    )
+
+
+def test_human_approval_err_propagates_keyerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 13: programmer-error exceptions (KeyError) MUST propagate out
+    of _human_approval_err — they are not in the narrowed allow-list
+    (ImportError/OSError/JSONDecodeError) and silently swallowing them
+    hides bugs.
+    """
+    td = _task_dir(tmp_path, stage="SPEC_REVIEW")
+    spec_path = td / "spec.md"
+    spec_path.write_text("# spec\n")
+
+    monkeypatch.setattr(lib_receipts, "read_receipt", _raise_keyerror)
+
+    with pytest.raises(KeyError):
+        _human_approval_err(
+            td, "SPEC_REVIEW", "PLANNING", "SPEC_REVIEW", spec_path
+        )
+
+
+def test_rules_check_err_propagates_keyerror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 14: programmer-error exceptions (KeyError) MUST propagate out
+    of _rules_check_err. Pre-fix the broad `except Exception` swallows
+    them and returns None (gate opens silently).
+    """
+    td = _task_dir(tmp_path, stage="SPEC_NORMALIZATION")
+
+    monkeypatch.setattr(lib_receipts, "read_receipt", _raise_keyerror)
+
+    with pytest.raises(KeyError):
+        _rules_check_err(td, "SPEC_NORMALIZATION", "SPEC_REVIEW")
