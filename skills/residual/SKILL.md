@@ -29,15 +29,33 @@ are supported: `list` and `run-next`.
 
 ## Subcommand: `list`
 
-Invoked as `/dynos-work:residual list`.
+Invoked in two forms:
+
+- `/dynos-work:residual list` — default view, excludes `done` rows.
+- `/dynos-work:residual list --all` — includes all rows (including `done`).
 
 ### What you do
 
 1. Resolve `{root}` — the current project root (the directory containing
    `.dynos/`). If running from a repo subdirectory, walk upward until
    `.dynos/` is found.
-2. Run the following Python snippet (adjust `ROOT` to the resolved
-   project root):
+2. Run the following Python snippet. To include `done` rows, pass `--all`
+   as a positional argument to the heredoc process — bash makes it visible
+   to the snippet via `sys.argv`:
+
+   ```bash
+   # Default (excludes done rows):
+   python3 - <<'PY'
+   ...
+   PY
+
+   # Include all rows (including done):
+   python3 - --all <<'PY'
+   ...
+   PY
+   ```
+
+   The shared snippet body:
 
    ```bash
    python3 - <<'PY'
@@ -49,8 +67,14 @@ Invoked as `/dynos-work:residual list`.
    queue = lib_residuals.queue_path(root)
    data = lib_residuals.load_queue(queue)
    findings = data.get("findings", [])
+   raw_count = len(findings)
+   include_done = "--all" in sys.argv
+   findings = [r for r in findings if include_done or r.get("status") != "done"]
    if not findings:
-       print("dynos-work: no residuals queued")
+       if raw_count == 0:
+           print("dynos-work: no residuals queued")
+       else:
+           print("dynos-work: no active residuals (use --all to show done rows)")
        sys.exit(0)
    # Sort oldest first by created_at
    findings_sorted = sorted(findings, key=lambda r: r.get("created_at", ""))
@@ -74,12 +98,17 @@ Invoked as `/dynos-work:residual list`.
      `dynos-work: no residuals queued` and exit 0.
    - If the file exists but `findings` is `[]`, print exactly
      `dynos-work: no residuals queued` and exit 0.
+   - If the file has rows but every row is `done` and `--all` was not
+     passed, print exactly
+     `dynos-work: no active residuals (use --all to show done rows)`
+     and exit 0.
    - Otherwise print one tab-separated line per row containing, in
      order: `id`, `status`, `attempts`, `source_auditor`,
      `title` (truncated to 60 chars), `created_at`. All six fields must
      appear on every row.
-   - Do NOT filter by status. `pending`, `in_progress`, `done`, and
-     `failed` rows all appear.
+   - Default behavior excludes `done` rows. Pass `--all` to include them.
+     `pending`, `in_progress`, `wontfix`, and `failed` rows always appear
+     regardless of `--all`.
    - Plain text only. No JSON, no ANSI colour codes, no header row
      decoration that would break the six-field shape.
 
@@ -339,6 +368,7 @@ lib_residuals.update_row_status(root, residual_id, "pending")
 | Condition | Output (exact) | Exit |
 |---|---|---|
 | `list`: queue file missing or `findings == []` | `dynos-work: no residuals queued` | 0 |
+| `list`: queue file has rows but all are `done` (default view) | `dynos-work: no active residuals (use --all to show done rows)` | 0 |
 | `list`: rows present | one tab-separated line per row (id, status, attempts, source_auditor, title[60], created_at) | 0 |
 | `run-next`: queue file missing or `findings == []` or no eligible row | `dynos-work: residual queue empty` | 0 |
 | `run-next`: another row already `in_progress` | `dynos-work: residual in_progress — run-next already active` | 0 |
