@@ -2938,16 +2938,16 @@ def collect_retrospectives(root: Path, *, include_unverified: bool = False) -> l
     ]
 
 
-def retrospective_task_ids(root: Path) -> list[str]:
+def _retrospective_task_ids(root: Path) -> list[str]:
     """Return list of task IDs from retrospectives."""
     return [item.get("task_id") for item in collect_retrospectives(root) if isinstance(item.get("task_id"), str)]
 
 
-def task_recency_index(root: Path, task_id: Optional[str]) -> Optional[int]:
+def _task_recency_index(root: Path, task_id: Optional[str]) -> Optional[int]:
     """Return how many tasks ago a given task_id appeared (0 = most recent)."""
     if not task_id:
         return None
-    task_ids = retrospective_task_ids(root)
+    task_ids = _retrospective_task_ids(root)
     if task_id not in task_ids:
         return None
     return len(task_ids) - 1 - task_ids.index(task_id)
@@ -2955,4 +2955,4 @@ def task_recency_index(root: Path, task_id: Optional[str]) -> Optional[int]:
 
 def tasks_since(root: Path, task_id: Optional[str]) -> Optional[int]:
     """Return the number of tasks since a given task_id."""
-    return task_recency_index(root, task_id)
+    return _task_recency_index(root, task_id)

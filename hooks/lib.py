@@ -39,8 +39,6 @@ from lib_core import (
     project_dir,
     project_policy,
     require,
-    retrospective_task_ids,
-    task_recency_index,
     tasks_since,
     trajectories_store_path,
     transition_task,
