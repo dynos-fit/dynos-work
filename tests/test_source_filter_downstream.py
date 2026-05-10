@@ -299,6 +299,27 @@ class TestPostmortemImproveFilter:
 
 
 # ---------------------------------------------------------------------------
+# 4b. TestPostmortemFilter — AST guarantee on memory/postmortem.py.
+# ---------------------------------------------------------------------------
+
+
+class TestPostmortemFilter:
+    """Static guarantee that postmortem never opts into unverified.
+
+    ``memory/postmortem.py`` is the rule-mining sibling of
+    ``postmortem_improve.py`` and consumes ``collect_retrospectives``
+    output to build prevention rules.  Same trust-boundary contract
+    applies: ingesting a ``persistent-unverified`` retro into rule
+    mining would let a tampered/unflushed retro shape future routing
+    decisions, which is precisely the leak this suite closes.
+    """
+
+    def test_postmortem_never_calls_with_include_unverified_true(self) -> None:
+        src = (MEMORY_DIR / "postmortem.py").read_text()
+        _assert_no_include_unverified_true(src, "memory/postmortem.py")
+
+
+# ---------------------------------------------------------------------------
 # 5. TestRegressionSentinel — repo-wide static scan for direct-glob
 #    bypasses of collect_retrospectives.
 # ---------------------------------------------------------------------------
