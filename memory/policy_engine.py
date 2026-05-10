@@ -13,6 +13,7 @@ from pathlib import Path
 
 from lib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json, VALID_EXECUTORS
 from lib_log import log_event, verify_signed_events
+from lib_project_id import sanitize_path_for_slug
 from lib_registry import ensure_learned_registry
 
 DEFAULT_TASK_TYPES = ["feature", "bugfix", "refactor", "migration", "ml", "full-stack"]
@@ -53,7 +54,13 @@ MAX_EFFECTIVENESS_ROWS = EMA_MAX_EFFECTIVENESS_ROWS
 
 
 def project_slug(root: Path) -> str:
-    return str(root.resolve()).replace("/", "-")
+    # T-18: validate the RAW input string BEFORE Path.resolve() collapses '..'
+    # traversal components. resolve() silently turns '/a/../etc' into '/etc',
+    # which would let a hostile path bypass the sanitizer that runs on the
+    # post-resolve string.
+    raw = str(root)
+    sanitize_path_for_slug(raw)
+    return sanitize_path_for_slug(str(root.resolve()))
 
 
 def local_patterns_path(root: Path) -> Path:

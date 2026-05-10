@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from lib_project_id import _safe_git_env, resolve_project_id
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 
@@ -227,6 +228,7 @@ def _resolve_git_toplevel(root_str: str) -> Optional[str]:
             text=True,
             timeout=5,
             check=False,
+            env=_safe_git_env(),  # T-2: strip GIT_DIR/GIT_CONFIG_* injection
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
@@ -248,6 +250,18 @@ def _resolve_git_toplevel(root_str: str) -> Optional[str]:
     if common_path.name != ".git":
         return None
     main_worktree = common_path.parent
+    # T-5: parent-contains-root check. The input root must be the same as or
+    # a subdirectory of the main worktree. If a planted .git dir was resolved
+    # to an unrelated location (e.g. via GIT_CEILING bypass residual), the
+    # root would NOT be under main_worktree — reject it.
+    try:
+        resolved_root = Path(root_str).resolve()
+    except OSError:
+        return None
+    try:
+        resolved_root.relative_to(main_worktree)
+    except ValueError:
+        return None
     return str(main_worktree)
 
 
@@ -283,20 +297,30 @@ def _persistent_project_dir(root: Path) -> Path:
     Callers that need the directory to exist should call
     ensure_persistent_project_dir() instead.
 
-    Slug derivation:
-    - If `root` is inside a git repository, the slug is derived from the MAIN
-      working tree (via `git rev-parse --git-common-dir`). All git worktrees
-      for the same repo therefore share one persistent dir with main —
-      learning state doesn't fragment per-branch.
-    - Otherwise (not a git repo, git not installed, bare repo) the slug is
-      derived from `str(root.resolve())` as it was historically.
+    Slug derivation (delegated to lib_project_id.resolve_project_id):
+    - If `root` is inside a git repository: a UUID4 stored in
+      <git-common-dir>/dynos-project-id. All worktrees for the same repo
+      share one persistent dir — learning state does not fragment per-branch.
+    - Otherwise (not a git repo, git not installed, bare repo): a sanitised
+      path slug ``path-{abs-path-slug}``.
+    Raises ProjectIdSecurityError on threat detection (symlink, hostile
+    content, foreign-uid ownership). Callers must NOT catch it silently.
     """
     dynos_home = Path(os.environ.get("DYNOS_HOME", str(Path.home() / ".dynos")))
-    resolved_str = str(root.resolve())
-    canonical = _resolve_git_toplevel(resolved_str)
-    base = canonical if canonical is not None else resolved_str
-    slug = base.strip("/").replace("/", "-")
-    return dynos_home / "projects" / slug
+    # resolve_project_id returns a UUID4 slug (git repo) or 'path-...' slug
+    # (non-git fallback). ProjectIdSecurityError propagates to the caller — do
+    # NOT catch it here.
+    slug = resolve_project_id(root)
+    uuid_dir = dynos_home / "projects" / slug
+    # Seg-7 dual-read compat: if the UUID dir is empty and a legacy
+    # path-slug dir exists for the same root, prefer the legacy dir and emit
+    # an observable event. ``check_dual_read`` returns ``None`` in the
+    # steady-state UUID case, in which case we return the UUID dir as before.
+    from lib_compat_legacy_slug import check_dual_read  # noqa: PLC0415
+    legacy = check_dual_read(root, uuid_dir, dynos_home)
+    if legacy is not None:
+        return legacy
+    return uuid_dir
 
 
 def ensure_persistent_project_dir(root: Path) -> Path:

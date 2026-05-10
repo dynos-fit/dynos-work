@@ -19,6 +19,7 @@ _PYTHON3: str = shutil.which("python3") or sys.executable
 
 from lib_core import load_json, write_json, now_iso, _persistent_project_dir
 from lib_log import log_event
+from lib_project_id import ProjectIdSecurityError
 
 
 def maintenance_dir(root: Path) -> Path:
@@ -67,7 +68,7 @@ def check_prevention_rules_bootstrap(root: Path) -> bool:
     a timestamp + error summary (atomic write). Downstream task-creation
     gates (hooks/ctl.py) refuse to create new tasks while the sentinel
     exists, forcing operators to fix
-    ``~/.dynos/projects/{slug}/prevention-rules.json`` first.
+    ``(persistent project dir)/prevention-rules.json`` first (resolved via lib_core._persistent_project_dir).
 
     Narrow exception set: only JSONDecodeError / OSError are treated as
     corruption. FileNotFoundError (absent file) is benign and returns
@@ -79,7 +80,19 @@ def check_prevention_rules_bootstrap(root: Path) -> bool:
     out of scope for the bootstrap sanity check. Reading the file
     directly with json.loads keeps the bootstrap gate minimal.
     """
-    rules_path = _persistent_project_dir(root) / "prevention-rules.json"
+    try:
+        rules_path = _persistent_project_dir(root) / "prevention-rules.json"
+    except ProjectIdSecurityError as exc:
+        try:
+            log_event(
+                root,
+                "project_id_security_error",
+                where="check_prevention_rules_bootstrap",
+                error=str(exc),
+            )
+        except Exception:
+            pass
+        return False
     sentinel = rules_corrupt_sentinel_path(root)
     try:
         raw = rules_path.read_text()
@@ -128,7 +141,19 @@ def rules_healed_check(root: Path) -> bool:
     sentinel = rules_corrupt_sentinel_path(root)
     if not sentinel.exists():
         return False
-    rules_path = _persistent_project_dir(root) / "prevention-rules.json"
+    try:
+        rules_path = _persistent_project_dir(root) / "prevention-rules.json"
+    except ProjectIdSecurityError as exc:
+        try:
+            log_event(
+                root,
+                "project_id_security_error",
+                where="rules_healed_check",
+                error=str(exc),
+            )
+        except Exception:
+            pass
+        return False
     try:
         raw = rules_path.read_text()
     except (FileNotFoundError, OSError):
@@ -241,7 +266,20 @@ def log_path(root: Path) -> Path:
 
 
 def policy_path(root: Path) -> Path:
-    return _persistent_project_dir(root) / "policy.json"
+    try:
+        return _persistent_project_dir(root) / "policy.json"
+    except ProjectIdSecurityError as exc:
+        try:
+            log_event(
+                root,
+                "project_id_security_error",
+                where="policy_path",
+                error=str(exc),
+            )
+        except Exception:
+            pass
+        # Fallback to a maintenance-local stub so the daemon does not crash.
+        return maintenance_dir(root) / "policy.json"
 
 
 def maintainer_policy(root: Path) -> dict:

@@ -114,7 +114,7 @@ def _refuse_if_rules_corrupt(root: Path) -> int | None:
         from lib_core import _persistent_project_dir
         persistent = _persistent_project_dir(root) / "prevention-rules.json"
     except Exception:
-        persistent = Path("~/.dynos/projects/{slug}/prevention-rules.json")
+        persistent = Path("(persistent project dir)/prevention-rules.json")
     print(
         f"ERROR: prevention-rules.json is corrupt; "
         f"fix {persistent} and retry "
