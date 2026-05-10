@@ -250,9 +250,16 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
         category = proposal.get("category", "")
         existing_cats = {r.get("category") for r in rules}
         if category and category not in existing_cats:
+            # Aggregate category-trend rules are audit-time signals: they
+            # describe cross-task patterns useful when reviewing code, not
+            # actionable per-line constraints for the executor writing it.
+            # Tag them `executor="auditor-only"` so the executor-facing
+            # filters in agent_generator and router exclude them.
             rules.append({
                 "category": category,
                 "rule": f"Category '{category}' has {proposal.get('total_occurrences', 0)} findings across tasks. Add extra scrutiny for {category}-class issues.",
+                "executor": "auditor-only",
+                "template": "advisory",
                 "added_at": now_iso(),
             })
             write_json(rules_path, {"rules": rules, "updated_at": now_iso()})

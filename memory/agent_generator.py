@@ -100,13 +100,18 @@ def _build_agent_content(
     finding_categories = _aggregate_finding_categories(matched_retros)
 
     prevention_rules = _load_prevention_rules(root)
-    # Filter rules: category must match AND executor must be this role or "all"
+    # Filter rules: category must match AND executor must be this role or "all".
+    # `auditor-only` rules (aggregate category-trend signals from
+    # memory/postmortem_improve.py) are excluded from every executor agent
+    # file — they are audit-review signals, not per-line code constraints.
     relevant_rules: dict[str, list[dict]] = {}
     for r in prevention_rules:
         cat = r.get("category")
         if cat not in finding_categories:
             continue
         rule_executor = r.get("executor", "all")
+        if rule_executor == "auditor-only":
+            continue
         if rule_executor not in (role, "all"):
             continue
         relevant_rules.setdefault(cat, []).append(r)
