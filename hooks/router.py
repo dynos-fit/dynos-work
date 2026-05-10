@@ -1083,9 +1083,13 @@ def build_executor_plan(
         route_decision = resolve_route(root, executor, task_type, ctx=ctx)
 
         # Step 1: filter to rules that target this executor (or all).
+        # `auditor-only` rules (aggregate category-trend signals) are
+        # excluded — executors cannot act on cross-task category warnings
+        # the way auditors reviewing code can.
         executor_scoped: list[dict] = [
             r for r in all_rules
             if isinstance(r, dict) and r.get("rule")
+            and r.get("executor") != "auditor-only"
             and (not r.get("executor") or r.get("executor") == executor)
         ]
 
@@ -1792,6 +1796,26 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     agent_path = target.get("agent_path")
 
     final_text = base_prompt
+
+    # Inject aggregate category-trend prevention rules (executor="auditor-only").
+    # These are cross-task signals that auditors can act on when reviewing
+    # code; executors writing code cannot. They are excluded from every
+    # executor prompt by build_executor_plan and surface here instead.
+    aggregate_rules = [
+        r for r in load_prevention_rules(root)
+        if isinstance(r, dict) and r.get("rule")
+        and r.get("executor") == "auditor-only"
+    ]
+    if aggregate_rules:
+        aggregate_block = "\n\n## Aggregate Findings Trends\n"
+        aggregate_block += (
+            "Cross-task signals to scrutinize during this audit. Each entry "
+            "names a category whose finding count has crossed the learned "
+            "threshold across recent tasks.\n\n"
+        )
+        for r in aggregate_rules:
+            aggregate_block += f"- {r['rule']}\n"
+        final_text = final_text.rstrip() + aggregate_block
 
     if route_mode in ("replace", "alongside") and agent_path:
         try:
