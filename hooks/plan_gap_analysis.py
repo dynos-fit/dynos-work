@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from lib_core import write_json
+
 # ---------------------------------------------------------------------------
 # Route pattern detection — covers major frameworks across ecosystems
 # ---------------------------------------------------------------------------
@@ -519,10 +521,7 @@ def _write_cache(task_dir: Path, fingerprint: str, report: dict[str, Any]) -> No
     """Persist gap-analysis report keyed by fingerprint. Best-effort."""
     cache_path = _cache_path(task_dir)
     try:
-        cache_path.write_text(json.dumps({
-            "fingerprint": fingerprint,
-            "report": report,
-        }))
+        write_json(cache_path, {"fingerprint": fingerprint, "report": report})
     except OSError:
         pass  # Cache failure must not break gap analysis
 
