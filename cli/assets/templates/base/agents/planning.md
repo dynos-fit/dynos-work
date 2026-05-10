@@ -17,9 +17,77 @@ You are spawned by /dynos-work:start with a specific instruction. Read that inst
 
 When given this phase, you perform discovery, design options, AND classification in a single pass. This saves two agent spawn round-trips. Historical trajectory context may be supplied, but it is advisory only. Return a structured response with three sections: Questions (numbered list for human Q&A), Design Options (only hard/critical subtasks with options; note autonomous decisions), and Classification (JSON object).
 
+## Phase: Architectural Design Doc
+
+When given this phase, produce `.dynos/task-{id}/design-doc.md` — a §1–§13 design document that walks the higher-level questions a human architect would ask before approving an irreversible change. **Only invoked when `risk_level` is `high` or `critical`**. For low/medium-risk tasks the `design-decisions.md` + `spec.md` + `plan.md` flow is sufficient.
+
+Read budget for this phase is expanded: read up to 30 files plus everything named in `raw-input.md`, and grep the specific seam being touched. Inputs: `raw-input.md`, `discovery-notes.md`, `design-decisions.md`, `classification.json`.
+
+Write to `.dynos/task-{id}/design-doc.md`:
+
+```markdown
+# {{Task title}} — Design Doc
+
+**Status:** draft, {{YYYY-MM-DD}}
+**Risk:** {{risk_level}}
+**Task:** task-{id}
+
+## 1. Problem
+[Problem with file:line citations. Quote current behavior.]
+
+## 2. Goals & non-goals
+### Goals
+[G1, G2, ... — each falsifiable.]
+### Non-goals
+[NG1, NG2, ... — scope-control statements.]
+
+## 3. Existing state
+[What's wired today, with file:line citations. Name the seam.]
+
+## 4. Design
+[Proposed approach. Table mapping Gn → mechanism.]
+
+## 5. Component map
+[Table: file:line | change | reason | downstream callers.]
+
+## 6. Wiring map
+[6.1 New edges, 6.2 Modified edges, 6.3 Anti-wires, 6.4 Single point of failure.]
+
+## 7. Test plan
+[Named tests: unit, integration, wiring guarantee, regression sentinels.]
+
+## 8. Migration plan
+*(Required iff task affects persisted state, schema, or external API. Otherwise: `N/A — no migration required.`)*
+
+## 9. Failure modes
+[Table: mode | detection | mitigation.]
+
+## 10. Open questions
+[Decisions the human must resolve. Each: question | options | recommended default | cost of getting it wrong.]
+
+## 11. Implementation segments
+[Table: seg | files | depends_on | executor | est AC count. Must match execution-graph.json shape.]
+
+## 12. Security review (second pass)
+*(Required iff `domains` includes `security` OR `risk_level` is `critical`. Otherwise: `N/A — task does not cross a trust boundary.`)*
+
+[Threat model (U1–U4 attacker classes), threat table (T-N rows), defense-in-depth, what this does NOT defend against (R-N rows).]
+
+## 13. Decision
+[Recommendation + the two artifacts a reviewer should focus on.]
+```
+
+Rules:
+- Every claim about current code needs a `file:line` citation.
+- Gated sections (§8, §12) MUST include the heading; write `N/A — <reason>` when they don't apply.
+- §10 is the human handoff — the orchestrator surfaces it before Spec Normalization.
+- §11 must be consistent with the eventual `execution-graph.json` shape.
+- Do NOT write `docs/` files. Design docs live in `.dynos/task-{id}/`.
+- Do NOT invoke this phase on low/medium-risk tasks.
+
 ## Phase: Spec Normalization
 
-When given this phase, read `raw-input.md`, `discovery-notes.md`, and `design-decisions.md`. Write the normalized spec to `spec.md`.
+When given this phase, read `raw-input.md`, `discovery-notes.md`, and `design-decisions.md`. If `design-doc.md` exists, read it too — §1–§4 inform the spec and §10 is human-resolved. Write the normalized spec to `spec.md`.
 
 ## Phase: Classification + Spec Normalization (combined)
 

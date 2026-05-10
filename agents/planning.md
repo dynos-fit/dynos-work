@@ -62,9 +62,86 @@ When given this phase, you perform discovery, design options, AND classification
 
 Do not waste space on obvious questions. Ask only questions whose answers materially change the implementation, risk, or acceptance criteria. If a question is low-value, resolve it yourself and record the assumption instead of punting.
 
+## Phase: Architectural Design Doc
+
+When given this phase, produce `.dynos/task-{id}/design-doc.md` — a §1–§13 design document that walks the same higher-level questions a human architect would ask before approving an irreversible change. **Only invoked when `risk_level` is `high` or `critical`** (the orchestrator decides). For low/medium-risk tasks the `design-decisions.md` + `spec.md` + `plan.md` flow is sufficient and this phase MUST NOT be invoked.
+
+**Read budget for this phase is expanded.** §3 (existing state) and §5 (component map) require evidence from the actual code. You may read up to 30 files plus everything named in `raw-input.md`, and you MAY grep/glob the specific seam being touched. You may NOT grep the whole repo.
+
+**Inputs you read:** `raw-input.md`, `discovery-notes.md`, `design-decisions.md`, `classification.json`, plus the exact files named by the user or surfaced in discovery.
+
+**Output:** `.dynos/task-{id}/design-doc.md` with this structure:
+
+```markdown
+# {{Task title}} — Design Doc
+
+**Status:** draft, {{YYYY-MM-DD}}
+**Risk:** {{risk_level from classification.json}}
+**Task:** task-{id}
+
+## 1. Problem
+[State the problem with file:line citations. Quote current behavior. If a workaround exists today, describe it and explain why it isn't enough.]
+
+## 2. Goals & non-goals
+### Goals
+[Numbered list G1, G2, ... — each falsifiable. "Stable across worktrees" is good. "Better UX" is not.]
+### Non-goals
+[Numbered list NG1, NG2, ... — each a scope-control statement an executor can use to stop and ask in a gray area.]
+
+## 3. Existing state
+[What's already wired. file:line citations for every claim. Quote ≤6-line code snippets where structure matters. Identify the seam: the single function or file the change pivots around.]
+
+## 4. Design
+[The proposed approach. Use subsections 4.1, 4.2, ... if the design has distinct facets. Include a small "Why this satisfies the goals" table mapping each Gn → mechanism.]
+
+## 5. Component map
+[Table of every file created or modified. Columns: file:line | change | reason | downstream callers affected (count or names). Use grep to count call sites; cite the grep result.]
+
+## 6. Wiring map
+[The data-flow edges. Sub-section 6.1 "New edges" — table: # | write side | read side | format | wire-test name. Sub-section 6.2 "Modified edges" — same shape. Sub-section 6.3 "Anti-wires" — paths the new code must NOT take, one-line reason each. Sub-section 6.4 "Single point of failure" — name the one assertion that, if it holds, guarantees the seam works.]
+
+## 7. Test plan
+[Named tests grouped by type: unit, integration, wiring guarantee (the §6.4 test), regression sentinels. Each test gets a `test_xxx` name so testing-executor can implement against this list directly.]
+
+## 8. Migration plan
+*(Required iff the task affects persisted state, schema, on-disk artifacts, or external API contracts. Otherwise: `N/A — no migration required.`)*
+
+[Compatibility window, active migration commands, conflict resolution rules, idempotency guarantee.]
+
+## 9. Failure modes
+[Table: mode | detection | mitigation. Cover crashes, races, corrupted state, partial writes, permission errors, version drift. Each mode names an assertion or event that surfaces it.]
+
+## 10. Open questions
+[Decisions the human must resolve before Spec Normalization. Each: the question, the options, the recommended default, and the consequence of getting it wrong. If none: `None — design fully resolved.` with one line per potential ambiguity explaining why it's closed.]
+
+## 11. Implementation segments
+[Table: seg | files | depends_on | executor type | estimated AC count. This is a preview of the execution-graph.json that Implementation Planning will emit — keep them consistent.]
+
+## 12. Security review (second pass)
+*(Required iff `domains` includes `security` OR `risk_level` is `critical`. Otherwise: `N/A — task does not cross a trust boundary.`)*
+
+[Threat model with attacker classes (U1 commit-level, U2 same-machine, U3 same-uid, U4 network). Threat table — rows: ID (T-N) | threat | attacker class | mitigation | test name. Defense-in-depth principles. Explicit list of what this design does NOT defend against (R-N rows). Mapping to existing code that already mitigates some threats.]
+
+## 13. Decision
+[One paragraph. The recommended path forward, the two artifacts a reviewer should focus on (typically §6 wiring map and §12 threat table when present), and the explicit gate: "If both pass review, implementation follows §11."]
+```
+
+**Section rules:**
+- Every claim about the current codebase needs a `file:line` citation. Don't write "today, X happens" without a pointer.
+- Sections gated by domain/risk (§8, §12) MUST include the heading. If they do not apply, write `N/A — <one-line reason>.` Do not silently omit.
+- §10 is the human handoff. The orchestrator presents §10 via AskUserQuestion before invoking Spec Normalization.
+- §13 is a recommendation, never a self-approval. The human-approval receipt finalizes the decision.
+- §11 must be consistent with the eventual `execution-graph.json`. If §11 lists 6 segments and the plan emits 4, the auditor flags drift.
+- This file becomes a primary input for Spec Normalization. `spec.md` should reference §1–§4 rather than restating them.
+
+**Hard rules specific to this phase:**
+- Do NOT write `docs/` files. Design docs live in `.dynos/task-{id}/`.
+- Do NOT invoke this phase on low/medium-risk tasks. Refuse and surface the misclassification instead.
+- Do NOT advance the lifecycle stage; the orchestrator owns transitions.
+
 ## Phase: Spec Normalization
 
-When given this phase, read `raw-input.md`, `discovery-notes.md`, and `design-decisions.md`. Write the normalized spec to `spec.md`.
+When given this phase, read `raw-input.md`, `discovery-notes.md`, and `design-decisions.md`. If `.dynos/task-{id}/design-doc.md` exists (high/critical-risk task), read it too — its §1–§4 inform the spec, §10 has been resolved by the human, and §11 lists the intended segments. Write the normalized spec to `spec.md`.
 
 Your spec must be hostile to sloppy implementation. It should leave no room for fake completion, implied behavior gaps, or "good enough" interpretations.
 
@@ -161,6 +238,8 @@ Write to `.dynos/task-{id}/spec.md`:
 ## Phase: Implementation Planning (+ Execution Graph)
 
 When given this phase, generate BOTH the implementation plan (`plan.md`) AND the execution graph payload. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. This eliminates the need for a separate execution-coordinator spawn.
+
+If `.dynos/task-{id}/design-doc.md` exists, its §11 lists the intended segments — your execution graph MUST match that segment shape (count, executor type, depends_on edges). If you must diverge, justify the divergence in `plan.md` under Open Questions; the plan-audit will flag silent drift.
 
 Before writing the plan, read the normalized spec and ask:
 

@@ -138,6 +138,7 @@ def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]:
         return [
             ".dynos/task-*/discovery-notes.md",
             ".dynos/task-*/design-decisions.md",
+            ".dynos/task-*/design-doc.md",
             ".dynos/task-*/spec.md",
             ".dynos/task-*/plan.md",
             # NOTE: classification.json and execution-graph.json require the ctl
@@ -324,7 +325,7 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
     if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
         return WriteDecision(True, "repo work artifact allowed for executor role", "direct")
     if attempt.role == "planning":
-        if rel_posix in {"discovery-notes.md", "design-decisions.md", "spec.md", "plan.md"}:
+        if rel_posix in {"discovery-notes.md", "design-decisions.md", "design-doc.md", "spec.md", "plan.md"}:
             return WriteDecision(True, f"{rel_posix} is planner-owned judgment output", "direct")
         return WriteDecision(False, "planning role may only write planning artifacts", "deny")
     if attempt.role == "repair-coordinator":

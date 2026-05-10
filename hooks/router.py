@@ -1909,9 +1909,11 @@ def cmd_planner_inject_prompt(args: argparse.Namespace) -> int:
     from ``lib_receipts.INJECTED_PLANNER_PROMPTS_DIR`` so writer and
     reader share one source of truth for the filename schema.
 
-    The three recognized phases are ``discovery``, ``spec``, and ``plan``
-    — one sidecar per phase, matching the three planner spawn sites in
-    ``skills/start/SKILL.md``.
+    The four recognized phases are ``discovery``, ``arch-design``, ``spec``,
+    and ``plan`` — one sidecar per phase, matching the planner spawn sites
+    in ``skills/start/SKILL.md``. ``arch-design`` is the conditional
+    high/critical-risk gate that produces ``design-doc.md`` before spec
+    normalization.
     """
     import sys as _sys
     import re as _re
@@ -2120,7 +2122,7 @@ def build_parser() -> argparse.ArgumentParser:
     pip.add_argument(
         "--phase",
         required=True,
-        choices=("discovery", "spec", "plan"),
+        choices=("discovery", "arch-design", "spec", "plan"),
         help="Planner phase this sidecar corresponds to",
     )
     pip.set_defaults(func=cmd_planner_inject_prompt)

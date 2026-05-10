@@ -6299,7 +6299,7 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Write a planner spawn receipt deterministically from sidecar proof",
     )
     planner_receipt_parser.add_argument("task_dir")
-    planner_receipt_parser.add_argument("phase", choices=("discovery", "spec", "plan"))
+    planner_receipt_parser.add_argument("phase", choices=("discovery", "arch-design", "spec", "plan"))
     planner_receipt_parser.add_argument("--tokens-used", type=int, required=True)
     planner_receipt_parser.add_argument("--model", default=None)
     planner_receipt_parser.add_argument("--agent-name", default=None)
