@@ -17,6 +17,7 @@ from urllib.parse import urlparse, parse_qs
 
 from lineage import build_lineage
 from report import build_report
+from lib_core import write_json
 from lib_validate import validate_generated_html
 
 
@@ -2602,7 +2603,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     data_path = dynos_dir / "dashboard-data.json"
     html_path = dynos_dir / "dashboard.html"
-    data_path.write_text(json.dumps(payload, indent=2) + "\n")
+    write_json(data_path, payload)
     html_path.write_text(_REDIRECT_HTML)
 
     validation_errors = validate_generated_html(html_path)

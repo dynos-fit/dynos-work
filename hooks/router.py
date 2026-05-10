@@ -30,6 +30,7 @@ from lib_core import (
     load_json,
     now_iso,
     project_policy,
+    write_json,
 )
 from lib_defaults import (
     DEFAULT_MODEL as _DEFAULT_MODEL_CONST,
@@ -1353,7 +1354,7 @@ def _write_executor_plan_cache(
         "graph_path": str(graph_path),
         "plan": plan,
     }
-    cache_path.write_text(json.dumps(record, indent=2) + "\n")
+    write_json(cache_path, record)
     return cache_path
 
 

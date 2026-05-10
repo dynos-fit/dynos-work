@@ -3796,7 +3796,7 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
             diff_files=diff_files if (diff_base is not None and diff_error is None) else None,
         )
         audit_plan_path = task_dir / "audit-plan.json"
-        audit_plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
+        write_json(audit_plan_path, plan)
 
         print(json.dumps({
             "status": "audit_setup_ready",

@@ -265,7 +265,7 @@ def maintainer_policy(root: Path) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, merged)
     if merged != data:
-        path.write_text(json.dumps({**data, **merged}, indent=2) + "\n")
+        write_json(path, {**data, **merged})
     return merged
 
 
@@ -291,7 +291,7 @@ def current_pid(root: Path) -> int | None:
 def write_status(root: Path, payload: dict) -> None:
     path = status_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    write_json(path, payload)
 
 
 def run_python(root: Path, script_name: str, *args: str) -> tuple[subprocess.CompletedProcess[str], dict | None]:
