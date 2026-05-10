@@ -1089,7 +1089,7 @@ def cmd_backfill_rejected(args: argparse.Namespace) -> int:
     existing_rules.extend(novel)
     existing_doc["rules"] = existing_rules
     rules_path.parent.mkdir(parents=True, exist_ok=True)
-    rules_path.write_text(json.dumps(existing_doc, indent=2), encoding="utf-8")
+    write_json(rules_path, existing_doc)
     print(json.dumps(result, indent=2))
     return 0
 
