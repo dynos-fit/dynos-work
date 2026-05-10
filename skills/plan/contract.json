@@ -17,6 +17,11 @@
       "type": "string",
       "required": false,
       "source": ".dynos/task-{id}/design-decisions.md"
+    },
+    "design-doc.md": {
+      "type": "string",
+      "required": false,
+      "source": ".dynos/task-{id}/design-doc.md"
     }
   },
   "output_schema": {

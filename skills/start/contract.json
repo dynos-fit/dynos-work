@@ -26,6 +26,10 @@
       "type": "string",
       "description": "Design decisions for hard/critical subtasks"
     },
+    "design-doc.md": {
+      "type": "string",
+      "description": "§1–§13 architectural design doc. Only produced when classification.risk_level is high or critical."
+    },
     "spec.md": {
       "type": "string",
       "description": "Normalized spec with numbered acceptance criteria"

@@ -30,6 +30,9 @@ Before EVERY planner receipt write, you MUST first write a per-phase injected-pr
 # Discovery planner — write sidecar, capture digest:
 DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase discovery)
 
+# Architectural Design Doc planner (high/critical-risk only) — write sidecar, capture digest:
+ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase arch-design)
+
 # Spec planner — write sidecar, capture digest:
 SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase spec)
 
@@ -46,6 +49,13 @@ python3 hooks/ctl.py planner-receipt .dynos/task-{id} discovery \
   --model {MODEL_USED} \
   --agent-name planning \
   --injected-prompt-sha256 "${DISCOVERY_DIGEST}"
+
+# After planner spawn (architectural design doc — high/critical-risk only):
+python3 hooks/ctl.py planner-receipt .dynos/task-{id} arch-design \
+  --tokens-used {TOTAL_TOKENS} \
+  --model {MODEL_USED} \
+  --agent-name planning \
+  --injected-prompt-sha256 "${ARCH_DESIGN_DIGEST}"
 
 # After planner spawn (spec normalization):
 python3 hooks/ctl.py planner-receipt .dynos/task-{id} spec \
@@ -337,6 +347,45 @@ Rules:
 Logging: append exactly one line to the execution log:
 
 `{timestamp} [GATE] external-solution — recommended: {true|false}`
+
+Proceed to Step 2d.
+
+---
+
+## Step 2d — Architectural Design Doc Gate (conditional)
+
+**Only runs when `classification.risk_level` is `high` or `critical`.** Read `.dynos/task-{id}/classification.json`. If `risk_level` is `low` or `medium`, append `{timestamp} [SKIP] arch-design — risk_level={risk_level}` to the execution log and proceed to Step 3.
+
+For high/critical tasks, spawn the planner with the **Architectural Design Doc** phase to produce `.dynos/task-{id}/design-doc.md` — a §1–§13 design document that walks the higher-level architectural questions before spec normalization. §10 Open Questions is the human handoff.
+
+**Stamp role BEFORE the spawn (MANDATORY):** write the per-phase injected-prompt sidecar and capture the digest:
+
+```bash
+ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase arch-design)
+```
+
+Without this stamp the planner subagent resolves to `execute-inline` and its write to `design-doc.md` is denied by `write_policy`.
+
+Spawn the planner subagent (`dynos-work:planning`) with instruction:
+
+> Architectural Design Doc phase. Read `raw-input.md`, `discovery-notes.md`, `design-decisions.md`, and `classification.json`. Produce `.dynos/task-{id}/design-doc.md` following the §1–§13 structure defined in your agent prompt. Cite `file:line` for every claim about the current codebase. Surface unresolved decisions in §10 Open questions. Do NOT write to `docs/`. Do NOT advance any lifecycle stage.
+
+After the spawn returns, write the receipt:
+
+```bash
+python3 hooks/ctl.py planner-receipt .dynos/task-{id} arch-design \
+  --tokens-used {TOTAL_TOKENS} \
+  --model {MODEL_USED} \
+  --agent-name planning \
+  --injected-prompt-sha256 "${ARCH_DESIGN_DIGEST}"
+```
+
+Read `.dynos/task-{id}/design-doc.md` and locate the `## 10. Open questions` section. If it contains only the literal `None — design fully resolved.`, no human input is needed; log `{timestamp} [GATE] arch-design — no open questions` and proceed to Step 3.
+
+Otherwise, parse each open question and present it to the user via **AskUserQuestion**. Append the user's resolutions back to `design-doc.md` immediately under the `## 10. Open questions` section as a `### Resolutions` sub-section, one line per resolved question: `Q{n}: {chosen-option} — {one-line rationale}`.
+
+Logging: append exactly one line to the execution log:
+`{timestamp} [GATE] arch-design — open-questions: {n} (resolved)`
 
 Proceed to Step 3.
 
