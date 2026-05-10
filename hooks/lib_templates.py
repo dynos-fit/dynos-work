@@ -49,7 +49,7 @@ def _truncate_diff(diff: str) -> str:
 def save_fix_template(root: Path, finding: dict, diff: str) -> None:
     """Save a fix template derived from a finding and its diff.
 
-    Templates are stored at ~/.dynos/projects/{slug}/fix-templates.json.
+    Templates are stored at the persistent project dir (resolved via lib_core._persistent_project_dir) under fix-templates.json.
     FIFO eviction keeps the list at most 50 entries.
     Never raises.
     """

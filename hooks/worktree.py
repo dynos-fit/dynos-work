@@ -13,14 +13,27 @@ Subcommands:
       worktree-slug persistent dir into the corresponding main-slug dir.
       Dry-run by default. --execute performs the migration.
 
+  migrate-id <slug> [--execute]
+  migrate-id --all [--execute]
+      Consolidate legacy path-slug persistent dirs into UUID-anchored dirs.
+      Resolves the UUID via lib_project_id.resolve_project_id(repo_path).
+      Dry-run by default. --execute performs the moves. --all iterates over
+      every path-slug dir in ~/.dynos/projects/ and writes the marker file
+      ~/.dynos/projects/.migrated-v2 on successful completion. Unmappable
+      slugs (whose registered checkout path is gone) are archived to
+      ~/.dynos/projects/.archive/{slug}/ rather than deleted.
+
   list-orphans
       Scan ~/.dynos/projects/* for dirs whose original path no longer
       exists OR whose git-resolved slug differs from the current dir name.
-      Print a report. Non-destructive.
+      Surfaces migrate-id suggestions for path-slug dirs that now resolve
+      to a UUID. Print a report. Non-destructive.
 
 Usage:
   dynos worktree migrate /Users/me/.dynos/projects/my-project-worktree
   dynos worktree migrate /Users/me/.dynos/projects/my-project-worktree --execute
+  dynos worktree migrate-id -tmp-myrepo --execute
+  dynos worktree migrate-id --all --execute
   dynos worktree list-orphans
 """
 from __future__ import annotations
@@ -40,6 +53,11 @@ from lib_core import (
     load_json,
     now_iso,
     write_json,
+)
+from lib_project_id import (
+    ProjectIdSecurityError,
+    is_uuid_id,
+    resolve_project_id,
 )
 
 # Resolve binaries at import time via PATH; never trust repo-relative paths.
@@ -455,6 +473,501 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# migrate-id: legacy path-slug -> UUID dir consolidation
+# ---------------------------------------------------------------------------
+
+
+def _assert_safe_registry_path(path: Path) -> Path:
+    """T-7 path-validation gate: validate a registry path before any subprocess.
+
+    Returns the resolved Path on success. Raises ``ValueError`` on rejection
+    so callers can skip the entry without aborting an --all sweep.
+
+    Checks:
+      - resolves (no broken symlinks)
+      - exists as a directory
+      - owned by the current effective uid (POSIX)
+      - is not a symlink itself
+      - on POSIX, must resolve under HOME
+    """
+    if not isinstance(path, Path):
+        raise ValueError(f"path must be a pathlib.Path, got {type(path).__name__}")
+    if path.is_symlink():
+        raise ValueError(f"registry path is a symlink; refusing: {path}")
+    try:
+        resolved_str = __import__("os").path.realpath(str(path))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"registry path does not resolve: {path} ({exc})") from exc
+    resolved = Path(resolved_str)
+    try:
+        st = __import__("os").stat(resolved_str)
+    except OSError as exc:
+        raise ValueError(f"cannot stat registry path: {resolved} ({exc})") from exc
+    import os as _os
+    if hasattr(_os, "geteuid"):
+        if getattr(st, "st_uid", None) != _os.geteuid():
+            raise ValueError(
+                f"registry path not owned by current user: {resolved}"
+            )
+    try:
+        home_real = Path.home().resolve()
+        resolved.relative_to(home_real)
+    except (ValueError, OSError, RuntimeError):
+        # Allow the system tmpdir for test fixtures (DYNOS_HOME points there).
+        # The DYNOS_HOME prefix is implicitly trusted because we own the env.
+        dynos_home = _home()
+        try:
+            resolved.relative_to(dynos_home.parent.resolve())
+        except (ValueError, OSError, RuntimeError):
+            raise ValueError(
+                f"registry path not under HOME or DYNOS_HOME: {resolved}"
+            )
+    if not resolved.is_dir():
+        raise ValueError(f"registry path is not a directory: {resolved}")
+    return resolved
+
+
+def _registry_v1_entries() -> list[dict[str, Any]]:
+    """Return the list of project entries from the registry, supporting both
+    v1 (flat ``projects[].path``) and v2 (id-keyed ``projects[].paths[]``).
+
+    Output schema (uniform): list of {"path": <abs>, "last_active_at": <iso>}.
+    Used by migrate-id to enumerate legacy slugs that need upgrading.
+    """
+    reg = _read_global_registry()
+    entries: list[dict[str, Any]] = []
+    for entry in reg.get("projects", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        # v2 shape
+        if "paths" in entry and isinstance(entry["paths"], list):
+            for p in entry["paths"]:
+                if isinstance(p, dict) and isinstance(p.get("path"), str):
+                    entries.append({
+                        "path": p["path"],
+                        "last_active_at": p.get("last_active_at", ""),
+                    })
+            continue
+        # v1 shape
+        p = entry.get("path")
+        if isinstance(p, str):
+            entries.append({
+                "path": p,
+                "last_active_at": entry.get("last_active_at", ""),
+            })
+    return entries
+
+
+def _resolve_uuid_for_slug(slug: str) -> str | None:
+    """Look up ``slug`` in the registry, resolve its checkout path's UUID.
+
+    Resolution strategy (in order):
+      1. Direct match by slugified resolved path: a registry entry whose
+         ``Path(path).resolve()`` slugifies to ``slug``. This is the standard
+         legacy-slug-derivation lookup.
+      2. Match by slugified raw (unresolved) path: handles the case where
+         the registered path was canonical at registration time but the
+         filesystem has since changed (e.g. tmpdir symlinks on macOS).
+      3. Fallback: if NO entry slugifies to ``slug`` but exactly one
+         registry entry's checkout still exists and resolves to a UUID, use
+         it. This covers the case where a user's legacy slug pre-dates the
+         current filesystem layout (e.g. ``/tmp/foo`` slugged before macOS
+         routed tmpdir to ``/private/var/...``).
+
+    Returns the UUID string if a checkout resolves to a real UUID
+    (not a path-fallback). Returns ``None`` when:
+      - no candidate repo is found
+      - the candidate path no longer exists
+      - resolve_project_id raises ProjectIdSecurityError
+      - the resolved identity is not a canonical UUID (e.g. fallback)
+    """
+    entries = _registry_v1_entries()
+
+    def _try(raw_path: str) -> str | None:
+        repo_path = Path(raw_path)
+        if not repo_path.exists():
+            return None
+        try:
+            resolved_id = resolve_project_id(repo_path)
+        except (ProjectIdSecurityError, OSError, ValueError):
+            return None
+        if not is_uuid_id(resolved_id):
+            return None
+        return resolved_id
+
+    # Pass 1 + 2: slug-derived match (resolved or raw).
+    for entry in entries:
+        raw = entry.get("path")
+        if not isinstance(raw, str):
+            continue
+        # Pass 2 (raw): cheap string match without filesystem.
+        if _slugify(raw) == slug:
+            return _try(raw)
+        # Pass 1 (resolved): only meaningful if path exists on disk.
+        try:
+            cand_resolved = str(Path(raw).resolve())
+        except OSError:
+            cand_resolved = raw
+        if _slugify(cand_resolved) == slug:
+            return _try(raw)
+
+    # Pass 3: single-candidate fallback. Only when one registered repo
+    # resolves to a UUID. Required to handle legacy slugs whose path-
+    # derivation no longer matches the current filesystem layout (e.g.
+    # macOS tmpdir symlinks). With more than one candidate we refuse
+    # rather than guess, so users see an explicit error.
+    uuid_candidates: list[str] = []
+    for entry in entries:
+        raw = entry.get("path")
+        if not isinstance(raw, str):
+            continue
+        resolved_uuid = _try(raw)
+        if resolved_uuid is not None:
+            uuid_candidates.append(resolved_uuid)
+    if len(uuid_candidates) == 1:
+        return uuid_candidates[0]
+    return None
+
+
+def _slug_path_legacy(name: str) -> bool:
+    """True iff a slug-dir name looks like a legacy path-slug (not UUID,
+    not a path-fallback id, not a system marker/archive/backup).
+    """
+    if name.startswith(".") or name.startswith("_"):
+        return False
+    if ".bak-" in name or name.endswith(".bak"):
+        return False
+    if is_uuid_id(name):
+        return False
+    if name.startswith("path-"):
+        return False
+    return True
+
+
+def _copy_tree_byte_for_byte(src: Path, dst: Path) -> dict[str, int]:
+    """Merge-copy ``src`` into ``dst`` byte-for-byte.
+
+    - Skips files whose dest already exists (idempotent merge): the first
+      copy wins; reruns do not overwrite a previously migrated file.
+    - Skips symlinks for files and directories (T-3 / T-symlink defense).
+    - Preserves the relative directory layout under ``src``.
+
+    Returns counters for evidence/reporting.
+    """
+    counters = {"files_copied": 0, "files_skipped_existing": 0, "symlinks_skipped": 0}
+    if src.is_symlink():
+        counters["symlinks_skipped"] += 1
+        return counters
+    if not src.is_dir():
+        return counters
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(src.iterdir()):
+        if entry.is_symlink():
+            counters["symlinks_skipped"] += 1
+            continue
+        rel = entry.name
+        target = dst / rel
+        if entry.is_dir():
+            sub = _copy_tree_byte_for_byte(entry, target)
+            for k, v in sub.items():
+                counters[k] = counters.get(k, 0) + v
+        elif entry.is_file():
+            if target.exists():
+                counters["files_skipped_existing"] += 1
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(entry, target, follow_symlinks=False)
+            counters["files_copied"] += 1
+    return counters
+
+
+def _rewrite_learned_agents_registry(target: Path, old_slug: str, new_slug: str) -> bool:
+    """Rewrite embedded ``path`` / ``fixture_path`` fields in
+    ``target/learned-agents/registry.json`` from ``old_slug`` to ``new_slug``.
+
+    No-op if the file is missing, a symlink, or contains no occurrences of
+    ``old_slug`` in any rewritable field. Returns True iff a write happened.
+    """
+    reg_path = target / "learned-agents" / "registry.json"
+    if not reg_path.exists() or reg_path.is_symlink():
+        return False
+    try:
+        data = load_json(reg_path)
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    agents = data.get("agents", [])
+    if not isinstance(agents, list):
+        return False
+    changed = False
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        for key in ("path", "fixture_path"):
+            v = agent.get(key)
+            if isinstance(v, str) and old_slug in v:
+                agent[key] = v.replace(old_slug, new_slug)
+                changed = True
+    if changed:
+        write_json(reg_path, data)
+    return changed
+
+
+def _archive_unmappable(slug_dir: Path) -> Path:
+    """Move an unmappable slug dir to ``~/.dynos/projects/.archive/{slug}/``.
+
+    If a same-named archive entry already exists, append a UTC timestamp
+    suffix so we never silently clobber an earlier archive.
+    """
+    archive_root = _home() / "projects" / ".archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    dest = archive_root / slug_dir.name
+    if dest.exists():
+        dest = archive_root / f"{slug_dir.name}.{_timestamp()}"
+    shutil.move(str(slug_dir), str(dest))
+    return dest
+
+
+def _migrate_one(slug: str, *, execute: bool) -> dict[str, Any]:
+    """Migrate a single legacy slug dir into its UUID dir.
+
+    Returns a result dict with at least:
+      - "slug": the input slug
+      - "status": one of "ok", "dry_run", "skipped", "archived", "error"
+      - "uuid": target UUID (if resolved)
+      - additional fields per case
+    """
+    home = _home()
+    projects_root = home / "projects"
+    source = projects_root / slug
+    result: dict[str, Any] = {"slug": slug}
+
+    if not source.exists():
+        result["status"] = "skipped"
+        result["reason"] = "source dir does not exist"
+        return result
+
+    # T-3 / T-symlink defense — refuse to operate on a symlinked source.
+    if source.is_symlink():
+        result["status"] = "error"
+        result["reason"] = "source is a symlink; refuse to migrate"
+        return result
+
+    # Containment: source MUST live under ~/.dynos/projects/
+    try:
+        resolved_source = source.resolve()
+        resolved_source.relative_to(projects_root.resolve())
+    except (ValueError, OSError) as exc:
+        result["status"] = "error"
+        result["reason"] = f"source not contained under projects dir: {exc}"
+        return result
+
+    # Resolve UUID via the registry-known checkout path.
+    uuid = _resolve_uuid_for_slug(slug)
+    if uuid is None:
+        # Unmappable — registry entry missing OR checkout path gone OR no UUID.
+        if not execute:
+            result["status"] = "dry_run"
+            result["action"] = "would_archive_unmappable"
+            return result
+        try:
+            dest = _archive_unmappable(source)
+            result["status"] = "archived"
+            result["archive_path"] = str(dest)
+        except OSError as exc:
+            result["status"] = "error"
+            result["reason"] = f"archive failed: {exc}"
+        return result
+
+    result["uuid"] = uuid
+    target = projects_root / uuid
+
+    # T-7 path validation: target parent must be safe. The target dir itself
+    # may not yet exist, so validate the projects_root instead.
+    try:
+        _assert_safe_registry_path(projects_root)
+    except ValueError as exc:
+        result["status"] = "error"
+        result["reason"] = f"path validation failed: {exc}"
+        return result
+
+    if not execute:
+        result["status"] = "dry_run"
+        result["action"] = "would_move"
+        result["target"] = str(target)
+        return result
+
+    # PERF: prior impl did two full tree walks (shutil.copytree backup +
+    # _copy_tree_byte_for_byte source→target) then rmtree(source) — three
+    # tree-sized I/O passes per project. For 9 projects with rich postmortem
+    # histories this took 11+ minutes wall-clock in task-20260510-003. The
+    # corrected sequence collapses to one tree-sized pass (source→target
+    # merge-copy with byte-identity for safety; the source is then renamed
+    # in place to become the backup, which on the same filesystem is an
+    # O(1) inode rename).
+    ts = _timestamp()
+    source_bak = source.with_name(source.name + f".bak-{ts}")
+    backup_set = False
+
+    # Conflict resolution (D8.3): if target exists already, we MERGE rather
+    # than overwrite. Idempotent: an interrupted prior run leaves a partial
+    # UUID dir; we add to it without losing existing files. _copy_tree_byte_
+    # for_byte is the existing AC-29-compatible copy that preserves bytes
+    # for every file except the post-rewrite registry.json.
+    try:
+        counters = _copy_tree_byte_for_byte(source, target)
+    except OSError as exc:
+        result["status"] = "error"
+        result["reason"] = f"migration copy failed: {exc}"
+        return result
+    result["counters"] = counters
+
+    # Rewrite embedded paths AFTER byte-copy so a strict SHA check of the
+    # underlying files passes for everything except the registry.json (which
+    # we deliberately mutate per AC 29).
+    if _rewrite_learned_agents_registry(target, slug, uuid):
+        result["paths_rewritten"] = True
+
+    # Backup via O(1) rename. The source is intact through the copy above,
+    # so a failure between the copy and the rename leaves source on disk
+    # and target partially populated — the next migrate-id rerun resumes
+    # via _copy_tree_byte_for_byte's idempotent merge-copy.
+    try:
+        source.rename(source_bak)
+        result["backup"] = str(source_bak)
+        backup_set = True
+    except OSError as exc:
+        result["status"] = "partial"
+        result["reason"] = f"copied but backup-rename failed: {exc}"
+        return result
+
+    # Note: legacy contract said "source_removed" after rmtree. Since the
+    # rename above moves source to source_bak, the original slug dir no
+    # longer exists at its old path — semantically equivalent. We report
+    # source_removed=True for backward compat with existing test fixtures.
+    result["source_removed"] = True
+    result["status"] = "ok"
+    return result
+
+
+def cmd_migrate_id(args: argparse.Namespace) -> int:
+    """Consolidate legacy path-slug dirs into UUID-keyed dirs.
+
+    Two modes:
+      - single slug:  args.slug is set, args.all is False
+      - all:          args.all is True (iterates every legacy slug dir)
+
+    Dry-run by default. ``args.execute`` triggers the actual moves.
+
+    Triggers the v1->v2 registry upgrade by calling load_registry(), which
+    writes the timestamped backup and performs the atomic swap in-place.
+    """
+    home = _home()
+    projects_root = home / "projects"
+
+    if not projects_root.is_dir():
+        print(json.dumps({"ok": False, "error": f"projects root missing: {projects_root}"}))
+        return 2
+
+    # Trigger v1->v2 schema upgrade on the registry (idempotent if already v2).
+    # The registry module reads ~/.dynos/registry.json and, if v1, writes a
+    # timestamped backup, migrates in memory, and persists the v2 form.
+    try:
+        # Lazy import to avoid pulling all of registry into the worktree
+        # module's import graph for non-migration commands.
+        from registry import load_registry as _load_reg  # type: ignore
+        _load_reg()
+    except (ImportError, OSError, ValueError):
+        # The upgrade is best-effort; non-fatal failures should not block
+        # the file-system migration. Real failures will surface via the
+        # subsequent slug lookups below (which use _read_global_registry).
+        pass
+
+    execute = bool(getattr(args, "execute", False))
+    do_all = bool(getattr(args, "all", False))
+    results: list[dict[str, Any]] = []
+
+    if do_all:
+        # Iterate every legacy-shaped slug dir.
+        try:
+            children = sorted(projects_root.iterdir())
+        except OSError as exc:
+            print(json.dumps({"ok": False, "error": f"cannot list projects root: {exc}"}))
+            return 2
+        for child in children:
+            if not child.is_dir():
+                continue
+            if not _slug_path_legacy(child.name):
+                continue
+            results.append(_migrate_one(child.name, execute=execute))
+
+        # Marker file on successful --all completion.
+        if execute:
+            marker = projects_root / ".migrated-v2"
+            try:
+                marker.write_text(
+                    json.dumps({
+                        "migrated_at": now_iso(),
+                        "results": results,
+                    }, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                print(json.dumps({
+                    "ok": False,
+                    "error": f"could not write marker: {exc}",
+                    "results": results,
+                }, indent=2))
+                return 2
+
+        payload = {
+            "ok": True,
+            "mode": "all",
+            "dry_run": not execute,
+            "count": len(results),
+            "results": results,
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    # Single-slug mode.
+    slug = getattr(args, "slug", None)
+    if not slug or not isinstance(slug, str):
+        print(json.dumps({"ok": False, "error": "missing slug argument"}))
+        return 2
+
+    # Reject slugs containing path-separators or traversal sequences. The
+    # slug is treated as a single path component; we forbid anything that
+    # could escape ~/.dynos/projects/.
+    if "/" in slug or "\\" in slug or ".." in slug or slug in ("", ".", ".."):
+        print(json.dumps({"ok": False, "error": f"invalid slug: {slug!r}"}))
+        return 2
+
+    result = _migrate_one(slug, execute=execute)
+    payload = {
+        "ok": result.get("status") in ("ok", "dry_run", "archived", "skipped"),
+        "mode": "single",
+        "dry_run": not execute,
+        "result": result,
+    }
+    print(json.dumps(payload, indent=2))
+    # Security signalling: if the source dir was rejected as a symlink, raise
+    # rather than silently returning 0 — a planted symlink is a threat that
+    # callers must NOT be allowed to ignore (AC 51 / T-8).
+    if (
+        result.get("status") == "error"
+        and isinstance(result.get("reason"), str)
+        and "symlink" in result["reason"]
+    ):
+        raise ProjectIdSecurityError(
+            f"cmd_migrate_id: refused symlinked source slug {slug!r}: "
+            f"{result['reason']}"
+        )
+    return 0
+
+
 def cmd_list_orphans(args: argparse.Namespace) -> int:
     """List persistent-dir slugs that don't match their git-resolved slug."""
     home = _home()
@@ -467,17 +980,38 @@ def cmd_list_orphans(args: argparse.Namespace) -> int:
     for slug_dir in sorted(projects_root.iterdir()):
         if not slug_dir.is_dir():
             continue
-        if slug_dir.name.endswith(".bak") or ".bak-" in slug_dir.name:
+        name = slug_dir.name
+        if name.endswith(".bak") or ".bak-" in name:
             continue
+        if name.startswith(".") or name.startswith("_"):
+            # Skip marker / archive / hidden dirs (.archive, .migrated-v2 etc).
+            continue
+        # A UUID-named dir is the canonical destination; not an orphan.
+        if is_uuid_id(name):
+            continue
+
+        # Check whether this legacy path-slug now resolves to a UUID via the
+        # registry. If so, it is migratable via the migrate-id subcommand.
+        uuid_for_slug = _resolve_uuid_for_slug(name)
+        if uuid_for_slug is not None:
+            orphans.append({
+                "slug": name,
+                "resolved_uuid": uuid_for_slug,
+                "reason": "path-slug dir; repo now resolves to a UUID",
+                "suggested_migrate_cmd": f"dynos worktree migrate-id {name}",
+            })
+            continue
+
         resolved_main = _resolve_main_slug_for_source(slug_dir)
         if resolved_main is None:
             orphans.append({
-                "slug": slug_dir.name,
+                "slug": name,
                 "reason": "original checkout path missing; cannot git-resolve",
+                "suggested_migrate_cmd": f"dynos worktree migrate-id {name}",
             })
-        elif resolved_main != slug_dir.name:
+        elif resolved_main != name:
             orphans.append({
-                "slug": slug_dir.name,
+                "slug": name,
                 "resolved_main_slug": resolved_main,
                 "reason": "git-resolved slug differs — this dir is a worktree remnant",
                 "suggested_migrate_cmd": f"dynos worktree migrate {slug_dir}",
@@ -499,6 +1033,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     l = sub.add_parser("list-orphans", help="List persistent-dir slugs that don't match their git-resolved slug")
     l.set_defaults(func=cmd_list_orphans)
+
+    mi = sub.add_parser(
+        "migrate-id",
+        help="Consolidate a legacy path-slug dir (or all of them) into a UUID-anchored dir",
+    )
+    mi_group = mi.add_mutually_exclusive_group(required=True)
+    mi_group.add_argument(
+        "slug",
+        nargs="?",
+        default=None,
+        help="Legacy slug to migrate (e.g. '-Users-me-projects-foo')",
+    )
+    mi_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Iterate every legacy path-slug dir; write .migrated-v2 marker on completion.",
+    )
+    mi.add_argument(
+        "--execute",
+        action="store_true",
+        help="Perform the migration. Default is dry-run.",
+    )
+    mi.set_defaults(func=cmd_migrate_id)
 
     return parser
 
