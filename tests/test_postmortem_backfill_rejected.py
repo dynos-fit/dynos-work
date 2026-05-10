@@ -250,3 +250,90 @@ def test_backfill_handles_existing_rules_doc(tmp_path: Path, monkeypatch: pytest
     assert any(r["rule"] == "new rule from backfill" for r in final["rules"])
     # Top-level extra fields preserved
     assert final["extra_field"] == "must be preserved"
+
+
+def test_backfill_writes_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """``cmd_backfill_rejected`` must persist ``prevention-rules.json``
+    via the atomic ``write_json`` helper (tempfile + fsync + os.rename),
+    not via a raw ``write_text(json.dumps(...))`` call.
+
+    This test pins the observable difference between the two write
+    paths: ``write_json`` appends a trailing ``\\n`` (see
+    ``hooks/lib_core.py:166``), while ``write_text(json.dumps(...))``
+    does not. A single-byte tell that catches a regression of line
+    1092 back to the non-atomic write.
+
+    Covers ACs 3, 4, 5, 6 — and structurally guards AC 7 by ensuring
+    the only call site writing ``rules_path`` is the atomic helper.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("DYNOS_HOME", str(fake_home / ".dynos"))
+
+    # Seed an existing rules doc so the test exercises the merge-and-write
+    # path (existing_doc has both a prior rule and the newly added one).
+    from lib_core import _persistent_project_dir
+    persistent = _persistent_project_dir(tmp_path)
+    persistent.mkdir(parents=True, exist_ok=True)
+    rules_path_seed = persistent / "prevention-rules.json"
+    seed_doc = {
+        "rules": [
+            {
+                "executor": "all",
+                "category": "process",
+                "rule": "seed rule for atomic write regression",
+                "template": "advisory",
+                "params": {},
+            }
+        ],
+    }
+    rules_path_seed.write_text(json.dumps(seed_doc))
+
+    _make_task_with_analysis(tmp_path, "task-atomic", [
+        {
+            "executor": "all",
+            "category": "process",
+            "rule": "atomic write regression rule (novel)",
+        },
+    ])
+
+    result = _run_backfill(tmp_path, dry_run=False)
+    assert result["novel_rules"] == 1
+    rules_path = Path(result["rules_path"])
+    assert rules_path == rules_path_seed
+    assert rules_path.is_file()
+
+    # AC 3 + AC 4: trailing newline byte — the strongest signal that
+    # ``write_json`` (not ``write_text``) was used at line 1092.
+    raw = rules_path.read_bytes()
+    assert raw.endswith(b"\n"), (
+        "prevention-rules.json must end with a trailing newline, which is "
+        "the documented behavior of write_json (lib_core.py:166). A missing "
+        "newline indicates the non-atomic write_text path is still in use."
+    )
+
+    # AC 5: file is parseable as JSON (write_json's append of '\n' is
+    # whitespace, which json.loads tolerates).
+    content = json.loads(rules_path.read_text())  # must not raise
+
+    # AC 6: parsed content matches the in-memory doc that was written —
+    # seed rule preserved, novel rule appended.
+    assert isinstance(content, dict)
+    assert "rules" in content
+    assert len(content["rules"]) == 2, (
+        "expected seed rule + 1 novel rule = 2 total"
+    )
+    rule_texts = {r["rule"] for r in content["rules"]}
+    assert "seed rule for atomic write regression" in rule_texts
+    assert "atomic write regression rule (novel)" in rule_texts
+
+    # Structural guard for AC 7: write_json removes its tempfile via
+    # os.rename on success and unlinks on failure, so no orphan
+    # ``.tmp`` siblings should remain in the rules dir after a clean run.
+    leftover_tmps = [
+        p for p in rules_path.parent.iterdir()
+        if p.name != rules_path.name and p.suffix == ".tmp"
+    ]
+    assert leftover_tmps == [], (
+        f"unexpected tempfile leftovers in {rules_path.parent}: {leftover_tmps}"
+    )
