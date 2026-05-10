@@ -138,7 +138,7 @@ Each stage validates its required inputs before proceeding. The runtime (`ctl.py
 | Repair | `repair-coordinator` | single — sonnet |
 | Investigation | `investigator` | single — sonnet |
 
-**Ensemble voting** (`security-auditor` and `db-schema-auditor` always; others sampled): sequential cascade — spawn haiku; if zero findings → spawn sonnet; if sonnet zero → PASS; if sonnet finds issues → escalate to opus; if haiku finds issues → skip sonnet, escalate directly to opus. Opus verdict is final. Configurable via `.dynos/config/policy.json` (`ensemble_auditors`, `ensemble_voting_models`, `ensemble_escalation_model`).
+**Ensemble voting** (`security-auditor` and `db-schema-auditor` always; others sampled): sequential cascade — spawn haiku; if zero findings → spawn sonnet; if sonnet zero → PASS; if sonnet finds issues → escalate to opus; if haiku finds issues → skip sonnet, escalate directly to opus. Opus verdict is final. Configurable via `~/.dynos/projects/{slug}/policy.json` (`ensemble_auditors`, `ensemble_voting_models`, `ensemble_escalation_model`).
 
 The router may further override models based on learned policy and benchmark history.
 
