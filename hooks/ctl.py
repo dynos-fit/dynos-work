@@ -75,6 +75,14 @@ _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
 # AC 8: single source of truth for the ctl write role used at all write sites.
 _WRITE_ROLE = "ctl"
 
+# Compiled-once regex constants. Hoisted out of inline call sites so the
+# pattern is the single source of truth and re.compile fires once at
+# module import instead of once per call.
+_FILE_PATH_RE = re.compile(
+    r"\b[\w./-]+\.(py|ts|tsx|js|jsx|go|rb|java|rs|yml|yaml|json|md|sql)\b"
+)
+_URL_SCHEME_RE = re.compile(r"^https?://")
+
 
 def _rules_corrupt_sentinel(root: Path) -> Path:
     """Return sentinel path co-located with daemon.py's writer.
@@ -192,9 +200,7 @@ def _match_terms(text: str, terms: tuple[str, ...]) -> list[str]:
 
 
 def _looks_like_local_file_scoped_task(text: str) -> bool:
-    return bool(
-        re.search(r"\b[\w./-]+\.(py|ts|tsx|js|jsx|go|rb|java|rs|yml|yaml|json|md|sql)\b", text.lower())
-    )
+    return bool(_FILE_PATH_RE.search(text.lower()))
 
 
 def _compute_external_solution_gate(task_dir: Path) -> dict:
@@ -3119,10 +3125,8 @@ def cmd_write_search_receipt(args: argparse.Namespace) -> int:
             return 1
 
         # Validate each URL matches ^https?://
-        import re as _re
-        _url_pattern = _re.compile(r"^https?://")
         for url in urls_consulted:
-            if not _url_pattern.match(url):
+            if not _URL_SCHEME_RE.match(url):
                 print(
                     f"validation error: urls_consulted entry does not match ^https?://: {url}",
                     file=sys.stderr,
@@ -3495,15 +3499,13 @@ def _check_receipt_structure(receipt: dict) -> str | None:
     """Return None if receipt carries valid urls_consulted and findings_summary.
     Return an error string on any violation.
     """
-    import re as _re
     urls = receipt.get("urls_consulted")
     if urls is None:
         return "receipt_structure: urls_consulted is missing from search-conducted receipt"
     if not isinstance(urls, list) or len(urls) == 0:
         return "receipt_structure: urls_consulted must be a non-empty list"
-    _url_pattern = _re.compile(r"^https?://")
     for url in urls:
-        if not isinstance(url, str) or not _url_pattern.match(url):
+        if not isinstance(url, str) or not _URL_SCHEME_RE.match(url):
             return (
                 f"receipt_structure: urls_consulted entry does not match ^https?://: {url!r}"
             )
