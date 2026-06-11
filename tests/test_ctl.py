@@ -843,6 +843,13 @@ def test_run_execution_finish_transitions_when_no_pending_segments(tmp_path) -> 
 
     evidence_dir = task_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    # run-execution-finish now verifies evidence + files_expected inside the
+    # stage gate (D7-1) — a finished execution has these files on disk.
+    root = task_dir.parent.parent
+    for expected in ("src/a.py", "tests/test_a.py"):
+        target = root / expected
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# produced by execution\n")
     for seg_id in ("seg-1", "seg-2"):
         evidence_path = evidence_dir / f"{seg_id}.md"
         evidence_path.write_text(f"{seg_id} evidence\n")
@@ -872,6 +879,85 @@ def test_run_execution_finish_transitions_when_no_pending_segments(tmp_path) -> 
 
     manifest = json.loads(manifest_path.read_text())
     assert manifest["stage"] == "TEST_EXECUTION"
+
+    # D7-1 regression: the standalone verifier must remain legal AFTER the
+    # stage advanced to TEST_EXECUTION (it used to hard-error here).
+    verify = _run_ctl("run-execution-verify-evidence", str(task_dir))
+    assert verify.returncode == 0, verify.stdout + verify.stderr
+    verify_payload = json.loads(verify.stdout)
+    assert verify_payload["status"] == "verified"
+
+
+def test_run_execution_finish_blocks_when_evidence_missing(tmp_path) -> None:
+    """The finish gate cannot advance the stage without evidence on disk."""
+    from lib_receipts import (
+        receipt_executor_done,
+        receipt_executor_routing,
+        receipt_plan_validated,
+        receipt_rules_check_passed,
+    )
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(task_dir, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
+
+    receipt_executor_routing(task_dir, [
+        {
+            "segment_id": "seg-1",
+            "executor": "backend-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+        {
+            "segment_id": "seg-2",
+            "executor": "testing-executor",
+            "model": "sonnet",
+            "route_mode": "generic",
+            "agent_path": None,
+        },
+    ])
+
+    evidence_dir = task_dir / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    for seg_id in ("seg-1", "seg-2"):
+        evidence_path = evidence_dir / f"{seg_id}.md"
+        evidence_path.write_text(f"{seg_id} evidence\n")
+        sidecar_dir = task_dir / "receipts" / "_injected-prompts"
+        sidecar_dir.mkdir(parents=True, exist_ok=True)
+        digest = ("f" if seg_id == "seg-1" else "a") * 64
+        (sidecar_dir / f"{seg_id}.sha256").write_text(digest)
+        receipt_executor_done(
+            task_dir,
+            segment_id=seg_id,
+            executor_type="backend-executor" if seg_id == "seg-1" else "testing-executor",
+            model_used="sonnet",
+            injected_prompt_sha256=digest,
+            agent_name=None,
+            evidence_path=str(evidence_path),
+            tokens_used=5,
+            diff_verified_files=[],
+            no_op_justified=False,
+        )
+    receipt_rules_check_passed(task_dir, "all")
+    # Delete seg-2's evidence after the receipts: the gate must catch it.
+    (evidence_dir / "seg-2.md").unlink()
+
+    result = _run_ctl("run-execution-finish", str(task_dir))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert any("seg-2" in failure for failure in payload["failures"])
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "EXECUTION"
 
 
 def test_run_execution_finish_blocks_when_pending_segments_remain(tmp_path) -> None:

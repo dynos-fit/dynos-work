@@ -5,6 +5,19 @@ description: "Internal dynos-work skill. Re-run planning on an existing task. Us
 
 # dynos-work: Plan
 
+
+## Command Funnel (applies to every command in this skill)
+
+Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
+
+```bash
+DYNOS="${CLAUDE_PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
+```
+
+`"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
+
+JSON payloads (classification, execution-graph, repair-log) are piped to the ctl wrapper over stdin with `--from -` and a heredoc — NEVER staged at `/tmp` or any raw filesystem path (the write policy denies those, by design). Temp files, when genuinely needed, belong in `.dynos/task-{id}/_scratch/`.
+
 Re-runs the planning phase on an existing task. Use this when:
 - You need to regenerate the plan after manual spec changes
 - The task was initialized externally and skipped planning
@@ -33,7 +46,7 @@ Verify `spec.md` exists. If not, print "No spec found. Run /dynos-work:start to 
 Transition the stage by running:
 
 ```text
-python3 hooks/ctl.py transition .dynos/task-{id} PLANNING
+"$DYNOS" ctl transition .dynos/task-{id} PLANNING
 ```
 
 Append to execution log (transition_task already auto-logged the `[STAGE] → PLANNING` line; only emit the `[SPAWN]` line):
@@ -41,12 +54,12 @@ Append to execution log (transition_task already auto-logged the `[STAGE] → PL
 {timestamp} [SPAWN] planning — generate implementation plan
 ```
 
-Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md`, `design-decisions.md` (if it exists), and `design-doc.md` (if it exists — §11 lists the intended segment shape your execution graph must match). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, write the JSON payload to `/tmp/execution-graph-{id}.json`, then persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. Include: technical approach, module/component breakdown, data flow, error handling, failure modes, rollback or migration risk where relevant, test strategy, and explicit file ownership per segment. Do not leave any acceptance criterion covered only by implication. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
+Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md`, `design-decisions.md` (if it exists), and `design-doc.md` (if it exists — §11 lists the intended segment shape your execution graph must match). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -`, piping the JSON payload over stdin with a heredoc (never stage it at /tmp or any raw path). Include: technical approach, module/component breakdown, data flow, error handling, failure modes, rollback or migration risk where relevant, test strategy, and explicit file ownership per segment. Do not leave any acceptance criterion covered only by implication. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
 
 Wait for completion. Finalize planning through the deterministic control-plane entrypoint. Run:
 
 ```text
-python3 hooks/ctl.py run-planning .dynos/task-{id}
+"$DYNOS" ctl run-planning .dynos/task-{id}
 ```
 
 `run-planning` owns full deterministic artifact validation, writes the `plan-validated` receipt, and advances `PLANNING -> PLAN_REVIEW` when the artifacts are sound. If it exits non-zero, the JSON payload tells you exactly why replanning is required.
@@ -72,12 +85,12 @@ Approve this plan? (yes / no + what to change)
 - If **approved**: run the `approve-stage` ctl command below. It hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, then transitions PLAN_REVIEW → PLAN_AUDIT in one atomic step. The hash is computed from the CURRENT `plan.md` content **at transition time** (the `transition_task` gate re-hashes the file and compares it to `receipt.artifact_sha256`), so an approval that races against a manual edit to `plan.md` after the receipt is written will be refused with the literal substrings `human-approval-PLAN_REVIEW` and `hash mismatch`. Do NOT add a manual `[HUMAN]` log line — the receipt is the audit trail. Then proceed to Step 4.
 
   ```text
-  python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW
+  "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW
   ```
 
   Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause: missing artifact, hash drift, illegal transition). Do not bypass with `transition --force`.
 - If **changes requested**: append `{timestamp} [HUMAN] PLAN_REVIEW — changes requested: {summary}` to log. Spawn planning agent again with the feedback. Re-present the updated plan. Repeat until approved. Do NOT call `approve-stage` against a stale plan — the next time you call it, the live `plan.md` content (and therefore its hash) MUST match the version the user just approved, otherwise the transition will be refused.
-- If **rejected**: run `python3 hooks/ctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`. Stop. Do not edit `manifest.json` directly.
+- If **rejected**: run `"$DYNOS" ctl transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`. Stop. Do not edit `manifest.json` directly.
 
 ### Step 4 — Spec coverage audit (PLAN_AUDIT)
 
@@ -86,7 +99,7 @@ The `approve-stage` call in Step 3 has already advanced the manifest to `PLAN_AU
 Run the deterministic plan-audit controller first:
 
 ```text
-python3 hooks/ctl.py run-plan-audit .dynos/task-{id}
+"$DYNOS" ctl run-plan-audit .dynos/task-{id}
 ```
 
 Interpret the JSON result:
@@ -96,7 +109,7 @@ Interpret the JSON result:
 - `status == "llm_audit_required"`: high/critical-risk task. Spawn `spec-completion-auditor`, then finalize with:
 
   ```text
-  python3 hooks/ctl.py run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}
+  "$DYNOS" ctl run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}
   ```
 
 If the final `run-plan-audit` call returns `status == "replan_required"`, repair the plan and rerun it. If it returns `status == "passed"`, proceed.
@@ -106,7 +119,7 @@ If the final `run-plan-audit` call returns `status == "replan_required"`, repair
 Transition the stage by running:
 
 ```text
-python3 hooks/ctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+"$DYNOS" ctl transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
 Append to log:

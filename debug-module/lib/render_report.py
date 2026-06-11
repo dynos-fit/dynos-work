@@ -115,7 +115,14 @@ def render(bug_report_json: dict, dossier: dict) -> str:
         or "INV-unknown"
     )
     bug_text = dossier.get("bug_text") or ""
-    bug_type = dossier.get("bug_type") or "unknown"
+    # bug_type lives canonically in the dossier (triage classification); the
+    # bug report may refine it. Prefer the report's value when present so the
+    # rendered header reflects the investigator's conclusion.
+    bug_type = (
+        bug_report_json.get("bug_type")
+        or dossier.get("bug_type")
+        or "unknown"
+    )
     repo_path = dossier.get("repo_path") or ""
     languages = dossier.get("languages_detected") or []
     pipeline_errors = dossier.get("pipeline_errors") or []

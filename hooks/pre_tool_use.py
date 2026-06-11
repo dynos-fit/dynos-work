@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -27,7 +28,7 @@ from pathlib import Path
 _EXECUTOR_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "backend-executor", "ui-executor", "testing-executor", "integration-executor",
     "ml-executor", "db-executor", "refactor-executor", "docs-executor",
-    "planning", "execute-inline", "repair-coordinator",
+    "planning", "execute-inline", "repair-coordinator", "investigator",
     "audit-spec-completion", "audit-security", "audit-code-quality",
     "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui", "audit-claude-md",
 })
@@ -65,41 +66,186 @@ def _find_task_dir_from_ancestors(cwd: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# Bash pre-filter: commands that could write files
+# Bash pre-filter: quote-aware write-destination extraction
 # ---------------------------------------------------------------------------
-# These patterns detect shell commands that write to the filesystem.
-# Group index indicates which capture group holds the destination path.
-_BASH_WRITE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
-    # redirection: > file or >> file  (looks for > after optional command text)
+# The original implementation ran regexes over the raw command string, which
+# matched `>` characters inside quoted prompt text and heredoc bodies and
+# produced false-positive "write destinations" (P0-b in
+# docs/permissions-on-design.md). Extraction is now token-based:
+#   1. heredoc bodies are stripped (their content is data, not shell),
+#   2. the command is tokenized with shlex (quoted strings stay single
+#      tokens and can never be operators),
+#   3. redirection operators and write-verb argv positions are resolved on
+#      the token stream.
+# This filter is defense-in-depth, not the trust anchor: interpreter-internal
+# writes (e.g. `python3 -c "open(p,'w')"`) are invisible to any Bash-level
+# parser. The unforgeable guarantees live in receipts + spawn-log + the
+# ctl-internal require_write_allowed path (see docs/write-boundary-spec.md).
+
+# Legacy regex patterns, retained ONLY as the fallback when shlex cannot
+# tokenize the command (unbalanced quotes). Fallback keeps the filter
+# fail-closed rather than silently allowing unparseable commands.
+_LEGACY_BASH_WRITE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r">>?\s*([^\s;|&>]+)"), 1),
-    # tee: tee [-a] file
     (re.compile(r"\btee\s+(?:-a\s+)?([^\s;|&]+)"), 1),
-    # mv: mv src dst
     (re.compile(r"\bmv\s+\S+\s+([^\s;|&]+)"), 1),
-    # cp: cp [-rRp...] src dst
     (re.compile(r"\bcp\s+(?:-[a-zA-Z]+\s+)?(?:\S+\s+)+([^\s;|&]+)"), 1),
-    # rsync: rsync [opts...] src dst
     (re.compile(r"\brsync\s+(?:\S+\s+)+([^\s;|&]+)"), 1),
-    # install: install [-m MODE] [opts] src dst
     (re.compile(r"\binstall\s+(?:-[a-zA-Z]+\s+(?:\S+\s+)?)?(?:\S+\s+)+([^\s;|&]+)"), 1),
-    # rm: rm [opts] file — sec-1 fix: deletion of audit-grep-quota.json
-    # was the quota-bypass primitive. Each non-flag argument is checked.
     (re.compile(r"\brm\s+(?:-[a-zA-Z]+\s+)*([^\s;|&]+)"), 1),
-    # unlink: unlink file
     (re.compile(r"\bunlink\s+([^\s;|&]+)"), 1),
 ]
 
+# Heredoc opener: `<< WORD`, `<<-WORD`, `<<'WORD'`, `<<"WORD"`. The negative
+# lookbehind keeps herestrings (`<<<`) from being misparsed as heredocs.
+_HEREDOC_OPEN_RE = re.compile(r"(?<!<)<<-?\s*(['\"]?)(\w+)\1")
 
-def _extract_bash_destinations(command: str) -> list[str]:
-    """Return a list of write destination paths detected in a Bash command string."""
+# Punctuation-run tokens that redirect output to a file. `>&` (fd dup) is
+# handled separately — its operand is a file descriptor, not a path.
+_REDIRECT_TOKENS = frozenset({">", ">>", "&>", "&>>", ">|"})
+
+# Device sinks: writing to these persists nothing. The plugin's own skills
+# prescribe `2>/dev/null`; denying a sink only produces noise.
+_SINK_DESTINATIONS = frozenset({
+    "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty",
+})
+
+_COMMAND_SEPARATOR_TOKENS = frozenset({";", "|", "||", "&&", "&", "(", ")"})
+
+# argv-based write verbs -> which following non-flag args are destinations.
+#   "last" -> final non-flag argument (mv/cp/rsync/install)
+#   "all"  -> every non-flag argument (tee/rm/unlink/shred/truncate)
+_WRITE_VERB_DEST: dict[str, str] = {
+    "tee": "all",
+    "mv": "last",
+    "cp": "last",
+    "rsync": "last",
+    "install": "last",
+    "rm": "all",
+    "unlink": "all",
+    "shred": "all",
+    "truncate": "all",
+}
+
+
+def _strip_heredocs(command: str) -> str:
+    """Remove heredoc bodies so their content is not tokenized as shell."""
+    out: list[str] = []
+    terminator: str | None = None
+    for line in command.split("\n"):
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        match = _HEREDOC_OPEN_RE.search(line)
+        out.append(line)
+        if match:
+            terminator = match.group(2)
+    return "\n".join(out)
+
+
+def _tokenize_bash(command: str) -> list[str] | None:
+    """shlex-tokenize a command; None when the command cannot be parsed."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _extract_bash_destinations_legacy(command: str) -> list[str]:
+    """Regex fallback used only when shlex tokenization fails."""
     destinations: list[str] = []
     seen: set[str] = set()
-    for pattern, group in _BASH_WRITE_PATTERNS:
+    for pattern, group in _LEGACY_BASH_WRITE_PATTERNS:
         for match in pattern.finditer(command):
             dest = match.group(group).strip().rstrip(";|&>")
             if dest and dest not in seen:
                 seen.add(dest)
                 destinations.append(dest)
+    return destinations
+
+
+def _is_candidate_dest(token: str) -> bool:
+    """Filter tokens that cannot be filesystem write destinations."""
+    if not token:
+        return False
+    if token in _SINK_DESTINATIONS:
+        return False
+    if token.isdigit():  # fd numbers from `>& 2` style constructs
+        return False
+    if token.startswith("-"):
+        return False
+    if token in _COMMAND_SEPARATOR_TOKENS or token in _REDIRECT_TOKENS:
+        return False
+    if token in {"<", "<<", "<<<", ">&", "<&"}:
+        return False
+    return True
+
+
+def _extract_bash_destinations(command: str) -> list[str]:
+    """Return write destination paths detected in a Bash command string.
+
+    Token-based: quoted strings are single tokens (never operators), heredoc
+    bodies are stripped before tokenization. Falls back to the legacy regex
+    scan when the command cannot be tokenized.
+    """
+    stripped = _strip_heredocs(command)
+    tokens = _tokenize_bash(stripped)
+    if tokens is None:
+        return _extract_bash_destinations_legacy(command)
+
+    destinations: list[str] = []
+    seen: set[str] = set()
+
+    def _add(dest: str) -> None:
+        if _is_candidate_dest(dest) and dest not in seen:
+            seen.add(dest)
+            destinations.append(dest)
+
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        # Redirection operator: next token is the destination. Punctuation
+        # runs may glue a trailing newline onto the operator; normalize.
+        op = tok.strip()
+        if op in _REDIRECT_TOKENS:
+            if i + 1 < n:
+                _add(tokens[i + 1])
+                i += 2
+                continue
+        # Write verb: collect its argv tail up to the next separator. The
+        # verb is recognized at any statement position (parity with the old
+        # \b-anchored regexes) — quoted text can no longer false-positive
+        # because it arrives as a single token, not as words.
+        verb = os.path.basename(op)
+        if verb in _WRITE_VERB_DEST:
+            mode = _WRITE_VERB_DEST[verb]
+            args: list[str] = []
+            j = i + 1
+            while j < n and tokens[j] not in _COMMAND_SEPARATOR_TOKENS:
+                t = tokens[j]
+                if t in _REDIRECT_TOKENS:
+                    break
+                if t != "--" and not t.startswith("-"):
+                    args.append(t)
+                j += 1
+            if mode == "all":
+                for a in args:
+                    _add(a)
+            elif args:
+                # "last" verbs need >= 2 operands to have a distinct
+                # destination (`mv src dst`); a single operand is a source.
+                if verb in {"mv", "cp", "rsync", "install"}:
+                    if len(args) >= 2:
+                        _add(args[-1])
+                else:
+                    _add(args[-1])
+            i = j
+            continue
+        i += 1
     return destinations
 
 
@@ -109,6 +255,28 @@ def _resolve_path(raw: str, cwd: Path) -> Path:
     if not p.is_absolute():
         p = cwd / p
     return p.resolve()
+
+
+def _format_denial(role: str, path: Path | str, decision) -> str:
+    """Self-explaining denial text (P0-f in docs/permissions-on-design.md).
+
+    Denials from this hook are routinely mistaken for Claude Code permission
+    failures, sending users into settings changes that cannot help. Every
+    denial therefore names (a) what it is, (b) the role and path it judged,
+    and (c) the sanctioned alternative when one exists.
+    """
+    sanctioned = ""
+    wrapper = getattr(decision, "wrapper_command", None)
+    if wrapper:
+        sanctioned = f" Sanctioned path: {wrapper}."
+    return (
+        f"write-policy: DENIED — {decision.reason} "
+        f"[dynos-work guardrail, not a Claude Code permission; changing "
+        f"permission settings will not affect this] "
+        f"role={role} path={path}.{sanctioned} "
+        f"Temp files belong in .dynos/task-*/_scratch/. "
+        f"See docs/write-boundary-spec.md."
+    )
 
 
 def main() -> int:
@@ -197,51 +365,112 @@ def main() -> int:
     else:
         task_dir = _find_task_dir_from_ancestors(cwd)
 
-    # 3-step role resolution chain:
-    # (a) env var -- highest priority
-    # (b) role file in task dir -- searched whenever task_dir is known
-    #     (DYNOS_TASK_DIR env OR ancestor-walked discovery)
-    # (c) default "execute-inline"
+    # Actor identity inputs (D3): the harness-provided session_id and the
+    # SessionStart-pinned orchestrator identity. Neither is agent-writable.
+    session_id = str(payload.get("session_id") or "").strip()
+    actor_identity = None
+    pin = None
+    if task_dir is not None:
+        try:
+            import actor_identity as _ai
+            actor_identity = _ai
+            pin = _ai.read_pin(task_dir.parent.parent)
+        except Exception:
+            actor_identity = None
+            pin = None
+
+    # Role resolution chain:
+    # (a) DYNOS_ROLE env var — highest priority (daemon/scheduler/tests)
+    # (b) orchestrator pin — session_id matches the SessionStart pin: the
+    #     MAIN session always resolves to 'orchestrator' and never reads
+    #     role files (stamping a subagent role can no longer mutate the
+    #     orchestrator's own rights mid-flow)
+    # (c) session binding / grant consumption — any OTHER session is a
+    #     subagent: reuse its existing binding, else consume the oldest
+    #     pending grant from the ctl-written ledger
+    # (d) legacy role file — sessions without a pin (pre-D3 sessions) and
+    #     subagents on tasks that still stamp active-segment-role
+    # (e) default "execute-inline"
     role_file_searched: bool = False
     role_file_path: Path | None = None
-    role_file_reason: str | None = None  # "absent" | "empty" when falling to (c)
+    role_file_reason: str | None = None  # "absent" | "empty" | "invalid"
 
     if role_from_env:
         # Step (a): env var wins
         role = role_from_env
         role_missing = False
     else:
-        # Step (b): check role file whenever task_dir was resolved (env OR
-        # ancestor walk). Subagents spawned via the harness Agent tool do not
-        # inherit DYNOS_TASK_DIR, so gating this on the env var alone made the
-        # role-file fallback unreachable in real workflows — every spec.md
-        # write from a planning subagent fell to execute-inline and was denied.
-        role = "execute-inline"
+        role: str | None = None
         role_missing = True
 
-        if task_dir is not None:
-            role_file_path = task_dir / "active-segment-role"
-            role_file_searched = True
-            try:
-                if role_file_path.is_file():
-                    file_contents = role_file_path.read_text(encoding="utf-8").strip()
-                    if file_contents and file_contents in _EXECUTOR_ROLE_ALLOWLIST:
-                        # Step (b) resolved: use file contents, suppress role_missing
-                        role = file_contents
-                        role_missing = False
-                    elif file_contents and file_contents not in _EXECUTOR_ROLE_ALLOWLIST:
-                        # File has contents but value is not an allowed executor role --
-                        # reject and fall to (c) to prevent privilege escalation via role file.
-                        role_file_reason = "invalid"
+        # Steps (b)/(c): only meaningful when both a task dir and a pin
+        # exist — without a pin we cannot distinguish actors and fall back
+        # to the legacy chain wholesale (today's behavior, no regression).
+        if task_dir is not None and actor_identity is not None and pin and session_id:
+            if session_id == pin.get("session_id"):
+                role = "orchestrator"
+                role_missing = False
+            else:
+                bound = actor_identity.lookup_binding(task_dir, session_id)
+                if bound is None:
+                    bound = actor_identity.consume_grant(task_dir, session_id)
+                    if bound is not None:
+                        try:
+                            if log_event is not None:
+                                log_event(
+                                    task_dir.parent.parent,
+                                    "role_grant_consumed",
+                                    task=task_dir.name,
+                                    role=bound,
+                                    session=session_id[:16],
+                                )
+                        except Exception:
+                            pass
+                if bound is not None and bound in _EXECUTOR_ROLE_ALLOWLIST:
+                    role = bound
+                    role_missing = False
+
+        # Step (d): legacy role file fallback.
+        if role is None:
+            role = "execute-inline"
+            if task_dir is not None:
+                role_file_path = task_dir / "active-segment-role"
+                role_file_searched = True
+                try:
+                    if role_file_path.is_file():
+                        file_contents = role_file_path.read_text(encoding="utf-8").strip()
+                        if file_contents and file_contents in _EXECUTOR_ROLE_ALLOWLIST:
+                            role = file_contents
+                            role_missing = False
+                        elif file_contents and file_contents not in _EXECUTOR_ROLE_ALLOWLIST:
+                            # Not an allowed executor role — reject and fall to
+                            # (e) to prevent privilege escalation via role file.
+                            role_file_reason = "invalid"
+                        else:
+                            role_file_reason = "empty"
                     else:
-                        # File exists but empty/whitespace -- fall to (c)
-                        role_file_reason = "empty"
-                else:
-                    # File absent -- fall to (c)
+                        role_file_reason = "absent"
+                except Exception:
                     role_file_reason = "absent"
-            except Exception:
-                # File read failure is non-fatal -- treat as absent
-                role_file_reason = "absent"
+
+    # Degraded-mode diagnostic (D3): if the ORCHESTRATOR role is denied while
+    # grants are pending, the denial may actually be a subagent whose tool
+    # calls arrived under the pinned session_id (harness did not distinguish
+    # actors). Fail closed, but say so — this is the one failure mode of
+    # session-keyed actor resolution and it must be diagnosable from the
+    # error text alone.
+    degraded_hint = ""
+    if role == "orchestrator" and actor_identity is not None and task_dir is not None:
+        try:
+            if actor_identity.pending_grants(task_dir):
+                degraded_hint = (
+                    " NOTE: unconsumed role grants are pending for this task. "
+                    "If this denial occurred inside a SUBAGENT, the harness "
+                    "did not present a distinct session_id for it (degraded "
+                    "actor resolution) — see docs/permissions-on-design.md §D3."
+                )
+        except Exception:
+            pass
 
     # Emit pre_tool_use_role_missing event if role was not set in the environment
     # AND role was not resolved from the role file (step b)
@@ -303,9 +532,17 @@ def main() -> int:
         # is the authoritative set of valid agent roles; anything else is a
         # mis-configured or injected role and should be denied unconditionally.
         if task_dir is not None:
-            if role not in _EXECUTOR_ROLE_ALLOWLIST and not role.endswith("-executor"):
+            if (
+                role != "orchestrator"
+                and role not in _EXECUTOR_ROLE_ALLOWLIST
+                and not role.endswith("-executor")
+            ):
                 print(
-                    f"write-policy: role '{role}' is not in the authorized role allowlist",
+                    f"write-policy: role '{role}' is not in the authorized role "
+                    f"allowlist [dynos-work guardrail, not a Claude Code "
+                    f"permission]. Stamp a valid role via "
+                    f"`ctl.py stamp-role <task_dir> --role <role>`; valid roles: "
+                    f"{', '.join(sorted(_EXECUTOR_ROLE_ALLOWLIST))}",
                     file=sys.stderr,
                 )
                 return 2
@@ -365,7 +602,7 @@ def main() -> int:
                 pass
 
             if not decision.allowed:
-                print(f"write-policy: {decision.reason}", file=sys.stderr)
+                print(_format_denial(role, dest_path, decision) + degraded_hint, file=sys.stderr)
                 return 2
 
         return 0
@@ -409,15 +646,74 @@ def main() -> int:
             _emit_policy_event(attempt, decision)
 
             if not decision.allowed:
-                print(f"write-policy: {decision.reason}", file=sys.stderr)
+                print(_format_denial(role, target_path, decision) + degraded_hint, file=sys.stderr)
                 return 2
 
         return 0
 
     # -----------------------------------------------------------------
     # Handle Read, Grep, Glob tools: enforce read policy for audit roles
+    # and the investigator's dossier-only guarantee
     # -----------------------------------------------------------------
     if tool_name in ("Read", "Grep", "Glob"):
+        # Investigator (D7-3): "the LLM never gathers evidence on its own"
+        # is enforced here, not just promised in prose. Reads are allowed
+        # only inside .dynos/investigations/ (the dossier and its siblings)
+        # or for files the dossier itself references; Grep/Glob are denied
+        # outright — searching IS evidence-gathering.
+        if role == "investigator":
+            if tool_name in ("Grep", "Glob"):
+                print(
+                    "read-policy: investigator is dossier-only — Grep/Glob "
+                    "are evidence-gathering and are denied [dynos-work "
+                    "guardrail]. Cite pre-minted evidence IDs from the "
+                    "dossier instead.",
+                    file=sys.stderr,
+                )
+                return 2
+            raw_path = ""
+            if isinstance(tool_input, dict):
+                raw_path = tool_input.get("file_path") or tool_input.get("path") or ""
+            target = _resolve_path(str(raw_path), cwd) if raw_path else cwd
+            # Locate the project .dynos root: task dir wins, else cwd walk.
+            dynos_root: Path | None = None
+            if task_dir is not None:
+                dynos_root = task_dir.parent
+            else:
+                for ancestor in [cwd, *cwd.parents]:
+                    if (ancestor / ".dynos").is_dir():
+                        dynos_root = ancestor / ".dynos"
+                        break
+            if dynos_root is not None:
+                investigations = (dynos_root / "investigations").resolve()
+                try:
+                    target.relative_to(investigations)
+                    return 0  # dossier and investigation artifacts: allowed
+                except ValueError:
+                    pass
+                # Files referenced by the most recent dossier are citable —
+                # allow confirming a citation snippet.
+                try:
+                    dossiers = sorted(investigations.glob("*/dossier.json"))
+                    if dossiers:
+                        dossier_text = dossiers[-1].read_text(encoding="utf-8", errors="ignore")
+                        project_root = dynos_root.parent.resolve()
+                        try:
+                            rel = target.resolve().relative_to(project_root).as_posix()
+                        except ValueError:
+                            rel = None
+                        if rel and rel in dossier_text:
+                            return 0
+                except OSError:
+                    pass
+            print(
+                f"read-policy: investigator is dossier-only — {target} is "
+                "neither under .dynos/investigations/ nor referenced by the "
+                "dossier [dynos-work guardrail].",
+                file=sys.stderr,
+            )
+            return 2
+
         # AC 16: non-audit roles bypass read-policy enforcement entirely.
         if not role.startswith("audit-"):
             return 0

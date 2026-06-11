@@ -7,7 +7,19 @@ description: "Run checkpoint audit, repair any findings, then reach DONE — all
 
 Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 
-All repair-log persistence must go through `python3 hooks/ctl.py write-repair-log ... --from ...`.
+## Command Funnel (applies to every command in this skill)
+
+Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
+
+```bash
+DYNOS="${CLAUDE_PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
+```
+
+`"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
+
+JSON payloads (classification, execution-graph, repair-log) are piped to the ctl wrapper over stdin with `--from -` and a heredoc — NEVER staged at `/tmp` or any raw filesystem path (the write policy denies those, by design). Temp files, when genuinely needed, belong in `.dynos/task-{id}/_scratch/`.
+
+All repair-log persistence must go through `"$DYNOS" ctl write-repair-log ... --from ...`.
 Do not hand-write `.dynos/task-{id}/repair-log.json`.
 
 ## Ruthlessness Standard
@@ -27,7 +39,7 @@ Do not hand-write `.dynos/task-{id}/repair-log.json`.
 After finding the active task, validate that all required inputs from the execute skill are present:
 
 ```text
-python3 hooks/ctl.py validate-contract --skill audit --task-dir .dynos/task-{id}
+"$DYNOS" ctl validate-contract --skill audit --task-dir .dynos/task-{id}
 ```
 
 If validation fails with missing required inputs (evidence files, snapshot SHA), print the errors and stop.
@@ -43,7 +55,7 @@ Verify stage is `CHECKPOINT_AUDIT`. If not, print the current stage and what com
 Build the deterministic audit setup first:
 
 ```text
-python3 hooks/ctl.py run-audit-setup .dynos/task-{id}
+"$DYNOS" ctl run-audit-setup .dynos/task-{id}
 ```
 
 This command reads `manifest.json`, derives the audit plan, writes `.dynos/task-{id}/audit-plan.json`, and computes diff scope from `snapshot.head_sha` (or `HEAD` fallback when needed). Use its JSON output directly. Do not hand-derive diff scope, task type, domains, fast-track, skip policy, or model selection in prompt logic.
@@ -70,7 +82,7 @@ For each auditor in the plan:
 
 ```bash
 AUDIT_CONTEXT_PATH=".dynos/task-{id}/audit-context.md"
-python3 "${PLUGIN_HOOKS}/build_prompt_context.py" --diff {diff_base} --root . --sidecar "$AUDIT_CONTEXT_PATH"
+"$DYNOS" hook build_prompt_context --diff {diff_base} --root . --sidecar "$AUDIT_CONTEXT_PATH"
 ```
 
 <!-- pre-resolved-context-start -->
@@ -90,7 +102,7 @@ Read calls are cheap and parallel (per auditor, per session); prompt input token
 **Parallelism note (task-20260430-011):** This sidecar pre-computation is per-auditor work, NOT a serial constraint between auditors. Issue all `router.py audit-inject-prompt` Bash commands in **a single message with multiple Bash tool calls** — they have no inter-dependencies and complete independently. Then issue the Agent-tool spawns themselves the same way: a single message with multiple Agent tool calls, one per spawned auditor. Sequential pre-step bash calls followed by sequential Agent calls is the slow path the latency investigation flagged; the harness already supports parallel tool calls in a single message and the pre-step has no ordering constraints. Wall-clock cost drops from `sum(per-auditor sidecar + spawn)` to `max(sidecar) + max(spawn)`.
 
 ```bash
-echo "{base prompt for this auditor}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/router.py" audit-inject-prompt \
+echo "{base prompt for this auditor}" | "$DYNOS" hook router audit-inject-prompt \
   --root . \
   --task-type {task_type} \
   --audit-plan .dynos/task-{id}/audit-plan.json \
@@ -107,7 +119,7 @@ The auditor's final text message IS the envelope JSON (a single bare JSON line).
 ```bash
 INJECTED_AGENT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256)
 FINAL_ENVELOPE=$(... <extract last line of Agent tool return>)
-python3 hooks/ctl.py audit-receipt .dynos/task-{id} {auditor_name} \
+"$DYNOS" ctl audit-receipt .dynos/task-{id} {auditor_name} \
   --model {model_used} \
   --report-path .dynos/task-{id}/audit-reports/{report_filename}.json \
   --tokens-used {tokens_used} \
@@ -119,7 +131,7 @@ python3 hooks/ctl.py audit-receipt .dynos/task-{id} {auditor_name} \
 
 For `route_mode == "generic"` the `--final-envelope` argument may be omitted.
 
-`python3 hooks/ctl.py audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. The new `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
+`"$DYNOS" ctl audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. The new `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
@@ -145,7 +157,7 @@ Append to log (transition_task already auto-logged the `[STAGE] → CHECKPOINT_A
 **Role stamping (MANDATORY — BEFORE each Agent spawn):** Before each auditor's Agent tool invocation, stamp the role file via the deterministic ctl wrapper. The auditor subagent's `pre_tool_use.py` reads `active-segment-role` to resolve role; without this stamp the subagent runs as `execute-inline` and its `audit-reports/` writes are denied by `write_policy`. Issue all stamp-role Bash calls in a single message with multiple Bash tool uses (no inter-dependencies):
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "audit-{name-without-suffix}"
+"$DYNOS" ctl stamp-role .dynos/task-{id} --role "audit-{name-without-suffix}"
 ```
 
 The role string strips the `-auditor` suffix from the agent file name: `spec-completion-auditor` → `audit-spec-completion`, `security-auditor` → `audit-security`, `claude-md-auditor` → `audit-claude-md`. The wrapper validates against an allowlist (`hooks/ctl.py::_STAMP_ROLE_ALLOWLIST`) and fails with exit 1 if the resolved string is unknown — a fail-fast guard that catches typos before the spawn.
@@ -157,12 +169,12 @@ When auditors run in parallel, the role file is overwritten on each stamp; this 
 Before issuing each parallel auditor batch (this includes the first batch AND every subsequent re-audit batch — the check runs once per spawn cycle, before EACH batch, not only the first), run:
 
 ```bash
-python3 hooks/ctl.py check-spawn-budget .dynos/task-{id}
+"$DYNOS" ctl check-spawn-budget .dynos/task-{id}
 ```
 
 Parse the JSON output. The command emits a single-line JSON object with keys `status`, `count`, `threshold`, `exempt_count`, and `task_class`. If `status` is `'paused'` or `'already_paused'`:
 
-1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the auditor count, the threshold, the `task_class`, and instruct the operator to run `python3 hooks/ctl.py spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why spawns were wasted.
+1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the auditor count, the threshold, the `task_class`, and instruct the operator to run `"$DYNOS" ctl spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why spawns were wasted.
 2. Append a line beginning with `[BUDGET-PAUSE]` to `execution-log.md` that records the timestamp, count, and threshold.
 3. Exit non-zero.
 
@@ -178,7 +190,7 @@ Each auditor writes its own report to `.dynos/task-{id}/audit-reports/{auditor}-
 
 **For LLM subagent spawns** (auditors, repair executors):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
+"$DYNOS" hook lib_tokens record \
   --task-dir .dynos/task-{id} \
   --agent "{agent_name}" \
   --model "{model_name}" \
@@ -192,7 +204,7 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens
 
 **For deterministic steps** (router decisions, retrospective computation, repair-log validation):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
+"$DYNOS" hook lib_tokens record \
   --task-dir .dynos/task-{id} \
   --agent "{tool_name}" \
   --model "none" \
@@ -222,7 +234,7 @@ Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.jso
 Decide whether audit proceeds to repair or reflect through ctl:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-audit-findings-gate .dynos/task-{id}
+"$DYNOS" ctl run-audit-findings-gate .dynos/task-{id}
 ```
 
 Use the JSON output as authoritative:
@@ -240,7 +252,7 @@ This step runs only when blocking findings exist.
 Build the repair queue through ctl:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-audit-repair-cycle-plan .dynos/task-{id}
+"$DYNOS" ctl run-audit-repair-cycle-plan .dynos/task-{id}
 ```
 
 Use this JSON output as authoritative:
@@ -262,7 +274,7 @@ Append to log:
 Build the repair log through ctl — Q-learning assignments are computed inside this command from `repair-cycle-plan.json`; do NOT construct or pipe a separate findings payload:
 
 ```text
-python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-log-build .dynos/task-{id}
+"$DYNOS" ctl run-repair-log-build .dynos/task-{id}
 ```
 
 This command reads `repair-cycle-plan.json`, calls Q-learning itself, derives `files_to_modify`, writes `.dynos/task-{id}/repair-log.json`, and validates the result. Do NOT ask an LLM to draft `repair-log.json`.
@@ -270,7 +282,7 @@ This command reads `repair-cycle-plan.json`, calls Q-learning itself, derives `f
 Wait for completion, then finalize repair execution readiness through the control plane:
 
 ```text
-python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-execution-ready .dynos/task-{id}
+"$DYNOS" ctl run-repair-execution-ready .dynos/task-{id}
 ```
 
 This command validates `repair-log.json` and advances `REPAIR_PLANNING -> REPAIR_EXECUTION`. Use its JSON output directly.
@@ -278,7 +290,7 @@ This command validates `repair-log.json` and advances `REPAIR_PLANNING -> REPAIR
 Build the repair execution groups through ctl:
 
 ```text
-python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-batch-plan .dynos/task-{id}
+"$DYNOS" ctl run-repair-batch-plan .dynos/task-{id}
 ```
 
 Use this JSON output as authoritative:
@@ -304,7 +316,7 @@ After all batches complete, append to log:
 **Phase 1 re-audit (domain-aware, incremental scope):** Build the re-audit plan through ctl:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-audit-reaudit-plan .dynos/task-{id}
+"$DYNOS" ctl run-audit-reaudit-plan .dynos/task-{id}
 ```
 
 Use its JSON output as authoritative:
@@ -320,7 +332,7 @@ After re-audit, run `run-audit-findings-gate` again.
 Update Q-learning outcomes through ctl:
 
 ```text
-python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-q-update .dynos/task-{id}
+"$DYNOS" ctl run-repair-q-update .dynos/task-{id}
 ```
 
 This command derives outcomes from `repair-log.json` plus the current blocking audit findings and updates the Q-tables deterministically. Do NOT build `outcomes` JSON by hand.
@@ -329,7 +341,7 @@ This command derives outcomes from `repair-log.json` plus the current blocking a
 - If `status == "repair_required"`: let the control plane decide whether another repair cycle is legal:
 
   ```text
-  python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-retry .dynos/task-{id}
+  "$DYNOS" ctl run-repair-retry .dynos/task-{id}
   ```
 
   Interpret the JSON result:
@@ -341,7 +353,7 @@ This command derives outcomes from `repair-log.json` plus the current blocking a
 Write the deterministic audit summary:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-audit-summary .dynos/task-{id}
+"$DYNOS" ctl run-audit-summary .dynos/task-{id}
 ```
 
 This command writes `audit-summary.json` from the on-disk audit reports. Do not aggregate counts by hand.
@@ -351,7 +363,7 @@ This command writes `audit-summary.json` from the on-disk audit reports. Do not 
 Generate the retrospective through the control plane:
 
 ```text
-python3 hooks/ctl.py run-audit-reflect .dynos/task-{id}
+"$DYNOS" ctl run-audit-reflect .dynos/task-{id}
 ```
 
 This command computes `task-retrospective.json` and writes the `retrospective` receipt deterministically. Use its JSON output directly.
@@ -368,7 +380,7 @@ Append to log:
 **Deterministic Postmortem (Step 5a):** Generate the deterministic postmortem report before the LLM analysis so the LLM has access to anomaly detection, recurring patterns, and similar task comparisons.
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem.py" generate --root . --task-id {task-id}
+"$DYNOS" hook postmortem generate --root . --task-id {task-id}
 ```
 
 `memory/postmortem.py:generate_postmortem` (called by `postmortem.py generate`) now writes its own receipt internally as part of the same call. You do NOT need to write a receipt from this skill:
@@ -386,14 +398,14 @@ This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the p
 
 1. Build the analysis prompt:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem_analysis.py" build-prompt .dynos/task-{id}
+"$DYNOS" hook postmortem_analysis build-prompt .dynos/task-{id}
 ```
 
 2. If the result has `"has_findings": true`, spawn an **opus** agent with the prompt from the `"prompt"` field. Instruct the agent to respond with ONLY the JSON object described in the prompt — no markdown, no explanation.
 
 3. Parse the agent's JSON response and apply it:
 ```bash
-echo '${AGENT_JSON_OUTPUT}' | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem_analysis.py" apply .dynos/task-{id}
+echo '${AGENT_JSON_OUTPUT}' | "$DYNOS" hook postmortem_analysis apply .dynos/task-{id}
 ```
 
 This writes `postmortem-analysis.json` to the task dir and merges new prevention rules into `prevention-rules.json`. These rules are automatically included in `project_rules.md` by the policy engine on the next task.
@@ -419,7 +431,7 @@ If `has_findings` is false, skip this step and append:
 Finalize completion through ctl:
 
 ```text
-python3 "${PLUGIN_HOOKS}/ctl.py" run-audit-finish .dynos/task-{id}
+"$DYNOS" ctl run-audit-finish .dynos/task-{id}
 ```
 
 This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic.

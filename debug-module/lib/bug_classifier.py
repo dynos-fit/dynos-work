@@ -29,6 +29,8 @@ ALLOWED_BUG_TYPES: tuple[str, ...] = (
     "performance",
     "data-corruption",
     "schema-drift",
+    "ci-failure",
+    "config-error",
     "unknown",
 )
 
@@ -125,6 +127,26 @@ _PATTERNS: dict[str, list[re.Pattern[str]]] = {
                    r"should\s*(?:return|be|equal)|"
                    r"expected\s+.+\s+but\s+got)\b", re.I),
     ],
+    # CI/pipeline failures — process-shaped, not code-shaped. Checked BEFORE
+    # test-failure so "the CI job fails" doesn't collapse into test-failure.
+    "ci-failure": [
+        re.compile(r"\b(ci|cd|ci/cd)\s*(?:job|run|pipeline|workflow|build|check|stage)s?\s*"
+                   r"(?:fail(?:ed|ing|s|ure)?|brok(?:e|en)|red|stuck|hang(?:s|ing)?)\b", re.I),
+        re.compile(r"\b(github\s*actions?|gitlab\s*ci|jenkins|circleci|buildkite|"
+                   r"travis|azure\s*pipelines?|teamcity)\b", re.I),
+        re.compile(r"\b(pipeline|workflow)\s+(?:is\s+)?(?:fail(?:ed|ing|s)?|broken|red)\b", re.I),
+        re.compile(r"\bfail(?:s|ed|ing)?\s+(?:only\s+)?(?:in|on)\s+ci\b", re.I),
+        re.compile(r"\bworks\s+locally\b.{0,40}\bfails?\b", re.I),
+    ],
+    # Configuration / environment errors — also process-shaped.
+    "config-error": [
+        re.compile(r"\b(misconfigur(?:ed|ation)|configuration\s*(?:error|issue|problem)|"
+                   r"wrong\s*config(?:uration)?|bad\s*config(?:uration)?|"
+                   r"missing\s*(?:env(?:ironment)?\s*var(?:iable)?s?|secret|api\s*key|credential)s?|"
+                   r"env(?:ironment)?\s*var(?:iable)?s?\s*(?:not\s*set|missing|unset|undefined)|"
+                   r"\.env\s*(?:file\s*)?(?:missing|not\s*loaded|ignored)|"
+                   r"invalid\s*(?:yaml|toml|ini|json)\s*config)\b", re.I),
+    ],
 }
 
 # Priority of detection — first match wins.
@@ -134,6 +156,8 @@ CLASSIFICATION_PRIORITY: tuple[str, ...] = (
     "data-corruption",
     "race-condition",
     "resource-leak",
+    "ci-failure",
+    "config-error",
     "performance",
     "runtime-error",
     "test-failure",

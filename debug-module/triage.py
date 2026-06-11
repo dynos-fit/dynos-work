@@ -386,10 +386,166 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
+# finalize — deterministic persistence of the investigator's returned JSON
+# ---------------------------------------------------------------------------
+# The @investigator agent is read-only (tools: Read, Grep) and RETURNS its
+# bug-report JSON as its final message; it never writes a file. The
+# orchestrator pipes that JSON here. This step owns schema validation,
+# citation validation (every cited evidence ID must exist in the dossier),
+# and persistence of both the JSON and the rendered Markdown — so the
+# "citation validation third" guarantee is unskippable: it sits inside the
+# only sanctioned persistence path.
+
+def _strip_markdown_fences(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        first_newline = stripped.find("\n")
+        if first_newline != -1:
+            stripped = stripped[first_newline + 1:]
+        if stripped.rstrip().endswith("```"):
+            stripped = stripped.rstrip()[:-3]
+    return stripped.strip()
+
+
+def _validate_bug_report_structure(report: Any) -> list[str]:
+    """Minimal structural validation of bug_report.schema.json invariants."""
+    errors: list[str] = []
+    if not isinstance(report, dict):
+        return ["bug report must be a JSON object"]
+    for key in ("investigation_id", "causal_chain", "root_cause", "recommended_fix"):
+        if key not in report:
+            errors.append(f"missing required field: {key}")
+    chain = report.get("causal_chain")
+    if not isinstance(chain, list) or not chain:
+        errors.append("causal_chain must be a non-empty array")
+    else:
+        for idx, step in enumerate(chain):
+            if not isinstance(step, dict):
+                errors.append(f"causal_chain[{idx}] must be an object")
+                continue
+            if not str(step.get("description", "")).strip():
+                errors.append(f"causal_chain[{idx}].description must be non-empty")
+            ids = step.get("evidence_ids")
+            if not isinstance(ids, list) or not ids:
+                errors.append(
+                    f"causal_chain[{idx}].evidence_ids must be non-empty "
+                    "(an uncited claim is a contract violation)"
+                )
+    for section in ("root_cause", "recommended_fix"):
+        block = report.get(section)
+        if not isinstance(block, dict):
+            errors.append(f"{section} must be an object")
+            continue
+        if not str(block.get("description", "")).strip():
+            errors.append(f"{section}.description must be non-empty")
+        ids = block.get("evidence_ids")
+        if not isinstance(ids, list) or not ids:
+            errors.append(f"{section}.evidence_ids must be non-empty")
+    return errors
+
+
+def _collect_all_cited_ids(report: dict) -> list[str]:
+    cited: list[str] = []
+    for step in report.get("causal_chain") or []:
+        if isinstance(step, dict):
+            cited.extend(str(x) for x in (step.get("evidence_ids") or []))
+    for section in ("root_cause", "recommended_fix"):
+        block = report.get(section)
+        if isinstance(block, dict):
+            cited.extend(str(x) for x in (block.get("evidence_ids") or []))
+    return cited
+
+
+def _finalize_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="triage.py finalize",
+        description=(
+            "Validate the investigator's returned bug-report JSON against the "
+            "dossier and persist report + rendered Markdown."
+        ),
+    )
+    parser.add_argument(
+        "--report", required=True,
+        help="Bug-report JSON file path, or '-' to read from stdin",
+    )
+    parser.add_argument("--dossier", required=True, help="Evidence dossier JSON path")
+    parser.add_argument(
+        "--out-dir", default=None,
+        help="Output directory (default: the dossier's directory)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.report == "-":
+        raw = sys.stdin.read()
+    else:
+        try:
+            with open(args.report, "r", encoding="utf-8") as fh:
+                raw = fh.read()
+        except OSError as exc:
+            sys.stderr.write(f"finalize: cannot read report: {exc}\n")
+            return 2
+    try:
+        report = json.loads(_strip_markdown_fences(raw))
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"finalize: report is not valid JSON: {exc}\n")
+        return 1
+
+    try:
+        with open(args.dossier, "r", encoding="utf-8") as fh:
+            dossier_data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"finalize: cannot load dossier: {exc}\n")
+        return 2
+
+    structural = _validate_bug_report_structure(report)
+    if structural:
+        sys.stderr.write(
+            "finalize: bug report rejected (structural violations):\n"
+            + "".join(f"  - {e}\n" for e in structural)
+        )
+        return 1
+
+    evidence_index = dossier_data.get("evidence_index") or {}
+    known_ids = {str(k) for k in evidence_index.keys()} if isinstance(evidence_index, dict) else set()
+    unknown = sorted({eid for eid in _collect_all_cited_ids(report) if eid not in known_ids})
+    if unknown:
+        sys.stderr.write(
+            "finalize: bug report rejected — citations not present in the "
+            f"dossier: {', '.join(unknown)}\n"
+            "The investigator may only cite pre-minted evidence IDs.\n"
+        )
+        return 1
+
+    out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.dossier))
+    os.makedirs(out_dir, exist_ok=True)
+    report_path = os.path.join(out_dir, "bug_report.json")
+    _atomic_write_json(report_path, report)
+
+    from lib import render_report as _render_report  # noqa: PLC0415
+    markdown = _render_report.render(report, dossier_data)
+    md_path = os.path.join(out_dir, "report.md")
+    tmp_md = md_path + ".tmp"
+    with open(tmp_md, "w", encoding="utf-8") as fh:
+        fh.write(markdown)
+    os.replace(tmp_md, md_path)
+
+    print(json.dumps({
+        "status": "report_finalized",
+        "report_path": report_path,
+        "markdown_path": md_path,
+        "citations_validated": len(set(_collect_all_cited_ids(report))),
+    }, indent=2))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "finalize":
+        return _finalize_main(raw_argv[1:])
     parser = _build_parser()
     args = parser.parse_args(argv)
 

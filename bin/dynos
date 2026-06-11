@@ -155,6 +155,24 @@ sys.exit(0 if pid else 1)
     ;;
 
   # --- Internals ---
+  hook)
+    # Generic passthrough for plugin helper scripts (router, lib_tokens,
+    # build_prompt_context, ...). Lets skill prose use ONE allowlistable
+    # command prefix instead of PYTHONPATH=... python3 incantations.
+    if [ $# -lt 1 ]; then
+      echo "usage: dynos hook <script-name> [args...]" >&2
+      exit 2
+    fi
+    script="$1"; shift
+    case "$script" in
+      */*|*..*) echo "dynos hook: invalid script name: $script" >&2; exit 2 ;;
+    esac
+    if [ ! -f "${HOOKS_DIR}/${script}.py" ]; then
+      echo "dynos hook: no such helper: ${script}" >&2
+      exit 2
+    fi
+    exec python3 "${HOOKS_DIR}/${script}.py" "$@"
+    ;;
   route)      exec python3 "${HOOKS_DIR}/router.py" "$@" ;;
   plan)       exec python3 "${HOOKS_DIR}/planner.py" "$@" ;;
   patterns)   exec python3 "${HOOKS_DIR}/patterns.py" "$@" ;;

@@ -16,7 +16,7 @@ CONTRACT
 6. Output JSON conforming to debug-module/schemas/bug_report.schema.json. Do not invent fields.
 7. Do NOT read files not referenced in the evidence_dossier. Your tools are Read and Grep only.
 
-INPUT: path to evidence_dossier.json
-OUTPUT: JSON object matching bug_report.schema.json — no prose, no markdown wrapping.
+INPUT: path to evidence_dossier.json (under .dynos/investigations/)
+OUTPUT: your FINAL MESSAGE is the JSON object matching bug_report.schema.json — no prose, no markdown wrapping, nothing before or after it. Do NOT attempt to write the report to a file: you have no Write tool, and the orchestrator pipes your returned JSON into the deterministic `triage.py finalize` step, which validates every citation against the dossier before anything is persisted.
 
-Every evidence_ids field in the output MUST be populated with at least one ID drawn from the dossier. An empty evidence_ids array is a contract violation and the report will be rejected.
+Every evidence_ids field in the output MUST be populated with at least one ID drawn from the dossier. An empty evidence_ids array is a contract violation and the report will be rejected by finalize.

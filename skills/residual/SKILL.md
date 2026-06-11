@@ -224,7 +224,7 @@ that case fall through to the normal human-approval path (the gates
 were not enabled, but the residual still runs).
 
 ```bash
-python3 hooks/ctl.py set-auto-approve-gates \
+"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl set-auto-approve-gates \
   --task-dir .dynos/task-{new_id} \
   --from-residual-id {row["id"]}
 ```

@@ -1,7 +1,7 @@
 {
   "name": "dynos-work",
-  "version": "7.4.0",
-  "description": "Autonomous Software Foundry. Self-learning, human-directed. Standalone — no dependencies required.",
+  "version": "7.4.1",
+  "description": "Autonomous Software Foundry. Self-learning, human-directed. Standalone \u2014 no dependencies required.",
   "license": "MIT",
   "skills": "./skills/",
   "hooks": "./hooks.json"
