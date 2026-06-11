@@ -15,7 +15,7 @@ Show the current state of the active dynos-work task.
 
 ## What you do
 
-1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED). If available in this repo, use `"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl active-task`.
+1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED). If available in this repo, use `"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl active-task`.
 2. If no active task, report "No active dynos-work task found. Start one with /dynos-work:start"
 3. Read: manifest.json, spec.md, execution-graph.json, latest audit-reports, repair-log.json, test-results.json, execution-log.md
 4. Print a human-readable status report

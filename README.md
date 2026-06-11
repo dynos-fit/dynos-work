@@ -6,20 +6,32 @@
 
 # dynos-work
 
-A Claude Code plugin that builds features, catches its own bugs, and gets better at your codebase over time.
+A Claude Code and Codex plugin that builds features, catches its own bugs, and gets better at your codebase over time.
 
 ## Install
+
+### Claude Code
 
 ```
 claude plugin marketplace add dynos-fit/dynos-work
 claude plugin install dynos-work
 ```
 
+### Codex
+
+This repo also includes a Codex plugin manifest at `.codex-plugin/plugin.json`. Install it through your Codex plugin workflow from this repository root.
+
 ## Use
+
+### Claude Code
 
 ```
 /dynos-work:start build a user settings page
 ```
+
+### Codex
+
+Invoke the `start` skill with your task, for example: "Use dynos-work start to build a user settings page."
 
 That's it. You'll answer a few questions about what you want, approve a spec, approve a plan — then it builds.
 
@@ -50,7 +62,7 @@ After the task, it learns from what went wrong and builds prevention rules for n
 
 ## Requirements
 
-Just Claude Code.
+Claude Code or Codex, plus Python 3 for the local dynos-work control plane.
 
 ## Running with permissions ON
 

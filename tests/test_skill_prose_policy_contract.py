@@ -49,6 +49,8 @@ _SUBSTITUTIONS = [
     ("{segment-id}", "seg-1"),
     ("$INVESTIGATION_DIR", ".dynos/investigations/20260611-000000"),
     ('"$AUDIT_CONTEXT_PATH"', ".dynos/task-20260611-001/audit-context.md"),
+    ("${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}", "/fake-plugin-root"),
+    ("${PLUGIN_ROOT}", "/fake-plugin-root"),
     ("${CLAUDE_PLUGIN_ROOT}", "/fake-plugin-root"),
     ("${PLUGIN_HOOKS}", "/fake-plugin-root/hooks"),
     ('"$DYNOS"', "/fake-plugin-root/bin/dynos"),

@@ -11,6 +11,29 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.4.2] - 2026-06-11
+### "Codex Compatibility": Same Foundry, Second Host
+
+This release adds Codex plugin packaging while preserving the existing dynos-work philosophy: human-approved spec and plan gates, deterministic control-plane writes, audited execution, repair loops, and project learning stay intact. Claude Code remains supported by the existing plugin metadata.
+
+### Added
+- **Codex plugin manifest** at `.codex-plugin/plugin.json`, including interface metadata and the existing `skills/` directory as the Codex-discoverable skill surface.
+- **Execution grouping skill** at `skills/execution/SKILL.md` so Codex skill discovery accepts the executor grouping directory without changing the specialized executor flow.
+
+### Changed
+- Skill command funnels and hook commands now resolve the plugin root via `CODEX_PLUGIN_ROOT` first, falling back to `CLAUDE_PLUGIN_ROOT`, so the same `bin/dynos` control-plane path works under either host.
+- Session-start context uses host-neutral dynos-work wording while keeping the same routing and start/execute/audit guidance.
+- README now documents Claude Code and Codex install/use paths.
+- Prose-policy test substitutions understand the new Codex/Claude root fallback expression.
+
+### Fixed
+- `telemetry/global_dashboard.py` no longer embeds escaped HTML inside an f-string expression, restoring Python compile compatibility for pre-3.12 interpreters.
+
+### Plugin / Distribution
+- Bump `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, and `.codex-plugin/plugin.json` to `7.4.2`.
+
+---
+
 ## [7.4.1] - 2026-06-11
 ### "Permissions-ON": The Plugin Stops Denying Its Own Pipeline
 

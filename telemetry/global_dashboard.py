@@ -675,6 +675,15 @@ def _render_compact_card(proj: dict, index: int) -> str:
     if isinstance(af_cost_usd, (int, float)) and af_cost_usd > 0:
         af_cost_line = f'<span class="mini" style="margin-left:6px;">${af_cost_usd:.2f} autofix</span>'
 
+    # Autofix tag for compact card (hoisted: backslash escapes inside an
+    # f-string expression are a SyntaxError before Python 3.12)
+    autofix_tag = ""
+    if maintenance.get("autofix_enabled"):
+        autofix_tag = (
+            '<span class="tag" style="font-size:9px;padding:1px 6px;'
+            'margin-left:6px;">autofix</span>'
+        )
+
     return (
         f'<div class="panel pcard" data-project-id="{index}" '
         f'role="button" tabindex="0" aria-label="Show details for {name}">'
@@ -695,7 +704,7 @@ def _render_compact_card(proj: dict, index: int) -> str:
         f'<span class="daemon-dot" style="background:{daemon_dot_color};" '
         f'aria-label="{daemon_dot_label}"></span>'
         f'<span class="mini">{daemon_dot_label}</span>'
-        f'{"<span class=\"tag\" style=\"font-size:9px;padding:1px 6px;margin-left:6px;\">autofix</span>" if maintenance.get("autofix_enabled") else ""}'
+        f'{autofix_tag}'
         f'{af_cost_line}'
         f'<span class="mini" style="margin-left:auto;">{last_cycle_display}</span>'
         f'</div>'
