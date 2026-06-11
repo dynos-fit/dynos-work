@@ -405,7 +405,9 @@ def receipt_audit_routing(
 
     Each entry in `auditors` MUST include the keys:
       - injected_agent_sha256: str | None
-          (None only when route_mode == "generic"; otherwise required)
+          (None means routing was recorded before prompt injection; the
+          per-auditor audit receipt enforces the sidecar digest for actual
+          non-generic spawns)
       - agent_path: str | None
     Callers are responsible for populating these; this writer enforces
     presence so downstream consumers can rely on the schema.
@@ -442,13 +444,6 @@ def receipt_audit_routing(
                 )
         route_mode = entry.get("route_mode")
         injected = entry.get("injected_agent_sha256")
-        # injected_agent_sha256 may be None only when route_mode is generic OR on skip.
-        if injected is None and route_mode != "generic" and action != "skip":
-            raise ValueError(
-                f"auditors[{idx}] injected_agent_sha256 may be None only "
-                f"when route_mode=='generic' or action=='skip' "
-                f"(got route_mode={route_mode!r} action={action!r})"
-            )
         if injected is not None and not isinstance(injected, str):
             raise ValueError(
                 f"auditors[{idx}] injected_agent_sha256 must be str or None"

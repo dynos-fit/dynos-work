@@ -28,6 +28,7 @@ This release adds Codex plugin packaging while preserving the existing dynos-wor
 
 ### Fixed
 - `telemetry/global_dashboard.py` no longer embeds escaped HTML inside an f-string expression, restoring Python compile compatibility for pre-3.12 interpreters.
+- `run-audit-setup` now writes the required `audit-routing` receipt from the deterministic audit plan, so the DONE gate can enumerate routed auditors instead of failing on a missing receipt.
 
 ### Plugin / Distribution
 - Bump `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, and `.codex-plugin/plugin.json` to `7.4.2`.

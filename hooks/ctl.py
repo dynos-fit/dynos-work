@@ -45,6 +45,7 @@ from lib_receipts import (
     receipt_spawn_budget_paused,
     receipt_spawn_budget_resumed,
     receipt_spec_validated,
+    receipt_audit_routing,
     receipt_executor_routing,
     write_receipt,
 )
@@ -4092,11 +4093,24 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
         )
         audit_plan_path = task_dir / "audit-plan.json"
         write_json(audit_plan_path, plan)
+        receipt_path = receipt_audit_routing(
+            task_dir,
+            [
+                {
+                    **auditor,
+                    "injected_agent_sha256": auditor.get("injected_agent_sha256"),
+                    "agent_path": auditor.get("agent_path"),
+                }
+                for auditor in plan.get("auditors", [])
+                if isinstance(auditor, dict)
+            ],
+        )
 
         print(json.dumps({
             "status": "audit_setup_ready",
             "task_dir": str(task_dir),
             "audit_plan_path": str(audit_plan_path),
+            "receipt_path": str(receipt_path),
             "task_type": task_type,
             "domains": domains,
             "fast_track": fast_track,
