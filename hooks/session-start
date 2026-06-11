@@ -5,6 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
+# Pin the orchestrator session identity (D3). SessionStart fires only for
+# the MAIN session, so this records which session_id is the orchestrator;
+# pre_tool_use resolves that session to the 'orchestrator' role and every
+# other session to a granted subagent role. The hook payload arrives on
+# stdin — capture it before anything else consumes it.
+HOOK_PAYLOAD="$(cat 2>/dev/null || true)"
+if [ -n "${HOOK_PAYLOAD}" ]; then
+  printf '%s' "${HOOK_PAYLOAD}" | python3 "${SCRIPT_DIR}/actor_identity.py" pin --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
+fi
 
 python3 "${SCRIPT_DIR}/registry.py" set-active "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 python3 "${SCRIPT_DIR}/dashboard.py" generate --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true

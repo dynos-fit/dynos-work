@@ -9,6 +9,18 @@ You are the entry point for dynos-work. You own all human-in-the-loop gates befo
 
 There is one pipeline for all tasks. There are no shortcuts. Historical memory may inform discovery and design review, but it is advisory only. Human approval and deterministic artifact checks decide readiness.
 
+## Command Funnel (applies to every command in this skill)
+
+Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
+
+```bash
+DYNOS="${CLAUDE_PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
+```
+
+`"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
+
+JSON payloads (classification, execution-graph, repair-log) are piped to the ctl wrapper over stdin with `--from -` and a heredoc — NEVER staged at `/tmp` or any raw filesystem path (the write policy denies those, by design). Temp files, when genuinely needed, belong in `.dynos/task-{id}/_scratch/`.
+
 ## Ruthlessness Standard
 
 - Do not let ambiguity leak downstream.
@@ -24,58 +36,58 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 
 After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
 
-Before EVERY planner receipt write, you MUST first write a per-phase injected-prompt sidecar by piping the planner prompt body into `hooks/router.py planner-inject-prompt`. Capture the printed sha256 digest and pass it back through as the `injected_prompt_sha256=<digest>` kwarg on the receipt call. The receipt will raise `ValueError` if the sidecar is missing or its contents do not match — that is the proof-of-injection gate.
+Before EVERY planner receipt write, you MUST first write a per-phase injected-prompt sidecar by piping the planner prompt body into `"$DYNOS" hook router planner-inject-prompt`. Capture the printed sha256 digest and pass it back through as the `injected_prompt_sha256=<digest>` kwarg on the receipt call. The receipt will raise `ValueError` if the sidecar is missing or its contents do not match — that is the proof-of-injection gate.
 
 ```bash
 # Discovery planner — write sidecar, capture digest:
-DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase discovery)
+DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase discovery)
 
 # Architectural Design Doc planner (high/critical-risk only) — write sidecar, capture digest:
-ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase arch-design)
+ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase arch-design)
 
 # Spec planner — write sidecar, capture digest:
-SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase spec)
+SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase spec)
 
 # Plan planner — write sidecar, capture digest:
-PLAN_DIGEST=$(printf '%s' "$PLAN_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase plan)
+PLAN_DIGEST=$(printf '%s' "$PLAN_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase plan)
 ```
 
 Then, after each planner subagent returns, write the matching deterministic receipt:
 
 ```bash
 # After planner spawn (discovery/design/classification):
-python3 hooks/ctl.py planner-receipt .dynos/task-{id} discovery \
+"$DYNOS" ctl planner-receipt .dynos/task-{id} discovery \
   --tokens-used {TOTAL_TOKENS} \
   --model {MODEL_USED} \
   --agent-name planning \
   --injected-prompt-sha256 "${DISCOVERY_DIGEST}"
 
 # After planner spawn (architectural design doc — high/critical-risk only):
-python3 hooks/ctl.py planner-receipt .dynos/task-{id} arch-design \
+"$DYNOS" ctl planner-receipt .dynos/task-{id} arch-design \
   --tokens-used {TOTAL_TOKENS} \
   --model {MODEL_USED} \
   --agent-name planning \
   --injected-prompt-sha256 "${ARCH_DESIGN_DIGEST}"
 
 # After planner spawn (spec normalization):
-python3 hooks/ctl.py planner-receipt .dynos/task-{id} spec \
+"$DYNOS" ctl planner-receipt .dynos/task-{id} spec \
   --tokens-used {TOTAL_TOKENS} \
   --model {MODEL_USED} \
   --agent-name planning \
   --injected-prompt-sha256 "${SPEC_DIGEST}"
 
 # After planner spawn (plan generation OR combined Spec + Plan):
-python3 hooks/ctl.py planner-receipt .dynos/task-{id} plan \
+"$DYNOS" ctl planner-receipt .dynos/task-{id} plan \
   --tokens-used {TOTAL_TOKENS} \
   --model {MODEL_USED} \
   --agent-name planning \
   --injected-prompt-sha256 "${PLAN_DIGEST}"
 
 # After validate_task_artifacts passes — REQUIRED before execute skill can run.
-python3 hooks/ctl.py plan-validated-receipt .dynos/task-{id}
+"$DYNOS" ctl plan-validated-receipt .dynos/task-{id}
 
 # After spec-completion auditor on high/critical-risk tasks only:
-python3 hooks/ctl.py plan-audit-receipt .dynos/task-{id} \
+"$DYNOS" ctl plan-audit-receipt .dynos/task-{id} \
   --tokens-used {TOTAL_TOKENS} \
   --model {MODEL_USED}
 ```
@@ -90,38 +102,24 @@ Each receipt auto-records tokens to `token-usage.json`. If you skip this, the re
 
 ## Step 0 — Metadata & Initialization
 
-1. Ensure `.dynos/` exists: `mkdir -p .dynos`. Then auto-register this project with the global registry (silent, idempotent): run `python3 "${PLUGIN_HOOKS}/registry.py" register "$(pwd)" 2>/dev/null || true`. This creates `~/.dynos/projects/{slug}/` and adds the project to `~/.dynos/registry.json` if not already registered. No user action needed. Then ensure the local maintenance daemon is running (silent, idempotent): run `PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/daemon.py" start --root "$(pwd)" 2>/dev/null || true`. If already running, it is a no-op.
-2. Generate a task ID in the format `task-YYYYMMDD-NNN`.
-3. Create the task directory: `.dynos/task-{id}/`.
-3. Write `raw-input.md` with the full task description exactly as given.
-4. Initialize `manifest.json` with at least:
+1. Before initializing, inspect the user input for:
+   - A file path ending in `.prd.md`, `.pdf`, or `.txt` — treat it as a primary spec source (`--input-type prd`).
+   - A URL to a Figma link, screenshot, or wireframe — note it as a design artifact (`--input-type wireframe`).
+   - An attached screenshot or image — note it as a visual spec artifact (`--input-type mixed`).
+2. Initialize the task through the single deterministic entrypoint. It creates `.dynos/`, registers the project + ensures the daemon (silent, idempotent), generates the `task-YYYYMMDD-NNN` id, and writes `raw-input.md`, the initial `manifest.json`, and `execution-log.md` — all under ctl ownership. Pipe the FULL task description exactly as given via stdin:
 
-```json
-{
-  "task_id": "task-20260403-001",
-  "created_at": "ISO timestamp",
-  "title": "First 80 characters of task description",
-  "raw_input": "Full task description as provided by user",
-  "input_type": "text | prd | wireframe | mixed",
-  "stage": "FOUNDRY_INITIALIZED",
-  "classification": null,
-  "retry_counts": {},
-  "blocked_reason": null,
-  "completed_at": null
-}
+```bash
+"$DYNOS" ctl run-start-init --root . --input-type {text|prd|wireframe|mixed} --description - <<'TASK_INPUT'
+{full task description exactly as provided by the user}
+TASK_INPUT
 ```
 
-5. Initialize `.dynos/task-{id}/execution-log.md`.
-6. Before writing `raw-input.md`, inspect the user input for:
-   - A file path ending in `.prd.md`, `.pdf`, or `.txt` and treat it as a primary spec source.
-   - A URL to a Figma link, screenshot, or wireframe and note it as a design artifact.
-   - An attached screenshot or image and note it as a visual spec artifact.
-7. Deterministically verify that `manifest.json` parses as valid JSON and that `task_id`, `created_at`, `raw_input`, and `stage` are present before continuing. Run:
+3. Read the printed JSON for `task_id` and `task_dir`; use them in every later step. Verify with:
 
 ```text
-python3 hooks/ctl.py validate-task .dynos/task-{id}
+"$DYNOS" ctl validate-task .dynos/task-{id}
 ```
-8. Print: `dynos-work: Foundry Task Initialized: task-YYYYMMDD-NNN`
+4. Print: `dynos-work: Foundry Task Initialized: {task_id}`
 
 ---
 
@@ -131,7 +129,7 @@ After every subagent spawn AND every deterministic validation, record the event:
 
 **For LLM subagent spawns** (planner, testing-executor, spec-completion-auditor):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
+"$DYNOS" hook lib_tokens record \
   --task-dir .dynos/task-{id} \
   --agent "{agent_name}" \
   --model "{model_name}" \
@@ -145,7 +143,7 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens
 
 **For deterministic Python validations** (validate_task_artifacts, ctl validate-task, spec heading check, etc.):
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
+"$DYNOS" hook lib_tokens record \
   --task-dir .dynos/task-{id} \
   --agent "{validation_tool_name}" \
   --model "none" \
@@ -190,7 +188,7 @@ Every Agent tool spawn in this skill (planner, spec-completion-auditor, testing-
 Direct writes to `active-segment-role` are denied by `write_policy.py` — the file is wrapper-required. Always go through ctl:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "{role}"
+"$DYNOS" ctl stamp-role .dynos/task-{id} --role "{role}"
 ```
 
 The wrapper enforces `_STAMP_ROLE_ALLOWLIST` (`hooks/ctl.py`), which gates the allowed values. Forgery defense for `audit-*` claims is enforced downstream by `receipt_audit_done`, which cross-checks against `spawn-log.jsonl` — stamping a role that no real Agent spawn matches produces an unforgeable audit-trail mismatch at receipt time.
@@ -223,15 +221,17 @@ There is no direct-classify shortcut here. Always use the planner for Discovery 
 **Learned Planning Skill Injection (skip when `learning_enabled=false`):** Before spawning the planner, check if a learned planning skill exists for this task type:
 
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 -c "from pathlib import Path; from router import resolve_route; r = resolve_route(Path('.'), 'plan-skill', '{task_type}'); print(r['agent_path'] or '')" 
+"$DYNOS" hook router resolve plan-skill {task_type} --root .
 ```
+
+Read `agent_path` from the printed JSON.
 
 If a non-empty path is returned AND the file exists, read it, strip frontmatter, and append its contents to the planner's instruction below under a `## Learned Planning Rules` heading. This injects project-specific planning patterns (e.g., tighter acceptance criteria, better segment sizing) derived from past task retrospectives. Log: `{timestamp} [ROUTE] plan-skill route={mode} agent={agent_name}`.
 
 **Stamp role BEFORE the spawn (MANDATORY):**
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "planning"
+"$DYNOS" ctl stamp-role .dynos/task-{id} --role "planning"
 ```
 
 Without this stamp the planner subagent resolves to `execute-inline` and its writes to `discovery-notes.md` and `design-decisions.md` are denied by `write_policy`.
@@ -263,7 +263,13 @@ If hard or critical design options were returned, present each option to the use
 
 If no high-risk design options were returned, write `design-decisions.md` with the autonomous design choices and rationale.
 
-Write the returned classification object to `/tmp/classification-{id}.json`, then run `python3 hooks/ctl.py write-classification .dynos/task-{id} --from /tmp/classification-{id}.json`.
+Persist the returned classification object by piping it to the ctl wrapper over stdin (never stage it at a raw path):
+
+```bash
+"$DYNOS" ctl write-classification .dynos/task-{id} --from - <<'JSON'
+{the planner's returned classification object, verbatim}
+JSON
+```
 
 Deterministic validation before proceeding:
 1. The wrapper enforces `classification.type`.
@@ -275,7 +281,7 @@ Transition the stage by running:
 Finalize classification through the deterministic control-plane entrypoint:
 
 ```text
-python3 hooks/ctl.py run-start-classification .dynos/task-{id}
+"$DYNOS" ctl run-start-classification .dynos/task-{id}
 ```
 
 `run-start-classification` validates the classification payload, applies fast-track + `tdd_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects.
@@ -302,7 +308,7 @@ If any condition is not met, proceed normally (no fast-track). Do not ask the us
 Before inventing a solution from scratch, run the deterministic gate:
 
 ```text
-python3 hooks/ctl.py run-external-solution-gate .dynos/task-{id}
+"$DYNOS" ctl run-external-solution-gate .dynos/task-{id}
 ```
 
 This command writes `.dynos/task-{id}/external-solution-gate.json` and prints the same decision payload to stdout. The gate owns the decision artifact. Do NOT hand-write or rewrite this JSON in prompt logic.
@@ -332,7 +338,7 @@ Rules:
 - If `search_recommended` is `true`, you MUST conduct external research before proceeding. Use `query_reason` and `decision_basis` to form the search query, then call:
 
   ```text
-  python3 hooks/ctl.py write-search-receipt .dynos/task-{id} \
+  "$DYNOS" ctl write-search-receipt .dynos/task-{id} \
     --query "<your search query>" \
     --urls-consulted "<url1>,<url2>" \
     --findings-summary "<one-sentence summary of what the research found>"
@@ -361,7 +367,7 @@ For high/critical tasks, spawn the planner with the **Architectural Design Doc**
 **Stamp role BEFORE the spawn (MANDATORY):** write the per-phase injected-prompt sidecar and capture the digest:
 
 ```bash
-ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | python3 "${PLUGIN_HOOKS}/router.py" planner-inject-prompt --task-id {id} --phase arch-design)
+ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase arch-design)
 ```
 
 Without this stamp the planner subagent resolves to `execute-inline` and its write to `design-doc.md` is denied by `write_policy`.
@@ -373,7 +379,7 @@ Spawn the planner subagent (`dynos-work:planning`) with instruction:
 After the spawn returns, write the receipt:
 
 ```bash
-python3 hooks/ctl.py planner-receipt .dynos/task-{id} arch-design \
+"$DYNOS" ctl planner-receipt .dynos/task-{id} arch-design \
   --tokens-used {TOTAL_TOKENS} \
   --model {MODEL_USED} \
   --agent-name planning \
@@ -402,7 +408,7 @@ Proceed to Step 3.
 **Normal path:** **Stamp role BEFORE the spawn (MANDATORY):**
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "planning"
+"$DYNOS" ctl stamp-role .dynos/task-{id} --role "planning"
 ```
 
 Without this stamp the planner falls to `execute-inline` and the `spec.md` write is denied by `write_policy.decide_write` (the spec.md guard at `hooks/write_policy.py:290-296` denies executor roles outright). This is the failure mode reported in the SPEC_NORMALIZATION block incident.
@@ -431,7 +437,7 @@ If any rule fails, send the Planner back to fix `spec.md` before presenting it.
 Finalize spec readiness through the deterministic control-plane entrypoint:
 
 ```text
-python3 hooks/ctl.py run-spec-ready .dynos/task-{id}
+"$DYNOS" ctl run-spec-ready .dynos/task-{id}
 ```
 
 `run-spec-ready` validates `spec.md`, writes the `spec-validated` receipt, and advances `SPEC_NORMALIZATION -> SPEC_REVIEW` when the artifact is sound. If it exits non-zero, the JSON payload tells you exactly why the spec must be regenerated.
@@ -447,7 +453,7 @@ python3 hooks/ctl.py run-spec-ready .dynos/task-{id}
 **Auto-approve path (precedes the human path):** If `manifest.json` has `"auto_approve_gates": true`, do NOT present `spec.md` to the user. Run the auto-approved variant of the approve-stage ctl command instead. This is the only sanctioned bypass — it still hashes the live `spec.md`, writes a `human-approval-SPEC_REVIEW` receipt with `approver_type="residual-auto"`, and advances SPEC_REVIEW → PLANNING through the same atomic gate that the human path uses. The receipt is forensically distinguishable from a human approval (the `approver_type` field), so the audit chain remains intact.
 
 ```text
-python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW --auto-approved
+"$DYNOS" ctl approve-stage .dynos/task-{id} SPEC_REVIEW --auto-approved
 ```
 
 - Exit code 0: receipt was written and the stage advanced. Skip the rest of this step.
@@ -459,15 +465,15 @@ In the auto path, the "if changes requested" and "if rejected" branches of the h
 
 - If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, the scheduler then observes the receipt write and advances the task to PLANNING asynchronously. Do NOT write a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
 - If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, write a new `receipt_spec_validated`, and present the updated spec again. Do NOT call `approve-stage` until the user re-approves the regenerated spec.
-- If rejected outright: run `python3 hooks/ctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Spec rejected by user`, and stop. Do not edit `manifest.json` directly.
+- If rejected outright: run `"$DYNOS" ctl transition .dynos/task-{id} FAILED`, append `[FAILED] Spec rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 When approved:
 
 ```text
-python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW
+"$DYNOS" ctl approve-stage .dynos/task-{id} SPEC_REVIEW
 ```
 
-Exit code 0 means the receipt was written and the scheduler queued the advance to PLANNING (verify via manifest.stage after the in-process event dispatch completes). Exit code 1 means the gate refused — the stderr text identifies the cause (missing artifact, hash drift, illegal transition). Do not retry without addressing the reported cause; in particular, do not call `python3 hooks/ctl.py transition ... --force` to bypass — that would advance the stage without a receipt and break the audit chain.
+Exit code 0 means the receipt was written and the scheduler queued the advance to PLANNING (verify via manifest.stage after the in-process event dispatch completes). Exit code 1 means the gate refused — the stderr text identifies the cause (missing artifact, hash drift, illegal transition). Do not retry without addressing the reported cause; in particular, do not call `"$DYNOS" ctl transition ... --force` to bypass — that would advance the stage without a receipt and break the audit chain.
 
 ---
 
@@ -482,7 +488,7 @@ Exit code 0 means the receipt was written and the scheduler queued the advance t
 Choose planning mode through ctl:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-planning-mode .dynos/task-{id}
+"$DYNOS" ctl run-planning-mode .dynos/task-{id}
 ```
 
 Use the JSON output as authoritative:
@@ -495,7 +501,7 @@ Do NOT re-derive fast-track, risk-based escalation, or acceptance-criteria thres
 **Stamp role BEFORE every planner spawn in this step (MANDATORY — applies to all three flows below):**
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "planning"
+"$DYNOS" ctl stamp-role .dynos/task-{id} --role "planning"
 ```
 
 For hierarchical flow, stamp once before the Master Planner spawn AND again before each Worker Planner spawn (each spawn reads the file fresh at its first tool call — successive stamps with the same role are idempotent and overwrite cleanly). Without these stamps the planner falls to `execute-inline` and `plan.md` / `execution-graph.json` writes are denied by `write_policy`.
@@ -503,20 +509,20 @@ For hierarchical flow, stamp once before the Master Planner spawn AND again befo
 Hierarchical flow:
 1. Spawn Master Planner using the default planning model for this repo.
 2. Spawn Worker Planners in parallel for non-overlapping subsystems.
-3. Merge outputs into final `plan.md` and an execution-graph payload, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`.
+3. Merge outputs into final `plan.md` and an execution-graph payload, then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path).
 
 Fast-track combined flow (when `fast_track: true`):
 1. **Stage precondition:** the manifest is still at `SPEC_NORMALIZATION` (Step 3 deferred the walk). Do NOT advance yet.
-2. Spawn Planner (Opus) ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and an execution-graph payload in `/tmp/execution-graph-{id}.json`, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
+2. Spawn Planner (Opus) ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and an execution-graph payload returned in its final message; then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path). This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
 3. After the spawn returns AND `validate_task_artifacts` passes (see below), walk the stage forward through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING` (each transition is legal per `ALLOWED_STAGE_TRANSITIONS` in `hooks/lib_core.py`). Only advance once the artifacts that justify each stage exist on disk. Log each transition. Then continue with the post-validation flow below (which advances to `PLAN_REVIEW`).
 
 Standard flow:
-1. Spawn Planner (Opus) with instruction to generate `plan.md` and an execution-graph payload, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`.
+1. Spawn Planner (Opus) with instruction to generate `plan.md` and an execution-graph payload, then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path).
 
 After generation, run deterministic artifact validation before any human review. If available in this repo, run:
 
 ```text
-python3 hooks/validate_task_artifacts.py .dynos/task-{id} --no-gap
+"$DYNOS" hook validate_task_artifacts .dynos/task-{id} --no-gap
 ```
 
 The command is the source of truth for artifact validation. Use the rules below to explain and repair failures:
@@ -543,7 +549,7 @@ If any validation fails, respawn planning and fix the artifacts before continuin
 **Receipt: plan-validated (MANDATORY).** Once `validate_task_artifacts` passes, write the plan-validated receipt. Without this receipt the eventual transition to `EXECUTION` (in the execute skill) will be blocked by the state machine:
 
 ```bash
-python3 hooks/ctl.py plan-validated-receipt .dynos/task-{id}
+"$DYNOS" ctl plan-validated-receipt .dynos/task-{id}
 ```
 
 Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
@@ -555,7 +561,7 @@ Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_
 Transition the stage by running:
 
 ```text
-python3 hooks/ctl.py transition .dynos/task-{id} PLAN_REVIEW
+"$DYNOS" ctl transition .dynos/task-{id} PLAN_REVIEW
 ```
 
 ---
@@ -569,14 +575,14 @@ This gate always runs. For fast-track tasks it acts as the combined Spec + Plan 
 - Normal path (Step 4 already wrote the SPEC_REVIEW receipt — auto or human):
 
   ```text
-  python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
+  "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
   ```
 
 - Fast-track combined gate (Step 4 was skipped; the manifest is at SPEC_REVIEW after Step 5's stage walk and needs both receipts in order):
 
   ```text
-  python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW --auto-approved
-  python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
+  "$DYNOS" ctl approve-stage .dynos/task-{id} SPEC_REVIEW --auto-approved
+  "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
   ```
 
   The state machine requires the SPEC_REVIEW receipt before the PLAN_REVIEW receipt — this ordering is unchanged by the auto-approval feature. Both calls must return exit 0; if either returns exit 1, log the stderr message and fall through to the human-approval path for that specific gate.
@@ -590,17 +596,17 @@ In the auto path, "if changes requested" and "if rejected outright" branches bel
 
 Present the artifact(s) to the user and ask for approval.
 
-- If approved (normal path): run `python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
+- If approved (normal path): run `"$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
 - If approved (fast-track combined gate): the manifest is currently at SPEC_REVIEW (Step 5 walked it through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING → PLAN_REVIEW`). Run `approve-stage` twice in order — first for the spec, then for the plan:
 
   ```text
-  python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW
-  python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW
+  "$DYNOS" ctl approve-stage .dynos/task-{id} SPEC_REVIEW
+  "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW
   ```
 
   Each call hashes the live artifact, writes the matching receipt, and advances one stage. Both must succeed; if either returns exit 1, address the reported cause before retrying.
 - If changes are requested: append the feedback, respawn planning (combined Spec + Plan phase for fast-track, otherwise standard planning), re-run deterministic artifact validation, and present the updated artifact(s) again. Do NOT call `approve-stage` until the user re-approves the regenerated artifact(s) — the gate compares the receipt hash to the live file at transition time, so an approval against an out-of-date hash will be refused with `hash mismatch`.
-- If rejected outright: run `python3 hooks/ctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`, and stop. Do not edit `manifest.json` directly.
+- If rejected outright: run `"$DYNOS" ctl transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 ---
 
@@ -614,7 +620,7 @@ The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/c
 
 1. **Deterministic gap analysis (mandatory, always runs):**
    ```bash
-   python3 hooks/plan_gap_analysis.py --root . --task-dir .dynos/task-{id}
+   "$DYNOS" hook plan_gap_analysis --root . --task-dir .dynos/task-{id}
    ```
    This verifies that claims in `## API Contracts` and `## Data Model` sections correspond to real code. If the plan claims an endpoint or table exists that the codebase doesn't have, the planner must either fix the table or explicitly mark the entry as to-be-created. Gap analysis failures block — repair before continuing.
 
@@ -623,7 +629,7 @@ The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/c
    **Stamp role BEFORE the spawn (MANDATORY — only when the conditional fires):**
 
    ```bash
-   python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "audit-spec-completion"
+   "$DYNOS" ctl stamp-role .dynos/task-{id} --role "audit-spec-completion"
    ```
 
    Without this stamp the auditor falls to `execute-inline` and its `audit-reports/spec-completion.json` write is denied by `write_policy.decide_write` (which restricts `audit-reports/` to `audit-*` roles). Forgery defense: `receipt_audit_done` cross-checks the orchestrator-claimed spawn against `spawn-log.jsonl`, so stamping without a real Agent spawn produces an unforgeable mismatch at receipt time.
@@ -646,7 +652,7 @@ When `tdd_required` is `true`:
 1. **Stamp role BEFORE the spawn (MANDATORY):**
 
    ```bash
-   python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "testing-executor"
+   "$DYNOS" ctl stamp-role .dynos/task-{id} --role "testing-executor"
    ```
 
    Without this stamp the testing-executor falls to `execute-inline`. Repo-file writes still work because `write_policy` permits both `execute-inline` and `*-executor` for repo artifacts, but the role file is what every other dynos-work skill in this codebase stamps before an executor spawn — keeping the convention here ensures the spawn-log entry's claimed role matches the runtime role and that downstream receipts identify the spawn correctly.
@@ -667,26 +673,19 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
    - No production source files may be modified in this step.
 3. Present the test file paths and summary to the user.
 4. If changes are requested, rerun the testing executor and the same deterministic validation.
-5. When validation passes (and before asking for human approval), write the TDD receipt:
+5. When validation passes (and before asking for human approval), write the TDD receipt through ctl (the evidence hash is computed from the on-disk file — do not supply hashes yourself):
 
-   ```python
-   from pathlib import Path
-   from lib_receipts import receipt_tdd_tests, hash_file
-
-   evidence_path = Path(".dynos/task-{id}/evidence/tdd-tests.md")
-   receipt_tdd_tests(
-       task_dir=Path(".dynos/task-{id}"),
-       test_file_paths=[...],                       # list of test file paths from this run
-       tests_evidence_sha256=hash_file(evidence_path),
-       tokens_used=TOTAL_TOKENS,                    # from testing-executor spawn usage
-       model_used="opus",                           # or whichever model was used
-   )
+   ```bash
+   "$DYNOS" ctl tdd-receipt .dynos/task-{id} \
+     --test-file {path/to/test_one.py} --test-file {path/to/test_two.py} \
+     --tokens-used {TOTAL_TOKENS} \
+     --model {MODEL_USED}
    ```
 
 6. **Auto-approve path (precedes the human path):** If `manifest.json` has `"auto_approve_gates": true` AND `tdd_required: true` (which is the only condition under which Step 8 fires at all), do NOT present the test suite to the user. After the testing-executor spawn and the deterministic validation in step 2 above have both passed, run the auto-approved variant of approve-stage:
 
    ```text
-   python3 hooks/ctl.py approve-stage .dynos/task-{id} TDD_REVIEW --auto-approved
+   "$DYNOS" ctl approve-stage .dynos/task-{id} TDD_REVIEW --auto-approved
    ```
 
    - Exit code 0: receipt written, stage advanced TDD_REVIEW → PRE_EXECUTION_SNAPSHOT. Proceed to step 7 (commit tests).
@@ -697,7 +696,7 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 7. When the user approves the test suite (or after step 6's auto-approval has run), transition out of TDD_REVIEW via the `approve-stage` ctl command. This hashes `evidence/tdd-tests.md`, writes the `human-approval-TDD_REVIEW` receipt with that hash, and advances TDD_REVIEW → PRE_EXECUTION_SNAPSHOT in one atomic step. Do NOT append a manual `[HUMAN]` log line — the receipt + approve-stage path is the only one the state machine accepts (the gate refuses with `human-approval-TDD_REVIEW` / `hash mismatch` substrings on drift):
 
    ```text
-   python3 hooks/ctl.py approve-stage .dynos/task-{id} TDD_REVIEW
+   "$DYNOS" ctl approve-stage .dynos/task-{id} TDD_REVIEW
    ```
 
    Exit code 0 means the receipt was written and the stage advanced. Exit code 1 means the gate refused — the stderr text identifies the cause. Do not bypass with `transition --force`. (If step 6's auto-approval already advanced the stage, this human-path call is unreachable.)
@@ -712,16 +711,16 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 
 ## Step 9 — Done
 
-**Role file cleanup (MANDATORY — BEFORE the handoff transition):** Delete `.dynos/task-{id}/active-segment-role` so `/dynos-work:execute` starts each segment with a clean slate. Deletion is permitted by `write_policy` (only the *write* path is wrapper-required); leaving the file in place is benign because every executor stamp overwrites it, but cleaning up keeps the spawn-log → role file relationship one-to-one for the next phase.
+**Role cleanup (MANDATORY — BEFORE the handoff transition):** Clear unconsumed role grants and the legacy role file so `/dynos-work:execute` starts each segment with a clean slate. Do NOT `rm` the role file by hand — `active-segment-role` is wrapper-required and write_policy denies the deletion; `clear-role` is the sanctioned (privilege-reducing) path:
 
 ```bash
-rm -f .dynos/task-{id}/active-segment-role
+"$DYNOS" ctl clear-role .dynos/task-{id}
 ```
 
 Transition the stage by running:
 
 ```text
-python3 hooks/ctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+"$DYNOS" ctl transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
 Append to the execution log:

@@ -7,6 +7,18 @@ description: "Execute the approved plan. Orchestrates execution graph segments t
 
 Manages the parallel execution of the implementation plan via the execution graph. Handles dependency ordering, executor spawning, and final integration.
 
+## Command Funnel (applies to every command in this skill)
+
+Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
+
+```bash
+DYNOS="${CLAUDE_PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
+```
+
+`"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
+
+JSON payloads (classification, execution-graph, repair-log) are piped to the ctl wrapper over stdin with `--from -` and a heredoc — NEVER staged at `/tmp` or any raw filesystem path (the write policy denies those, by design). Temp files, when genuinely needed, belong in `.dynos/task-{id}/_scratch/`.
+
 ## Ruthlessness Standard
 
 - No silent shortcuts.
@@ -23,7 +35,7 @@ Manages the parallel execution of the implementation plan via the execution grap
 Validate that all required inputs from the start skill are present:
 
 ```text
-python3 hooks/ctl.py validate-contract --skill execute --task-dir .dynos/task-{id}
+"$DYNOS" ctl validate-contract --skill execute --task-dir .dynos/task-{id}
 ```
 
 If validation fails with missing required inputs, print the errors and stop. Do not proceed with execution.
@@ -41,7 +53,7 @@ Before any modification starts:
    ```
 2. Record the snapshot SHA into manifest.snapshot via the audited ctl wrapper:
    ```
-   python3 hooks/ctl.py record-snapshot .dynos/task-{id}
+   "$DYNOS" ctl record-snapshot .dynos/task-{id}
    ```
    The command auto-detects HEAD SHA and branch from git. It accepts optional
    `--head-sha SHA` and `--branch NAME` to override. Stage gate refuses anything
@@ -58,7 +70,7 @@ Read the printed JSON for `head_sha` and `branch`. Append to log:
 Run deterministic execute setup first:
 
 ```text
-python3 hooks/ctl.py run-execute-setup .dynos/task-{id}
+"$DYNOS" ctl run-execute-setup .dynos/task-{id}
 ```
 
 This command runs execution preflight validation, advances `PRE_EXECUTION_SNAPSHOT -> EXECUTION`, builds the executor plan, and writes the `executor-routing` receipt. Use its JSON output directly.
@@ -78,7 +90,7 @@ If any segment has route_mode in {replace, alongside} with non-null agent_path, 
 
 **Inline execution procedure (only when the decision table row says `inline`):** Inline execution skips the executor subagent entirely and runs the segment in this thread. This avoids the ~30K token overhead of agent context setup, but it does NOT relax any other rule. Even in the inline branch, you MUST still run the router, write the executor-routing receipt, and apply the prompt-injection/prevention pipeline to your own work:
 
-1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/router.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
+1. Run the executor plan router: `"$DYNOS" hook router executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
 2. Write the executor-routing receipt (required for stage transitions).
 3. Re-verify the decision table row. If the router's response contains any segment with `route_mode` in `{"replace", "alongside"}` with a non-null `agent_path`, STOP — the inline branch is FORBIDDEN for this task. Fall through to the spawn path below.
 4. Run `inject-prompt` with your base prompt to get the complete prompt with prevention rules. Apply those rules to your own work.
@@ -86,7 +98,7 @@ If any segment has route_mode in {replace, alongside} with non-null agent_path, 
 6. **Transition the manifest stage `PRE_EXECUTION_SNAPSHOT → EXECUTION`** (mandatory — without this the Step 4 transition to `TEST_EXECUTION` is illegal per `ALLOWED_STAGE_TRANSITIONS`). `transition_task` auto-appends the `[STAGE] → EXECUTION` log line; do not write it manually:
 
 ```text
-python3 hooks/ctl.py transition .dynos/task-{id} EXECUTION
+"$DYNOS" ctl transition .dynos/task-{id} EXECUTION
 ```
 
 Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
@@ -102,7 +114,7 @@ Skipping the router in inline mode silently ignores learned agents and breaks th
 Immediately compute the authoritative execution schedule:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-execution-batch-plan .dynos/task-{id}
+"$DYNOS" ctl run-execution-batch-plan .dynos/task-{id}
 ```
 
 This command is authoritative for:
@@ -126,7 +138,7 @@ Do NOT read project_rules.md tables manually. The router handles model policy, a
 **Learned Agent Injection (MANDATORY — NOT OPTIONAL):** For every segment, you MUST build the executor prompt using the deterministic prompt builder. This is not a suggestion. This is an enforcement gate. For each segment in the executor plan:
 
 ```bash
-echo "{your base prompt for this segment}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 hooks/router.py inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
+echo "{your base prompt for this segment}" | "$DYNOS" hook router inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
 ```
 
 This command:
@@ -140,7 +152,7 @@ This command:
 **Routing cache (automatic — no extra steps):** `executor-plan` writes its result to `.dynos/task-{id}/router-cache/executor-plan.json` keyed by a fingerprint over every input that drives the plan (graph, policy, effectiveness scores, retrospectives, learned registry, benchmark history, prevention rules). Each `inject-prompt` call checks this cache first; on a fingerprint match it reuses the cached entry instead of re-deriving routing. This guarantees the model the executor was spawned under matches the model the prompt was injected for, even with epsilon-greedy exploration enabled. Cache lookups emit a `router_cache_lookup` event with `status: hit | fingerprint_drift | stale_segment`. Inspect freshness with:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/router.py" router-cache-status --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
+"$DYNOS" hook router router-cache-status --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
 ```
 
 If status is `stale`, re-run `executor-plan` before continuing inject-prompt calls — otherwise per-segment routing will silently fall back to live builds.
@@ -161,10 +173,10 @@ If the injected prompt is weak, strengthen the base prompt before spawning. Do n
 
 If `inject-prompt` fails or is unavailable, stop and fix the deterministic routing path. Do NOT manually read `agent_path` or hand-build the learned-agent prompt.
 
-**Role stamping (MANDATORY — BEFORE every Agent tool spawn):** Stamp the executor role via the deterministic ctl wrapper immediately before spawning each executor subagent. The wrapper enforces the executor-role allowlist (audit-* roles cannot be stamped — auditors run as subagents whose role is established at spawn time, not via orchestrator-stamped role files; this closes the self-elevation primitive behind the 2026-04-30 audit-chain forgery incident). Direct writes to `active-segment-role` are denied by `write_policy.py` and surface a wrapper hint to the model.
+**Role granting (MANDATORY — BEFORE every Agent tool spawn):** Grant the executor role via the deterministic ctl wrapper immediately before spawning each executor subagent. The wrapper enforces the role allowlist; the grant is single-use and is consumed by the spawned subagent's first tool call (the orchestrator's own session is pinned at SessionStart and can never consume a grant — that closes the role-leak behind the 2026-04-30 audit-chain forgery incident; the audit-* forgery defense itself is the spawn-log cross-check at receipt time). Direct writes to `active-segment-role`, `role-grants.json`, or `role-bindings.json` are denied by `write_policy.py` and surface a wrapper hint.
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "{executor-role}"
+"$DYNOS" ctl stamp-role .dynos/task-{id} --role "{executor-role}"
 ```
 
 Where `{executor-role}` is the exact role string from the executor plan (e.g. `backend-executor`, `ui-executor`, `integration-executor`). The write MUST complete (exit 0) before the Agent tool invocation that spawns the subagent — this is a sequential constraint, not a timing one. Exit 1 means the wrapper refused; the stderr names the cause (audit-* refusal, role outside allowlist, missing task dir).
@@ -178,12 +190,12 @@ Where `{executor-role}` is the exact role string from the executor plan (e.g. `b
 Before issuing each parallel next_batch executor batch (this includes the first batch AND every subsequent next_batch — the check runs once per spawn cycle, before EACH batch, not only the first), run:
 
 ```bash
-python3 hooks/ctl.py check-spawn-budget .dynos/task-{id}
+"$DYNOS" ctl check-spawn-budget .dynos/task-{id}
 ```
 
 Parse the JSON output. The command emits a single-line JSON object with keys `status`, `count`, `threshold`, `exempt_count`, and `task_class`. If `status` is `'paused'` or `'already_paused'`:
 
-1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the executor count, the threshold, the `task_class`, and instruct the operator to run `python3 hooks/ctl.py spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why spawns were wasted.
+1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the executor count, the threshold, the `task_class`, and instruct the operator to run `"$DYNOS" ctl spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why spawns were wasted.
 2. Append a line beginning with `[BUDGET-PAUSE]` to `execution-log.md` that records the timestamp, count, and threshold.
 3. Exit non-zero.
 
@@ -202,7 +214,7 @@ The base prompt for each executor (before inject-prompt) must include:
 5. **Pre-loaded file contents (MANDATORY):** Run the context builder for each file in the segment's `files_expected` and append its output to the base prompt:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/build_prompt_context.py" --root . {files_expected_1} {files_expected_2} ...
+"$DYNOS" hook build_prompt_context --root . {files_expected_1} {files_expected_2} ...
 ```
 
 Append the printed output verbatim to the base prompt. This gives the executor the current file contents upfront so it does not need to call Read at the start, keeping the context window small. If a file does not exist yet (new file), the script emits a placeholder — include it anyway so the executor knows the file is new.
@@ -212,7 +224,7 @@ Do NOT pass the full `spec.md` or `plan.md` to executors.
 **Segment finalization (MANDATORY):** After each executor completes, finalize the segment through ctl instead of hand-writing receipt / ownership / manifest logic:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-execution-segment-done \
+"$DYNOS" ctl run-execution-segment-done \
   .dynos/task-{id} \
   "{seg-id}" \
   --injected-prompt-sha256 "{INJECTED_PROMPT_SHA256 captured from sidecar}" \
@@ -229,10 +241,10 @@ This command deterministically:
 - writes `receipt_executor_done(...)`
 - updates `manifest.json.execution_progress` from deterministic execution state
 
-**Role file cleanup (MANDATORY — AFTER `run-execution-segment-done` writes the receipt):** Delete `.dynos/task-{id}/active-segment-role` immediately after the segment receipt is written. This prevents the completed segment's role from leaking into any subsequent segment's execution context. (Deletion is permitted by write_policy as a benign cleanup; only the *write* path is wrapper-required.)
+**Role cleanup (MANDATORY — AFTER `run-execution-segment-done` writes the receipt):** Clear unconsumed role grants immediately after the segment receipt is written. This prevents a stale grant from leaking into any subsequent segment's spawn. Do NOT `rm` the role file by hand — `active-segment-role` is wrapper-required and the deletion is denied by write_policy; `clear-role` is the sanctioned (privilege-reducing) path:
 
 ```bash
-rm -f .dynos/task-{id}/active-segment-role
+"$DYNOS" ctl clear-role .dynos/task-{id}
 ```
 
 After each batch (or cached resolution) completes, record events and verify:
@@ -246,7 +258,7 @@ After each batch (or cached resolution) completes, record events and verify:
   and remain the orchestrator's responsibility.)
 - **Token capture (deterministic checks):** After file ownership and evidence verification:
   ```bash
-  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
+  "$DYNOS" hook lib_tokens record \
     --task-dir .dynos/task-{id} \
     --agent "ctl-check-ownership" \
     --model "none" \
@@ -260,7 +272,7 @@ After each batch (or cached resolution) completes, record events and verify:
   ```
 - Also record the **router decision** before each batch:
   ```bash
-  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
+  "$DYNOS" hook lib_tokens record \
     --task-dir .dynos/task-{id} \
     --agent "router-executor-plan" \
     --model "none" \
@@ -277,7 +289,7 @@ After each batch (or cached resolution) completes, record events and verify:
 
 **For inline fast-track execution** (no subagent spawn), record with `--type inline`:
 ```bash
-PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
+"$DYNOS" hook lib_tokens record \
   --task-dir .dynos/task-{id} \
   --agent "inline-executor" \
   --model "none" \
@@ -295,10 +307,10 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens
 When `run-execution-batch-plan` reports no pending segments, advance through ctl:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-execution-finish .dynos/task-{id}
+"$DYNOS" ctl run-execution-finish .dynos/task-{id}
 ```
 
-This command refuses the transition if any segment is still pending. Do not manually decide that execution is complete.
+This command refuses the transition if any segment is still pending, AND it runs the full evidence verification (non-empty `evidence/{seg-id}.md` per segment, every `files_expected` entry on disk) inside the stage gate before advancing to `TEST_EXECUTION`. If it reports `"status": "blocked"` with `failures`, address each listed failure and re-run. Do not manually decide that execution is complete.
 
 ### Step 4 — Run tests
 
@@ -317,13 +329,13 @@ If tests fail:
 
 ### Step 5 — Verify completion
 
-After successfully completing execution and tests (and any repairs triggered by tests or audit), run the deterministic evidence verifier:
+After successfully completing execution and tests (and any repairs triggered by tests or audit), re-run the deterministic evidence verifier as confirmation:
 
 ```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-execution-verify-evidence .dynos/task-{id}
+"$DYNOS" ctl run-execution-verify-evidence .dynos/task-{id}
 ```
 
-This command checks every non-cached segment's evidence file exists and is non-empty, and that every `files_expected` entry exists on disk. It exits non-zero with a JSON error payload if any check fails. **Do NOT assert completion in prompt logic — consume this command's output as the authoritative pass/fail signal.**
+This command checks every non-cached segment's evidence file exists and is non-empty, and that every `files_expected` entry exists on disk. It is legal at both `EXECUTION` and `TEST_EXECUTION` (the same verification already ran inside the `run-execution-finish` stage gate in Step 3 — this re-run confirms nothing regressed during test execution). It exits non-zero with a JSON error payload if any check fails. **Do NOT assert completion in prompt logic — consume this command's output as the authoritative pass/fail signal.**
 
 If the command reports `"status": "blocked"`, address each listed failure before proceeding.
 
@@ -337,7 +349,7 @@ Append to log:
 After Step 5, run:
 
 ```text
-python3 hooks/ctl.py write-execute-handoff .dynos/task-{id}
+"$DYNOS" ctl write-execute-handoff .dynos/task-{id}
 ```
 
 This writes `.dynos/task-{id}/handoff-execute-audit.json` deterministically from the live manifest stage. Do NOT hand-write the handoff JSON in prompt logic.

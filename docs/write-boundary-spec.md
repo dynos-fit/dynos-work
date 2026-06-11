@@ -644,3 +644,77 @@ This work is complete when:
 20. Add prompt regression scans.
 21. Add dashboard/reporting for denied writes.
 22. Repeat until no direct LLM control-plane writes remain.
+
+---
+
+## Addendum: Per-Actor Resolution & Permissions-ON Operation (v7.4.1)
+
+Implemented in v7.4.1 per `docs/permissions-on-design.md`. This addendum is normative
+for the additions; the sections above remain accurate for the original
+artifact classes.
+
+### Actor identity (D3)
+
+- The MAIN session is pinned at SessionStart: `.dynos/orchestrator-session.json`
+  (hook-owned; every agent write to it is denied). Tool calls matching the
+  pinned `session_id` resolve to the `orchestrator` role and never read role
+  files — stamping a subagent role cannot mutate the orchestrator's rights.
+- Subagent sessions consume single-use grants from
+  `.dynos/task-*/role-grants.json` (wrapper-required: `ctl grant-role` /
+  `ctl stamp-role`, allowlist-enforced). The first tool call of an unknown
+  session binds it (`role-bindings.json`, hook-owned); the binding is
+  immutable for the session's lifetime. `ctl clear-role` expires unconsumed
+  grants and is the only sanctioned cleanup (privilege-reducing).
+- Sessions without a pin fall back to the legacy `active-segment-role`
+  chain — no regression for pre-pin sessions.
+- Degraded mode: if the harness ever fails to give subagents distinct
+  session ids, their calls resolve as `orchestrator` and fail CLOSED with a
+  denial that names the condition ("degraded actor resolution").
+
+### Orchestrator role surface
+
+Allowed: `_scratch/**`, `execution-log.md`, `escalation.md`,
+`audit-context.md`, `raw-input.md`, `discovery-notes.md`,
+`design-decisions.md`; repo files ONLY while `manifest.stage == EXECUTION`
+with `fast_track == true` (inline execution — capability follows the ctl
+state machine). Everything else (spec/plan/audit-reports/evidence/
+control-plane) is denied with a self-explaining message.
+
+### New namespaces and sinks
+
+- `.dynos/task-*/_scratch/**` — sanctioned temp space for all recognized
+  actor roles. Proof-irrelevant by construction: no gate, receipt, or
+  validator reads it (CI-asserted by tests/test_scratch_namespace.py).
+- `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty` — always-allowed
+  sinks (not persistence).
+- `evidence/verification/**` — ctl-captured verification records (D6);
+  agent roles, including executors, are denied. Written only by
+  `ctl run-verification-evidence`, hash-bound by a receipt, consumed by
+  the spec-completion auditor as machine evidence for execution-based
+  acceptance criteria.
+
+### Self-modification guard (H1)
+
+Agent roles are denied writes under the installed plugin root,
+`~/.claude/plugins/`, `~/.claude/settings*.json`, and `~/.dynos/` — the
+"agent edits its own guardrails" primitive. Developer mode (the project IS
+the plugin source checkout) exempts the plugin-root check only.
+
+### Honest enforcement statement
+
+The Bash pre-filter (now shlex-based and quote-aware) is defense-in-depth,
+NOT the trust anchor: interpreter-internal writes (`python3 -c
+"open(p,'w')"`) are invisible to any command-text parser. The unforgeable
+guarantees are: capability-keyed `require_write_allowed` inside ctl,
+receipts + the task receipt chain, and the hook-owned `spawn-log.jsonl`
+cross-check at audit-receipt time.
+
+### Permissions-ON operation
+
+All skill-prescribed deterministic steps run through one funnel:
+`<plugin-root>/bin/dynos` (`dynos ctl ...`, `dynos hook ...`). JSON payloads
+travel over stdin (`--from -` + heredoc) — nothing is staged at /tmp or any
+raw path. A permissions-ON user can allow the single `bin/dynos` prefix and
+then interacts only with the human gates (discovery questions, SPEC_REVIEW,
+PLAN_REVIEW, TDD_REVIEW). `tests/test_skill_prose_policy_contract.py` keeps
+prose and policy from drifting apart again.

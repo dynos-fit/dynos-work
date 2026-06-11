@@ -28,6 +28,107 @@ from write_policy import find_write_violations
 # passed plan validation are grandfathered through unaffected.
 _OVERFLOW_GUARD_STAGES: set[str] = {"PLANNING", "PLAN_REVIEW", "EXECUTION_GRAPH_BUILD"}
 
+def _glob_entry_regex(entry: str) -> "re.Pattern[str]":
+    """Translate a files_expected glob to a regex with PATH semantics:
+    `*`/`?` do not cross `/`; `**` does. (fnmatch's `*` crosses slashes,
+    which would make `src/*.py` silently claim `src/sub/a.py`.)"""
+    out: list[str] = []
+    i = 0
+    n = len(entry)
+    while i < n:
+        ch = entry[i]
+        if ch == "*":
+            if entry[i : i + 3] == "**/":
+                out.append(r"(?:[^/]+/)*")
+                i += 3
+                continue
+            if entry[i : i + 2] == "**":
+                out.append(r".*")
+                i += 2
+                continue
+            out.append(r"[^/]*")
+        elif ch == "?":
+            out.append(r"[^/]")
+        elif ch == "[":
+            end = entry.find("]", i + 1)
+            if end == -1:
+                out.append(re.escape(ch))
+            else:
+                out.append(entry[i : end + 1])
+                i = end
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+# Known shorthand -> canonical-value hints for enum errors. difflib catches
+# typos; this table catches *conceptual* aliases it cannot (e.g. "ci" is not
+# string-similar to "infra"). Per the 2026-06 decision, "ci" maps to "infra"
+# — it is intentionally NOT added to VALID_DOMAINS.
+_ENUM_ALIAS_HINTS: dict[str, str] = {
+    "ci": "infra",
+    "cicd": "infra",
+    "ci/cd": "infra",
+    "devops": "infra",
+    "ops": "infra",
+    "frontend": "ui",
+    "front-end": "ui",
+    "database": "db",
+    "documentation": "docs",
+}
+
+
+def invalid_enum_error(field: str, value: object, valid: Iterable[str]) -> str:
+    """Uniform enum-violation message: names the valid set and, when
+    possible, a did-you-mean hint (D7-4 — errors must be self-correcting,
+    a bare 'invalid: ci' sends the model guessing)."""
+    import difflib
+
+    valid_sorted = sorted(valid)
+    msg = f"{field} invalid: {value!r} — valid values: [{', '.join(valid_sorted)}]"
+    if isinstance(value, str) and value:
+        lowered = value.strip().lower()
+        hint = _ENUM_ALIAS_HINTS.get(lowered)
+        if hint is None and f"{lowered}-executor" in valid_sorted:
+            hint = f"{lowered}-executor"
+        if hint is None:
+            close = difflib.get_close_matches(lowered, valid_sorted, n=1, cutoff=0.6)
+            hint = close[0] if close else None
+        if hint and hint in valid_sorted:
+            msg += f"; did you mean {hint!r}?"
+    return msg
+
+
+def files_expected_entry_matches(entry: str, file_path: str) -> bool:
+    """True when a files_expected entry covers a concrete file path (D7-2).
+
+    - trailing '/'  -> directory prefix containment
+    - glob chars    -> path-aware glob (`*` within a segment, `**` across)
+    - plain entry   -> exact equality (original behavior)
+    """
+    if entry == file_path:
+        return True
+    if entry.endswith("/"):
+        return file_path.startswith(entry)
+    if any(ch in entry for ch in "*?["):
+        return _glob_entry_regex(entry).match(file_path) is not None
+    return False
+
+
+def files_expected_entries_overlap(a: str, b: str) -> bool:
+    """True when two files_expected entries could claim the same file.
+
+    Used by the cross-segment exclusivity rule: directory/glob entries
+    overlap any entry they contain or match, in either direction.
+    """
+    if a == b:
+        return True
+    return files_expected_entry_matches(a, b.rstrip("/")) or files_expected_entry_matches(
+        b, a.rstrip("/")
+    ) or files_expected_entry_matches(a, b) or files_expected_entry_matches(b, a)
+
+
 def require_nonblank(value: str, *, field_name: str) -> str:
     """Validate that *value* is a non-empty string and return its stripped form.
 
@@ -313,10 +414,10 @@ def validate_manifest(manifest: dict) -> list[str]:
             return errors
         ctype = classification.get("type")
         if ctype not in VALID_CLASSIFICATION_TYPES:
-            errors.append(f"classification.type invalid: {ctype!r}")
+            errors.append(invalid_enum_error("classification.type", ctype, VALID_CLASSIFICATION_TYPES))
         risk = classification.get("risk_level")
         if risk not in VALID_RISK_LEVELS:
-            errors.append(f"classification.risk_level invalid: {risk!r}")
+            errors.append(invalid_enum_error("classification.risk_level", risk, VALID_RISK_LEVELS))
         domains = classification.get("domains")
         if not isinstance(domains, list) or not domains:
             errors.append("classification.domains must be a non-empty array")
@@ -327,7 +428,7 @@ def validate_manifest(manifest: dict) -> list[str]:
                     errors.append("classification.domains entries must be non-empty strings")
                     continue
                 if domain not in VALID_DOMAINS:
-                    errors.append(f"classification domain invalid: {domain!r}")
+                    errors.append(invalid_enum_error("classification domain", domain, VALID_DOMAINS))
                 if domain in seen_domains:
                     errors.append(f"classification.domains contains duplicate entry: {domain!r}")
                 else:
@@ -488,6 +589,23 @@ def validate_task_artifacts(
         for heading in all_required:
             if heading not in plan_headings:
                 errors.append(f"plan missing heading: {heading}")
+        # Section-level exemption (D7-4): every backtick path listed under a
+        # "Files to be created" heading (any level) is exempt everywhere, in
+        # addition to the per-line "to-be-created" marker.
+        to_be_created: set[str] = set()
+        in_create_section = False
+        for line in plan_text.splitlines():
+            heading_match = re.match(r"#{2,4}\s+(.*)", line)
+            if heading_match:
+                title = heading_match.group(1).strip().lower()
+                in_create_section = (
+                    "files to be created" in title or "to-be-created" in title
+                )
+                continue
+            if in_create_section:
+                for match in re.finditer(r"`([^`]+)`", line):
+                    to_be_created.add(match.group(1).strip())
+
         in_ref_section = False
         for line in plan_text.splitlines():
             if line.startswith("## "):
@@ -497,11 +615,22 @@ def validate_task_artifacts(
                 continue
             for match in re.finditer(r"`([^`]+\.[a-zA-Z]{1,5})`", line):
                 ref_path = match.group(1)
+                # Only slash-containing tokens are treated as repo paths —
+                # bare tokens like `policy.json` are frequently concepts or
+                # basenames, and path-checking them produced false rejects.
+                if "/" not in ref_path:
+                    continue
                 if "to-be-created" in line.lower():
+                    continue
+                if ref_path in to_be_created:
                     continue
                 full = task_dir.parent.parent / ref_path
                 if not full.exists():
-                    errors.append(f"plan Reference Code path does not exist: {ref_path}")
+                    errors.append(
+                        f"plan Reference Code path does not exist: {ref_path} "
+                        "(mark new files as to-be-created on the same line, or "
+                        "list them under a 'Files to be created' heading)"
+                    )
 
         components_section = extract_markdown_section(plan_text, "Components / Modules")
         if components_section.strip():
@@ -570,7 +699,7 @@ def validate_task_artifacts(
                     errors.append(f"{segment_id}: description must be a non-empty string")
                 executor = segment.get("executor")
                 if executor not in VALID_EXECUTORS:
-                    errors.append(f"{segment_id}: invalid executor {executor!r}")
+                    errors.append(invalid_enum_error(f"{segment_id}: executor", executor, VALID_EXECUTORS))
                 files_expected = segment.get("files_expected")
                 if not isinstance(files_expected, list) or not files_expected:
                     errors.append(f"{segment_id}: files_expected must be a non-empty array")
@@ -586,11 +715,17 @@ def validate_task_artifacts(
                             errors.append(f"{segment_id}: duplicate file in files_expected: {file_path}")
                         else:
                             segment_seen_files.add(file_path)
-                        owner = seen_files.get(file_path)
-                        if owner and owner != segment_id:
-                            errors.append(f"file {file_path} appears in multiple segments: {owner}, {segment_id}")
-                        else:
-                            seen_files[file_path] = segment_id
+                        # Cross-segment exclusivity. Directory ("dir/") and
+                        # glob entries participate by containment, so a
+                        # directory segment cannot silently share files with
+                        # a per-file segment (D7-2 — stricter, not looser).
+                        for other_path, owner in seen_files.items():
+                            if owner != segment_id and files_expected_entries_overlap(file_path, other_path):
+                                errors.append(
+                                    f"file {file_path} appears in multiple segments: {owner}, {segment_id}"
+                                )
+                                break
+                        seen_files.setdefault(file_path, segment_id)
                     # AC-9 / AC-10: plan-time overflow guard. Fires only at
                     # plan-creation/review stages so that in-flight tasks at
                     # PRE_EXECUTION_SNAPSHOT or later are grandfathered.
@@ -759,7 +894,7 @@ def validate_repair_log(task_dir: Path) -> list[str]:
                 errors.append(f"{batch_id}: instruction must be a non-empty string")
             executor = task.get("assigned_executor")
             if executor not in VALID_EXECUTORS:
-                errors.append(f"{batch_id}: invalid assigned_executor {executor!r}")
+                errors.append(invalid_enum_error(f"{batch_id}: assigned_executor", executor, VALID_EXECUTORS))
             files = task.get("affected_files")
             if files is None:
                 files = task.get("files_to_modify")
@@ -1486,7 +1621,10 @@ def check_segment_ownership(task_dir: Path, segment_id: str, files: Iterable[str
                     rel_to_task = None
                 if rel_to_task is not None and rel_to_task.startswith("evidence/"):
                     continue
-                if file_path not in allowed:
+                if not any(
+                    files_expected_entry_matches(entry, str(file_path))
+                    for entry in allowed
+                ):
                     violations.append(str(file_path))
             return violations
     raise ValueError(f"Unknown segment id: {segment_id}")

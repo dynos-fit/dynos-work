@@ -580,6 +580,9 @@ class TestBinDynosUnchanged:
         "plan",
         "patterns",
         "ctl",
+        # D4 (permissions-on): generic helper-script funnel so skill prose
+        # never needs PYTHONPATH=... python3 incantations.
+        "hook",
         "postmortem",
         "registry",
         "calibration",

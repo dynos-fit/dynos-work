@@ -46,6 +46,7 @@ from lib_receipts import (
     receipt_spawn_budget_resumed,
     receipt_spec_validated,
     receipt_executor_routing,
+    write_receipt,
 )
 from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, validate_task_artifacts
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
@@ -278,7 +279,22 @@ def _write_ctl_json(task_dir: Path, path: Path, payload: dict) -> None:
 
 
 def _read_json_input(path: str) -> dict:
-    payload = load_json(Path(path).resolve())
+    """Load a JSON-object payload from a file path, or from stdin when '-'.
+
+    The stdin form (`--from -`) exists so skills can pipe an LLM-returned
+    payload straight into the ctl wrapper via a heredoc instead of staging it
+    at a raw filesystem path the write policy would have to sanction
+    (D1 in docs/permissions-on-design.md). Validation, normalization, and the
+    atomic policy-checked write downstream are identical for both forms.
+    """
+    if path == "-":
+        raw = sys.stdin.read()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"stdin payload is not valid JSON: {exc}") from exc
+    else:
+        payload = load_json(Path(path).resolve())
     if not isinstance(payload, dict):
         raise ValueError("input payload must be a JSON object")
     return payload
@@ -349,6 +365,35 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
             reason = raw.get("no_op_reason")
             if isinstance(reason, str) and reason.strip():
                 normalized["no_op_reason"] = reason
+        # verify_commands (D6): deterministic verification commands declared
+        # at planning time and locked by the plan-approval gate. Executed by
+        # `ctl run-verification-evidence`, never by prompt logic.
+        verify_commands: list[dict] = []
+        seen_vc_ids: set[str] = set()
+        for entry in raw.get("verify_commands", []) or []:
+            if not isinstance(entry, dict):
+                raise ValueError("verify_commands entries must be objects")
+            vc_id = str(entry.get("id", "")).strip()
+            command = str(entry.get("command", "")).strip()
+            if not vc_id or not command:
+                raise ValueError(
+                    "verify_commands entries require non-empty 'id' and 'command'"
+                )
+            if vc_id in seen_vc_ids:
+                raise ValueError(f"duplicate verify_commands id: {vc_id}")
+            seen_vc_ids.add(vc_id)
+            vc: dict = {"id": vc_id, "command": command}
+            vc_criteria: list[int] = []
+            for crit in entry.get("criteria_ids", []) or []:
+                try:
+                    vc_criteria.append(int(crit))
+                except (TypeError, ValueError):
+                    continue
+            if vc_criteria:
+                vc["criteria_ids"] = vc_criteria
+            verify_commands.append(vc)
+        if verify_commands:
+            normalized["verify_commands"] = verify_commands
         normalized_segments.append(normalized)
     return {"task_id": task_dir.name, "segments": normalized_segments}
 
@@ -2202,19 +2247,168 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
 _STAMP_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "backend-executor", "ui-executor", "testing-executor", "integration-executor",
     "ml-executor", "db-executor", "refactor-executor", "docs-executor",
-    "planning", "execute-inline", "repair-coordinator",
+    "planning", "execute-inline", "repair-coordinator", "investigator",
     "audit-spec-completion", "audit-security", "audit-code-quality",
     "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui",
     "audit-claude-md",
 })
 
 
+def cmd_run_start_init(args: argparse.Namespace) -> int:
+    """Initialize a new task deterministically (D4).
+
+    Replaces start-skill Step 0's six hand-run actions: .dynos creation,
+    silent registration + daemon ensure, task-id generation, raw-input.md,
+    the initial manifest.json, and execution-log.md. The manifest moves
+    from agent-write to ctl-write — strictly tighter than before.
+
+    The task description arrives via --description, or stdin when
+    `--description -` (heredoc-friendly for long inputs).
+    """
+    import time as _time
+
+    root = Path(args.root or ".").resolve()
+    description = args.description or ""
+    if description == "-":
+        description = sys.stdin.read()
+    description = description.strip()
+    if not description:
+        print("run-start-init: a non-empty task description is required", file=sys.stderr)
+        return 1
+
+    dynos_dir = root / ".dynos"
+    dynos_dir.mkdir(parents=True, exist_ok=True)
+
+    # Best-effort registration + daemon (idempotent, silent — failure here
+    # must never block task creation).
+    hooks_dir = Path(__file__).resolve().parent
+    import subprocess as _subprocess
+    for helper_cmd in (
+        [sys.executable, str(hooks_dir / "registry.py"), "register", str(root)],
+        [sys.executable, str(hooks_dir / "daemon.py"), "ensure", "--root", str(root)],
+    ):
+        try:
+            _subprocess.run(helper_cmd, capture_output=True, timeout=30, check=False)
+        except Exception:
+            pass
+
+    today = _time.strftime("%Y%m%d", _time.gmtime())
+    seq = 1
+    for existing in sorted(dynos_dir.glob(f"task-{today}-*")):
+        suffix = existing.name.rsplit("-", 1)[-1]
+        if suffix.isdigit():
+            seq = max(seq, int(suffix) + 1)
+    task_id = f"task-{today}-{seq:03d}"
+    task_dir = dynos_dir / task_id
+    task_dir.mkdir()
+
+    input_type = args.input_type or "text"
+    manifest = {
+        "task_id": task_id,
+        "created_at": now_iso(),
+        "title": description[:80],
+        "raw_input": description,
+        "input_type": input_type,
+        "stage": "FOUNDRY_INITIALIZED",
+        "classification": None,
+        "retry_counts": {},
+        "blocked_reason": None,
+        "completed_at": None,
+    }
+    _write_ctl_json(task_dir, task_dir / "manifest.json", manifest)
+
+    for filename, content in (
+        ("raw-input.md", description + "\n"),
+        ("execution-log.md", f"{now_iso()} [INIT] {task_id} created\n"),
+    ):
+        target = task_dir / filename
+        require_write_allowed(
+            WriteAttempt(
+                role=_WRITE_ROLE,
+                task_dir=task_dir,
+                path=target,
+                operation="create",
+                source=_WRITE_ROLE,
+            ),
+            capability_key=_get_capability_key(_WRITE_ROLE),
+        )
+        target.write_text(content, encoding="utf-8")
+
+    print(json.dumps({
+        "status": "task_initialized",
+        "task_id": task_id,
+        "task_dir": str(task_dir),
+        "stage": "FOUNDRY_INITIALIZED",
+        "input_type": input_type,
+    }, indent=2))
+    return 0
+
+
+def cmd_tdd_receipt(args: argparse.Namespace) -> int:
+    """Write the TDD receipt deterministically (replaces the inline-python
+    snippet the start skill used to prescribe)."""
+    from lib_receipts import receipt_tdd_tests
+
+    task_dir = Path(args.task_dir).resolve()
+    evidence_path = task_dir / "evidence" / "tdd-tests.md"
+    if not evidence_path.is_file():
+        print(f"tdd-receipt: evidence file missing: {evidence_path}", file=sys.stderr)
+        return 1
+    test_files = [p for p in (args.test_file or []) if p.strip()]
+    if not test_files:
+        print("tdd-receipt: at least one --test-file is required", file=sys.stderr)
+        return 1
+    try:
+        receipt_tdd_tests(
+            task_dir=task_dir,
+            test_file_paths=test_files,
+            tests_evidence_sha256=hash_file(evidence_path),
+            tokens_used=int(args.tokens_used or 0),
+            model_used=args.model or "unknown",
+        )
+    except Exception as exc:
+        print(f"tdd-receipt: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"status": "tdd_receipt_written", "task_dir": str(task_dir)}, indent=2))
+    return 0
+
+
+def _validated_grant_role(command: str, raw_role: str | None) -> str | None:
+    """Shared allowlist validation for stamp-role / grant-role."""
+    role = (raw_role or "").strip()
+    if not role:
+        print(f"{command}: --role is required and must be non-empty", file=sys.stderr)
+        return None
+    if role not in _STAMP_ROLE_ALLOWLIST:
+        print(
+            f"{command}: refused — role {role!r} is not in the role "
+            f"allowlist; permitted values: {sorted(_STAMP_ROLE_ALLOWLIST)}",
+            file=sys.stderr,
+        )
+        return None
+    return role
+
+
+def _append_role_grant(task_dir: Path, role: str) -> dict:
+    """Append a pending grant to the per-actor ledger (D3) via the
+    policy-checked ctl writer."""
+    import actor_identity
+
+    def _ctl_writer(path: Path, data: object) -> None:
+        _write_ctl_json(task_dir, path, data)
+
+    return actor_identity.append_grant(task_dir, role, write_json_fn=_ctl_writer)
+
+
 def cmd_stamp_role(args: argparse.Namespace) -> int:
-    """Write the executor role to active-segment-role under role=ctl.
+    """Write the executor role to active-segment-role under role=ctl,
+    AND append a matching grant to the per-actor ledger (D3).
 
     Replaces the legacy `printf '%s' "{role}" > active-segment-role` pattern.
-    Validates the role string against the allowlist. Forgery defense for
-    audit-* claims is enforced downstream at receipt_audit_done, which
+    Validates the role string against the allowlist. The legacy role file is
+    kept for sessions without an orchestrator pin (pre-D3 fallback); pinned
+    sessions resolve subagent roles from the grant ledger. Forgery defense
+    for audit-* claims is enforced downstream at receipt_audit_done, which
     cross-checks against spawn-log.jsonl — see task-20260430-005.
     """
     task_dir = Path(args.task_dir).resolve()
@@ -2222,17 +2416,8 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
         print(f"stamp-role: task_dir does not exist: {task_dir}", file=sys.stderr)
         return 1
 
-    role = (args.role or "").strip()
-    if not role:
-        print("stamp-role: --role is required and must be non-empty", file=sys.stderr)
-        return 1
-
-    if role not in _STAMP_ROLE_ALLOWLIST:
-        print(
-            f"stamp-role: refused — role {role!r} is not in the role "
-            f"allowlist; permitted values: {sorted(_STAMP_ROLE_ALLOWLIST)}",
-            file=sys.stderr,
-        )
+    role = _validated_grant_role("stamp-role", args.role)
+    if role is None:
         return 1
 
     role_file = task_dir / "active-segment-role"
@@ -2242,7 +2427,91 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
         print(f"stamp-role: failed to write {role_file}: {exc}", file=sys.stderr)
         return 1
 
-    print(json.dumps({"status": "role_stamped", "path": str(role_file), "role": role}, indent=2))
+    try:
+        _append_role_grant(task_dir, role)
+    except Exception as exc:
+        print(f"stamp-role: failed to append role grant: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps({
+        "status": "role_stamped",
+        "path": str(role_file),
+        "role": role,
+        "grant_appended": True,
+    }, indent=2))
+    return 0
+
+
+def cmd_grant_role(args: argparse.Namespace) -> int:
+    """Append a single-use role grant for the NEXT subagent spawn (D3).
+
+    The grant is consumed by the first tool call of the first unbound
+    session that appears; the binding is immutable for that session's
+    lifetime. Grants expire unconsumed after the TTL. Unlike stamp-role this
+    does not touch the legacy active-segment-role file.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    if not task_dir.is_dir():
+        print(f"grant-role: task_dir does not exist: {task_dir}", file=sys.stderr)
+        return 1
+
+    role = _validated_grant_role("grant-role", args.role)
+    if role is None:
+        return 1
+
+    try:
+        grant = _append_role_grant(task_dir, role)
+    except Exception as exc:
+        print(f"grant-role: failed to append role grant: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps({
+        "status": "role_granted",
+        "role": role,
+        "expires_at": grant.get("expires_at"),
+    }, indent=2))
+    return 0
+
+
+def cmd_clear_role(args: argparse.Namespace) -> int:
+    """Expire all unconsumed grants and remove the legacy role file.
+
+    This is the sanctioned replacement for the (policy-denied)
+    `rm active-segment-role` step the skills used to prescribe. Clearing
+    only ever REDUCES privilege: existing session bindings are untouched
+    (a running subagent keeps its role), no new role can be minted here.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    if not task_dir.is_dir():
+        print(f"clear-role: task_dir does not exist: {task_dir}", file=sys.stderr)
+        return 1
+
+    import actor_identity
+
+    def _ctl_writer(path: Path, data: object) -> None:
+        _write_ctl_json(task_dir, path, data)
+
+    try:
+        expired = actor_identity.expire_grants(task_dir, write_json_fn=_ctl_writer)
+    except Exception as exc:
+        print(f"clear-role: failed to expire grants: {exc}", file=sys.stderr)
+        return 1
+
+    role_file = task_dir / "active-segment-role"
+    removed = False
+    if role_file.is_file():
+        try:
+            role_file.unlink()
+            removed = True
+        except OSError as exc:
+            print(f"clear-role: failed to remove {role_file}: {exc}", file=sys.stderr)
+            return 1
+
+    print(json.dumps({
+        "status": "role_cleared",
+        "grants_expired": expired,
+        "legacy_role_file_removed": removed,
+    }, indent=2))
     return 0
 
 
@@ -2524,7 +2793,26 @@ def _verify_git_diff_covers_files(
         if stripped:
             covered.add(stripped)
 
-    return [f for f in files_expected if f not in covered]
+    return [f for f in files_expected if not _entry_covered(f, covered)]
+
+
+def _entry_covered(entry: str, covered: set[str]) -> bool:
+    """Match a files_expected entry against covered diff paths (D7-2).
+
+    - trailing '/'  -> directory prefix: any covered path under it counts
+    - glob chars    -> path-aware glob against every covered path
+    - plain entry   -> exact membership (original behavior)
+
+    The proof source is unchanged (git diff + untracked listing); a
+    directory or glob entry that matches NOTHING in the diff still fails.
+    """
+    if entry in covered:
+        return True
+    if entry.endswith("/") or any(ch in entry for ch in "*?["):
+        from lib_validate import files_expected_entry_matches
+
+        return any(files_expected_entry_matches(entry, path) for path in covered)
+    return False
 
 
 def _segment_runtime_state(
@@ -2658,11 +2946,16 @@ def _segment_runtime_state(
     }
 
 
-def _compute_execution_batch_payload(task_dir: Path) -> dict:
+def _compute_execution_batch_payload(
+    task_dir: Path, expected_stages: frozenset[str] = frozenset({"EXECUTION"})
+) -> dict:
     manifest = _load_manifest(task_dir)
     stage = manifest.get("stage")
-    if stage != "EXECUTION":
-        raise ValueError(f"unexpected stage for execution batch planning: {stage}")
+    if stage not in expected_stages:
+        raise ValueError(
+            f"unexpected stage for execution batch planning: {stage} "
+            f"(expected one of: {', '.join(sorted(expected_stages))})"
+        )
 
     root = _root_for_task_dir(task_dir)
     graph_segments = _load_graph_segments(task_dir)
@@ -4792,6 +5085,102 @@ def cmd_run_rules_check(args: argparse.Namespace) -> int:
         return 1
 
 
+def _verify_execution_evidence(task_dir: Path, cached_ids: set[str]) -> tuple[list[str], list[str]]:
+    """Shared evidence verification: returns (errors, verified) line lists.
+
+    Checks every non-cached segment has a non-empty evidence file and that
+    every files_expected entry exists on disk. Used by both
+    run-execution-verify-evidence and run-execution-finish so the
+    EXECUTION -> TEST_EXECUTION gate cannot pass without evidence
+    (D7-1 in docs/permissions-on-design.md).
+    """
+    root = _root_for_task_dir(task_dir)
+    graph_path = task_dir / "execution-graph.json"
+    if not graph_path.exists():
+        return ["execution-graph.json not found"], []
+
+    graph = load_json(graph_path)
+    segments = graph.get("segments", []) if isinstance(graph, dict) else []
+    if not isinstance(segments, list):
+        segments = []
+
+    errors: list[str] = []
+    verified: list[str] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        seg_id = str(seg.get("id", "") or "")
+        if not seg_id:
+            continue
+        if seg_id in cached_ids:
+            verified.append(f"{seg_id}: cached (evidence reused)")
+            continue
+
+        evidence_path = task_dir / "evidence" / f"{seg_id}.md"
+        if not evidence_path.exists():
+            errors.append(f"{seg_id}: evidence file missing at {evidence_path}")
+            continue
+        content = evidence_path.read_text(errors="ignore").strip()
+        if not content:
+            errors.append(f"{seg_id}: evidence file is empty at {evidence_path}")
+            continue
+
+        for expected_file in (seg.get("files_expected") or []):
+            if not isinstance(expected_file, str) or not expected_file.strip():
+                continue
+            entry = expected_file.strip()
+            # D7-2: directory entries ("dir/") must exist as directories;
+            # glob entries must match at least one path; plain entries must
+            # exist as before.
+            if entry.endswith("/"):
+                if not (root / entry).is_dir():
+                    errors.append(f"{seg_id}: files_expected directory missing on disk: {expected_file}")
+            elif any(ch in entry for ch in "*?["):
+                try:
+                    matched = next(iter(root.glob(entry)), None)
+                except (ValueError, NotImplementedError):
+                    matched = None
+                if matched is None:
+                    errors.append(f"{seg_id}: files_expected glob matched nothing on disk: {expected_file}")
+            elif not (root / entry).exists():
+                errors.append(f"{seg_id}: files_expected entry missing on disk: {expected_file}")
+
+        # D6: segments that declare verify_commands must have a passing
+        # machine-captured verification record before execution can finish.
+        declared = seg.get("verify_commands") or []
+        if declared:
+            record_path = task_dir / "evidence" / "verification" / f"{seg_id}.json"
+            if not record_path.exists():
+                errors.append(
+                    f"{seg_id}: verification evidence missing — run "
+                    f"`ctl.py run-verification-evidence` (expected {record_path})"
+                )
+            else:
+                record = load_json(record_path)
+                results = record.get("results", []) if isinstance(record, dict) else []
+                recorded = {
+                    str(r.get("id")): r for r in results if isinstance(r, dict)
+                }
+                for vc in declared:
+                    vc_id = str(vc.get("id"))
+                    entry = recorded.get(vc_id)
+                    if entry is None:
+                        errors.append(
+                            f"{seg_id}: verification record missing command {vc_id!r} — re-run run-verification-evidence"
+                        )
+                    elif str(entry.get("command")) != str(vc.get("command")):
+                        errors.append(
+                            f"{seg_id}: verification record for {vc_id!r} captured a different command than the approved graph — re-run run-verification-evidence"
+                        )
+                    elif entry.get("exit_code") != 0:
+                        errors.append(
+                            f"{seg_id}: verification command {vc_id!r} failed (exit {entry.get('exit_code')}) — fix and re-run run-verification-evidence"
+                        )
+
+        verified.append(f"{seg_id}: ok")
+    return errors, verified
+
+
 def cmd_run_execution_finish(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -4810,6 +5199,21 @@ def cmd_run_execution_finish(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
+        # Evidence gate: finish must not advance the stage when evidence is
+        # missing — the transition itself is the proof boundary, so the
+        # verification runs INSIDE the gate, not as a separate later step.
+        cached_ids = set(payload.get("cached_segments", []))
+        errors, verified = _verify_execution_evidence(task_dir, cached_ids)
+        if errors:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": f"{len(errors)} evidence verification failure(s)",
+                "failures": errors,
+                "verified": verified,
+            }, indent=2))
+            return 1
+
         _, manifest = transition_task(task_dir, "TEST_EXECUTION")
         print(json.dumps({
             "status": "test_execution_ready",
@@ -4817,6 +5221,7 @@ def cmd_run_execution_finish(args: argparse.Namespace) -> int:
             "stage": manifest.get("stage"),
             "completed_segments": payload["completed_segments"],
             "cached_segments": payload["cached_segments"],
+            "segments_verified": len(verified),
         }, indent=2))
         return 0
     except Exception as exc:
@@ -4825,7 +5230,7 @@ def cmd_run_execution_finish(args: argparse.Namespace) -> int:
 
 
 def cmd_run_execution_verify_evidence(args: argparse.Namespace) -> int:
-    """Deterministically verify evidence files and files_expected before Step 5 completion.
+    """Deterministically verify evidence files and files_expected.
 
     Checks:
     1. Each non-cached segment has a non-empty evidence file at evidence/{seg-id}.md.
@@ -4833,59 +5238,20 @@ def cmd_run_execution_verify_evidence(args: argparse.Namespace) -> int:
 
     Exits non-zero and prints a JSON error payload if any check fails.
     This replaces the model's narrative completion judgment in execute Step 5.
+
+    Legal at EXECUTION *and* TEST_EXECUTION: run-execution-finish performs
+    the same verification inside the stage gate, so the standalone command
+    is a re-runnable confirmation, not the gate itself. (It previously
+    hard-errored after finish advanced the stage — P0-e in
+    docs/permissions-on-design.md.)
     """
     task_dir = Path(args.task_dir).resolve()
-    root = _root_for_task_dir(task_dir)
     try:
-        graph_path = task_dir / "execution-graph.json"
-        if not graph_path.exists():
-            print(json.dumps({
-                "status": "blocked",
-                "task_dir": str(task_dir),
-                "error": "execution-graph.json not found",
-            }, indent=2))
-            return 1
-
-        graph = load_json(graph_path)
-        segments = graph.get("segments", []) if isinstance(graph, dict) else []
-        if not isinstance(segments, list):
-            segments = []
-
-        batch_payload = _compute_execution_batch_payload(task_dir)
+        batch_payload = _compute_execution_batch_payload(
+            task_dir, expected_stages=frozenset({"EXECUTION", "TEST_EXECUTION"})
+        )
         cached_ids = set(batch_payload.get("cached_segments", []))
-
-        errors: list[str] = []
-        verified: list[str] = []
-
-        for seg in segments:
-            if not isinstance(seg, dict):
-                continue
-            seg_id = str(seg.get("id", "") or "")
-            if not seg_id:
-                continue
-            if seg_id in cached_ids:
-                verified.append(f"{seg_id}: cached (evidence reused)")
-                continue
-
-            # Check evidence file.
-            evidence_path = task_dir / "evidence" / f"{seg_id}.md"
-            if not evidence_path.exists():
-                errors.append(f"{seg_id}: evidence file missing at {evidence_path}")
-                continue
-            content = evidence_path.read_text(errors="ignore").strip()
-            if not content:
-                errors.append(f"{seg_id}: evidence file is empty at {evidence_path}")
-                continue
-
-            # Check files_expected exist on disk.
-            for expected_file in (seg.get("files_expected") or []):
-                if not isinstance(expected_file, str) or not expected_file.strip():
-                    continue
-                fpath = root / expected_file.strip()
-                if not fpath.exists():
-                    errors.append(f"{seg_id}: files_expected entry missing on disk: {expected_file}")
-
-            verified.append(f"{seg_id}: ok")
+        errors, verified = _verify_execution_evidence(task_dir, cached_ids)
 
         if errors:
             print(json.dumps({
@@ -4907,6 +5273,134 @@ def cmd_run_execution_verify_evidence(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
+    """Execute plan-declared verify_commands and capture machine evidence (D6).
+
+    For every segment declaring `verify_commands` in execution-graph.json
+    (wrapper-written, human-approved at the plan gate), runs each command and
+    captures exit code + output tails into the ctl-owned artifact
+    `evidence/verification/{seg-id}.json`, then writes a receipt embedding
+    the artifact's sha256.
+
+    Anti-trust-me-bro property: the auditor reads THIS artifact instead of
+    accepting the executor's narrative claim that "ruff exits 0". Executors
+    cannot write or doctor it (write_policy denies evidence/verification/
+    for executor roles); the commands come only from the approved graph, so
+    an executor cannot substitute `exit 0` at audit time.
+    """
+    import subprocess as _subprocess
+    import time as _time
+
+    task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
+
+    try:
+        graph = load_json(task_dir / "execution-graph.json")
+    except Exception as exc:
+        print(f"run-verification-evidence: cannot read execution-graph.json: {exc}", file=sys.stderr)
+        return 1
+    segments = graph.get("segments", []) if isinstance(graph, dict) else []
+
+    targets: list[dict] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        seg_id = str(seg.get("id", "") or "")
+        if args.segment and seg_id != args.segment:
+            continue
+        if seg.get("verify_commands"):
+            targets.append(seg)
+    if args.segment and not targets:
+        print(
+            f"run-verification-evidence: segment {args.segment!r} not found "
+            "or declares no verify_commands",
+            file=sys.stderr,
+        )
+        return 1
+
+    timeout_s = int(args.timeout or 300)
+    tail_bytes = 8192
+    summary: list[dict] = []
+    any_failed = False
+
+    for seg in targets:
+        seg_id = str(seg.get("id"))
+        records: list[dict] = []
+        all_passed = True
+        for vc in seg.get("verify_commands", []):
+            command = str(vc.get("command", ""))
+            started = _time.monotonic()
+            try:
+                proc = _subprocess.run(
+                    ["bash", "-c", command],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s,
+                    check=False,
+                )
+                exit_code: int | None = proc.returncode
+                stdout_tail = proc.stdout[-tail_bytes:]
+                stderr_tail = proc.stderr[-tail_bytes:]
+                timed_out = False
+            except _subprocess.TimeoutExpired as exc:
+                exit_code = None
+                stdout_tail = (exc.stdout or "")[-tail_bytes:] if isinstance(exc.stdout, str) else ""
+                stderr_tail = (exc.stderr or "")[-tail_bytes:] if isinstance(exc.stderr, str) else ""
+                timed_out = True
+            duration_ms = int((_time.monotonic() - started) * 1000)
+            passed = exit_code == 0
+            if not passed:
+                all_passed = False
+            records.append({
+                "id": str(vc.get("id")),
+                "command": command,
+                "criteria_ids": list(vc.get("criteria_ids", []) or []),
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "duration_ms": duration_ms,
+                "stdout_tail": stdout_tail,
+                "stderr_tail": stderr_tail,
+                "passed": passed,
+            })
+
+        artifact = {
+            "segment_id": seg_id,
+            "captured_at": now_iso(),
+            "all_passed": all_passed,
+            "results": records,
+        }
+        artifact_path = task_dir / "evidence" / "verification" / f"{seg_id}.json"
+        _write_ctl_json(task_dir, artifact_path, artifact)
+        artifact_sha = hash_file(artifact_path)
+        write_receipt(
+            task_dir,
+            f"verification-evidence-{seg_id}",
+            artifact_sha256=artifact_sha,
+            command_count=len(records),
+            all_passed=all_passed,
+        )
+        if not all_passed:
+            any_failed = True
+        summary.append({
+            "segment_id": seg_id,
+            "all_passed": all_passed,
+            "commands": len(records),
+            "artifact": str(artifact_path),
+            "artifact_sha256": artifact_sha,
+        })
+
+    print(json.dumps({
+        "status": "verification_failed" if any_failed else "verification_captured",
+        "task_dir": str(task_dir),
+        "segments": summary,
+    }, indent=2))
+    return 1 if any_failed else 0
 
 
 def cmd_run_repair_execution_ready(args: argparse.Namespace) -> int:
@@ -6220,6 +6714,33 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register planning-stage subcommands: run-start-classification, run-spec-ready,
     run-planning-mode, run-planning, run-plan-audit, plan-validated-receipt,
     plan-audit-receipt, planner-receipt."""
+    run_start_init_parser = subparsers.add_parser(
+        "run-start-init",
+        help="Initialize a new task: .dynos, registration, task id, raw-input.md, manifest, execution log (D4)",
+    )
+    run_start_init_parser.add_argument("--root", default=".", help="Project root (default: cwd)")
+    run_start_init_parser.add_argument(
+        "--description", required=True,
+        help="Task description, or '-' to read it from stdin",
+    )
+    run_start_init_parser.add_argument(
+        "--input-type", choices=["text", "prd", "wireframe", "mixed"], default="text",
+    )
+    run_start_init_parser.set_defaults(func=cmd_run_start_init)
+
+    tdd_receipt_parser = subparsers.add_parser(
+        "tdd-receipt",
+        help="Write the TDD-tests receipt deterministically from on-disk evidence",
+    )
+    tdd_receipt_parser.add_argument("task_dir")
+    tdd_receipt_parser.add_argument(
+        "--test-file", action="append", default=[],
+        help="Test file path written this run (repeatable)",
+    )
+    tdd_receipt_parser.add_argument("--tokens-used", type=int, default=0)
+    tdd_receipt_parser.add_argument("--model", default="unknown")
+    tdd_receipt_parser.set_defaults(func=cmd_tdd_receipt)
+
     run_start_classification_parser = subparsers.add_parser(
         "run-start-classification",
         help="Validate classification, apply fast-track, and advance to SPEC_NORMALIZATION when ready",
@@ -6362,6 +6883,15 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_execution_verify_evidence_parser.add_argument("task_dir")
     run_execution_verify_evidence_parser.set_defaults(func=cmd_run_execution_verify_evidence)
+
+    run_verification_parser = subparsers.add_parser(
+        "run-verification-evidence",
+        help="Execute plan-declared verify_commands and capture exit codes/output into ctl-owned evidence (D6)",
+    )
+    run_verification_parser.add_argument("task_dir")
+    run_verification_parser.add_argument("--segment", help="Limit to one segment id")
+    run_verification_parser.add_argument("--timeout", type=int, default=300, help="Per-command timeout in seconds")
+    run_verification_parser.set_defaults(func=cmd_run_verification_evidence)
 
     ownership_parser = subparsers.add_parser("check-ownership", help="Check that files belong to a segment")
     ownership_parser.add_argument("task_dir")
@@ -6530,7 +7060,7 @@ def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Validate, normalize, and atomically write repair-log.json",
     )
     repair_write_parser.add_argument("task_dir")
-    repair_write_parser.add_argument("--from", dest="from_path", required=True)
+    repair_write_parser.add_argument("--from", dest="from_path", required=True, help="payload JSON file path, or '-' to read from stdin")
     repair_write_parser.set_defaults(func=cmd_write_repair_log)
 
 
@@ -6542,7 +7072,7 @@ def register_artifact_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Validate, normalize, and atomically write execution-graph.json",
     )
     graph_write_parser.add_argument("task_dir")
-    graph_write_parser.add_argument("--from", dest="from_path", required=True)
+    graph_write_parser.add_argument("--from", dest="from_path", required=True, help="payload JSON file path, or '-' to read from stdin")
     graph_write_parser.set_defaults(func=cmd_write_execution_graph)
 
     classification_write_parser = subparsers.add_parser(
@@ -6550,7 +7080,7 @@ def register_artifact_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Validate, normalize, and atomically write classification.json plus synced manifest state",
     )
     classification_write_parser.add_argument("task_dir")
-    classification_write_parser.add_argument("--from", dest="from_path", required=True)
+    classification_write_parser.add_argument("--from", dest="from_path", required=True, help="payload JSON file path, or '-' to read from stdin")
     classification_write_parser.set_defaults(func=cmd_write_classification)
 
     record_snapshot_parser = subparsers.add_parser(
@@ -6615,11 +7145,26 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     validate-chain, list-pending, approve, stats-dora, stats-usage, bus, calibration, config."""
     stamp_role_parser = subparsers.add_parser(
         "stamp-role",
-        help="Stamp the active-segment-role file under role=ctl (refuses audit-* roles)",
+        help="Stamp the legacy active-segment-role file AND append a role grant (allowlist enforced)",
     )
     stamp_role_parser.add_argument("task_dir")
-    stamp_role_parser.add_argument("--role", required=True, help="Executor role to stamp (allowlist enforced)")
+    stamp_role_parser.add_argument("--role", required=True, help="Role to stamp/grant (allowlist enforced)")
     stamp_role_parser.set_defaults(func=cmd_stamp_role)
+
+    grant_role_parser = subparsers.add_parser(
+        "grant-role",
+        help="Append a single-use role grant for the next subagent spawn (allowlist enforced)",
+    )
+    grant_role_parser.add_argument("task_dir")
+    grant_role_parser.add_argument("--role", required=True, help="Role to grant (allowlist enforced)")
+    grant_role_parser.set_defaults(func=cmd_grant_role)
+
+    clear_role_parser = subparsers.add_parser(
+        "clear-role",
+        help="Expire unconsumed role grants and remove the legacy role file (privilege-reducing)",
+    )
+    clear_role_parser.add_argument("task_dir")
+    clear_role_parser.set_defaults(func=cmd_clear_role)
 
     run_audit_reflect_parser = subparsers.add_parser(
         "run-audit-reflect",

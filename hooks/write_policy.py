@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -86,6 +87,8 @@ _CONTROL_PLANE_EXACT = frozenset({
     "events.jsonl",
     "spawn-log.jsonl",
     "audit-grep-quota.json",
+    "role-grants.json",
+    "role-bindings.json",
 })
 
 _WRAPPER_REQUIRED = {
@@ -96,9 +99,13 @@ _WRAPPER_REQUIRED = {
     # pre_tool_use call. If an agent could write it directly, it could elevate
     # itself to audit-* and unlock audit-reports/ writes, which is exactly the
     # primitive the 2026-04-30 audit-chain forgery incident exploited. The
-    # stamp-role wrapper enforces an executor-role allowlist (audit-* roles
-    # cannot be stamped — auditors must come from a real Agent-tool spawn).
+    # stamp-role wrapper enforces a role allowlist; the real forgery defense
+    # for audit-* claims is the spawn-log cross-check at receipt time.
     "active-segment-role": "python3 hooks/ctl.py stamp-role <task_dir> --role <role>",
+    # role-grants.json is the per-actor grant ledger (D3). Same elevation
+    # primitive as active-segment-role: only the ctl wrapper may append
+    # grants, and the wrapper enforces the role allowlist.
+    "role-grants.json": "python3 hooks/ctl.py grant-role <task_dir> --role <role>",
 }
 
 
@@ -134,6 +141,17 @@ def is_control_plane_path(path: Path, task_dir: Path | None) -> bool:
 
 
 def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]:
+    if role == "orchestrator":
+        return [
+            ".dynos/task-*/_scratch/**",
+            ".dynos/task-*/execution-log.md",
+            ".dynos/task-*/escalation.md",
+            ".dynos/task-*/audit-context.md",
+            ".dynos/task-*/raw-input.md",
+            ".dynos/task-*/discovery-notes.md",
+            ".dynos/task-*/design-decisions.md",
+            "repo files only during inline fast-track EXECUTION",
+        ]
     if _matches_role(role, "planning"):
         return [
             ".dynos/task-*/discovery-notes.md",
@@ -180,14 +198,172 @@ def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]:
     return []
 
 
+# Device sinks: writing here persists nothing, so no boundary applies.
+# Skill steps legitimately use `2>/dev/null`; denying a sink only produces
+# noise and teaches users that denials are arbitrary.
+_DEVICE_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"})
+
+# Roles that may use the task-scoped scratch namespace. _scratch/ is
+# deliberately excluded from every receipt, gate, and validator read path
+# (asserted by tests/test_scratch_namespace.py), so a scratch write can never
+# certify or forge anything — it is temp space inside the task boundary.
+_SCRATCH_ROLES = frozenset({
+    "orchestrator", "planning", "execute-inline", "repair-coordinator",
+})
+
+
+def _scratch_allowed_for(role: str) -> bool:
+    return (
+        role in _SCRATCH_ROLES
+        or role.endswith("-executor")
+        or role.startswith("audit-")
+    )
+
+
+# --- H1 self-modification guard (docs/permissions-on-design.md §D5-3) -------
+# Executor roles may write repo work artifacts anywhere, which historically
+# included the *installed plugin directory itself* — hooks.json, this file,
+# ctl.py. That is the "agent disables its own guardrails" primitive. Agent
+# roles are therefore denied writes under the plugin root and under the
+# host-level config locations that control hook execution.
+#
+# Developer mode: when the project being worked on IS the plugin source repo
+# (its root equals the plugin root and carries .claude-plugin/), plugin files
+# are ordinary repo files reviewed by the human like any other diff — the
+# guard stands down for the plugin-root check only.
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+
+# Roles that are deterministic framework code, not LLM tool calls.
+_FRAMEWORK_ROLES = frozenset({
+    "ctl", "scheduler", "eventbus", "system", "receipt-writer", "daemon",
+})
+
+
+def _protected_host_paths() -> tuple[Path, ...]:
+    home = Path.home()
+    return (
+        home / ".claude" / "plugins",
+        home / ".claude" / "settings.json",
+        home / ".claude" / "settings.local.json",
+        home / ".dynos",
+    )
+
+
+def _is_under(path: Path, prefix: Path) -> bool:
+    try:
+        path.relative_to(prefix)
+        return True
+    except ValueError:
+        return False
+
+
+def _self_modification_denial(attempt: WriteAttempt, path: Path) -> WriteDecision | None:
+    """Return a deny decision when an agent role targets guardrail-owning paths."""
+    if attempt.role in _FRAMEWORK_ROLES:
+        return None
+    if _is_under(path, _PLUGIN_ROOT):
+        if attempt.task_dir is not None:
+            project_root = attempt.task_dir.resolve().parent.parent
+            dev_mode = (
+                project_root == _PLUGIN_ROOT
+                and (project_root / ".claude-plugin").is_dir()
+            )
+        else:
+            # No active task: developer mode iff the plugin root is a source
+            # checkout (marketplace cache installs ship without .git).
+            dev_mode = (
+                (_PLUGIN_ROOT / ".claude-plugin").is_dir()
+                and (_PLUGIN_ROOT / ".git").exists()
+            )
+        if not dev_mode:
+            return WriteDecision(
+                False,
+                "plugin installation directory is not writable by task "
+                "agents (guardrail self-modification defense)",
+                "deny",
+            )
+        return None
+    for protected in _protected_host_paths():
+        if path == protected or _is_under(path, protected):
+            return WriteDecision(
+                False,
+                f"{protected} controls harness/hook execution and is not "
+                "writable by task agents (guardrail self-modification defense)",
+                "deny",
+            )
+    return None
+
+
+# Task-root files the orchestrator authors directly: logs, escalation notes,
+# the audit-context sidecar, the raw task input, and the discovery/design Q&A
+# records it appends user answers to. spec.md / plan.md / audit-reports /
+# evidence stay out — those belong to the planner, auditors, and executors.
+_ORCHESTRATOR_TASK_FILES = frozenset({
+    "execution-log.md",
+    "escalation.md",
+    "audit-context.md",
+    "raw-input.md",
+    "discovery-notes.md",
+    "design-decisions.md",
+})
+
+
+def _orchestrator_inline_execution_active(task_dir: Path | None) -> bool:
+    """True when the orchestrator may write repo files: inline fast-track
+    execution (single segment, no subagent spawn). Capability follows the
+    deterministic state machine — stage and fast_track are set exclusively
+    by ctl gates, never by the model."""
+    if task_dir is None:
+        return False
+    try:
+        manifest = json.loads((task_dir / "manifest.json").read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return (
+        manifest.get("stage") in {"EXECUTION", "TEST_EXECUTION"}
+        and manifest.get("fast_track") is True
+    )
+
+
 def decide_write(attempt: WriteAttempt) -> WriteDecision:
     path = attempt.path.resolve()
+    if str(path) in _DEVICE_SINKS:
+        return WriteDecision(True, "device sink — not a persistence target", "direct")
+    self_mod = _self_modification_denial(attempt, path)
+    if self_mod is not None:
+        return self_mod
+    # The orchestrator-session pin is hook-owned identity state (D3): only
+    # the SessionStart hook subprocess writes it. If any agent role could
+    # rewrite or delete it, a session could re-pin itself or force the
+    # orchestrator into the grant-consuming subagent branch.
+    if path.name == "orchestrator-session.json" and path.parent.name == ".dynos":
+        return WriteDecision(
+            False,
+            "orchestrator-session.json is hook-owned actor identity; only "
+            "the SessionStart hook subprocess may write it",
+            "deny",
+        )
     if path.name == ".rules_corrupt" and path.parent.name == ".dynos":
         if attempt.role == "daemon":
             return WriteDecision(True, ".dynos/.rules_corrupt allowed for daemon role", "direct")
         return WriteDecision(False, ".dynos/.rules_corrupt is daemon-owned kill-switch state; agent writes denied", "deny")
     rel = _task_relative(path, attempt.task_dir)
     rel_posix = rel.as_posix() if rel is not None else None
+
+    # Task-scoped scratch namespace (D2 in docs/permissions-on-design.md):
+    # sanctioned temp space for any recognized actor role. Nothing in the
+    # control plane reads _scratch/, so these writes are proof-irrelevant.
+    if rel_posix is not None and (
+        rel_posix == "_scratch" or rel_posix.startswith("_scratch/")
+    ):
+        if _scratch_allowed_for(attempt.role):
+            return WriteDecision(True, "task scratch namespace", "direct")
+        return WriteDecision(
+            False,
+            f"_scratch/ is reserved for recognized task actor roles; "
+            f"role={attempt.role!r} is not one",
+            "deny",
+        )
 
     if rel_posix is not None and rel_posix in _WRAPPER_REQUIRED:
         if attempt.role == "ctl":
@@ -248,6 +424,18 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             "deny",
         )
 
+    if rel_posix == "role-bindings.json":
+        # Session->role bindings are hook-owned (the pre_tool_use subprocess
+        # writes them via direct file I/O when a subagent's first tool call
+        # consumes a grant). If an agent could write this file it could bind
+        # its own session to an arbitrary granted role out of order.
+        return WriteDecision(
+            False,
+            "role-bindings.json is hook-owned actor identity; only the "
+            "pre-tool-use hook subprocess may write it",
+            "deny",
+        )
+
     if rel_posix == "web-tool-log.jsonl":
         # web-tool-log.jsonl is hook-owned. The web-tool-log hook subprocess
         # appends to it directly via Python file I/O (bypassing this policy
@@ -277,9 +465,27 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             return WriteDecision(True, "audit report is auditor-owned evidence", "direct")
         return WriteDecision(False, "audit reports are reserved for auditor roles", "deny")
 
+    if rel_posix is not None and rel_posix.startswith("evidence/verification/"):
+        # Machine-captured verification evidence (D6): written ONLY by
+        # `ctl run-verification-evidence`. If executors could write here
+        # they could doctor the captured exit codes — the exact narrative-
+        # claim laundering this artifact exists to prevent.
+        if attempt.role == "ctl":
+            return WriteDecision(True, "verification evidence is ctl-captured", "direct")
+        return WriteDecision(
+            False,
+            "evidence/verification/ is machine-captured by "
+            "`ctl.py run-verification-evidence`; agent roles may not write it",
+            "deny",
+        )
+
     if rel_posix is not None and rel_posix.startswith("evidence/"):
         if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
             return WriteDecision(True, "evidence markdown is executor-owned", "direct")
+        if attempt.role == "orchestrator" and _orchestrator_inline_execution_active(attempt.task_dir):
+            # Inline fast-track execution: the orchestrator IS the executor
+            # for the single segment, so it writes that segment's evidence.
+            return WriteDecision(True, "inline fast-track evidence write", "direct")
         return WriteDecision(False, "evidence artifacts are reserved for executor roles", "deny")
 
     if rel_posix is None:
@@ -291,6 +497,24 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         # write repo artifacts.
         if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
             return WriteDecision(True, "repo work artifact allowed for executor role", "direct")
+        if attempt.role == "orchestrator":
+            # The orchestrator only writes repo files itself during inline
+            # fast-track execution (no subagent spawn); otherwise repo work
+            # belongs to executor subagents.
+            if _orchestrator_inline_execution_active(attempt.task_dir):
+                return WriteDecision(
+                    True,
+                    "repo work artifact allowed for orchestrator during "
+                    "inline fast-track execution",
+                    "direct",
+                )
+            return WriteDecision(
+                False,
+                "orchestrator may not write repo files outside inline "
+                "fast-track execution; spawn an executor (after "
+                "`ctl.py grant-role`) or use the task _scratch/ dir",
+                "deny",
+            )
         if attempt.role in {"scheduler", "eventbus", "system"}:
             return WriteDecision(True, "non-task system path allowed", "direct")
         if attempt.task_dir is not None:
@@ -324,6 +548,16 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
 
     if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
         return WriteDecision(True, "repo work artifact allowed for executor role", "direct")
+    if attempt.role == "orchestrator":
+        if rel_posix in _ORCHESTRATOR_TASK_FILES:
+            return WriteDecision(True, f"{rel_posix} is orchestrator-owned coordination output", "direct")
+        return WriteDecision(
+            False,
+            f"orchestrator role may not write {rel_posix}; planner/auditor/"
+            "executor artifacts are written by their subagents, control-plane "
+            "files by ctl wrappers",
+            "deny",
+        )
     if attempt.role == "planning":
         if rel_posix in {"discovery-notes.md", "design-decisions.md", "design-doc.md", "spec.md", "plan.md"}:
             return WriteDecision(True, f"{rel_posix} is planner-owned judgment output", "direct")

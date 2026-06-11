@@ -11,6 +11,35 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.4.1] - 2026-06-11
+### "Permissions-ON": The Plugin Stops Denying Its Own Pipeline
+
+A real permissions-on run (no `--dangerously-skip-permissions`, no blanket allow) showed the plugin denying actions its own skills prescribe: `/tmp` payload staging, `2>/dev/null` redirects, `rm active-segment-role`, orchestrator writes blocked by whatever role was last stamped for a subagent, and `run-execution-verify-evidence` hard-erroring after `run-execution-finish`. 7.4.1 fixes the causes per `docs/permissions-on-design.md` while tightening every guardrail it touches. Design doc: `docs/permissions-on-design.md`; spec addendum: `docs/write-boundary-spec.md`.
+
+### Added
+- **Per-actor role resolution (D3):** SessionStart pins the orchestrator session (`.dynos/orchestrator-session.json`, hook-owned); the main session always resolves to the new `orchestrator` role and never reads role files. Subagents consume single-use grants (`ctl grant-role`, ledger at `role-grants.json`, wrapper-required) bound immutably per session (`role-bindings.json`, hook-owned). `ctl clear-role` replaces the policy-denied `rm active-segment-role`. Legacy role-file resolution is preserved for unpinned sessions.
+- **Verification-evidence runner (D6):** execution-graph segments may declare `verify_commands`; `ctl run-verification-evidence` executes them and captures exit codes + output into ctl-owned `evidence/verification/{seg}.json` (executors are policy-denied from writing it), hash-bound by a receipt. `run-execution-finish` requires a passing record for every declaring segment; the spec-completion auditor cites the record instead of trusting executor narrative — execution-based acceptance criteria are now machine-verified.
+- **Task scratch namespace (D2):** `.dynos/task-*/_scratch/` is sanctioned temp space for recognized actor roles; CI asserts no gate/receipt/validator ever reads it.
+- **stdin payloads (D1):** `write-classification` / `write-execution-graph` / `write-repair-log` accept `--from -`; skills pipe LLM-returned payloads via heredoc instead of staging files.
+- **`ctl run-start-init`** replaces start Step 0's six hand-run actions (manifest moves from agent-write to ctl-write); **`ctl tdd-receipt`** replaces the inline-python receipt snippet; **`dynos hook <script>`** funnels helper scripts without `PYTHONPATH=` incantations.
+- **Self-modification guard (H1):** agent roles (including executors) can no longer write the installed plugin directory, `~/.claude/plugins/`, `~/.claude/settings*.json`, or `~/.dynos/` — closing the "agent edits its own guardrails" hole. Developer mode (plugin source repo) exempts the plugin-root check only.
+- **Prose↔policy contract test** (`tests/test_skill_prose_policy_contract.py`): extracts every fenced command block from the pipeline skills, runs the production destination extractor + `decide_write`, and fails CI on any prescribed-but-denied write, forbidden token (`/tmp`, `PYTHONPATH=`, `rm active-segment-role`, repo-relative hook calls), unregistered ctl subcommand, or read-only agent instructed to write files.
+- **Investigator dossier-only enforcement (D7-3):** the pre-tool-use hook denies investigator Grep/Glob and restricts Read to `.dynos/investigations/` + dossier-referenced files; `triage.py finalize` validates structure + citations and persists report + markdown (the read-only agent now RETURNS its JSON). Classifier gains `ci-failure` / `config-error` types.
+
+### Changed
+- **Bash write detection is quote-aware (D5):** shlex tokenization with heredoc stripping replaces raw-string regexes — `>` inside quoted prompts/JSON no longer produces false write destinations; `/dev/null` and friends are recognized sinks. Legacy regexes remain only as the fail-closed fallback for unparseable commands.
+- **Denials are self-explaining:** every write-policy denial names itself as a plugin guardrail (not a Claude Code permission), the role, the path, and the sanctioned alternative (wrapper command or `_scratch/`), with a degraded-actor diagnostic when relevant.
+- **`run-execution-finish` verifies evidence inside the stage gate** (evidence files, `files_expected`, declared verifications); `run-execution-verify-evidence` is legal at EXECUTION *and* TEST_EXECUTION (it previously hard-errored after finish — the execute Step 5 dead-end).
+- **`files_expected` supports directories (`src/pkg/`) and path-aware globs (`src/**/*.py`)** across the diff-membership check, evidence existence, ownership, and the cross-segment exclusivity rule (which got stricter: containment counts as overlap).
+- **Validator errors are self-correcting:** enum violations name the valid set with did-you-mean hints (`'ci'` → `'infra'` — `ci` is intentionally NOT a domain; `'backend'` → `'backend-executor'`). Plan Reference-Code checks only slash-containing tokens and honors a "Files to be created" section.
+- **Skill prose rewritten to the `bin/dynos` funnel:** all `python3 hooks/ctl.py` / `PYTHONPATH=...` invocations in the pipeline skills route through `"$DYNOS" ctl` / `"$DYNOS" hook`; a permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once. `hooks.json` SessionStart matcher gains `resume` so the pin survives resumed sessions.
+- Conformance fixes: `execute/SKILL.md`'s false "audit-* roles cannot be stamped" claim corrected; repair-coordinator (no Write/Bash) now returns its payload for the orchestrator to persist via stdin; security-auditor description no longer claims "Read-only" while prescribing its report write.
+
+### Plugin / Distribution
+- Bump `.claude-plugin/plugin.json` and `package.json` to `7.4.1`.
+
+---
+
 ## [7.4.0] - 2026-05-05
 ### "Wider Drain": Residual Queue Captures More Sources
 

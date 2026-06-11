@@ -52,6 +52,10 @@ After the task, it learns from what went wrong and builds prevention rules for n
 
 Just Claude Code.
 
+## Running with permissions ON
+
+The pipeline works without `--dangerously-skip-permissions`. Every deterministic step funnels through one binary — `<plugin-root>/bin/dynos` — so you can allow that single command prefix once (via the permission prompt's "don't ask again" or a `Bash(<plugin-root>/bin/dynos ...)` allow rule in your settings) and then you only interact with the decisions that are actually yours: discovery questions, spec approval, plan approval, and TDD review. Plugin guardrail denials are not Claude Code permission errors — they say so explicitly and name the sanctioned alternative. Details: `docs/write-boundary-spec.md`.
+
 ## Links
 
 - [Changelog](CHANGELOG.md)
