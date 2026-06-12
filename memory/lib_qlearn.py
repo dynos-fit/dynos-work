@@ -73,7 +73,8 @@ _DEFAULT_ACTION_SPACE: dict[str, list[str]] = {
 EXECUTOR_ACTION_SPACE = _DEFAULT_ACTION_SPACE  # module-level default
 
 VALID_ROUTE_MODES = ["generic", "learned"]
-VALID_MODELS = ["haiku", "sonnet", "opus"]
+from lib_models import ALL_TIERS as ALL_TIERS, resolve_model_for_tier as _resolve_model_for_tier  # re-export; replaces VALID_MODELS
+from lib_host import detect_host as _detect_host, get_persisted_host as _get_persisted_host
 
 # Backwards compat
 VALID_EXECUTORS = ALL_EXECUTORS
@@ -285,6 +286,28 @@ def _has_learned_agent(root: Path, executor: str, task_type: str) -> tuple[bool,
     return False, None, None
 
 
+def _resolve_host(root: Path) -> str:
+    """Return the active host: persisted value if available, else detect from environment."""
+    cp_path = _persistent_project_dir(root) / "control-plane.json"
+    return _get_persisted_host(cp_path) or _detect_host()
+
+
+def _tier_to_model_override(host: str, tier: str | None) -> tuple[str | None, bool]:
+    """Resolve a tier name to the emitted model_override value for *host*.
+
+    Returns (resolved_model_or_None, should_include_key).
+    - Under claude: resolves deep/balanced/fast to their vendor model literal (True)
+    - Under a host where tier resolves to None: returns (None, False) — caller omits key
+    - tier is None (default/disabled path): returns (None, False)
+    """
+    if tier is None:
+        return None, False
+    resolved = _resolve_model_for_tier(host, tier)
+    if resolved is None:
+        return None, False
+    return resolved, True
+
+
 def build_repair_plan(
     root: Path,
     findings: list[dict],
@@ -295,13 +318,15 @@ def build_repair_plan(
     Three sequential decisions per finding, each conditioned on the prior:
       1. Executor (restricted action space per finding category)
       2. Route mode: generic vs learned (only if learned agent exists)
-      3. Model: haiku/sonnet/opus (hard constraints override)
+      3. Model tier: fast/balanced/deep (hard constraints override)
 
     If repair_qlearning is disabled in policy.json, returns default assignments.
     """
     policy = project_policy(root)
     enabled = bool(policy.get("repair_qlearning", True))
     epsilon = float(policy.get("repair_epsilon", DEFAULT_EPSILON))
+
+    host = _resolve_host(root)
 
     executor_q = load_q_table(root, "executor") if enabled else {"entries": {}}
     route_q = load_q_table(root, "route") if enabled else {"entries": {}}
@@ -356,18 +381,19 @@ def build_repair_plan(
 
         # --- Step 3: Model (conditioned on executor + route mode) ---
         # Hard constraints first
+        from lib_models import TIER_DEEP as _TIER_DEEP_QK
         if retry_count >= ESCALATION_RETRY_THRESHOLD:
-            model = "opus"
+            model = _TIER_DEEP_QK
             model_source = "escalation"
             model_q_val = None
         elif auditor.startswith("security"):
-            model = "opus"
+            model = _TIER_DEEP_QK
             model_source = "security_floor"
             model_q_val = None
         elif enabled and executor:
             model_state = f"{base_state}:{executor}:{route_mode}"
             model, model_source = select_action(
-                model_q, model_state, VALID_MODELS, epsilon,
+                model_q, model_state, ALL_TIERS, epsilon,
             )
             model_q_val = get_q_value(model_q, model_state, model)
         else:
@@ -375,7 +401,8 @@ def build_repair_plan(
             model_source = "default"
             model_q_val = None
 
-        assignments.append({
+        resolved_model, include_model_override = _tier_to_model_override(host, model)
+        assignment: dict = {
             "finding_id": finding_id,
             "state": base_state,
             "assigned_executor": executor,
@@ -386,10 +413,12 @@ def build_repair_plan(
             "route_q_value": route_q_val if enabled else None,
             "agent_path": agent_path if route_mode == "learned" else None,
             "agent_name": agent_name if route_mode == "learned" else None,
-            "model_override": model,
             "model_source": model_source,
             "model_q_value": model_q_val,
-        })
+        }
+        if include_model_override:
+            assignment["model_override"] = resolved_model
+        assignments.append(assignment)
 
     return {
         "generated_at": now_iso(),

@@ -171,3 +171,64 @@ class TestHostUnsupportedNotUpgraded:
             assert result == model, (
                 f"_resolve_model({model!r}) must return {model!r}, got {result!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# cq-005 repair: the ENTRY path resolves the persisted host (not the helper
+# default), so the host_unsupported sentinel can actually fire under codex.
+# Added during repair phase_1 (orchestrator-direct, disclosed in
+# execution-log.md) after three executor spawns died on upstream API errors.
+# ---------------------------------------------------------------------------
+
+class TestEntryPathHostResolution:
+    def test_resolve_active_host_reads_persisted_codex(self, tmp_path: Path) -> None:
+        """cq-005: the entry-path resolver returns the persisted codex host."""
+        import json as _json
+
+        import lib_tokens_hook
+
+        dynos = tmp_path / ".dynos"
+        dynos.mkdir()
+        (dynos / "control-plane.json").write_text(_json.dumps({"host": "codex"}))
+        assert lib_tokens_hook._resolve_active_host(tmp_path) == "codex"
+
+    def test_resolve_active_host_claude_byte_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """cq-005: no control-plane.json + no env vars -> claude (pre-task behavior)."""
+        import lib_tokens_hook
+
+        monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
+        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        assert lib_tokens_hook._resolve_active_host(tmp_path) == "claude"
+
+    def test_sentinel_fires_via_entry_resolved_codex_host(self, tmp_path: Path) -> None:
+        """cq-005: with the persisted host codex, a zero-token unrecognized-model
+        transcript parses to model='host_unsupported' — driven through the same
+        (path, host) call shape the entry path now uses at its call sites."""
+        import json as _json
+
+        import lib_tokens_hook
+
+        dynos = tmp_path / ".dynos"
+        dynos.mkdir()
+        (dynos / "control-plane.json").write_text(_json.dumps({"host": "codex"}))
+        host = lib_tokens_hook._resolve_active_host(tmp_path)
+
+        transcript = tmp_path / "agent-xyz.jsonl"
+        transcript.write_text(
+            _json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "model": "gpt-5-codex",
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                }
+            )
+            + "\n"
+        )
+        result = lib_tokens_hook._parse_transcript(transcript, host=host)
+        assert result.get("model") == "host_unsupported", (
+            f"expected host_unsupported sentinel under persisted codex host, got {result!r}"
+        )

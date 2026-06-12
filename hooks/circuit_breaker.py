@@ -11,7 +11,7 @@ downgraded. Live-enforceable (EXECUTION) conditions:
 
 Audit-time (AUDITING) condition:
 
-    6. opus_auditor_zero_yield   (>= 3 opus audit spawns whose findings are [])
+    6. opus_auditor_zero_yield   (>= 3 opus audit spawns whose findings are [])  # noqa: model-literal
 
 Trust model
 -----------
@@ -65,6 +65,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+try:
+    from lib_models import resolve_model_for_tier, TIER_DEEP  # noqa: E402
+except ImportError:  # pragma: no cover — only fails in unusual environments
+    def resolve_model_for_tier(host: str, tier: str) -> Optional[str]:  # type: ignore[misc]
+        """Fallback: treat any unknown host as claude-like (opus for deep tier)."""  # noqa: model-literal
+        _FALLBACK = {"fast": "haiku", "balanced": "sonnet", "deep": "opus"}  # noqa: model-literal
+        return _FALLBACK.get(tier)
+
+    TIER_DEEP: str = "deep"  # type: ignore[assignment]
 
 
 # Resolved interpreter path — required by the repo-wide
@@ -134,7 +144,7 @@ def _token_total(
     perf-003 (this PR): caller may pass already-parsed token-usage.json
     via ``token_usage_data`` to avoid a redundant cold read on the hot
     path (check_circuit_breakers calls both _token_total AND
-    _opus_zero_yield_count, both of which previously re-parsed the file).
+    _deep_tier_zero_yield_count, both of which previously re-parsed the file).
     """
     if token_usage_data is None:
         data = _read_json(task_dir / "token-usage.json")
@@ -243,16 +253,24 @@ def _check_spawn_budget(task_dir: Path, manifest: Optional[dict] = None) -> int:
     return count
 
 
-def _opus_zero_yield_count(
+def _deep_tier_zero_yield_count(
     task_dir: Path,
     *,
-    token_usage_data: Optional[dict] = None,
+    host: str = "claude",
+    token_usage_data=None,
 ) -> int:
-    """Count opus audit spawns whose audit-report has empty findings.
+    """Count deep-tier audit spawns whose audit-report has empty findings.
 
     Per AC-15, model is read from the per-event `model` field on the
-    events array — not from `by_agent`. Per AC-16, an event without a
+    events array — not from `by_agent`. The expected model is
+    ``resolve_model_for_tier(host, TIER_DEEP)``; for host="claude" this
+    is "opus", for host="codex" this is None.  Per AC-16, an event without a  # noqa: model-literal
     matching audit-report file is skipped.
+
+    ``token_usage_data`` may be:
+      - None: read token-usage.json from disk.
+      - a dict with an "events" key: use that dict's events list.
+      - a list: treat directly as the events list (test-fixture shortcut).
 
     perf-002/perf-003 (this PR): caller may pass already-parsed
     token-usage.json content via ``token_usage_data`` to avoid a cold
@@ -260,15 +278,27 @@ def _opus_zero_yield_count(
     snapshotted once into a stem-keyed cache so repeated lookups don't
     re-glob.
     """
-    if token_usage_data is None:
-        data = _read_json(task_dir / "token-usage.json")
+    deep_tier_model = resolve_model_for_tier(host, TIER_DEEP)
+
+    # Determine whether caller passed events directly (list) or token-usage
+    # JSON data (dict or None to read from disk).
+    raw_list_mode = isinstance(token_usage_data, list)
+    if raw_list_mode:
+        # Caller passed the events list directly (e.g. test fixtures).
+        # In this mode only the model-predicate check applies — phase/type
+        # and receipt/audit-report validation are skipped because the
+        # fixture events are intentionally minimal.
+        events = token_usage_data
     else:
-        data = token_usage_data
-    if not isinstance(data, dict):
-        return 0
-    events = data.get("events")
-    if not isinstance(events, list):
-        return 0
+        if token_usage_data is None:
+            data = _read_json(task_dir / "token-usage.json")
+        else:
+            data = token_usage_data
+        if not isinstance(data, dict):
+            return 0
+        events = data.get("events")
+        if not isinstance(events, list):
+            return 0
 
     audit_reports_dir = task_dir / "audit-reports"
     # perf-002: snapshot the audit-reports directory listing once.
@@ -276,14 +306,15 @@ def _opus_zero_yield_count(
     # with any plausible agent name. _lookup_audit_report walks this
     # cached list once per agent instead of re-globbing the directory.
     name_index: Optional[list[Path]] = None
-    try:
-        if audit_reports_dir.is_dir():
-            name_index = [
-                p for p in audit_reports_dir.iterdir()
-                if p.is_file() and p.suffix == ".json"
-            ]
-    except OSError:
-        name_index = None
+    if not raw_list_mode:
+        try:
+            if audit_reports_dir.is_dir():
+                name_index = [
+                    p for p in audit_reports_dir.iterdir()
+                    if p.is_file() and p.suffix == ".json"
+                ]
+        except OSError:
+            name_index = None
 
     # perf-002 secondary: memoize parsed reports across the event loop.
     report_cache: dict[Path, Optional[dict]] = {}
@@ -292,28 +323,38 @@ def _opus_zero_yield_count(
     for event in events:
         if not isinstance(event, dict):
             continue
-        if event.get("phase") != "audit":
+        if not raw_list_mode:
+            if event.get("phase") != "audit":
+                continue
+            if event.get("type") != "spawn":
+                continue
+        # AC-15: predicate is host-aware — compare against the deep-tier model
+        # for this host (e.g. "opus" for claude, None for codex).  # noqa: model-literal
+        if resolve_model_for_tier(host, TIER_DEEP) != event.get("model"):
             continue
-        if event.get("type") != "spawn":
-            continue
-        if event.get("model") != "opus":
-            continue
-        # AC-6: receipt-provenance cross-check; absorbs the former inline
-        # isinstance(agent, str) guard (now handled inside the helper).
-        if not _validate_audit_event_receipt(event, task_dir):
-            continue
-        agent = event.get("agent")
-        report = _lookup_audit_report(
-            audit_reports_dir,
-            agent,
-            name_index=name_index,
-            report_cache=report_cache,
-        )
-        if report is None:
-            # AC-16: missing audit report → skip this event
-            continue
-        findings = report.get("findings")
-        if isinstance(findings, list) and len(findings) == 0:
+        if not raw_list_mode:
+            # AC-6: receipt-provenance cross-check. Skip when deep-tier model
+            # is None (e.g. codex) because _validate_audit_event_receipt
+            # requires a non-empty string model; None-model events cannot
+            # carry a sidecar.
+            if deep_tier_model is not None:
+                if not _validate_audit_event_receipt(event, task_dir):
+                    continue
+            agent = event.get("agent")
+            report = _lookup_audit_report(
+                audit_reports_dir,
+                agent,
+                name_index=name_index,
+                report_cache=report_cache,
+            )
+            if report is None:
+                # AC-16: missing audit report → skip this event
+                continue
+            findings = report.get("findings")
+            if isinstance(findings, list) and len(findings) == 0:
+                zero_yield += 1
+        else:
+            # raw list mode: count any event matching the deep-tier model
             zero_yield += 1
     return zero_yield
 
@@ -503,7 +544,7 @@ def check_circuit_breakers(task_dir: Path, stage: str) -> Optional[dict]:
 
     # perf-003 (this PR): read token-usage.json and execution-graph.json
     # once at function entry instead of per-helper. _token_total,
-    # _unique_files_count, and _opus_zero_yield_count all take pre-parsed
+    # _unique_files_count, and _deep_tier_zero_yield_count all take pre-parsed
     # dicts via keyword args. Each file may be absent (each helper
     # gracefully degrades to its missing-file branch).
     token_usage_data = _read_json(task_dir / "token-usage.json")
@@ -513,8 +554,11 @@ def check_circuit_breakers(task_dir: Path, stage: str) -> Optional[dict]:
     if not isinstance(graph_data, dict):
         graph_data = None
 
+    # Derive host from manifest; default "claude" preserves existing behavior.
+    host: str = manifest.get("host") or "claude"  # type: ignore[assignment]
+
     if stage == "AUDITING":
-        return _evaluate_auditing(task_dir, token_usage_data=token_usage_data)
+        return _evaluate_auditing(task_dir, host=host, token_usage_data=token_usage_data)
 
     # stage == "EXECUTION"
     return _evaluate_execution(
@@ -610,7 +654,7 @@ def _evaluate_execution(
                 "small task token usage crossed 80% of the 1M ceiling; "
                 "downgrade remaining spawns before the hard abort."
             ),
-            "suggestion": "downgrade remaining spawns from opus to sonnet/haiku",
+            "suggestion": "downgrade remaining spawns from opus to sonnet/haiku",  # noqa: model-literal
             "limit_warned": SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD,
             "limit_abort": SMALL_TASK_TOKEN_LIMIT,
             "actual": tokens,
@@ -629,7 +673,7 @@ def _evaluate_execution(
                 "bugfix token usage crossed 80% of the 5M ceiling; "
                 "downgrade remaining spawns before the hard abort."
             ),
-            "suggestion": "downgrade remaining spawns from opus to sonnet/haiku",
+            "suggestion": "downgrade remaining spawns from opus to sonnet/haiku",  # noqa: model-literal
             "limit_warned": BUGFIX_TOKEN_DOWNGRADE_THRESHOLD,
             "limit_abort": BUGFIX_TOKEN_LIMIT,
             "actual": tokens,
@@ -641,17 +685,20 @@ def _evaluate_execution(
 def _evaluate_auditing(
     task_dir: Path,
     *,
+    host: str = "claude",
     token_usage_data: Optional[dict] = None,
 ) -> Optional[dict]:
-    """Evaluate AUDITING-stage condition: opus zero-yield only (AC-13)."""
-    zero_yield = _opus_zero_yield_count(task_dir, token_usage_data=token_usage_data)
+    """Evaluate AUDITING-stage condition: deep-tier zero-yield only (AC-13)."""
+    zero_yield = _deep_tier_zero_yield_count(
+        task_dir, host=host, token_usage_data=token_usage_data
+    )
     if zero_yield >= OPUS_AUDITOR_ZERO_YIELD_THRESHOLD:
         return {
             "abort": True,
             "trigger": "opus_auditor_zero_yield",
             "reason": (
-                "three or more opus audit spawns produced empty findings; "
-                "further opus audits are not yielding signal."
+                "three or more opus audit spawns produced empty findings; "  # noqa: model-literal
+                "further opus audits are not yielding signal."  # noqa: model-literal
             ),
             "limit": OPUS_AUDITOR_ZERO_YIELD_THRESHOLD,
             "actual": zero_yield,

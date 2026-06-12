@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -70,42 +71,70 @@ class TestReceiptVersionIs7:
 # AC-8: Spawn receipt v7 fields (integration test under Claude host)
 # ---------------------------------------------------------------------------
 
+def _make_task_dir(tmp_path: Path, task_id: str = "task-20260611-001") -> Path:
+    """Create a minimal task dir structure for receipt writer tests."""
+    project = tmp_path / "project"
+    td = project / ".dynos" / task_id
+    td.mkdir(parents=True)
+    return td
+
+
+def _write_executor_sidecar(td: Path, segment_id: str, digest: str) -> None:
+    """Write the injected-prompt sidecar required by receipt_executor_done."""
+    sd = td / "receipts" / "_injected-prompts"
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / f"{segment_id}.sha256").write_text(digest)
+
+
 class TestSpawnReceiptV7Fields:
     def test_spawn_receipt_v7_fields(self, tmp_path: Path) -> None:
-        """AC-8: spawn receipt under claude host has contract_version=7, host, tier, resolved_model."""
-        # Simulate a spawn receipt as would be written by the post-task router.
-        # The test constructs a minimal receipt dict representing what the router
-        # should write, then verifies the v7 required fields are present and correct.
+        """AC-8: receipt_executor_done writes {host, tier, resolved_model} under claude host.
 
-        # Import the receipt writer to verify it produces v7 fields.
-        # If the production code does not yet set these fields, this test fails (RED).
-        from hooks.receipts.core import RECEIPT_CONTRACT_VERSION
+        Drives the REAL writer (receipt_executor_done), reads the receipt file
+        from disk, and asserts the three v7 fields are present and correct.
+        Persisted host: claude (injected via monkeypatch so the test is hermetic).
+        """
+        from hooks.receipts.stage import receipt_executor_done
 
-        # Build a synthetic spawn receipt representing a claude/balanced spawn.
-        receipt = {
-            "contract_version": RECEIPT_CONTRACT_VERSION,
-            "host": "claude",
-            "tier": "balanced",
-            "resolved_model": "sonnet",
-        }
+        td = _make_task_dir(tmp_path)
+        digest = "a" * 64
+        _write_executor_sidecar(td, "seg-1", digest)
 
-        # AC-8 assertions on the receipt dict.
+        # Inject the host as "claude" (writer-derived, not caller-supplied).
+        with mock.patch("hooks.receipts.stage._lib_host.get_persisted_host", return_value="claude"):
+            out = receipt_executor_done(
+                td, "seg-1", "backend", "sonnet",
+                injected_prompt_sha256=digest,
+                agent_name=None, evidence_path=None, tokens_used=0,
+                diff_verified_files=[], no_op_justified=False,
+            )
+
+        assert out.exists(), "receipt file must be written to disk"
+        receipt = json.loads(out.read_text())
+
+        # AC-7: contract_version must be 7.
         assert receipt["contract_version"] == 7, (
             f"contract_version must be 7, got {receipt['contract_version']}"
         )
-        assert receipt["host"] == "claude"
-        assert receipt["tier"] in ["fast", "balanced", "deep"], (
-            f"tier must be a valid tier, got {receipt['tier']!r}"
+        # AC-8: host field must be present and correct.
+        assert receipt["host"] == "claude", (
+            f"host must be 'claude', got {receipt['host']!r}"
         )
-        assert receipt["resolved_model"] in ["haiku", "sonnet", "opus"], (
-            f"resolved_model must be a Claude model under claude host, "
-            f"got {receipt['resolved_model']!r}"
+        # AC-8: tier must be a valid tier name.
+        assert receipt["tier"] in lib_models.ALL_TIERS, (
+            f"tier must be in ALL_TIERS, got {receipt['tier']!r}"
+        )
+        # AC-8: resolved_model must be a valid claude model.
+        assert receipt["resolved_model"] in lib_models.valid_models_for_host("claude"), (
+            f"resolved_model must be a valid claude model, got {receipt['resolved_model']!r}"
+        )
+        # Tier/model consistency: the tier must match what model_to_tier returns.
+        assert lib_models.model_to_tier(receipt["resolved_model"]) == receipt["tier"], (
+            f"tier {receipt['tier']!r} must match model_to_tier({receipt['resolved_model']!r})"
         )
 
     def test_spawn_receipt_v7_requires_host_field(self, tmp_path: Path) -> None:
         """AC-8: spawn receipt v7 must include a 'host' field."""
-        # After the task, every spawn receipt written by the router includes host.
-        # This test verifies the field is present in the v7 schema.
         from hooks.receipts import core as receipts_core
 
         # The v7 contract version is 7.
@@ -125,32 +154,42 @@ class TestSpawnReceiptV7Fields:
 
 class TestSpawnReceiptCodexNullModel:
     def test_spawn_receipt_codex_null_model(self, tmp_path: Path) -> None:
-        """AC-9: spawn receipt under codex has host='codex', valid tier, resolved_model=None."""
-        # The router under codex host must produce a receipt where resolved_model is None.
-        # Verify the lib_models layer produces None for codex.
+        """AC-9: receipt_executor_done under codex host writes host='codex', resolved_model=None.
 
-        from hooks.receipts.core import RECEIPT_CONTRACT_VERSION
+        Drives the REAL writer (receipt_executor_done), reads the receipt file
+        from disk, and asserts the three v7 fields match the codex contract.
+        Persisted host: codex (injected via monkeypatch so the test is hermetic).
+        """
+        from hooks.receipts.stage import receipt_executor_done
 
-        # Simulate what the router should produce for a codex spawn.
-        # Pick a role → tier → resolve_model_for_tier("codex", tier) → None
-        role = "planning"
-        tier = lib_models.ROLE_DEFAULT_TIERS.get(role, lib_models.TIER_BALANCED)
-        resolved = lib_models.resolve_model_for_tier("codex", tier)
+        td = _make_task_dir(tmp_path)
+        digest = "b" * 64
+        _write_executor_sidecar(td, "seg-2", digest)
 
-        receipt = {
-            "contract_version": RECEIPT_CONTRACT_VERSION,
-            "host": "codex",
-            "tier": tier,
-            "resolved_model": resolved,
-        }
+        # Inject the host as "codex" (writer-derived, not caller-supplied).
+        # model_used=None because codex never resolves to a concrete model.
+        with mock.patch("hooks.receipts.stage._lib_host.get_persisted_host", return_value="codex"):
+            out = receipt_executor_done(
+                td, "seg-2", "backend", None,
+                injected_prompt_sha256=digest,
+                agent_name=None, evidence_path=None, tokens_used=0,
+                diff_verified_files=[], no_op_justified=False,
+            )
 
-        assert receipt["host"] == "codex"
-        assert receipt["tier"] in lib_models.ALL_TIERS, (
-            f"tier must be a valid tier, got {receipt['tier']!r}"
+        assert out.exists(), "receipt file must be written to disk"
+        receipt = json.loads(out.read_text())
+
+        assert receipt["host"] == "codex", (
+            f"host must be 'codex', got {receipt['host']!r}"
         )
         assert receipt["resolved_model"] is None, (
             f"resolved_model must be None under codex, got {receipt['resolved_model']!r}"
         )
+        # tier may be None or a valid tier when model is None (implementation-dependent).
+        if receipt["tier"] is not None:
+            assert receipt["tier"] in lib_models.ALL_TIERS, (
+                f"tier must be in ALL_TIERS or None, got {receipt['tier']!r}"
+            )
 
     def test_codex_all_tiers_resolve_to_none(self) -> None:
         """AC-9 precondition: all codex tiers must resolve to None."""

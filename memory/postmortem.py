@@ -209,7 +209,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DET
             "pattern": "recurring_token_overrun",
             "occurrences": overrun_count,
             "window": window,
-            "recommendation": "Multiple tasks exceeded token budget. Consider: haiku for low-risk auditors, inline execution for simple segments, tighter spec to reduce planning tokens.",
+            "recommendation": "Multiple tasks exceeded token budget. Consider: haiku for low-risk auditors, inline execution for simple segments, tighter spec to reduce planning tokens.",  # noqa: model-literal
         })
 
     # Recurring repair cycles

@@ -6,8 +6,12 @@ enforce a per-segment tool-call budget for spawned executor agents.
 Formula (spec AC-2):
     budget = min(
         TOOL_BUDGET_CEILING,
-        max(N * PER_FILE_COST + FIXED_OVERHEAD, STATIC_CAPS_BY_MODEL.get(model, 15)),
+        max(N * PER_FILE_COST + FIXED_OVERHEAD, floor),
     )
+
+    The floor is resolved from STATIC_CAPS_BY_MODEL (when model is provided),
+    STATIC_CAPS_BY_TIER (when model is None and tier is provided), or 15
+    (haiku-equivalent default when both are absent).  # noqa: model-literal
 
 Overflow predicate (spec AC-3):
     overflow = (N * PER_FILE_COST + FIXED_OVERHEAD) > TOOL_BUDGET_CEILING
@@ -34,27 +38,52 @@ TOOL_BUDGET_CEILING: int = 40
 TOOL_BUDGET_ADVISORY: int = 35
 
 # Static per-model floor (minimum budget) keyed by model family name.
-# An unknown model falls back to 15 (the haiku floor) — see compute_segment_budget.
-STATIC_CAPS_BY_MODEL: dict[str, int] = {"haiku": 15, "sonnet": 20, "opus": 25}
+# An unknown model falls back to 15 (the haiku floor) — see compute_segment_budget.  # noqa: model-literal
+STATIC_CAPS_BY_MODEL: dict[str, int] = {"haiku": 15, "sonnet": 20, "opus": 25}  # noqa: model-literal
+
+# Static per-tier floor (minimum budget) keyed by tier name.
+# Maps tier names (fast/balanced/deep) to their respective floor values.
+# Used by compute_segment_budget when model=None and a tier is supplied.
+STATIC_CAPS_BY_TIER: dict[str, int] = {"fast": 15, "balanced": 20, "deep": 25}
 
 
-def compute_segment_budget(files_expected_count: int, model: str) -> int:
+def compute_segment_budget(
+    files_expected_count: int,
+    model: "str | None",
+    *,
+    tier: "str | None" = None,
+) -> int:
     """Return the tool-call budget for a segment.
 
     Spec AC-2:
         min(TOOL_BUDGET_CEILING,
             max(N * PER_FILE_COST + FIXED_OVERHEAD,
-                STATIC_CAPS_BY_MODEL.get(model, 15)))
+                floor))
+
+    The floor is resolved as follows:
+      1. If *model* is a non-None string, use STATIC_CAPS_BY_MODEL.get(model, 15)
+         (original behavior — backward-compatible with all existing callers).
+      2. If *model* is None and *tier* is a known tier name, use
+         STATIC_CAPS_BY_TIER[tier].
+      3. Otherwise (model is None and tier is None or unknown), default to 15
+         (haiku-equivalent — preserves pre-task behavior when model is null).  # noqa: model-literal
 
     Args:
         files_expected_count: Number of files in the segment's files_expected.
-        model: Model family name ("haiku" | "sonnet" | "opus" | other).
+        model: Model family name ("haiku" | "sonnet" | "opus" | other), or None.  # noqa: model-literal
+        tier: Optional tier name ("fast" | "balanced" | "deep").  Keyword-only.
+              Only consulted when model is None.
 
     Returns:
         Integer tool-call budget, always 1 <= budget <= TOOL_BUDGET_CEILING.
     """
     raw = files_expected_count * PER_FILE_COST + FIXED_OVERHEAD
-    floor = STATIC_CAPS_BY_MODEL.get(model, 15)
+    if model is not None:
+        floor = STATIC_CAPS_BY_MODEL.get(model, 15)
+    elif tier is not None:
+        floor = STATIC_CAPS_BY_TIER.get(tier, 15)
+    else:
+        floor = 15
     return min(TOOL_BUDGET_CEILING, max(raw, floor))
 
 

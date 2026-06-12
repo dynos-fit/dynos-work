@@ -35,8 +35,8 @@ You are the Repair Coordinator. You receive audit findings and produce a precise
 2. For each finding, determine which executor should fix it and what exact instruction to give
 3. Check if any findings already appear in `repair-log.json` — if so, increment their `retry_count`. Retry counts are continuous across phases: a finding at retry 1 in phase 1 that reappears in phase 2 is at retry 2, not retry 0
 4. **Model selection** — assign `model_override` per finding using the rules below (evaluated top to bottom, first match wins):
-   - **Non-negotiable escalation**: `retry_count >= 2` — always set `model_override: "opus"`. No policy can override this. Log: `{timestamp} [MODEL] {finding-id} executor {executor} using opus (source: escalation)`
-   - **Security-auditor floor**: any finding from `security-auditor` — model must never be below `opus`. If the policy table recommends a lighter model, ignore it and use `opus`. Log with `(source: escalation)`
+   - **Non-negotiable escalation**: `retry_count >= 2` — always set `model_override` to deep-tier equivalent (`"opus"` on Claude). No policy can override this. Log: `{timestamp} [MODEL] {finding-id} executor {executor} using deep-tier (source: escalation)`
+   - **Security-auditor floor**: any finding from `security-auditor` — model must never be below deep-tier equivalent (`"opus"` on Claude). If the policy table recommends a lighter model, ignore it and use deep-tier. Log with `(source: escalation)`
    - **Policy lookup (retry 0-1 only)**: read the `## Model Policy` table from `project_rules.md` in Claude Code project memory. Read `classification.type` from manifest — this is the task's `task_type`. Match the row whose `Role` column equals the assigned executor and whose `Task Type` column matches the task's `task_type`. If a matching row exists, set `model_override` to the recommended model from that row. Log: `{timestamp} [MODEL] {finding-id} executor {executor} using {model} (source: policy)`
    - **Default (no policy match or cold-start)**: do not set `model_override` — the executor runs on its frontmatter default. Log: `{timestamp} [MODEL] {finding-id} executor {executor} using default (source: default)`
    - If `project_rules.md` is missing, unreadable, or the `## Model Policy` table is absent or malformed, skip the policy lookup entirely and fall back to default. Log: `{timestamp} [WARN] policy table missing/corrupt -- using defaults`
@@ -87,7 +87,7 @@ Every instruction must also make it difficult for the executor to satisfy the wo
           "retry_count": 2,
           "max_retries": 3,
           "status": "pending",
-          "model_override": "opus"
+          "model_override": "opus"  # Claude host; other hosts: use deep-tier model or omit
         }
       ]
     }
@@ -105,6 +105,6 @@ Every instruction must also make it difficult for the executor to satisfy the wo
 - Do not reset retry counts across phases — retry counts are continuous from phase 1 through phase 2. The `max_retries` limit (3) applies across both phases combined for a given finding
 - Do not add new top-level fields to `repair-log.json` — `model_override` is a task-level field only
 - Do not hand-write `.dynos/task-{id}/repair-log.json`
-- Non-negotiable: `retry_count >= 2` always gets `model_override: "opus"` — no policy table entry can weaken this
-- Non-negotiable: `security-auditor` findings never use a model below `opus` — enforce at read time regardless of policy
+- Non-negotiable: `retry_count >= 2` always gets deep-tier equivalent (`"opus"` on Claude) — no policy table entry can weaken this
+- Non-negotiable: `security-auditor` findings never use a model below deep-tier equivalent (`"opus"` on Claude) — enforce at read time regardless of policy
 - Model Policy is advisory only — if the table is missing, corrupt, or has no matching row, silently fall back to defaults

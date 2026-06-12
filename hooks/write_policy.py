@@ -343,6 +343,22 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             "the SessionStart hook subprocess may write it",
             "deny",
         )
+    # control-plane.json is hook-owned actor/host identity (same elevation
+    # class as orchestrator-session.json above). It drives host resolution for
+    # receipt anti-forgery validation (receipts/stage.py) and token capture
+    # (lib_tokens_hook.py): if an agent could write {"host": "codex"}, receipt
+    # writers would accept resolved_model=None and the model cross-check would
+    # be blinded. ALL agent roles are denied — including executors and the
+    # orchestrator. The framework write path is the SessionStart hook
+    # subprocess's direct file I/O (lib_host.persist_host), which does not pass
+    # through this policy because hook subprocesses do not invoke harness tools.
+    if path.name == "control-plane.json" and path.parent.name == ".dynos":
+        return WriteDecision(
+            False,
+            "control-plane.json is hook-owned actor/host identity; only "
+            "the SessionStart hook subprocess may write it",
+            "deny",
+        )
     if path.name == ".rules_corrupt" and path.parent.name == ".dynos":
         if attempt.role == "daemon":
             return WriteDecision(True, ".dynos/.rules_corrupt allowed for daemon role", "direct")

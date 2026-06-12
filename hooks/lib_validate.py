@@ -20,6 +20,7 @@ from lib_core import (
     write_ctl_json,
     write_json,
 )
+from lib_models import ALL_TIERS, HOST_CLAUDE, valid_models_for_host
 from lib_tool_budget import would_overflow
 from write_policy import find_write_violations
 
@@ -563,11 +564,15 @@ def validate_task_artifacts(
 
     # AC 15: if a spec-validated receipt exists, its recorded spec_sha256 must
     # match the current sha256(spec.md). Hash-drift is a validation error.
+    # `amend-artifact spec` updates the canonical receipt's artifact_sha256
+    # (and appends to its amendments trail) — prefer that field so a
+    # receipted amendment can re-validate; the original spec_sha256 is the
+    # pre-amendment fallback.
     try:
         from lib_receipts import hash_file, read_receipt  # local import to avoid cycles
         receipt = read_receipt(task_dir, "spec-validated")
         if receipt is not None:
-            recorded = receipt.get("spec_sha256")
+            recorded = receipt.get("artifact_sha256") or receipt.get("spec_sha256")
             current = hash_file(spec_path)
             if recorded and recorded != current:
                 errors.append(
@@ -922,7 +927,10 @@ def validate_repair_log(task_dir: Path) -> list[str]:
             if status is not None and status not in {"pending", "in_progress", "done", "failed", "blocked"}:
                 errors.append(f"{batch_id}: invalid status {status!r}")
             model_override = task.get("model_override")
-            if model_override is not None and model_override not in {"haiku", "sonnet", "opus"}:
+            _VALID_MODEL_OVERRIDES: frozenset[str] = (
+                valid_models_for_host(HOST_CLAUDE) | frozenset(ALL_TIERS)
+            )
+            if model_override is not None and model_override not in _VALID_MODEL_OVERRIDES:
                 errors.append(f"{batch_id}: invalid model_override {model_override!r}")
     return errors
 
@@ -989,7 +997,7 @@ def compute_pipeline_budget(task_dir: Path) -> dict:
     Returns a dict with at minimum:
       - audit_phase_llm_calls: count of token-usage events whose
         phase=='audit' AND type=='spawn'. This is the cascade
-        multiplication factor: under haiku→sonnet→opus, a single auditor
+        multiplication factor: under fast→balanced→deep tiers, a single auditor
         role can fan out into 3 of these.
       - audit_phase_input_tokens: sum of input_tokens across audit-phase
         events. Pre-loaded prompt context (CG-013) shows up here.

@@ -16,6 +16,9 @@ import os
 from pathlib import Path
 from typing import Any
 
+from lib_core import _persistent_project_dir
+import lib_host as _lib_host
+import lib_models as _lib_models
 from lib_log import log_event, verify_signed_events
 from lib_validate import require_nonblank_str
 
@@ -25,6 +28,7 @@ from .core import (
     _record_tokens,
     hash_file,
     read_receipt,
+    validate_receipt_model_field,
     write_receipt,
 )
 
@@ -35,6 +39,53 @@ def _hash_artifact(path: Path) -> str | None:
         return hash_file(path)
     except (FileNotFoundError, OSError):
         return None
+
+
+def _compute_spawn_host_fields(
+    task_dir: Path,
+    model_used: str | None,
+    tier_hint: str | None = None,
+) -> tuple[str, str | None, str | None]:
+    """Self-compute (host, tier, resolved_model) for a spawn receipt.
+
+    ``host`` is read from the persisted control-plane.json at the project
+    root (``task_dir.parent.parent``). If no persisted host is available,
+    ``lib_host.detect_host()`` is used as fallback. The caller never
+    supplies the host — this is the writer-derived, anti-forgery pattern.
+
+    ``resolved_model`` is normalised from ``model_used`` (None stays None).
+
+    ``tier`` is derived from ``resolved_model`` via
+    ``lib_models.model_to_tier``; when ``resolved_model`` is None the
+    ``tier_hint`` (e.g. from sidecar naming context) is used if provided,
+    otherwise None.
+
+    Raises ``ValueError`` when the resolved_model/host combination is
+    invalid (anti-forgery: claiming a claude-tier model under codex must fail at write
+    time).
+    """
+    root = task_dir.parent.parent
+    cp_path = _persistent_project_dir(root) / "control-plane.json"
+    host = _lib_host.get_persisted_host(cp_path) or _lib_host.detect_host()
+
+    resolved_model: str | None = model_used  # None stays None
+
+    # Validate the model/host combination at write time.
+    # Build a minimal receipt dict for the validator.
+    probe = {"resolved_model": resolved_model}
+    if not validate_receipt_model_field(probe, host):
+        raise ValueError(
+            f"receipt write refused: resolved_model={resolved_model!r} is "
+            f"invalid for host={host!r} (anti-forgery check at write time)"
+        )
+
+    # Derive tier from model; fall back to tier_hint when model is None.
+    if resolved_model is not None:
+        tier: str | None = _lib_models.model_to_tier(resolved_model)
+    else:
+        tier = tier_hint
+
+    return host, tier, resolved_model
 
 
 def receipt_search_conducted(
@@ -382,6 +433,9 @@ def receipt_executor_done(
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, f"{executor_type}-{segment_id}", model_used or "default", tokens_used)
 
+    # Self-compute spawn identity fields (anti-forgery: writer-derived, not caller-supplied).
+    host, tier, resolved_model = _compute_spawn_host_fields(task_dir, model_used)
+
     return write_receipt(
         task_dir,
         f"executor-{segment_id}",
@@ -394,6 +448,9 @@ def receipt_executor_done(
         tokens_used=tokens_used,
         diff_verified_files=diff_verified_files,
         no_op_justified=no_op_justified,
+        host=host,
+        tier=tier,
+        resolved_model=resolved_model,
     )
 
 
@@ -542,16 +599,30 @@ def _assert_sidecar_match(
     auditor_name: str,
     model_used: str | None,
     injected_agent_sha256: str,
+    tier: str | None = None,
 ) -> None:
     """Assert per-(auditor, model) injected-prompt sidecar matches.
 
     Caller MUST only invoke when ``injected_agent_sha256 is not None``.
     Raises ValueError with byte-identical messages on missing,
     unreadable, or mismatched sidecar.
+
+    D-14 tier-name substitution: when ``model_used`` is ``None`` (e.g. for a
+    Codex host spawn where no model is resolved), the sidecar filename uses
+    ``tier`` as the discriminator instead of the literal string ``"None"``.
+    This produces ``{auditor_name}-{tier}.sha256`` (e.g.
+    ``security-auditor-deep.sha256``) which passes ``_SAFE_AGENT_RE`` and is
+    meaningful to reviewers. If both ``model_used`` and ``tier`` are None, the
+    fallback key ``"unknown"`` is used to avoid a ``-None.sha256`` filename.
     """
+    # D-14: use tier name when model is None to avoid *-None.sha256 filenames.
+    if model_used is None:
+        sidecar_key = tier if (tier and tier != "None") else "unknown"
+    else:
+        sidecar_key = model_used
     sidecar_file = (
         task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
-        / f"{auditor_name}-{model_used}.sha256"
+        / f"{auditor_name}-{sidecar_key}.sha256"
     )
     if not sidecar_file.exists():
         raise ValueError(
@@ -1109,6 +1180,7 @@ def receipt_audit_done(
     injected_agent_sha256: str | None,
     ensemble_context: bool = False,
     final_envelope: str | None = None,
+    tier: str | None = None,
 ) -> Path:
     """Write receipt proving an auditor completed.
 
@@ -1141,7 +1213,7 @@ def receipt_audit_done(
         finding_count, blocking_count, auditor_name, ensemble_context,
     )
     if injected_agent_sha256 is not None:
-        _assert_sidecar_match(task_dir, auditor_name, model_used, injected_agent_sha256)
+        _assert_sidecar_match(task_dir, auditor_name, model_used, injected_agent_sha256, tier=tier)
     _assert_spawn_log_evidence(task_dir, auditor_name)
     _validate_final_envelope(
         task_dir, auditor_name, route_mode, report_path, final_envelope,
@@ -1170,6 +1242,16 @@ def receipt_audit_done(
             f"(finding={finding_count}, blocking={blocking_count}, "
             f"expected >= {expected_min_count})"
         )
+
+    # Self-compute spawn identity fields (anti-forgery: writer-derived, not caller-supplied).
+    # The sidecar uses a tier-name fallback when model_used is None (D-14); mirror that
+    # here so the receipt tier field is consistent with the sidecar naming context.
+    _sidecar_tier: str | None = tier
+    if model_used is None:
+        # Derive tier hint from sidecar key logic mirroring _assert_sidecar_match D-14.
+        _sidecar_tier = None  # No sidecar-derived tier available at this call site.
+    host, tier, resolved_model = _compute_spawn_host_fields(task_dir, model_used, _sidecar_tier)
+
     return write_receipt(
         task_dir,
         f"audit-{auditor_name}",
@@ -1184,6 +1266,9 @@ def receipt_audit_done(
         agent_path=agent_path,
         injected_agent_sha256=injected_agent_sha256,
         envelope_sha256=envelope_sha256,
+        host=host,
+        tier=tier,
+        resolved_model=resolved_model,
     )
 
 

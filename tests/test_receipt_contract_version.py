@@ -48,20 +48,20 @@ def _td(tmp_path: Path) -> Path:
     return td
 
 
-def test_contract_version_constant_is_five():
+def test_contract_version_constant_is_seven():
     """Task-20260419-009 (AC 24): contract bumped 4 -> 5 for
     force-override reason/approver. The rename (was _is_four) makes the
     current floor obvious to future readers — the old name would
     silently lie after a subsequent bump."""
-    assert RECEIPT_CONTRACT_VERSION == 6
+    assert RECEIPT_CONTRACT_VERSION == 7
 
 
 def test_write_receipt_embeds_contract_version(tmp_path: Path):
-    """Every receipt embeds v5 via write_receipt."""
+    """Every receipt embeds v7 via write_receipt."""
     td = _td(tmp_path)
     p = write_receipt(td, "spec-validated", criteria_count=1)
     payload = json.loads(p.read_text())
-    assert payload["contract_version"] == 6
+    assert payload["contract_version"] == 7
 
 
 def test_v1_receipt_without_contract_version_is_readable(tmp_path: Path):

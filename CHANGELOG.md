@@ -11,6 +11,30 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.0] - 2026-06-12
+### "Host Tiers": Model Orchestration Abstracted Over Claude and Codex Hosts
+
+Built end-to-end by the foundry pipeline itself (task-20260611-001: spec 28 criteria, 9-segment graph, TDD-first RED suite, 2 repair cycles, ensemble re-audits — all receipted in-task). Model orchestration no longer speaks vendor names outside one module.
+
+### Added
+- **`hooks/lib_models.py`** (leaf): ordered tiers `fast < balanced < deep`, `TIER_TO_MODEL` per host (claude: haiku/sonnet/opus; codex: all null initially), `ROLE_DEFAULT_TIERS` (18 roles), `resolve_model_for_tier` / `model_to_tier` / `valid_models_for_host`. Guard test (`tests/test_model_literal_guard.py`) holds vendor literals to this module (`# noqa: model-literal` escape for prose) — burned 87 violations to 0.
+- **`hooks/lib_host.py`** (leaf): `detect_host` (CODEX_PLUGIN_ROOT → CLAUDE_PLUGIN_ROOT → claude), persisted-host read/write for `.dynos/control-plane.json` — which is hook-owned in write_policy (agent writes denied; it is load-bearing for receipt anti-forgery).
+- **`memory/lib_migrate_host.py`**: idempotent, receipt-guarded one-time backfill stamping learning records `host=claude` + `model_tier`; auto-triggered on the next policy run.
+- **Receipts v7**: spawn receipts self-compute `{host, tier, resolved_model}`; writers REFUSE models invalid for the active host (claiming a claude model under codex fails at write time); `validate_receipt_model_field`; `RECEIPT_CONTRACT_VERSION` 6→7 with `spawn-*` floor.
+- **Fail-closed wiring under null-mapping hosts**: `floor_unmet: true` recorded when a floor (security=deep) is unsatisfiable; ensemble voting disabled with `reason: host_null_mapping`; retry escalation records `escalation_unavailable` (router helper wired through ctl's escalation path); token capture marks `host_unsupported` instead of silently defaulting (entry path resolves the persisted host).
+- 110+ new tests across 10 `tests/test_hostmodel_*.py` files plus the literal guard.
+
+### Changed
+- Claude behavior is byte-identical: the 18-role routing table resolves exactly as before (parametrized test); full-suite failure set byte-identical to the pre-task baseline.
+- Q-learning arms re-keyed to tiers internally; emitted `model_override` resolves through the host (opus under claude — unchanged); tool budgets, validators, postmortem-improve proposals, and ctl escalation all consume `lib_models`.
+- `agents/repair-coordinator.md` and `skills/audit/SKILL.md` prose use tier language with host-qualified examples; agents frontmatter intentionally untouched.
+- 6 new prevention rules minted by the task's own postmortem (production-caller requirements, signature locks, write-first executor discipline).
+
+### Plugin / Distribution
+- Bump all plugin manifests to `7.5.0`.
+
+---
+
 ## [7.4.2] - 2026-06-11
 ### "Codex Compatibility": Same Foundry, Second Host
 

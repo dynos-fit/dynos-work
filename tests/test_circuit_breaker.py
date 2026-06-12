@@ -801,7 +801,7 @@ def test_lookup_audit_report_reuses_cached_directory_listing(
 
     monkeypatch.setattr(Path, "iterdir", counting_iterdir)
 
-    cb._opus_zero_yield_count(task_dir)
+    cb._deep_tier_zero_yield_count(task_dir)
     assert counter["calls"] == 1, (
         f"Expected exactly 1 iterdir on audit-reports/ but got {counter['calls']}. "
         "perf-002 regression — directory listing is being re-read per agent."

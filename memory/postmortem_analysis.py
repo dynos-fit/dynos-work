@@ -34,9 +34,12 @@ from lib_receipts import (
     receipt_postmortem_skipped,
 )
 
+from lib_models import valid_models_for_host as _valid_models_for_host, HOST_CLAUDE as _HOST_CLAUDE, ALL_TIERS as _ALL_TIERS
+
 VALID_CATEGORIES = {"sec", "cq", "dc", "perf", "comp", "ui", "db", "test", "process", "unknown"}
 VALID_SEVERITIES = {"high", "medium", "low"}
-VALID_MODELS = {"haiku", "sonnet", "opus"}
+# Dual-accept: old Claude model literals + new tier names (IR-1, AC-20).
+VALID_MODELS: frozenset = _valid_models_for_host(_HOST_CLAUDE) | frozenset(_ALL_TIERS)
 VALID_ENFORCEMENT = {
     "test",
     "lint",
@@ -610,8 +613,8 @@ The JSON must have this exact top-level shape:
   "model_suggestions": [
     {{
       "agent": "agent-name",
-      "current_model": "haiku|sonnet|opus|null",
-      "suggested_model": "haiku|sonnet|opus",
+      "current_model": "haiku|sonnet|opus|null",  # noqa: model-literal
+      "suggested_model": "haiku|sonnet|opus",  # noqa: model-literal
       "reason": "Only include when task data supports a real model-capability mismatch"
     }}
   ],

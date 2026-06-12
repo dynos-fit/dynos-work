@@ -33,7 +33,6 @@ from lib_core import (
     write_json,
 )
 from lib_defaults import (
-    DEFAULT_MODEL as _DEFAULT_MODEL_CONST,
     DEFAULT_SKIP_THRESHOLD as _DEFAULT_SKIP_THRESHOLD,
     ROUTER_WEIGHT_COST,
     ROUTER_WEIGHT_EFFICIENCY,
@@ -41,6 +40,16 @@ from lib_defaults import (
     UCB_COLD_START_MINIMUM,
     UCB_EXPLORATION_CONSTANT,
 )
+from lib_models import (
+    TIER_DEEP as _TIER_DEEP,
+    resolve_model_for_tier as _resolve_model_for_tier,
+    ROLE_DEFAULT_TIERS as _ROLE_DEFAULT_TIERS,
+    TIER_BALANCED as _TIER_BALANCED,
+    valid_models_for_host as _valid_models_for_host,
+    ALL_TIERS as _ALL_TIERS,
+    HOST_CLAUDE as _HOST_CLAUDE,
+)
+from lib_host import detect_host as _detect_host
 from lib_log import log_event
 from lib_receipts import (
     INJECTED_AUDITOR_PROMPTS_DIR,
@@ -155,7 +164,7 @@ def _read_learned_registry(root: Path) -> dict:
 
 import random
 
-VALID_MODELS = ["haiku", "sonnet", "opus"]
+VALID_MODELS = list(_valid_models_for_host(_HOST_CLAUDE))
 DEFAULT_EPSILON = 0.1  # 10% exploration rate
 
 
@@ -163,45 +172,49 @@ DEFAULT_EPSILON = 0.1  # 10% exploration rate
 # Model selection
 # ---------------------------------------------------------------------------
 
-SECURITY_FLOOR_MODEL = "opus"
-DEFAULT_MODEL = _DEFAULT_MODEL_CONST  # "sonnet" — from lib_defaults.py
-
 # PRO-006: non-blocking inject-prompt size guardrail. Both
 # cmd_planner_inject_prompt and cmd_audit_inject_prompt emit a
 # planner_prompt_oversize event when stdin exceeds this threshold; the
 # sidecar is still written and the command still exits 0.
 _MAX_INJECTED_PROMPT_BYTES: int = 100_000
-ROLE_DEFAULT_MODELS: dict[str, str] = {
-    "planning": "sonnet",
-    "spec-writer": "sonnet",
-    "backend-executor": "sonnet",
-    "ui-executor": "sonnet",
-    "db-executor": "sonnet",
-    "integration-executor": "sonnet",
-    "refactor-executor": "sonnet",
-    "ml-executor": "sonnet",
-    "testing-executor": "sonnet",
-    "docs-executor": "haiku",
-    "spec-completion-auditor": "sonnet",
-    "code-quality-auditor": "sonnet",
-    "dead-code-auditor": "haiku",
-    "performance-auditor": "haiku",
-    "db-schema-auditor": "haiku",
-    "ui-auditor": "haiku",
-    "claude-md-auditor": "sonnet",
-}
 
 
-def _default_model_for_role(role: str) -> str:
-    """Return the low-cost default model for a role.
+def _default_model_for_role(role: str, host: str) -> str | None:
+    """Return the default model for a role on the given host.
 
-    Security remains pinned to Opus. Other roles bias toward Sonnet or
-    Haiku so projects do not pay Opus prices before any learned policy
-    exists.
+    Looks up the role's default tier from ROLE_DEFAULT_TIERS, then
+    resolves to a model via TIER_TO_MODEL for the given host.
+    Returns None when the host has no model mapping (e.g. Codex).
     """
-    if role == "security-auditor":
-        return SECURITY_FLOOR_MODEL
-    return ROLE_DEFAULT_MODELS.get(role, DEFAULT_MODEL)
+    tier = _ROLE_DEFAULT_TIERS.get(role, _TIER_BALANCED)
+    return _resolve_model_for_tier(host, tier)
+
+
+def _build_ensemble_context(host: str) -> dict:
+    """Return the ensemble context dict for the given host.
+
+    When all tier arms resolve to None for the host (null mapping,
+    e.g. Codex), ensemble is disabled with reason='host_null_mapping'.
+    Otherwise returns {'ensemble': True} so callers can proceed normally.
+    """
+    all_null = all(_resolve_model_for_tier(host, tier) is None for tier in _ALL_TIERS)
+    if all_null:
+        return {"ensemble": False, "reason": "host_null_mapping"}
+    return {"ensemble": True, "reason": "host_has_models"}
+
+
+def _build_escalation_result(host: str) -> dict:
+    """Return the escalation result dict for the given host.
+
+    When the deep-tier model resolves to None for the host (null mapping,
+    e.g. Codex), escalation is unavailable. The returned dict contains
+    escalation_unavailable=True and does NOT include a model_override key.
+    Otherwise returns {'model_override': <deep_model>}.
+    """
+    deep_model = _resolve_model_for_tier(host, _TIER_DEEP)
+    if deep_model is None:
+        return {"escalation_unavailable": True}
+    return {"model_override": deep_model}
 
 
 def _read_policy_json(root: Path, filename: str, key: str) -> dict | None:
@@ -307,7 +320,7 @@ def _filter_effectiveness_scores(
         if entry.get("role") != role or entry.get("task_type") != task_type:
             continue
         m = entry.get("model", "")
-        if not m or m not in ("haiku", "sonnet", "opus"):
+        if not m or m not in _valid_models_for_host(_HOST_CLAUDE):
             continue
         try:
             quality = float(entry.get("quality_ema", 0))
@@ -463,7 +476,13 @@ def _benchmark_model_for_agent(root: Path, role: str, task_type: str, ctx: Route
     }
 
 
-def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | None = None) -> dict:
+def resolve_model(
+    root: Path,
+    role: str,
+    task_type: str,
+    ctx: RouterContext | None = None,
+    host: str | None = None,
+) -> dict:
     """Determine which model an agent should use.
 
     Priority order:
@@ -476,10 +495,45 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
       5.  No match                        -> source: "default"
       *   Security floor enforcement      -> source: "security_floor"
 
+    The ``host`` parameter controls security-floor resolution. When not
+    provided (or None), the active host is resolved internally via
+    _detect_host() so callers that monkeypatch this function with a
+    host-less signature continue to work. Under hosts whose TIER_DEEP
+    mapping is None (e.g. codex), the security-auditor floor cannot be
+    satisfied. In that case the returned dict carries ``model=None`` and
+    ``floor_unmet=True`` so callers and receipt writers can record the
+    condition without raising.
+
     Returns {"model": str|None, "source": str, ...}.
     """
+    # Resolve host internally when not supplied so callers do not need to pass
+    # it. This keeps monkeypatched call surfaces (e.g. lambda root, role,
+    # task_type, ctx=None: ...) backward-compatible.
+    if host is None:
+        host = _detect_host()
+
     policy = ctx.policy if ctx else project_policy(root)
     key = f"{role}:{task_type}"
+
+    # Security floor pre-check: when host cannot satisfy the deep-tier floor
+    # for security-auditor, emit floor_unmet immediately (before any learned
+    # data path). This is the only wired production location that sets the flag.
+    if role == "security-auditor":
+        _host_floor_model = _resolve_model_for_tier(host, _TIER_DEEP)
+        if _host_floor_model is None:
+            result: dict = {
+                "model": None,
+                "resolved_model": None,
+                "floor_unmet": True,
+                "source": "security_floor",
+            }
+            log_event(
+                root, "router_model_decision",
+                role=role, task_type=task_type,
+                model=None, source="security_floor",
+                floor_unmet=True,
+            )
+            return result
 
     # 1. Explicit policy.json overrides (highest priority — never overridden)
     model_overrides = policy.get("model_overrides", {})
@@ -493,20 +547,21 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
     # to feed the UCB1 bandit with multi-arm data. Fires AFTER explicit
     # policy (user config always wins) but BEFORE learned data tiers.
     epsilon = float(policy.get("exploration_epsilon", DEFAULT_EPSILON))
+    _security_floor_model = _resolve_model_for_tier(_HOST_CLAUDE, _TIER_DEEP)
     if (
         epsilon > 0
         and role != "security-auditor"
         and (ctx.learning_enabled if ctx else is_learning_enabled(root))
         and random.random() < epsilon
     ):
-        model = random.choice([m for m in VALID_MODELS if m != SECURITY_FLOOR_MODEL])
+        model = random.choice([m for m in VALID_MODELS if m != _security_floor_model])
         result = {"model": model, "source": "exploration", "epsilon": epsilon}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=model, source="exploration")
         return result
 
     # Steps 2-4 use learned data — skip when learning is disabled.
     if not (ctx.learning_enabled if ctx else is_learning_enabled(root)):
-        result = {"model": _default_model_for_role(role), "source": "default"}
+        result = {"model": _default_model_for_role(role, _HOST_CLAUDE), "source": "default"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source="default (learning_enabled=false)")
         return result
 
@@ -520,6 +575,9 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
                 all_scores = []
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             all_scores = []
+    _non_floor_claude_models = {
+        m for m in _valid_models_for_host(_HOST_CLAUDE) if m != _security_floor_model
+    }
     if all_scores:
         candidates = _filter_effectiveness_scores(all_scores, role, task_type)
         if candidates:
@@ -531,9 +589,9 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
                 result = {"model": model, "source": source,
                           "ucb_score": winner["ucb_score"],
                           "exploration_bonus": winner["exploration_bonus"]}
-                # Security floor: security-auditor never below opus
-                if role == "security-auditor" and model in ("haiku", "sonnet"):
-                    result["model"] = SECURITY_FLOOR_MODEL
+                # Security floor: security-auditor never below deep-tier model
+                if role == "security-auditor" and model in _non_floor_claude_models:
+                    result["model"] = _security_floor_model
                     result["source"] = "security_floor"
                 log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
                 return result
@@ -545,9 +603,9 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
         result = {"model": model, "source": "benchmark_model",
                   "mean_composite": benchmark_result["mean_composite"],
                   "sample_count": benchmark_result["sample_count"]}
-        # Security floor: security-auditor never below opus
-        if role == "security-auditor" and model in ("haiku", "sonnet"):
-            result["model"] = SECURITY_FLOOR_MODEL
+        # Security floor: security-auditor never below deep-tier model
+        if role == "security-auditor" and model in _non_floor_claude_models:
+            result["model"] = _security_floor_model
             result["source"] = "security_floor"
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
@@ -557,8 +615,8 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
     if entry and isinstance(entry, dict) and entry.get("model"):
         model = entry["model"]
         # Security floor
-        if role == "security-auditor" and model in ("haiku", "sonnet"):
-            result = {"model": SECURITY_FLOOR_MODEL, "source": "security_floor"}
+        if role == "security-auditor" and model in _non_floor_claude_models:
+            result = {"model": _security_floor_model, "source": "security_floor"}
             log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
             return result
         result = {"model": model, "source": "learned_history"}
@@ -567,11 +625,11 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
 
     # 4. No data — default
     if role == "security-auditor":
-        result = {"model": SECURITY_FLOOR_MODEL, "source": "security_floor"}
+        result = {"model": _security_floor_model, "source": "security_floor"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
 
-    result = {"model": _default_model_for_role(role), "source": "default"}
+    result = {"model": _default_model_for_role(role, _HOST_CLAUDE), "source": "default"}
     log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
     return result
 
@@ -816,7 +874,7 @@ _DEFAULT_ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
 
 # Auditors whose verdict comes from deterministic analysis (AST, glob,
 # rule lookup, structured JSON) rather than from LLM judgment that varies
-# across model tiers. Running the haiku→sonnet→opus cascade against
+# across model tiers. Running the fast→balanced→deep tier cascade against
 # deterministic input is pure waste — the second and third spawns see the
 # same evidence and produce the same verdict. These auditors are pinned
 # to ensemble=false regardless of risk_level, sampling roll, or any
@@ -824,8 +882,11 @@ _DEFAULT_ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
 _DETERMINISTIC_FIRST_AUDITORS: frozenset[str] = frozenset({
     "claude-md-auditor",
 })
-_DEFAULT_ENSEMBLE_VOTING_MODELS = ["haiku", "sonnet"]
-_DEFAULT_ENSEMBLE_ESCALATION_MODEL = "opus"
+_DEFAULT_ENSEMBLE_VOTING_MODELS = [
+    _resolve_model_for_tier(_HOST_CLAUDE, "fast"),
+    _resolve_model_for_tier(_HOST_CLAUDE, "balanced"),
+]
+_DEFAULT_ENSEMBLE_ESCALATION_MODEL = _resolve_model_for_tier(_HOST_CLAUDE, "deep")
 
 # Default auditor registry — overridable via .dynos/config/auditors.json
 _DEFAULT_AUDITOR_REGISTRY = {
@@ -976,17 +1037,19 @@ def build_audit_plan(
             })
             continue
 
-        # Model selection (uses cached policy + patterns via ctx)
+        # Model selection (uses cached policy + patterns via ctx).
+        # resolve_model detects the active host internally; floor_unmet=True
+        # flows through when the security-auditor floor cannot be satisfied.
         model_decision = resolve_model(root, auditor, task_type, ctx=ctx)
 
-        # Fast-track model override: haiku for spec-completion
+        # Fast-track model override: fast-tier for spec-completion
         if fast_track and auditor == "spec-completion-auditor" and model_decision["source"] == "default":
-            model_decision = {"model": "haiku", "source": "fast_track_override"}
+            model_decision = {"model": _resolve_model_for_tier(_HOST_CLAUDE, "fast"), "source": "fast_track_override"}
 
         # Route selection (uses cached registry via ctx)
         route_decision = resolve_route(root, auditor, task_type, ctx=ctx)
 
-        entry = {
+        entry: dict = {
             "name": auditor,
             "action": "spawn",
             "model": model_decision["model"],
@@ -997,11 +1060,15 @@ def build_audit_plan(
             "agent_name": route_decision["agent_name"],
             "composite_score": route_decision["composite_score"],
         }
+        # Carry floor_unmet into the plan entry when the security floor cannot
+        # be satisfied (binding decision 2: artifact/receipt records the flag).
+        if model_decision.get("floor_unmet"):
+            entry["floor_unmet"] = True
 
         # Ensemble sampling — risk_level-gated with deterministic CRC32 tie-break
         if auditor in _DETERMINISTIC_FIRST_AUDITORS:
             # Pinned off: deterministic-first auditors don't benefit from
-            # the haiku→sonnet→opus cascade. See _DETERMINISTIC_FIRST_AUDITORS
+            # the fast→balanced→deep tier cascade. See _DETERMINISTIC_FIRST_AUDITORS
             # comment for rationale.
             entry["ensemble"] = False
             reason = "deterministic_first_auditor"
@@ -1021,6 +1088,17 @@ def build_audit_plan(
             sampled = zlib.crc32(seed_key) % 10000 < int(ENSEMBLE_SAMPLE_RATE * 10000)
             entry["ensemble"] = sampled
             reason = "sampled_in" if sampled else "sampled_out"
+
+        # Wire _build_ensemble_context(host): when the active host maps all
+        # ensemble tiers to None (null mapping, e.g. Codex), override ensemble
+        # to False and set reason to host_null_mapping (binding decision 5).
+        # Resolve host internally so callers don't need to pass it — same
+        # pattern as resolve_model which also detects internally.
+        active_host = _detect_host()
+        ensemble_ctx = _build_ensemble_context(active_host)
+        if not ensemble_ctx.get("ensemble", True):
+            entry["ensemble"] = False
+            reason = ensemble_ctx.get("reason", "host_null_mapping")
 
         if entry["ensemble"]:
             entry["ensemble_voting_models"] = list(ensemble_models)
@@ -1069,6 +1147,7 @@ def build_executor_plan(
     """
     ctx = ctx or RouterContext(root)
     all_rules = load_prevention_rules(root)
+
     plan = {
         "generated_at": now_iso(),
         "task_type": task_type,
@@ -1079,6 +1158,8 @@ def build_executor_plan(
         executor = seg.get("executor", "")
         seg_id = seg.get("id", "")
 
+        # resolve_model detects the active host internally; floor_unmet=True
+        # flows through when the security-auditor floor cannot be satisfied.
         model_decision = resolve_model(root, executor, task_type, ctx=ctx)
         route_decision = resolve_route(root, executor, task_type, ctx=ctx)
 
@@ -1119,7 +1200,7 @@ def build_executor_plan(
         files_expected = seg.get("files_expected") or []
         tool_budget = compute_segment_budget(len(files_expected), model_decision["model"])
 
-        plan["segments"].append({
+        seg_entry: dict = {
             "segment_id": seg_id,
             "executor": executor,
             "model": model_decision["model"],
@@ -1132,7 +1213,13 @@ def build_executor_plan(
             "prevention_rules": executor_rules,
             "prevention_rules_omitted": prevention_rules_omitted,
             "tool_budget": tool_budget,
-        })
+        }
+        # Carry floor_unmet into the segment entry when the security floor cannot
+        # be satisfied (binding decision 2: receipt records the flag).
+        if model_decision.get("floor_unmet"):
+            seg_entry["floor_unmet"] = True
+
+        plan["segments"].append(seg_entry)
 
     log_event(root, "router_executor_plan", task_type=task_type, segment_count=len(plan["segments"]), include_enforced=include_enforced, segments=[{"segment_id": s["segment_id"], "executor": s["executor"], "model": s.get("model"), "model_source": s.get("model_source"), "prevention_rules_omitted": s.get("prevention_rules_omitted", 0)} for s in plan["segments"]])
     return plan
@@ -1495,7 +1582,7 @@ def cmd_executor_plan(args: argparse.Namespace) -> int:
 def cmd_resolve(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     result = {
-        "model": resolve_model(root, args.role, args.task_type),
+        "model": resolve_model(root, args.role, args.task_type, host=_detect_host()),
         "skip": resolve_skip(root, args.role, args.task_type),
         "route": resolve_route(root, args.role, args.task_type),
     }

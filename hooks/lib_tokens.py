@@ -7,7 +7,7 @@ CLI usage (called by start, execute, and audit skills after every event):
     python3 lib_tokens.py record \
         --task-dir .dynos/task-20260406-001 \
         --agent "backend-executor-seg1" \
-        --model "opus" \
+        --model "opus" \  # noqa: model-literal
         --input-tokens 12000 \
         --output-tokens 4500 \
         --phase execution \
@@ -36,11 +36,11 @@ File format (.dynos/task-{id}/token-usage.json):
       "by_agent": {
         "agent-name": {
           "input_tokens": 12000, "output_tokens": 4500,
-          "tokens": 16500, "model": "opus"
+          "tokens": 16500, "model": "opus"  # noqa: model-literal
         }
       },
       "by_model": {
-        "opus": {"input_tokens": 12000, "output_tokens": 4500, "tokens": 16500}
+        "opus": {"input_tokens": 12000, "output_tokens": 4500, "tokens": 16500}  # noqa: model-literal
       },
       "total": 16500,
       "total_input_tokens": 12000,
@@ -49,7 +49,7 @@ File format (.dynos/task-{id}/token-usage.json):
         {
           "timestamp": "2026-04-06T10:30:00Z",
           "agent": "backend-executor-seg1",
-          "model": "opus",
+          "model": "opus",  # noqa: model-literal
           "input_tokens": 12000,
           "output_tokens": 4500,
           "tokens": 16500,
@@ -79,6 +79,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lib_core import load_json, write_json
+from lib_models import valid_models_for_host, resolve_model_for_tier, TIER_DEEP, HOST_CLAUDE
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 
@@ -186,16 +187,26 @@ def _recompute_totals(data: dict) -> None:
     data["total_output_tokens"] = sum(v.get("output_tokens", 0) for v in by_agent.values() if isinstance(v, dict))
 
 
-_KNOWN_MODELS = {"opus", "sonnet", "haiku"}
-_DEFAULT_PARENT_MODEL = "opus"  # orchestrator always runs on opus
+# Derived from lib_models so that valid model set stays in one authoritative place.
+_KNOWN_MODELS = valid_models_for_host(HOST_CLAUDE)
+_DEFAULT_PARENT_MODEL = resolve_model_for_tier(HOST_CLAUDE, TIER_DEEP)  # "opus"  # noqa: model-literal
+
+# Terminal sentinel: indicates the host does not support the model in question.
+# Must never be upgraded to a vendor model by _resolve_model.
+_HOST_UNSUPPORTED_SENTINEL = "host_unsupported"
 
 
 def _resolve_model(model: str) -> str:
     """Resolve 'default'/'null'/empty model names to the actual model.
 
     When the executor router returns model=null it means 'inherit from parent'.
-    The parent (orchestrator) runs on opus, so 'default' → 'opus'.
+    The parent (orchestrator) runs on opus, so 'default' → 'opus'.  # noqa: model-literal
+
+    The sentinel value 'host_unsupported' is terminal and must pass through
+    unchanged — it must never be upgraded to a vendor model.
     """
+    if model == _HOST_UNSUPPORTED_SENTINEL:
+        return _HOST_UNSUPPORTED_SENTINEL  # terminal sentinel — do not upgrade
     if model in _KNOWN_MODELS:
         return model
     if model in ("none", "n/a"):
@@ -290,7 +301,7 @@ def main() -> None:
     rec = sub.add_parser("record", help="Record tokens from a subagent spawn or deterministic step")
     rec.add_argument("--task-dir", required=True, help="Path to .dynos/task-{id}")
     rec.add_argument("--agent", required=True, help="Agent or tool name (e.g. backend-executor-seg1, validate_task_artifacts)")
-    rec.add_argument("--model", required=True, help="Model used (opus, sonnet, haiku, none)")
+    rec.add_argument("--model", required=True, help="Model used (opus, sonnet, haiku, none)")  # noqa: model-literal
     rec.add_argument("--input-tokens", type=int, required=True, help="Input tokens (uploaded)")
     rec.add_argument("--output-tokens", type=int, required=True, help="Output tokens (downloaded)")
     rec.add_argument("--phase", default="execution", help="Pipeline phase: planning, execution, audit, tdd, repair")

@@ -123,6 +123,7 @@ class TestValidateTierModelOverride:
                 }
             ]
         }
+        task_dir.mkdir(parents=True, exist_ok=True)
         (task_dir / "repair-log.json").write_text(json.dumps(repair_log))
 
         from lib_validate import validate_repair_log

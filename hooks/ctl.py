@@ -50,6 +50,8 @@ from lib_receipts import (
     write_receipt,
 )
 from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, validate_task_artifacts
+from lib_models import TIER_DEEP, resolve_model_for_tier
+from lib_host import detect_host
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 # task-20260504-007: residuals queue producer + run-next consumer.
@@ -2534,6 +2536,7 @@ def cmd_audit_receipt(args: argparse.Namespace) -> int:
             injected_agent_sha256=args.injected_agent_sha256,
             ensemble_context=args.ensemble_context,
             final_envelope=args.final_envelope,
+            tier=getattr(args, "tier", None),
         )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
@@ -4375,8 +4378,19 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
             entry["phase"] = phase
             entry["priority"] = "critical_spec" if fid in critical_spec_finding_ids else "normal"
             if retry_count >= 2:
-                entry["model_override"] = "opus"
-                model_overrides[fid] = "opus"
+                # Escalation routes through the router's fail-closed helper
+                # (binding decision 5): under a host with no deep-tier model
+                # the override is OMITTED and escalation_unavailable recorded;
+                # under claude this resolves the deep-tier model exactly as
+                # before (byte-identical).
+                from router import _build_escalation_result  # noqa: PLC0415 — deferred: router imports lib_* at module load
+                _esc = _build_escalation_result(detect_host())
+                if _esc.get("escalation_unavailable"):
+                    entry["escalation_unavailable"] = True
+                else:
+                    _deep_model = _esc.get("model_override") or resolve_model_for_tier(detect_host(), TIER_DEEP) or TIER_DEEP
+                    entry["model_override"] = _deep_model
+                    model_overrides[fid] = _deep_model
             planned_findings.append(entry)
 
         updated_manifest = manifest
@@ -7008,6 +7022,11 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--ensemble-context",
         action="store_true",
         help="Mark this receipt as part of ensemble voting/escalation.",
+    )
+    audit_receipt_parser.add_argument(
+        "--tier",
+        default=None,
+        help="Spawn tier (fast/balanced/deep) when known; threaded to the sidecar/tier fields.",
     )
     audit_receipt_parser.add_argument(
         "--final-envelope",

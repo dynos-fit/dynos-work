@@ -32,6 +32,7 @@ from lib_core import (
     write_json,
 )
 from lib_defaults import TASK_TOKEN_BUDGETS, DEFAULT_TOKEN_BUDGET
+from lib_models import ALL_TIERS, HOST_CLAUDE, TIER_FAST, resolve_model_for_tier
 
 
 def _expected_budget(risk_level: str, task_type: str, multiplier: float = 1.0) -> int:
@@ -66,7 +67,7 @@ def _save_applied_id(root: Path, proposal_id: str) -> None:
     write_json(path, sorted(applied))
 
 
-def propose_improvements(root: Path) -> list[dict]:
+def propose_improvements(root: Path, host: str = HOST_CLAUDE) -> list[dict]:
     """Analyze postmortems and propose project-local improvements.
 
     Improvements target .dynos/ state only:
@@ -75,8 +76,19 @@ def propose_improvements(root: Path) -> list[dict]:
     - prevention rule additions
     - fast-track threshold changes
 
+    When *host* has all tiers resolving to None (e.g. "codex"), model-tier
+    improvement proposals (ids matching ``^imp-model-``) are suppressed because
+    there are no model choices available to recommend.
+
     Never proposes changes to global plugin source files.
     """
+    # Determine whether model-tier proposals are meaningful for this host.
+    # If every tier resolves to None, the host has no concept of model tiers
+    # and recommendation proposals would be nonsensical.
+    _host_has_models: bool = any(
+        resolve_model_for_tier(host, t) is not None for t in ALL_TIERS
+    )
+
     all_retros = collect_retrospectives(root)
     if len(all_retros) < 3:
         return []
@@ -140,21 +152,29 @@ def propose_improvements(root: Path) -> list[dict]:
             })
 
     # 4. Model tier recommendation
-    default_high_quality = [
-        r for r in recent
-        if _safe_float(r.get("quality_score"), 0) >= 0.8
-        and r.get("agent_source") and all(v == "generic" for v in r.get("agent_source", {}).values())
-    ]
-    if len(default_high_quality) >= 3:
-        proposals.append({
-            "id": "imp-model-haiku",
-            "type": "model_recommendation",
-            "target": ".dynos/policy.json",
-            "description": "Default model produces high quality consistently. Safe to use haiku for non-security auditors to reduce cost.",
-            "evidence": [{"task_id": r.get("task_id"), "quality": _safe_float(r.get("quality_score"), 0)} for r in default_high_quality],
-            "action": "adjust_model_policy",
-            "suggested_value": "haiku for spec-completion-auditor and code-quality-auditor on low-risk tasks",
-        })
+    # Only emit model-tier proposals when the active host exposes model choices.
+    # Under a null-model host (e.g. codex) all tiers resolve to None and any
+    # recommendation would be meaningless — suppress the entire block.
+    if _host_has_models:
+        default_high_quality = [
+            r for r in recent
+            if _safe_float(r.get("quality_score"), 0) >= 0.8
+            and r.get("agent_source") and all(v == "generic" for v in r.get("agent_source", {}).values())
+        ]
+        _fast_model = resolve_model_for_tier(host, TIER_FAST)  # e.g. "haiku" under claude  # noqa: model-literal
+        if len(default_high_quality) >= 3 and _fast_model is not None:
+            proposals.append({
+                "id": f"imp-model-{_fast_model}",
+                "type": "model_recommendation",
+                "target": ".dynos/policy.json",
+                "description": (
+                    f"Default model produces high quality consistently. "
+                    f"Safe to use {_fast_model} for non-security auditors to reduce cost."
+                ),
+                "evidence": [{"task_id": r.get("task_id"), "quality": _safe_float(r.get("quality_score"), 0)} for r in default_high_quality],
+                "action": "adjust_model_policy",
+                "suggested_value": f"{_fast_model} for spec-completion-auditor and code-quality-auditor on low-risk tasks",
+            })
 
     # 5. Learned agent seeding — REMOVED.
     # agent_generator.py is the single owner of agent creation.
@@ -191,6 +211,7 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
             result["reason"] = f"Field {field} already exists in policy"
 
     elif action == "adjust_model_policy":
+        _fast_model = resolve_model_for_tier(HOST_CLAUDE, TIER_FAST)
         persistent = _persistent_project_dir(root)
         policy_path = persistent / "policy.json"
         policy = {}
@@ -205,13 +226,13 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
             for tt in ("feature", "bugfix", "refactor"):
                 key = f"{role}:{tt}"
                 if key not in overrides:
-                    overrides[key] = "haiku"
+                    overrides[key] = _fast_model
                     changed = True
         if changed:
             policy["model_overrides"] = overrides
             write_json(policy_path, policy)
             result["applied"] = True
-            result["reason"] = f"Set haiku for {len(overrides)} non-security auditor:task_type pairs"
+            result["reason"] = f"Set {_fast_model} for {len(overrides)} non-security auditor:task_type pairs"
         else:
             result["reason"] = "Model overrides already set"
 
@@ -230,7 +251,7 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
                 if existing.get("source") == "explicit_policy":
                     continue
                 model_policy[key] = {
-                    "model": "haiku",
+                    "model": _fast_model,
                     "source": "postmortem_recommendation",
                 }
                 mp_changed = True
