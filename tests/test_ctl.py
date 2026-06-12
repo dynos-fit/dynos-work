@@ -277,8 +277,10 @@ def test_run_audit_setup_writes_audit_plan(tmp_path) -> None:
     payload = json.loads(result.stdout)
     assert payload["status"] == "audit_setup_ready"
     assert Path(payload["audit_plan_path"]).exists()
+    assert Path(payload["receipt_path"]).exists()
     assert payload["task_type"] == "feature"
     assert isinstance(payload["spawn_auditors"], list)
+    assert (task_dir / "receipts" / "audit-routing.json").exists()
 
 
 def test_run_execute_setup_writes_routing_and_transitions(tmp_path) -> None:

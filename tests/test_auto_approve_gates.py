@@ -169,7 +169,7 @@ def _write_receipt_file(task_dir: Path, step: str, payload: dict) -> Path:
         "step": step,
         "ts": "2026-05-05T00:00:00Z",
         "valid": True,
-        "contract_version": 6,  # post-bump version
+        "contract_version": 7,  # post-bump version
         **payload,
     }
     p = receipts / f"{step}.json"
@@ -927,8 +927,8 @@ class TestReceiptAutoApproval:
         assert data["approver"] == "auto:residual-skill"
         assert data["kind"] == "auto"
 
-    def test_receipt_auto_approval_contract_version_6(self, tmp_path: Path):
-        """AC-8 / AC-9: receipt carries contract_version=6."""
+    def test_receipt_auto_approval_contract_version_7(self, tmp_path: Path):
+        """AC-8 / AC-9: receipt carries contract_version=7."""
         import sys
         sys.path.insert(0, str(HOOKS))
         from lib_receipts import receipt_auto_approval  # noqa: PLC0415
@@ -936,7 +936,7 @@ class TestReceiptAutoApproval:
         sha = "b" * 64
         receipt_path = receipt_auto_approval(task_dir, "SPEC_REVIEW", sha)
         data = json.loads(receipt_path.read_text())
-        assert data["contract_version"] == 6
+        assert data["contract_version"] == 7
 
     def test_receipt_auto_approval_no_duplicate_contract_version(self, tmp_path: Path):
         """AC-8 / sc-004: receipt payload must NOT have contract_version duplicated.
@@ -959,7 +959,7 @@ class TestReceiptAutoApproval:
         assert raw.count('"contract_version"') == 1, (
             "contract_version must appear exactly once in the receipt JSON"
         )
-        assert data["contract_version"] == 6
+        assert data["contract_version"] == 7
 
     def test_receipt_auto_approval_in_all(self, tmp_path: Path):
         """AC-8: receipt_auto_approval is exported in __all__."""
@@ -970,18 +970,18 @@ class TestReceiptAutoApproval:
 
 
 # ===========================================================================
-# AC-9: RECEIPT_CONTRACT_VERSION bumped to 6
+# AC-9: RECEIPT_CONTRACT_VERSION bumped to 7
 # ===========================================================================
 
 class TestContractVersionBump:
-    """AC-9: RECEIPT_CONTRACT_VERSION == 6."""
+    """AC-9: RECEIPT_CONTRACT_VERSION == 7."""
 
-    def test_receipt_contract_version_is_6(self):
-        """AC-9: RECEIPT_CONTRACT_VERSION must be 6 after the bump."""
+    def test_receipt_contract_version_is_7(self):
+        """AC-9: RECEIPT_CONTRACT_VERSION must be 7 after the bump."""
         import sys
         sys.path.insert(0, str(HOOKS))
         from lib_receipts import RECEIPT_CONTRACT_VERSION  # noqa: PLC0415
-        assert RECEIPT_CONTRACT_VERSION == 6
+        assert RECEIPT_CONTRACT_VERSION == 7
 
 
 # ===========================================================================

@@ -11,7 +11,12 @@ description: "Internal dynos-work skill. Re-run planning on an existing task. Us
 Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
 
 ```bash
-DYNOS="${CLAUDE_PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
+PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+if [ -z "$PLUGIN_ROOT" ]; then
+  echo "Set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT to the dynos-work plugin root." >&2
+  exit 2
+fi
+DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
 ```
 
 `"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
@@ -54,7 +59,7 @@ Append to execution log (transition_task already auto-logged the `[STAGE] → PL
 {timestamp} [SPAWN] planning — generate implementation plan
 ```
 
-Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md`, `design-decisions.md` (if it exists), and `design-doc.md` (if it exists — §11 lists the intended segment shape your execution graph must match). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -`, piping the JSON payload over stdin with a heredoc (never stage it at /tmp or any raw path). Include: technical approach, module/component breakdown, data flow, error handling, failure modes, rollback or migration risk where relevant, test strategy, and explicit file ownership per segment. Do not leave any acceptance criterion covered only by implication. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
+Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md`, `design-decisions.md` (if it exists), and `design-doc.md` (if it exists — §11 lists the intended segment shape your execution graph must match). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -`, piping the JSON payload over stdin with a heredoc (never stage it at /tmp or any raw path). Include: technical approach, module/component breakdown, data flow, error handling, failure modes, rollback or migration risk where relevant, test strategy, and explicit file ownership per segment. Do not leave any acceptance criterion covered only by implication. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
 
 Wait for completion. Finalize planning through the deterministic control-plane entrypoint. Run:
 

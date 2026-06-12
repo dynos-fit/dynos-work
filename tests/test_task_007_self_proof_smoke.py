@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "hooks"))
 import lib_receipts  # noqa: E402
 
 
-def test_receipt_contract_version_is_five():
+def test_receipt_contract_version_is_seven():
     """Task-007 hard constraint migrated for task-009 AC 24:
     RECEIPT_CONTRACT_VERSION bumped 4 → 5 for the force-override
     reason/approver contract tightening.
@@ -27,7 +27,7 @@ def test_receipt_contract_version_is_five():
     fixtures; asserting the exact value here is the pin that catches
     an out-of-band bump. Rename _is_four → _is_five follows the
     task-009 policy of making the current floor visible in the test name."""
-    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 6
+    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 7
 
 
 def test_plan_routing_writer_fully_deleted():

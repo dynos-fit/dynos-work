@@ -14,7 +14,12 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
 
 ```bash
-DYNOS="${CLAUDE_PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
+PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+if [ -z "$PLUGIN_ROOT" ]; then
+  echo "Set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT to the dynos-work plugin root." >&2
+  exit 2
+fi
+DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
 ```
 
 `"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.

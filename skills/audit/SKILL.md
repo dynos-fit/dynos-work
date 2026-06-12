@@ -12,7 +12,12 @@ Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
 
 ```bash
-DYNOS="${CLAUDE_PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
+PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+if [ -z "$PLUGIN_ROOT" ]; then
+  echo "Set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT to the dynos-work plugin root." >&2
+  exit 2
+fi
+DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
 ```
 
 `"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
@@ -69,7 +74,7 @@ When spawning auditors, tell them to attack the implementation, not narrate it. 
 For any auditor that does NOT have a `## Turn Budget Discipline` section in its agent file, the orchestrator applies these defaults when constructing the spawn prompt:
 
 - Final message MUST contain only a JSON code block matching the canonical audit-report schema. No prose, no commentary, no markdown around the JSON.
-- Tool-use budget: haiku ≤ 15, sonnet ≤ 20, opus ≤ 25 tool uses.
+- Tool-use budget: fast ≤ 15, balanced ≤ 20, deep ≤ 25 tool uses.
 - When within 3 tool uses of the budget, stop and emit the report.
 
 For each auditor in the plan:
@@ -131,19 +136,19 @@ FINAL_ENVELOPE=$(... <extract last line of Agent tool return>)
 
 For `route_mode == "generic"` the `--final-envelope` argument may be omitted.
 
-`"$DYNOS" ctl audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. The new `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
+`"$DYNOS" ctl audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. `run-audit-setup` writes the `audit-routing` receipt from the deterministic audit plan before prompt injection; the per-auditor `audit-receipt` is the sidecar proof for spawned learned auditors.
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
 **Ensemble Voting:** If the router plan has `"ensemble": true` for an auditor, follow this sequential cascade instead of a single spawn:
 
-1. Spawn **haiku** (first model in `ensemble_voting_models`).
-2. If haiku returns **zero findings** → spawn **sonnet** (second model in `ensemble_voting_models`).
-   - If sonnet returns **zero findings** → audit passes. Log: `{timestamp} [VOTE] {name} — PASS (haiku then sonnet: zero findings)`
-   - If sonnet returns **any findings** → escalate: spawn `ensemble_escalation_model` (opus). Opus verdict is final and binding. Log: `{timestamp} [VOTE] {name} — Escalating to {escalation_model}`
-3. If haiku returns **any findings** → skip sonnet entirely, escalate immediately: spawn `ensemble_escalation_model` (opus). Opus verdict is final and binding. Log: `{timestamp} [VOTE] {name} — haiku found issues, escalating directly to {escalation_model}`
+1. Spawn **fast-tier** (first model in `ensemble_voting_models`).
+2. If fast-tier returns **zero findings** → spawn **balanced-tier** (second model in `ensemble_voting_models`).
+   - If balanced-tier returns **zero findings** → audit passes. Log: `{timestamp} [VOTE] {name} — PASS (fast-tier then balanced-tier: zero findings)`
+   - If balanced-tier returns **any findings** → escalate: spawn `ensemble_escalation_model` (deep-tier). Deep-tier verdict is final and binding. Log: `{timestamp} [VOTE] {name} — Escalating to {escalation_model}`
+3. If fast-tier returns **any findings** → skip balanced-tier entirely, escalate immediately: spawn `ensemble_escalation_model` (deep-tier). Deep-tier verdict is final and binding. Log: `{timestamp} [VOTE] {name} — fast-tier found issues, escalating directly to {escalation_model}`
 
-If `"ensemble": false`, spawn normally with the single model from the plan.
+If `"ensemble": false`, spawn normally with the single tier from the plan. **Fail-closed:** On null-model hosts, the ensemble cascade still executes but with host-default models; escalation to deep-tier still occurs on findings, ensuring detection does not degrade.
 
 **Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log: `{timestamp} [VISION] UI audit complete -- {N} visual bugs found`.
 

@@ -1,8 +1,9 @@
 """Tests for the contract version bump (was AC 28 v2->v3; migrated for
-task-20260419-009 AC 24 v4->v5 force-override reason/approver bump).
+task-20260419-009 AC 24 v4->v5 force-override reason/approver bump;
+bumped to v7 by task-20260611-001 host-model abstraction).
 
-RECEIPT_CONTRACT_VERSION is now 5. Every writer's output embeds
-contract_version=5.
+RECEIPT_CONTRACT_VERSION is now 7. Every writer's output embeds
+contract_version=7.
 """
 from __future__ import annotations
 
@@ -32,18 +33,18 @@ def _td(tmp_path: Path) -> Path:
 
 
 def test_contract_version_constant_is_five():
-    """AC 24 (task-009): RECEIPT_CONTRACT_VERSION == 6. Renamed from
+    """AC 7 (task-20260611-001): RECEIPT_CONTRACT_VERSION == 7. Renamed from
     _is_four to _is_five so the current floor is obvious to future
     readers rather than hidden behind a stale name."""
-    assert RECEIPT_CONTRACT_VERSION == 6
+    assert RECEIPT_CONTRACT_VERSION == 7
 
 
 def test_write_receipt_embeds_contract_version_five(tmp_path: Path):
-    """AC 24 (task-009): write_receipt embeds 5 in the payload."""
+    """AC 7 (task-20260611-001): write_receipt embeds 7 in the payload."""
     td = _td(tmp_path)
     p = write_receipt(td, "spec-validated", criteria_count=1, spec_sha256="x" * 64)
     payload = json.loads(p.read_text())
-    assert payload["contract_version"] == 6
+    assert payload["contract_version"] == 7
 
 
 def _exercise_writer(name: str, td: Path, tmp_path: Path | None = None):
@@ -152,8 +153,8 @@ def _exercise_writer(name: str, td: Path, tmp_path: Path | None = None):
 
 
 def test_every_writer_in_all_embeds_contract_version_five(tmp_path: Path, monkeypatch):
-    """AC 24 (task-009): every receipt_* writer in __all__ writes
-    contract_version=5."""
+    """AC 7 (task-20260611-001): every receipt_* writer in __all__ writes
+    contract_version=7."""
     td = _td(tmp_path)
     # receipt_rules_check_passed needs run_checks stubbed.
     import rules_engine
@@ -171,8 +172,8 @@ def test_every_writer_in_all_embeds_contract_version_five(tmp_path: Path, monkey
             continue
         exercised += 1
         payload = json.loads(out.read_text())
-        assert payload["contract_version"] == 6, (
-            f"writer {name} did not embed contract_version=5 (got {payload.get('contract_version')!r})"
+        assert payload["contract_version"] == 7, (
+            f"writer {name} did not embed contract_version=7 (got {payload.get('contract_version')!r})"
         )
     assert exercised >= 14, f"expected at least 14 writers exercised, got {exercised}"
 
@@ -214,8 +215,8 @@ def test_postmortem_analysis_keyword_path_happy(tmp_path: Path):
     assert payload["analysis_sha256"] == hash_file(analysis_file)
     assert payload["rules_sha256_after"] == hash_file(rules_file)
     assert payload["rules_added"] == 2
-    # AC 18: contract_version still 5 (no bump)
-    assert payload["contract_version"] == 6
+    # AC 7 (task-20260611-001): contract_version bumped to 7
+    assert payload["contract_version"] == 7
 
 
 def test_postmortem_analysis_missing_analysis_path_raises(tmp_path: Path):

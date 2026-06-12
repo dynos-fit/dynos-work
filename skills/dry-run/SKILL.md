@@ -107,9 +107,9 @@ Result: PASS (or FAIL if any required field is missing/mismatched)
 If an active or completed task exists in `.dynos/`, run the runtime contract validator against it to verify real artifacts match the declared contracts:
 
 ```text
-"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl validate-contract --skill start --task-dir .dynos/task-{id} --direction both --strict
-"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl validate-contract --skill execute --task-dir .dynos/task-{id} --direction both --strict
-"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl validate-contract --skill audit --task-dir .dynos/task-{id} --direction both --strict
+"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl validate-contract --skill start --task-dir .dynos/task-{id} --direction both --strict
+"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl validate-contract --skill execute --task-dir .dynos/task-{id} --direction both --strict
+"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl validate-contract --skill audit --task-dir .dynos/task-{id} --direction both --strict
 ```
 
 Report any mismatches between declared contracts and actual artifacts. This catches drift between what contracts promise and what skills actually produce.

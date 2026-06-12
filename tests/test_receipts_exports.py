@@ -48,5 +48,5 @@ def test_required_writers_present():
 def test_constants_exported():
     assert "RECEIPT_CONTRACT_VERSION" in lib_receipts.__all__
     assert "CALIBRATION_POLICY_FILES" in lib_receipts.__all__
-    # Migrated task-20260419-009 AC 24: contract bumped 4 -> 5.
-    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 6
+    # task-20260611-001 AC 7: contract bumped 6 -> 7 for host-model abstraction.
+    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 7

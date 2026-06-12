@@ -25,6 +25,8 @@ import sys
 import time
 from pathlib import Path
 
+import lib_host
+from lib_models import valid_models_for_host
 from lib_tokens import record_tokens
 
 
@@ -120,10 +122,20 @@ def _find_active_task(root: Path) -> Path | None:
     return newest_dir
 
 
-def _parse_transcript(transcript_path: Path) -> dict:
+def _parse_transcript(transcript_path: Path, host: str = "claude") -> dict:
     """Parse a subagent transcript JSONL and sum token usage.
 
+    Args:
+        transcript_path: Path to the transcript file (JSONL or JSON array).
+        host: Host identifier used to validate the model name against
+              valid_models_for_host(host). Defaults to "claude".
+
     Returns: {input_tokens, output_tokens, model, agent_id}
+
+    When the detected model string is not in valid_models_for_host(host)
+    AND both input_tokens == 0 and output_tokens == 0, the model field is
+    set to the terminal sentinel "host_unsupported" (NARROW condition —
+    do not widen; real usage with unrecognized models is NOT marked).
     """
     total_input = 0
     total_output = 0
@@ -136,34 +148,63 @@ def _parse_transcript(transcript_path: Path) -> dict:
             if not line:
                 continue
             try:
-                entry = json.loads(line)
+                parsed = json.loads(line)
             except json.JSONDecodeError:
                 continue
 
-            # Extract agent ID
-            if not agent_id and entry.get("agentId"):
-                agent_id = entry["agentId"]
+            # Normalize: if the line parsed as a JSON array (e.g. a JSON file
+            # written as a single array rather than JSONL), iterate its items.
+            if isinstance(parsed, list):
+                entries = parsed
+            else:
+                entries = [parsed]
 
-            # Extract model from message
-            msg = entry.get("message", {})
-            if isinstance(msg, dict):
-                if msg.get("model"):
-                    model = msg["model"]
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+
+                # Extract agent ID from top-level agentId field (JSONL hook format).
+                if not agent_id and entry.get("agentId"):
+                    agent_id = entry["agentId"]
+
+                # Try to extract model and usage from the "message" sub-object
+                # (JSONL hook format) or directly from the entry itself
+                # (plain JSON transcript format used in tests).
+                msg = entry.get("message", {})
+                if isinstance(msg, dict) and msg:
+                    candidate = msg
+                else:
+                    candidate = entry
+
+                if candidate.get("model"):
+                    model = candidate["model"]
+
                 # Sum usage from each message
-                usage = msg.get("usage", {})
+                usage = candidate.get("usage", {})
                 if isinstance(usage, dict):
                     total_input += usage.get("input_tokens", 0)
                     total_input += usage.get("cache_read_input_tokens", 0)
                     total_input += usage.get("cache_creation_input_tokens", 0)
                     total_output += usage.get("output_tokens", 0)
 
-    # Normalize model name
-    if "haiku" in model:
-        model = "haiku"
-    elif "sonnet" in model:
-        model = "sonnet"
-    elif "opus" in model:
-        model = "opus"
+    # Normalize model name to short tier identifier.
+    # Use the host's known models list (sorted for deterministic order) so
+    # this block does not need to enumerate model family names literally.
+    # A model string contains at most one family name, so the loop order
+    # is immaterial — the first (and only) match wins identically to the
+    # prior per-family if/elif chain.
+    for _known in sorted(valid_models_for_host(host)):
+        if _known in model:
+            model = _known
+            break
+
+    # NARROW host_unsupported condition:
+    # Only when BOTH token counts are zero AND the model is unrecognized for
+    # this host. Do NOT widen — real usage with unrecognized models is kept as-is.
+    if total_input == 0 and total_output == 0:
+        valid = valid_models_for_host(host)
+        if model not in valid:
+            model = "host_unsupported"
 
     return {
         "input_tokens": total_input,
@@ -171,6 +212,22 @@ def _parse_transcript(transcript_path: Path) -> dict:
         "model": model,
         "agent_id": agent_id,
     }
+
+
+def _resolve_active_host(root: Path) -> str:
+    """Resolve the active host for this hook invocation.
+
+    Reads the persisted host from <root>/.dynos/control-plane.json
+    (written by the host-detection bootstrap). Falls back to
+    lib_host.detect_host() (env-based) when the control-plane file is
+    absent, unreadable, or lacks a host key. The fallback default is
+    "claude", so repos with no control-plane.json behave byte-identically
+    to the prior hardcoded host="claude".
+    """
+    persisted = lib_host.get_persisted_host(root / ".dynos" / "control-plane.json")
+    if persisted:
+        return persisted
+    return lib_host.detect_host()
 
 
 def _detect_phase_and_stage(agent_type: str, task_dir: Path) -> tuple[str, str]:
@@ -274,12 +331,17 @@ def main() -> int:
     if agent_name.startswith("dynos-work:"):
         agent_name = agent_name[len("dynos-work:"):]
 
+    # Resolve the active host once per hook invocation. Persisted host (from
+    # .dynos/control-plane.json) wins; env-based detect_host() is the fallback,
+    # whose default is "claude" — preserving prior byte-identical behavior.
+    _active_host = _resolve_active_host(root)
+
     # Find active task. If no fresh non-terminal task exists, the tokens
     # would otherwise be silently dropped — record to orphan-tokens.jsonl
     # so the data is preserved for reconciliation.
     task_dir = _find_active_task(root)
     if task_dir is None:
-        result = _parse_transcript(transcript_path)
+        result = _parse_transcript(transcript_path, host=_active_host)
         if result["input_tokens"] > 0 or result["output_tokens"] > 0:
             _record_orphan_tokens(
                 root,
@@ -292,11 +354,17 @@ def main() -> int:
         return 0
 
     # Parse transcript
-    result = _parse_transcript(transcript_path)
+    result = _parse_transcript(transcript_path, host=_active_host)
 
-    # Skip if no tokens recorded (empty transcript)
+    # Skip if no tokens recorded (empty transcript).
+    # Exception: a zero-token transcript whose model resolved to the terminal
+    # "host_unsupported" sentinel is NOT a mere empty transcript — it is the
+    # circuit-breaker signal that the active host produced no recognizable
+    # model attribution (binding decision 9). Record it so the sentinel can
+    # fire downstream instead of being silently dropped here.
     if result["input_tokens"] == 0 and result["output_tokens"] == 0:
-        return 0
+        if result["model"] != "host_unsupported":
+            return 0
 
     # Detect phase, stage, segment
     phase, stage = _detect_phase_and_stage(args.agent_type, task_dir)

@@ -4,7 +4,7 @@
 Captures harness-level evidence of every subagent spawn and return, so the
 audit-receipt write step can mechanically reconcile orchestrator-claimed
 spawns against actual spawns. Without this, the orchestrator can claim
-``model: "haiku"`` for an auditor that never spawned and the receipt chain
+``model: "haiku"`` for an auditor that never spawned and the receipt chain  # noqa: model-literal
 has no way to detect the forgery (this is the audit-chain forgery incident
 documented at memory/project_audit_forgery_incident.md).
 

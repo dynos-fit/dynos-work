@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-tool-use",
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" pre-tool-use",
             "async": false
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" pre-tool-use",
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" pre-tool-use",
             "async": false
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" agent-spawn-log pre",
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" agent-spawn-log pre",
             "async": false
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" agent-spawn-log post",
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" agent-spawn-log post",
             "async": false
           }
         ]
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" web-tool-log",
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" web-tool-log",
             "async": false
           }
         ]
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start",
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" session-start",
             "async": false
           }
         ]
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" task-completed"
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" task-completed"
           }
         ]
       }
@@ -81,7 +81,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" subagent-tokens",
+            "command": "bash \"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/run-hook.cmd\" subagent-tokens",
             "async": true
           }
         ]

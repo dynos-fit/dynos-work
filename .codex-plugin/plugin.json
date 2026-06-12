@@ -1,0 +1,48 @@
+{
+  "name": "dynos-work",
+  "version": "7.4.2",
+  "description": "Autonomous Software Foundry. Human-directed, tool-grounded, self-improving. Plans, executes, audits, repairs, and calibrates to your project over time.",
+  "author": {
+    "name": "dynos.fit",
+    "url": "https://dynos.fit"
+  },
+  "homepage": "https://github.com/dynos-fit/dynos-work",
+  "repository": "https://github.com/dynos-fit/dynos-work",
+  "license": "MIT",
+  "keywords": [
+    "audit",
+    "autonomous",
+    "engineering",
+    "agents",
+    "planning",
+    "repair",
+    "self-learning",
+    "reinforcement-learning",
+    "mcts",
+    "decision-transformer",
+    "foundry",
+    "human-in-the-loop"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "dynos-work",
+    "shortDescription": "Human-directed software foundry for planned, audited code work.",
+    "longDescription": "dynos-work turns a task into a scoped spec, reviewed plan, parallel execution, independent audit, repair loop, and learned prevention rules without changing the human approval gates.",
+    "developerName": "dynos.fit",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Planning",
+      "Code execution",
+      "Audit",
+      "Repair",
+      "Project learning"
+    ],
+    "websiteURL": "https://dynos.fit",
+    "defaultPrompt": [
+      "Start a dynos-work task for this repo.",
+      "Resume the active dynos-work task.",
+      "Audit and repair the current dynos-work task."
+    ],
+    "brandColor": "#111827"
+  }
+}

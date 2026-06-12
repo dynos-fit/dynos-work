@@ -16,6 +16,7 @@ from typing import Any
 
 from lib_core import now_iso, append_execution_log, _persistent_project_dir
 from lib_log import log_event, verify_signed_events
+from lib_models import valid_models_for_host, TIER_FAST, resolve_model_for_tier
 from lib_validate import require_nonblank, require_nonblank_str
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
@@ -70,7 +71,7 @@ from write_policy import WriteAttempt, _get_capability_key, require_write_allowe
 #   * receipt_rules_check_passed derives counts internally from rules_engine
 # The bump signals "new semantics available"; it does NOT retroactively
 # invalidate v2 receipts (see MIN_VERSION_PER_STEP floors below).
-RECEIPT_CONTRACT_VERSION = 6
+RECEIPT_CONTRACT_VERSION = 7
 
 
 # Files that compose the calibration policy snapshot used by the
@@ -122,6 +123,13 @@ MIN_VERSION_PER_STEP: dict[str, int] = {
     # invariant as human-approval receipts. v5 receipts on disk remain
     # readable; only new auto-approval-* writes carry contract_version=6.
     "auto-approval-*": 6,
+    # v6 -> v7 bump (task-20260611-001): spawn receipts now carry
+    # {host, tier, resolved_model} v7 fields. The floor ensures consumers
+    # that depend on host/tier/resolved_model fields reject pre-v7 spawn
+    # receipts that lack these fields. Pre-v7 spawn receipts on disk remain
+    # readable by callers that pass min_version=1; only new spawn-* writes
+    # carry contract_version=7.
+    "spawn-*": 7,
 }
 
 
@@ -636,3 +644,42 @@ def validate_chain(task_dir: Path) -> list[str]:
                     gaps.append(g)
 
     return gaps
+
+
+def validate_receipt_model_field(receipt: dict, host: str) -> bool:
+    """Validate the ``resolved_model`` field of a spawn receipt against the host.
+
+    Returns True when the receipt's ``resolved_model`` value is consistent with
+    ``host``; returns False (validation failure) when the field is inconsistent.
+
+    Rules (mirrors ``lib_models`` host contract):
+    - For ``host="codex"``: ``resolved_model`` must be ``None``.  Any non-None
+      value (including a valid Claude model name) is a forgery attempt and
+      returns False.
+    - For ``host="claude"``: ``resolved_model`` must be a member of
+      ``valid_models_for_host("claude")``.  ``None`` is not acceptable because
+      the Claude routing layer always resolves to a concrete model.
+    - For any other host: the check is fail-closed — False is returned unless
+      ``resolved_model`` is in ``valid_models_for_host(host)``.  When
+      ``valid_models_for_host`` returns an empty frozenset (unknown host), any
+      ``resolved_model`` value returns False.
+
+    This function does NOT raise; it returns a plain bool so callers can
+    distinguish "bad receipt" from "programmer error" without try/except.
+    """
+    if not isinstance(receipt, dict):
+        return False
+    resolved_model = receipt.get("resolved_model")
+    # Use the canary-tier approach: if resolve_model_for_tier returns None for
+    # TIER_FAST, this host never resolves to a concrete model (e.g. codex),
+    # so resolved_model MUST be None. Otherwise it must be in valid_models.
+    canary = resolve_model_for_tier(host, TIER_FAST)
+    if canary is None:
+        # None-model host (e.g. codex): resolved_model must be None.
+        return resolved_model is None
+    else:
+        # Concrete-model host (e.g. claude): resolved_model must be in valid set.
+        valid_models = valid_models_for_host(host)
+        if not valid_models:
+            return False
+        return resolved_model in valid_models

@@ -27,7 +27,14 @@ DEFAULT_AUDITOR_ROLES = [
     "code-quality-auditor",
 ]
 SKIP_EXEMPT_AUDITORS = {"security-auditor", "spec-completion-auditor"}
-VALID_MODELS = {"haiku", "sonnet", "opus"}
+from lib_models import (
+    ALL_TIERS as _ALL_TIERS,
+    valid_models_for_host as _valid_models_for_host,
+    HOST_CLAUDE as _HOST_CLAUDE,
+)
+# Dual-accept: old Claude model literals + new tier names.
+# IR-1: every call site that tests `model in VALID_MODELS` continues to work.
+VALID_MODELS: frozenset = _valid_models_for_host(_HOST_CLAUDE) | frozenset(_ALL_TIERS)
 from lib_defaults import (
     EMA_ALPHA,
     EMA_COLD_START_MINIMUM,
@@ -47,7 +54,14 @@ from lib_defaults import (
     UCB_COLD_START_MINIMUM,
 )
 COMPOSITE_WEIGHTS = (ROUTER_WEIGHT_QUALITY, ROUTER_WEIGHT_COST, ROUTER_WEIGHT_EFFICIENCY)
-MODEL_COST_ORDER = {"haiku": 0, "sonnet": 1, "opus": 2}
+# RN-6: keys are tier names (fast/balanced/deep) — model literals moved to lib_models.
+# IR-1: callers use MODEL_COST_ORDER.get(model_or_tier, 99) — tier names sort correctly.
+from lib_models import TIER_FAST as _TIER_FAST, TIER_BALANCED as _TIER_BALANCED, TIER_DEEP as _TIER_DEEP
+MODEL_COST_ORDER: dict[str, int] = {
+    _TIER_FAST: 0,
+    _TIER_BALANCED: 1,
+    _TIER_DEEP: 2,
+}
 # Backwards compat aliases
 COLD_START_MINIMUM = EMA_COLD_START_MINIMUM
 MAX_EFFECTIVENESS_ROWS = EMA_MAX_EFFECTIVENESS_ROWS
@@ -469,9 +483,9 @@ def derive_model_policy(effectiveness_scores: list[dict]) -> dict[str, dict]:
         winner = candidates[0]
         model = winner["model"]
 
-        # Monotonicity: security-auditor always opus
-        if role == "security-auditor" and model != "opus":
-            model = "opus"
+        # Monotonicity: security-auditor always TIER_DEEP
+        if role == "security-auditor" and model != _TIER_DEEP:
+            model = _TIER_DEEP
 
         # Confidence
         confidence = min(1.0, winner["quality_ema"] * min(1.0, winner["sample_count"] / UCB_COLD_START_MINIMUM))

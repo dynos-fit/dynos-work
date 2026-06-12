@@ -12,6 +12,7 @@ from .core import (
     require_receipt,
     validate_chain,
     hash_file,
+    validate_receipt_model_field,
     RECEIPT_CONTRACT_VERSION,
     MIN_VERSION_PER_STEP,
     CALIBRATION_POLICY_FILES,
@@ -90,4 +91,5 @@ __all__ = [
     "INJECTED_PLANNER_PROMPTS_DIR",
     "receipt_spawn_budget_paused",
     "receipt_spawn_budget_resumed",
+    "validate_receipt_model_field",
 ]

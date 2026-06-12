@@ -15,7 +15,7 @@ Registers the current working directory as a dynos-work project in the global re
 
 ## What you do
 
-1. Determine the plugin's hooks directory. Use the `CLAUDE_PLUGIN_ROOT` environment variable if available, otherwise find the `hooks/` directory relative to this skill file.
+1. Determine the plugin's hooks directory. Use `CODEX_PLUGIN_ROOT` if available, then `CLAUDE_PLUGIN_ROOT`; otherwise find the `hooks/` directory relative to this skill file.
 
 2. Run the registration command:
 ```bash

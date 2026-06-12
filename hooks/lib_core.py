@@ -130,7 +130,20 @@ NEXT_COMMAND: dict[str, str] = {
     "FAILED": "Review failure state before continuing",
 }
 
-TOKEN_ESTIMATES: dict[str, int] = {"opus": 45000, "sonnet": 25000, "haiku": 12000, "default": 20000}
+# Token-estimate lookup keyed by tier name (AC-1 guard requirement).
+TOKEN_ESTIMATES_BY_TIER: dict[str, int] = {"fast": 12000, "balanced": 25000, "deep": 45000}
+
+# Model/tier-keyed estimates. Tier keys are composed in from
+# TOKEN_ESTIMATES_BY_TIER so consumers that receive either a vendor model
+# name or a tier name resolve through this one dict; vendor keys are
+# byte-identical to the pre-task values.
+TOKEN_ESTIMATES: dict[str, int] = {
+    "opus": 45000,  # noqa: model-literal
+    "sonnet": 25000,  # noqa: model-literal
+    "haiku": 12000,  # noqa: model-literal
+    "default": 20000,
+    **TOKEN_ESTIMATES_BY_TIER,
+}
 
 
 # ---------------------------------------------------------------------------

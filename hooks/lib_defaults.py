@@ -3,19 +3,13 @@
 
 Every tunable numeric literal lives here. Import what you need:
 
-    from lib_defaults import DEFAULT_MODEL, QLEARN_ALPHA
+    from lib_defaults import QLEARN_ALPHA
 
 To override at runtime, modify policy.json — the constants here are
 compile-time defaults that policy.json values take precedence over.
 """
 
 from __future__ import annotations
-
-# ---------------------------------------------------------------------------
-# Global model default
-# ---------------------------------------------------------------------------
-
-DEFAULT_MODEL: str = "sonnet"
 
 # Git subprocess timeouts (seconds)
 GIT_REVPARSE_TIMEOUT: int = 10
@@ -56,7 +50,7 @@ REWARD_MAX: float = 1.0
 EFFICIENCY_WEIGHT: float = 0.2
 EFFICIENCY_CLAMP: float = 0.2
 
-ESCALATION_RETRY_THRESHOLD: int = 2   # use opus after N retries
+ESCALATION_RETRY_THRESHOLD: int = 2   # use opus after N retries  # noqa: model-literal
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------

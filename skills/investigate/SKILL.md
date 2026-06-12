@@ -20,14 +20,14 @@ Create an investigation directory inside the project's `.dynos/` (never `/tmp` �
 ```bash
 INVESTIGATION_DIR=".dynos/investigations/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$INVESTIGATION_DIR"
-python3 "${CLAUDE_PLUGIN_ROOT}/debug-module/triage.py" --bug "<bug text>" --repo . --out "$INVESTIGATION_DIR/dossier.json"
+python3 "${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/debug-module/triage.py" --bug "<bug text>" --repo . --out "$INVESTIGATION_DIR/dossier.json"
 ```
 
 This produces an evidence dossier with pre-minted evidence IDs (`F-001` for files, `S-001` for symbols, etc.), git blame, linter findings, and Semgrep silent-accomplice findings. The LLM does not gather evidence — it reasons over what triage has already found.
 
 ## Phase 2 — Causal Reasoning
 
-If a task dir exists, grant the investigator role before the spawn (enforces dossier-only reads in the hook): `python3 "${CLAUDE_PLUGIN_ROOT}/hooks/ctl.py" grant-role .dynos/task-{id} --role investigator`. Standalone investigations (no task) skip this.
+If a task dir exists, grant the investigator role before the spawn (enforces dossier-only reads in the hook): `python3 "${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/hooks/ctl.py" grant-role .dynos/task-{id} --role investigator`. Standalone investigations (no task) skip this.
 
 Spawn the `@investigator` subagent. Pass the contents of `$INVESTIGATION_DIR/dossier.json` as input and instruct the agent to:
 
@@ -42,7 +42,7 @@ The agent must not invent file paths, symbols, or findings outside the dossier.
 Pipe the agent's returned JSON into the deterministic finalize step. It validates the report structure (every claim must carry non-empty `evidence_ids`), mechanically verifies every cited evidence ID exists in the dossier, renders the Markdown via `debug-module/lib/render_report.py` (`render_report.render`), and persists `bug_report.json` + the rendered `report.md` — rejection exits non-zero and nothing is persisted:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/debug-module/triage.py" finalize \
+python3 "${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/debug-module/triage.py" finalize \
   --report - \
   --dossier "$INVESTIGATION_DIR/dossier.json" <<'REPORT_JSON'
 { ...the investigator's returned JSON, verbatim... }
