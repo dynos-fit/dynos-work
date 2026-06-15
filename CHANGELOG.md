@@ -11,6 +11,21 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.1] - 2026-06-15
+### "Claude Subagent Compatibility": Stamped Roles Work Where Subagents Share a Session
+
+Claude Code spawns subagents that share the orchestrator's `session_id` and `transcript_path` with no distinguishing field (claude-code #7881), so the D3 per-session actor model resolved every planner/executor/auditor subagent as `orchestrator`. Their role grants went unconsumed and `write_policy` denied their role-scoped writes — the planning and execute pipelines could only complete in fast-track inline mode. (#212)
+
+### Fixed
+- **Orchestrator role adoption:** a new `subagent_isolation` capability flag (`.dynos/config/policy.json`, default `false`) lets the pinned orchestrator session adopt the stamped `active-segment-role` on harnesses that do not isolate subagent sessions (Claude Code), making the existing `ctl stamp-role` calls effective. Setting `subagent_isolation: true` restores strict D3 (the orchestrator never adopts a stamped role).
+- Forgery defenses unchanged: `control-plane.json` and the orchestrator-session pin remain denied to all roles; `audit-reports/` writes remain cross-checked against `spawn-log.jsonl` at receipt time.
+- New diagnostic event `orchestrator_role_adopted` allowlisted in `hooks/lib_log.py`.
+
+### Plugin / Distribution
+- Bump `.claude-plugin/plugin.json`, `package.json`, `.claude-plugin/marketplace.json`, and `.codex-plugin/plugin.json` to `7.5.1`.
+
+---
+
 ## [7.5.0] - 2026-06-12
 ### "Selection, Durability, Enforcement, Scope": Four-Layer Foundation for Audited Execution
 
