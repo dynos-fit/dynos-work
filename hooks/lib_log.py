@@ -92,6 +92,15 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # non-isolating harness (Claude Code; pre_tool_use.py _subagent_isolation
     # = False). Forensic trace only — no gate depends on it.
     "orchestrator_role_adopted",
+    # Grant binding trace (pre_tool_use.py): a subagent session consumed a
+    # pending role grant. Forensic only — role resolution does not depend
+    # on the event, and on Claude Code (shared session_id) it is not emitted.
+    "role_grant_consumed",
+    # ProjectIdSecurityError caught while resolving the persistent project
+    # dir (daemon.py check_prevention_rules_bootstrap / rules_healed_check /
+    # policy_path). Each site already handles the error inline (bail or
+    # stub); the event is security observability only, with no consumer.
+    "project_id_security_error",
     # Read-policy decision observability (read_policy gate, task-20260501-002).
     # Forensic trace recording allow/deny decisions for read attempts.
     # Observability only — no gate or state machine depends on these events.
