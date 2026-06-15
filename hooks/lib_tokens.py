@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic token usage tracking for dynos-work tasks.
+r"""Deterministic token usage tracking for dynos-work tasks.
 
 CLI usage (called by start, execute, and audit skills after every event):
 

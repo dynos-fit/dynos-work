@@ -43,7 +43,12 @@ def _make_task_dir(tmp_path: Path, dynos_home: Path, *, task_id: str = "task-tes
 
 
 def _read_persisted_rules(dynos_home: Path, project: Path) -> list[dict]:
-    slug = str(project.resolve()).strip("/").replace("/", "-")
+    # Derive the slug through the production resolver (path-prefixed for a
+    # non-git project dir) so we read the SAME persistent dir apply_analysis
+    # wrote to. The legacy str-replace scheme no longer matches production.
+    from lib_project_id import resolve_project_id
+
+    slug = resolve_project_id(project)
     rules_path = dynos_home / "projects" / slug / "prevention-rules.json"
     if not rules_path.exists():
         return []

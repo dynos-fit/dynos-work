@@ -60,7 +60,14 @@ def dynos_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
     home.mkdir()
     monkeypatch.setenv("DYNOS_HOME", str(home))
 
-    slug = str(root.resolve()).strip("/").replace("/", "-")
+    # Derive the slug through the SAME resolver production uses
+    # (lib_core._persistent_project_dir delegates to resolve_project_id). For a
+    # non-git tmp_path/project this yields a 'path-'-prefixed slug. Hardcoding
+    # the legacy path-slug scheme here was the root cause of the cascading
+    # FileNotFoundError failures.
+    from lib_project_id import resolve_project_id  # noqa: PLC0415
+
+    slug = resolve_project_id(root)
     persistent = home / "projects" / slug
 
     return SimpleNamespace(root=root, dynos_home=home, persistent_dir=persistent)
