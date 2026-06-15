@@ -49,7 +49,7 @@ from lib_receipts import (
     receipt_executor_routing,
     write_receipt,
 )
-from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, validate_task_artifacts
+from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, select_eligible_reports, validate_task_artifacts
 from lib_models import TIER_DEEP, resolve_model_for_tier
 from lib_host import detect_host
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
@@ -78,6 +78,25 @@ _APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
 
 # AC 8: single source of truth for the ctl write role used at all write sites.
 _WRITE_ROLE = "ctl"
+
+# AC 8: Audit sharding thresholds. Override via DYNOS_* environment variables.
+# A diff exceeding EITHER threshold triggers per-auditor shard briefs +
+# a mandatory cross-cutting brief in audit-plan.json.
+def _parse_int_env(var: str, default: int) -> int:
+    raw = os.environ.get(var)
+    if raw is not None:
+        try:
+            return int(raw)
+        except ValueError:
+            print(
+                f"ctl: WARNING: invalid value for {var}={raw!r}; "
+                f"using default {default}",
+                file=sys.stderr,
+            )
+    return default
+
+AUDIT_SHARD_FILE_THRESHOLD: int = _parse_int_env("DYNOS_AUDIT_SHARD_FILE_THRESHOLD", 30)
+AUDIT_SHARD_LOC_THRESHOLD: int = _parse_int_env("DYNOS_AUDIT_SHARD_LOC_THRESHOLD", 8000)
 
 # Compiled-once regex constants. Hoisted out of inline call sites so the
 # pattern is the single source of truth and re.compile fires once at
@@ -2510,11 +2529,198 @@ def cmd_clear_role(args: argparse.Namespace) -> int:
             print(f"clear-role: failed to remove {role_file}: {exc}", file=sys.stderr)
             return 1
 
+    # Best-effort: strip attempt-tracking from expired grants so the next
+    # spawn-prep for this (task, auditor, model) starts from attempt 1.
+    try:
+        import actor_identity as _actor_id
+        _ledger = _actor_id.load_grants(task_dir)
+        _any_stripped = False
+        for _g in _ledger.get("grants", []):
+            if "attempt" in _g:
+                _g.pop("attempt")
+                _any_stripped = True
+        if _any_stripped:
+            def _ctl_writer_cr(p: Path, d: object) -> None:
+                _write_ctl_json(task_dir, p, d)
+            _ctl_writer_cr(_actor_id.grants_path(task_dir), _ledger)
+    except (OSError, json.JSONDecodeError):
+        pass
+
     print(json.dumps({
         "status": "role_cleared",
         "grants_expired": expired,
         "legacy_role_file_removed": removed,
     }, indent=2))
+    return 0
+
+
+# Regex for attempt-isolated audit report filenames: {auditor}-{model}-attempt-{n}.json
+_SPAWN_PREP_ARTIFACT_RE = re.compile(
+    r"^(?P<auditor>[a-zA-Z0-9_-]+)-(?P<model>[a-zA-Z0-9_-]+)-attempt-(?P<n>\d+)\.json$"
+)
+
+# Default budget for a spawn-prep grant (weighted tool-call budget).
+_SPAWN_PREP_DEFAULT_BUDGET: int = 20
+
+
+def cmd_spawn_prep(args: argparse.Namespace) -> int:
+    """Atomic spawn-prep: assign attempt number, write skeleton, append grant.
+
+    Behavior:
+    - Parse (auditor, model, attempt_n) from --artifact basename.
+      Error if basename doesn't match {a}-{m}-attempt-{n}.json.
+    - Scan role-grants.json for max existing attempt for (auditor, model) pair.
+    - If --artifact file exists with status='partial': return the existing
+      attempt number N with continuation=True. Skeleton is NOT overwritten.
+    - If --artifact exists with status='in_progress' (abandoned, no ledger)
+      or status='complete': assign next_attempt = max + 1 (or 1).
+    - If absent: assign next_attempt = max + 1 (or 1); write skeleton via
+      _write_ctl_json; append grant with expected_artifact/attempt/budget.
+    - Skeleton written BEFORE grant appended (skeleton failure aborts grant).
+    - Returns JSON: {"attempt": N, "artifact_path": "...", "budget": B}
+      or {"attempt": N, "continuation": True, "artifact_path": "..."} for resumptions.
+
+    IMPORTANT: callers must serialize re-spawns for the same (auditor, model)
+    pair. Concurrent same-pair calls produce non-deterministic attempt numbers.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    if not task_dir.is_dir():
+        print(
+            json.dumps({"status": "error", "error": f"task_dir does not exist: {task_dir}"}),
+            file=sys.stderr,
+        )
+        return 1
+
+    artifact_path = Path(args.artifact)
+    basename = artifact_path.name
+    m = _SPAWN_PREP_ARTIFACT_RE.match(basename)
+    if not m:
+        print(
+            json.dumps({
+                "status": "error",
+                "error": (
+                    f"artifact basename {basename!r} does not match "
+                    r"{auditor}-{model}-attempt-{n}.json pattern"
+                ),
+            }),
+            file=sys.stderr,
+        )
+        return 1
+
+    auditor = m.group("auditor")
+    model = m.group("model")
+
+    # If --model provided, it must match the model parsed from the filename.
+    if args.model is not None and args.model != model:
+        print(
+            json.dumps({
+                "status": "error",
+                "error": (
+                    f"--model {args.model!r} does not match model in artifact "
+                    f"basename {model!r}"
+                ),
+            }),
+            file=sys.stderr,
+        )
+        return 1
+
+    role = args.role
+
+    # AC 9: If artifact already exists with status='partial', return continuation.
+    if artifact_path.exists():
+        try:
+            existing = load_json(artifact_path)
+        except Exception:
+            existing = {}
+        if isinstance(existing, dict) and existing.get("status") == "partial":
+            # Continuation: return existing attempt number, do NOT overwrite.
+            existing_attempt = existing.get("attempt")
+            if not isinstance(existing_attempt, int):
+                # Fall back to parsing attempt from filename.
+                try:
+                    existing_attempt = int(m.group("n"))
+                except (ValueError, IndexError):
+                    existing_attempt = 1
+            out = {
+                "attempt": existing_attempt,
+                "continuation": True,
+                "artifact_path": str(artifact_path),
+            }
+            print(json.dumps(out, indent=2))
+            return 0
+
+    # Scan role-grants.json for max existing attempt for (auditor, model) pair.
+    import actor_identity as _actor_id
+
+    try:
+        ledger = _actor_id.load_grants(task_dir)
+    except Exception:
+        ledger = {"grants": []}
+
+    max_attempt = 0
+    for grant in ledger.get("grants", []):
+        if not isinstance(grant, dict):
+            continue
+        # Match grants for this (auditor, model) pair by checking expected_artifact.
+        expected = grant.get("expected_artifact", "")
+        if isinstance(expected, str) and expected:
+            ea_basename = Path(expected).name
+            ea_m = _SPAWN_PREP_ARTIFACT_RE.match(ea_basename)
+            if ea_m and ea_m.group("auditor") == auditor and ea_m.group("model") == model:
+                try:
+                    a = int(grant.get("attempt", 0) or 0)
+                except (TypeError, ValueError):
+                    a = 0
+                if a > max_attempt:
+                    max_attempt = a
+
+    next_attempt = max_attempt + 1
+
+    # Compute budget (pre-computed weighted budget; uses a fixed default here).
+    budget = _SPAWN_PREP_DEFAULT_BUDGET
+
+    # Skeleton-before-grant: write skeleton first; if write fails, no grant appended.
+    skeleton = {
+        "status": "in_progress",
+        "owner_model": model,
+        "attempt": next_attempt,
+        "started_at": now_iso(),
+    }
+    try:
+        _write_ctl_json(task_dir, artifact_path, skeleton)
+    except Exception as exc:
+        print(
+            json.dumps({"status": "error", "error": f"failed to write skeleton: {exc}"}),
+            file=sys.stderr,
+        )
+        return 1
+
+    # Append grant with expected_artifact, attempt, and budget.
+    def _ctl_writer_sp(p: Path, d: object) -> None:
+        _write_ctl_json(task_dir, p, d)
+
+    try:
+        _actor_id.append_grant(
+            task_dir,
+            role,
+            write_json_fn=_ctl_writer_sp,
+            expected_artifact=str(artifact_path),
+            attempt=next_attempt,
+            budget=budget,
+        )
+    except Exception as exc:
+        print(
+            json.dumps({"status": "error", "error": f"failed to append grant: {exc}"}),
+            file=sys.stderr,
+        )
+        return 1
+
+    out = {
+        "attempt": next_attempt,
+        "artifact_path": str(artifact_path),
+        "budget": budget,
+    }
+    print(json.dumps(out, indent=2))
     return 0
 
 
@@ -2537,6 +2743,8 @@ def cmd_audit_receipt(args: argparse.Namespace) -> int:
             ensemble_context=args.ensemble_context,
             final_envelope=args.final_envelope,
             tier=getattr(args, "tier", None),
+            shard_step_name=getattr(args, "shard_step_name", None),
+            stage=getattr(args, "stage", None),
         )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
@@ -4085,6 +4293,28 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
             else:
                 diff_error = (result.stderr or result.stdout or f"git diff failed with {result.returncode}").strip()
 
+        # AC 8: Measure diff LOC (insertions + deletions) for sharding threshold.
+        diff_loc = 0
+        if diff_base is not None and diff_error is None:
+            import subprocess as _subprocess  # noqa: PLC0415 — already imported above
+            _stat_result = _subprocess.run(
+                [_GIT or "git", "diff", "--stat", diff_base],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if _stat_result.returncode == 0:
+                _ins_m = re.search(r"(\d+) insertion", _stat_result.stdout)
+                _del_m = re.search(r"(\d+) deletion", _stat_result.stdout)
+                diff_loc = (int(_ins_m.group(1)) if _ins_m else 0) + (
+                    int(_del_m.group(1)) if _del_m else 0
+                )
+        should_shard = (
+            len(diff_files) >= AUDIT_SHARD_FILE_THRESHOLD
+            or diff_loc >= AUDIT_SHARD_LOC_THRESHOLD
+        )
+
         plan = build_audit_plan(
             root,
             str(task_type),
@@ -4094,6 +4324,41 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
             task_id=derived_task_id,
             diff_files=diff_files if (diff_base is not None and diff_error is None) else None,
         )
+        # AC 8: Attach shard_briefs to spawned auditors when diff exceeds threshold.
+        # Sub-threshold diffs: no shard_briefs key (absent, not null/empty).
+        if should_shard:
+            _auditors = plan.get("auditors", [])
+            for _auditor in _auditors:
+                if not isinstance(_auditor, dict) or _auditor.get("action") != "spawn":
+                    continue
+                _auditor_name = str(_auditor.get("name") or _auditor.get("auditor_name") or "unknown")
+                # Build per-directory cluster briefs from diff_files.
+                _dir_clusters: dict[str, list[str]] = {}
+                for _f in diff_files:
+                    _dir = _f.rsplit("/", 1)[0] if "/" in _f else "."
+                    _dir_clusters.setdefault(_dir, []).append(_f)
+                _shard_briefs: list[dict] = []
+                for _dir, _cluster_files in sorted(_dir_clusters.items()):
+                    _shard_briefs.append({
+                        "type": "file-cluster",
+                        "directory": _dir,
+                        "files": _cluster_files,
+                        "instruction": (
+                            f"Audit the following files in {_dir!r}: "
+                            + ", ".join(_cluster_files)
+                            + ". Focus on per-file correctness, logic, and security within this directory."
+                        ),
+                    })
+                # Mandatory cross-cutting brief — always present regardless of shard count.
+                _shard_briefs.append({
+                    "type": "cross-cutting",
+                    "instruction": (
+                        "trace relationships, call sites, and trust boundaries across the whole diff; "
+                        "do not re-audit per-file detail."
+                    ),
+                })
+                _auditor["shard_briefs"] = _shard_briefs
+
         audit_plan_path = task_dir / "audit-plan.json"
         write_json(audit_plan_path, plan)
         receipt_path = receipt_audit_routing(
@@ -4129,88 +4394,6 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
         return 1
 
 
-def _collect_latest_audit_reports(audit_dir: Path) -> dict[str, Path]:
-    """Return {auditor_key: winning_path} by selecting the highest-precedence report per auditor.
-
-    Visits only top-level *.json files (no recursion).
-    Returns an empty dict if audit_dir does not exist or contains no *.json files.
-
-    Precedence (highest wins):
-      1. is_reaudit  — 1 for -reaudit- files, 0 for -checkpoint- or legacy
-      2. cycle       — int parsed from reaudit-cycle-{N}-, else 0
-      3. ts          — string between separator and .json, else ""
-      4. mtime       — Path.stat().st_mtime
-      5. filename    — lexicographic (deterministic final tie-break)
-    """
-    if not audit_dir.exists():
-        return {}
-
-    # Group files by auditor key.
-    groups: dict[str, list[tuple[int, int, str, float, str, Path]]] = {}
-    for p in audit_dir.glob("*.json"):
-        if p.is_symlink():
-            continue
-        name = p.name
-        stem = p.stem  # filename without .json
-
-        # Determine separator and parse (auditor_key, is_reaudit, cycle, ts).
-        reaudit_sep = "-reaudit-"
-        checkpoint_sep = "-checkpoint-"
-
-        reaudit_idx = name.find(reaudit_sep)
-        checkpoint_idx = name.find(checkpoint_sep)
-
-        if reaudit_idx != -1:
-            # Pattern: {auditor}-reaudit-cycle-{N}-{ts}.json
-            auditor_key = name[:reaudit_idx]
-            is_reaudit = 1
-            after = name[reaudit_idx + len(reaudit_sep):]  # "cycle-{N}-{ts}.json"
-            cycle = 0
-            ts = ""
-            if after.startswith("cycle-"):
-                rest = after[len("cycle-"):]  # "{N}-{ts}.json"
-                dash_idx = rest.find("-")
-                if dash_idx != -1:
-                    cycle_str = rest[:dash_idx]
-                    try:
-                        cycle = int(cycle_str)
-                    except ValueError:
-                        cycle = 0
-                    ts_part = rest[dash_idx + 1:]  # "{ts}.json"
-                    if ts_part.endswith(".json"):
-                        ts = ts_part[:-5]
-        elif checkpoint_idx != -1:
-            # Pattern: {auditor}-checkpoint-{ts}.json
-            auditor_key = name[:checkpoint_idx]
-            is_reaudit = 0
-            cycle = 0
-            after = name[checkpoint_idx + len(checkpoint_sep):]  # "{ts}.json"
-            if after.endswith(".json"):
-                ts = after[:-5]
-            else:
-                ts = ""
-        else:
-            # Legacy / non-conforming: use full stem as key.
-            auditor_key = stem
-            is_reaudit = 0
-            cycle = 0
-            ts = ""
-
-        try:
-            mtime = p.stat().st_mtime
-        except OSError:
-            mtime = 0.0
-
-        entry = (is_reaudit, cycle, ts, mtime, name, p)
-        groups.setdefault(auditor_key, []).append(entry)
-
-    result: dict[str, Path] = {}
-    for auditor_key, candidates in groups.items():
-        winner = max(candidates, key=lambda info: (info[0], info[1], info[2], info[3], info[4]))
-        result[auditor_key] = winner[5]
-    return result
-
-
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -4222,9 +4405,7 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
         critical_spec_findings: list[dict] = []
         findings_by_auditor: dict[str, dict[str, int]] = {}
 
-        audit_dir = task_dir / "audit-reports"
-        for report_path in _collect_latest_audit_reports(audit_dir).values():
-            data = load_json(report_path)
+        for report_path, data in select_eligible_reports(task_dir, stage=None):
             findings = data.get("findings", []) if isinstance(data, dict) else []
             if not isinstance(findings, list):
                 findings = []
@@ -4285,9 +4466,7 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
         reports: list[dict] = []
         blocking_findings: list[dict] = []
         critical_spec_finding_ids: set[str] = set()
-        audit_dir = task_dir / "audit-reports"
-        for report_path in _collect_latest_audit_reports(audit_dir).values():
-            data = load_json(report_path)
+        for report_path, data in select_eligible_reports(task_dir, stage=None):
             findings = data.get("findings", []) if isinstance(data, dict) else []
             if not isinstance(findings, list):
                 findings = []
@@ -4527,11 +4706,7 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
         live_findings: dict[str, dict[str, str]] = {}
         audit_dir = task_dir / "audit-reports"
         if audit_dir.is_dir():
-            for report_path in _collect_latest_audit_reports(audit_dir).values():
-                try:
-                    data = load_json(report_path)
-                except Exception:
-                    continue
+            for report_path, data in select_eligible_reports(task_dir, stage=None):
                 auditor_name = str(data.get("auditor_name") or data.get("auditor") or report_path.stem)
                 findings_list = data.get("findings", []) if isinstance(data, dict) else []
                 if not isinstance(findings_list, list):
@@ -4772,11 +4947,7 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
         total_blocking = 0
 
         if reports_dir.exists():
-            for report_path in _collect_latest_audit_reports(reports_dir).values():
-                try:
-                    data = load_json(report_path)
-                except Exception:
-                    continue
+            for report_path, data in select_eligible_reports(task_dir, stage=None):
                 findings = data.get("findings", []) if isinstance(data, dict) else []
                 if not isinstance(findings, list):
                     findings = []
@@ -7036,6 +7207,18 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
             "message. Required for non-generic route_mode; optional for generic."
         ),
     )
+    audit_receipt_parser.add_argument(
+        "--shard-step-name",
+        dest="shard_step_name",
+        default=None,
+        help="Shard step name for attempt-isolated audit receipts (e.g. 'sc-<model>-attempt-1').",
+    )
+    audit_receipt_parser.add_argument(
+        "--stage",
+        dest="stage",
+        default=None,
+        help="Pipeline stage at receipt time (e.g. 'AUDITING'). Written into the receipt for gate matching.",
+    )
     audit_receipt_parser.set_defaults(func=cmd_audit_receipt)
 
     run_rules_check_parser = subparsers.add_parser(
@@ -7198,6 +7381,35 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     clear_role_parser.add_argument("task_dir")
     clear_role_parser.set_defaults(func=cmd_clear_role)
+
+    spawn_prep_parser = subparsers.add_parser(
+        "spawn-prep",
+        help=(
+            "Atomic spawn preparation: assign attempt number, write skeleton artifact, "
+            "append role grant. Callers must serialize re-spawns for the same "
+            "(auditor, model) pair."
+        ),
+    )
+    spawn_prep_parser.add_argument("task_dir", help="Task directory path")
+    spawn_prep_parser.add_argument(
+        "--role",
+        required=True,
+        help="Role to grant (e.g. 'audit-security', 'audit-sc')",
+    )
+    spawn_prep_parser.add_argument(
+        "--artifact",
+        required=True,
+        help=(
+            "Path to the audit report skeleton file. "
+            r"Basename must match {auditor}-{model}-attempt-{n}.json."
+        ),
+    )
+    spawn_prep_parser.add_argument(
+        "--model",
+        default=None,
+        help="Model identifier (optional; must match model parsed from --artifact basename if provided)",
+    )
+    spawn_prep_parser.set_defaults(func=cmd_spawn_prep)
 
     run_audit_reflect_parser = subparsers.add_parser(
         "run-audit-reflect",

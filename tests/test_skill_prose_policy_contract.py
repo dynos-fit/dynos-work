@@ -204,3 +204,12 @@ def test_skill_prescribed_ctl_subcommands_exist() -> None:
             if cmd not in known:
                 missing.append(f"{skill}: ctl subcommand {cmd!r} not registered")
     assert missing == [], "\n".join(sorted(set(missing)))
+
+
+def test_two_phase_prose_contract() -> None:
+    """AC 7: the execute skill must mandate the two-phase A/B split for
+    oversized segments, naming the flag, the change-list artifact, and the
+    write-first discipline."""
+    text = (ROOT / "skills" / "execute" / "SKILL.md").read_text(encoding="utf-8")
+    for needle in ("two_phase: true", "change-list", "write-first"):
+        assert needle in text, f"skills/execute/SKILL.md missing required string: {needle!r}"

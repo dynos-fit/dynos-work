@@ -114,3 +114,11 @@ If the hook reports broken references, fix them before writing evidence.
 - Always run validate_docs_accuracy.py before marking done
 - Always write evidence file
 - If a claim cannot be traced back to code, config, or a verified command, delete it
+
+## Durability Protocol
+
+Maintain a `## Progress Ledger` section in your artifact with three subsections: `### Done`, `### In-Flight`, and `### Next`.
+
+- Set `status="partial"` in your artifact until all sections complete.
+- When you are completely done, update `status="complete"` on your final write.
+- If a continuation spawn resumes your work: FIRST action is reading your predecessor artifact from the same attempt file. Do NOT redo sections listed in `### Done` — skip them and continue from `### In-Flight` or `### Next`. Write to the SAME attempt file, not a new one.

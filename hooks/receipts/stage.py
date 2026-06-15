@@ -1181,6 +1181,8 @@ def receipt_audit_done(
     ensemble_context: bool = False,
     final_envelope: str | None = None,
     tier: str | None = None,
+    shard_step_name: str | None = None,
+    stage: str | None = None,
 ) -> Path:
     """Write receipt proving an auditor completed.
 
@@ -1252,9 +1254,22 @@ def receipt_audit_done(
         _sidecar_tier = None  # No sidecar-derived tier available at this call site.
     host, tier, resolved_model = _compute_spawn_host_fields(task_dir, model_used, _sidecar_tier)
 
+    # Determine receipt step name: use shard_step_name when ensemble_context=True
+    # and shard_step_name is provided; otherwise fall back to auditor_name.
+    # Spawn-log cross-check (above) always keys on auditor_name — not shard_step_name.
+    if ensemble_context and shard_step_name is not None:
+        receipt_step_name = f"audit-{shard_step_name}"
+    else:
+        receipt_step_name = f"audit-{auditor_name}"
+
+    # Build optional extra fields for the receipt payload
+    extra_fields: dict = {}
+    if stage is not None:
+        extra_fields["stage"] = stage
+
     return write_receipt(
         task_dir,
-        f"audit-{auditor_name}",
+        receipt_step_name,
         auditor_name=auditor_name,
         model_used=model_used,
         finding_count=finding_count,
@@ -1269,6 +1284,7 @@ def receipt_audit_done(
         host=host,
         tier=tier,
         resolved_model=resolved_model,
+        **extra_fields,
     )
 
 

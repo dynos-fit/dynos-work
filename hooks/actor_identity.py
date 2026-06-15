@@ -130,13 +130,25 @@ def load_grants(task_dir: Path) -> dict:
     return _empty_ledger()
 
 
-def append_grant(task_dir: Path, role: str, *, write_json_fn=None) -> dict:
+def append_grant(
+    task_dir: Path,
+    role: str,
+    *,
+    write_json_fn=None,
+    expected_artifact: str | None = None,
+    attempt: int | None = None,
+    budget: int | None = None,
+) -> dict:
     """Append a pending grant. Role validity is the CALLER's responsibility
     (ctl validates against _STAMP_ROLE_ALLOWLIST before calling).
 
     write_json_fn: injection point for ctl's policy-checked writer
     (write_ctl_json); defaults to the module's direct atomic writer for the
     hook-side expiry path.
+
+    expected_artifact, attempt, budget: optional fields written into the grant
+    dict only when non-None. Old callers passing no new kwargs receive a
+    byte-identical grant dict.
     """
     ledger = load_grants(task_dir)
     now = time.time()
@@ -147,6 +159,12 @@ def append_grant(task_dir: Path, role: str, *, write_json_fn=None) -> dict:
         "consumed_by": None,
         "consumed_at": None,
     }
+    if expected_artifact is not None:
+        grant["expected_artifact"] = expected_artifact
+    if attempt is not None:
+        grant["attempt"] = attempt
+    if budget is not None:
+        grant["budget"] = budget
     ledger["grants"].append(grant)
     writer = write_json_fn or (lambda p, d: _atomic_write_json(p, d))
     writer(grants_path(task_dir), ledger)

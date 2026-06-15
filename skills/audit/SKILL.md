@@ -77,6 +77,8 @@ For any auditor that does NOT have a `## Turn Budget Discipline` section in its 
 - Tool-use budget: fast ≤ 15, balanced ≤ 20, deep ≤ 25 tool uses.
 - When within 3 tool uses of the budget, stop and emit the report.
 
+**Auditor Durability and Watchdog Discipline:** All auditors maintain a `## Progress Ledger` section in their artifact with subsections `### Done`, `### In-Flight`, and `### Next`. Set `status="partial"` until complete, then `status="complete"` on the final write. If an auditor fails to update its skeleton (artifact + Progress Ledger) by `ceil(budget/3)` tool calls, the watchdog will emit an instructional deny on the next spawn. Partial reports (status="partial" with ledger content) are excluded from gating decisions but are surfaced to repair planning as advisory context.
+
 For each auditor in the plan:
 - If `action: "skip"`: log `{timestamp} [SKIP] {name} — {reason}` and do not spawn
 - If `action: "spawn"`: spawn with the specified `model` (null = default)

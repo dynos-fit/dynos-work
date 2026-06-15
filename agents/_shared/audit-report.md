@@ -6,14 +6,17 @@
 - Evidence must point to concrete inspected code or generated output, not assumptions.
 - If coverage or confidence is weak, say so explicitly instead of padding the report.
 
-All auditors write their report as a JSON file to `.dynos/task-{id}/audit-reports/{auditor-name}-{timestamp}.json` using this schema:
+All auditors write their report as a JSON file to `.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json` using this schema:
 
 ```json
 {
   "auditor_name": "string — the auditor's name (e.g. 'security-auditor')",
   "run_id": "string — unique run identifier",
   "task_id": "string — the task ID",
-  "status": "pass | fail | warning",
+  "status": "in_progress | partial | complete",
+  "verdict": "pass | fail | warning",
+  "confidence": "number | null — 0.0 to 1.0; null if confidence cannot be determined",
+  "incomplete_reason": "string | null — human-readable reason when status is in_progress or partial; null when complete",
   "severity": "critical | major | minor",
   "findings": [
     {
@@ -42,7 +45,6 @@ All auditors write their report as a JSON file to `.dynos/task-{id}/audit-report
       "affected_files": ["string — file paths"]
     }
   ],
-  "confidence": "number — 0.0 to 1.0",
   "can_block_completion": "boolean"
 }
 ```

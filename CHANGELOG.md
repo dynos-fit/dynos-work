@@ -11,6 +11,26 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.0] - 2026-06-12
+### "Selection, Durability, Enforcement, Scope": Four-Layer Foundation for Audited Execution
+
+This release completes the execution-audit-repair pipeline's foundation across selection truth, durability contracts, per-session enforcement, and compute budgets (task-20260612-001: 9-segment graph, TDD-first build, 4-layer validation, full receipting).
+
+### Added
+- **L1 Selection Truth:** receipt-backed `select_eligible_reports` with attempt isolation (`{auditor}-{model}-attempt-{n}.json` filenames), status/receipt/stage triple-check gate path, and permissive repair-planning path. `receipt_audit_done` gains `shard_step_name` and `stage` fields; audit-report schema introduces `status` (lifecycle) and `verdict` fields. `_collect_latest_audit_reports` removed.
+- **L2 Durability:** `ctl spawn-prep` attempt isolation and continuation support; `append_grant` now carries `expected_artifact`, `attempt`, and `budget`. Durability Protocol and Progress Ledger added to all executor and auditor agents. `execute` skill mandates two-phase A/B writes in all entry points.
+- **L3 Enforcement:** per-session write-first watchdog in `pre_tool_use.py` tracking tool-call-counters in `.json`, deny-once with K=5 cooldown, preventing runaway tool use mid-stream.
+- **L4 Scope:** LOC-weighted `compute_segment_budget` (files_loc, LOC_BASE/LOC_SLOPE=400/1) with audit sharding (AUDIT_SHARD_FILE_THRESHOLD=30 files, LOC_THRESHOLD=8000), per-directory cluster briefs plus mandatory cross-cutting brief for large segments.
+
+### Changed
+- Receipt schema version bumped to match spawn-prep/execution flow changes; spawn receipts auto-compute attempt and stage fields.
+- All executor agents (specification, execution, repair-coordinator, security-auditor, code-quality-auditor, performance-auditor) updated to include Durability Protocol and Progress Ledger in task narratives.
+- Audit sharding logic applied to all audit segments; cluster briefs standardize large-file aggregation behavior.
+
+### Plugin / Distribution
+- Bump `.claude-plugin/plugin.json`, `package.json`, `.claude-plugin/marketplace.json`, and `.codex-plugin/plugin.json` to `7.5.0`.
+
+---
 
 ## [7.4.2] - 2026-06-11
 ### "Codex Compatibility": Same Foundry, Second Host
