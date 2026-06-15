@@ -1,7 +1,11 @@
 """Tests for per-actor role resolution (D3 in docs/permissions-on-design.md).
 
-The orchestrator session is pinned at SessionStart and ALWAYS resolves to the
-'orchestrator' role; subagent sessions consume single-use grants. The suite's
+The orchestrator session is pinned at SessionStart. On a harness that
+isolates subagent sessions (subagent_isolation=true) it ALWAYS resolves to the
+'orchestrator' role and never adopts a stamped role; under Claude Code (default
+subagent_isolation=false) it adopts the stamped active-segment-role so it can
+act as that segment's planner/executor/auditor. Subagent sessions, when the
+harness provides distinct ones, consume single-use grants. The suite's
 most important member is the self-elevation regression: granting an audit
 role must NOT let the orchestrator write audit-reports/.
 """
@@ -110,19 +114,68 @@ def test_orchestrator_cannot_write_audit_reports_even_with_audit_grant(
     assert "degraded actor resolution" in err
 
 
-def test_orchestrator_ignores_stamped_role_file(
+def test_orchestrator_adopts_stamped_role_when_not_isolated(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The P1-a fix: stamping a subagent role no longer mutates the
-    orchestrator's own rights."""
+    """Claude Code default (subagent_isolation unset -> False): the orchestrator
+    session ADOPTS the stamped active-segment-role so it can author that
+    segment's artifacts. Required because Claude Code subagents share the
+    orchestrator session_id (issue #7881) and would otherwise never be able to
+    write their role-scoped outputs."""
     task_dir = _task_dir(project)
     (task_dir / "active-segment-role").write_text("planning")
-    # planning may write spec.md — the orchestrator must NOT inherit that.
+    # planning may write spec.md; the orchestrator now adopts that role.
     code, err = _run_hook(
         monkeypatch,
         session_id=ORCH_SESSION,
         tool_name="Write",
         tool_input={"file_path": str(task_dir / "spec.md"), "content": "# spec"},
+        cwd=project,
+    )
+    assert code == 0, err
+
+
+def test_orchestrator_ignores_stamped_role_when_subagent_isolation(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strict D3 mode (subagent_isolation=true): on a harness that isolates
+    subagent sessions, the orchestrator must NOT adopt a stamped role — the
+    original P1-a self-elevation defense is preserved as an opt-in."""
+    task_dir = _task_dir(project)
+    cfg = project / ".dynos" / "config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "policy.json").write_text(json.dumps({"subagent_isolation": True}))
+    (task_dir / "active-segment-role").write_text("planning")
+    code, err = _run_hook(
+        monkeypatch,
+        session_id=ORCH_SESSION,
+        tool_name="Write",
+        tool_input={"file_path": str(task_dir / "spec.md"), "content": "# spec"},
+        cwd=project,
+    )
+    assert code == 2
+    assert "role=orchestrator" in err
+
+
+def test_orchestrator_audit_write_still_blocked_under_isolation(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even with adoption available, strict mode keeps the audit-report
+    self-elevation defense: under subagent_isolation, a stamped audit role is
+    NOT adopted by the orchestrator."""
+    task_dir = _task_dir(project)
+    cfg = project / ".dynos" / "config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "policy.json").write_text(json.dumps({"subagent_isolation": True}))
+    (task_dir / "active-segment-role").write_text("audit-security")
+    code, err = _run_hook(
+        monkeypatch,
+        session_id=ORCH_SESSION,
+        tool_name="Write",
+        tool_input={
+            "file_path": str(task_dir / "audit-reports" / "security-1.json"),
+            "content": "{}",
+        },
         cwd=project,
     )
     assert code == 2

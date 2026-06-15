@@ -33,6 +33,54 @@ _EXECUTOR_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui", "audit-claude-md",
 })
 
+
+def _subagent_isolation(task_dir: "Path | None") -> bool:
+    """True only when the host harness gives each subagent a DISTINCT
+    session_id, making per-subagent write-role enforcement meaningful.
+
+    Default False: Claude Code shares the orchestrator's session_id across
+    all subagents with no distinguishing field (GitHub issue #7881), so a
+    planner/executor/auditor subagent resolves as the orchestrator. With
+    isolation False the orchestrator is permitted to ADOPT the stamped
+    active-segment-role so it can act as that segment's role; otherwise no
+    subagent could ever author its role-scoped artifacts.
+
+    Set ``"subagent_isolation": true`` in
+    ``<project>/.dynos/config/policy.json`` ONLY on a harness that truly
+    isolates subagent sessions — that restores the strict D3 behavior where
+    the orchestrator never adopts a stamped role.
+    """
+    if task_dir is None:
+        return False
+    try:
+        cfg = task_dir.parent.parent / ".dynos" / "config" / "policy.json"
+        if not cfg.is_file():
+            return False
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        return bool(isinstance(data, dict) and data.get("subagent_isolation", False))
+    except Exception:
+        return False
+
+
+def _adoptable_stamped_role(task_dir: "Path | None") -> "str | None":
+    """Return the stamped active-segment-role when it is a valid,
+    non-orchestrator executor/planning/audit role; else None. Lets the
+    orchestrator session adopt the current segment role under a
+    non-isolating harness (see ``_subagent_isolation``)."""
+    if task_dir is None:
+        return None
+    try:
+        rf = task_dir / "active-segment-role"
+        if not rf.is_file():
+            return None
+        val = rf.read_text(encoding="utf-8").strip()
+        if val and val != "orchestrator" and val in _EXECUTOR_ROLE_ALLOWLIST:
+            return val
+    except Exception:
+        return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Module-level imports for write_policy, read_policy, and lib_log.
 # These are resolved lazily at first-use inside main() so the hook can still
@@ -619,8 +667,37 @@ def main() -> int:
         # to the legacy chain wholesale (today's behavior, no regression).
         if task_dir is not None and actor_identity is not None and pin and session_id:
             if session_id == pin.get("session_id"):
-                role = "orchestrator"
-                role_missing = False
+                # Orchestrator session. Strict D3 (subagent_isolation=true):
+                # never adopt a stamped role — prevents self-escalation.
+                # Under a non-isolating harness like Claude Code (default),
+                # subagents share this session_id with no distinguisher
+                # (issue #7881), so the orchestrator MUST adopt the stamped
+                # active-segment-role to act as the planner/executor/auditor
+                # for the segment, else no subagent can author its
+                # role-scoped artifacts. Forgery defenses are unaffected:
+                # control-plane.json and the pin are denied to ALL roles,
+                # and audit-report writes remain cross-checked against
+                # spawn-log.jsonl at receipt time.
+                adopted = (
+                    None if _subagent_isolation(task_dir)
+                    else _adoptable_stamped_role(task_dir)
+                )
+                if adopted is not None:
+                    role = adopted
+                    role_missing = False
+                    try:
+                        if log_event is not None:
+                            log_event(
+                                task_dir.parent.parent,
+                                "orchestrator_role_adopted",
+                                task=task_dir.name,
+                                role=adopted,
+                            )
+                    except Exception:
+                        pass
+                else:
+                    role = "orchestrator"
+                    role_missing = False
             else:
                 bound = actor_identity.lookup_binding(task_dir, session_id)
                 if bound is None:

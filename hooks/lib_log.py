@@ -88,6 +88,10 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # state machine depends on these events.
     "pre_tool_use_audit_plan_missing",
     "pre_tool_use_audit_plan_invalid",
+    # Orchestrator adopted the stamped active-segment-role under a
+    # non-isolating harness (Claude Code; pre_tool_use.py _subagent_isolation
+    # = False). Forensic trace only — no gate depends on it.
+    "orchestrator_role_adopted",
     # Read-policy decision observability (read_policy gate, task-20260501-002).
     # Forensic trace recording allow/deny decisions for read attempts.
     # Observability only — no gate or state machine depends on these events.
