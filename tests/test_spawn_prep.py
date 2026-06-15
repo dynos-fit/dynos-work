@@ -207,7 +207,7 @@ def test_resume_spawn_prep_output(tmp_path: Path) -> None:
     ledger = {
         "grants": [
             {
-                "role": "audit-sc",
+                "role": "audit-security",
                 "granted_at": now - 100,
                 "expires_at": now + 3500,
                 "consumed_by": "session-sub-001",
@@ -220,10 +220,11 @@ def test_resume_spawn_prep_output(tmp_path: Path) -> None:
     }
     (task_dir / "role-grants.json").write_text(json.dumps(ledger), encoding="utf-8")
 
-    # Call spawn-prep — should detect status=partial and return continuation=True
+    # Call spawn-prep — should detect status=partial and return continuation=True.
+    # Role must be allowlisted; validation now runs before artifact parsing (AC 5).
     r = _run_spawn_prep(
         task_dir,
-        role="audit-sc",
+        role="audit-security",
         artifact_path=str(artifact_path),
         model="haiku",  # noqa: model-literal
     )

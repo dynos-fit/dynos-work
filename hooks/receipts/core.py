@@ -123,12 +123,13 @@ MIN_VERSION_PER_STEP: dict[str, int] = {
     # invariant as human-approval receipts. v5 receipts on disk remain
     # readable; only new auto-approval-* writes carry contract_version=6.
     "auto-approval-*": 6,
-    # v6 -> v7 bump (task-20260611-001): spawn receipts now carry
-    # {host, tier, resolved_model} v7 fields. The floor ensures consumers
-    # that depend on host/tier/resolved_model fields reject pre-v7 spawn
-    # receipts that lack these fields. Pre-v7 spawn receipts on disk remain
-    # readable by callers that pass min_version=1; only new spawn-* writes
-    # carry contract_version=7.
+    # spawn-* floor matches only spawn-budget-paused / spawn-budget-resumed
+    # receipts, which do NOT carry host/tier/resolved_model fields. The floor
+    # value 7 does NOT enforce v7 host/tier/resolved_model field presence for
+    # spawn receipts — that enforcement is handled at write time by
+    # RECEIPT_CONTRACT_VERSION for executor-*/audit-* receipts, not by this
+    # floor. Callers that need to gate on v7 fields must pass min_version=7
+    # explicitly rather than relying on this spawn-* floor entry.
     "spawn-*": 7,
 }
 
@@ -304,11 +305,11 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     receipts.mkdir(parents=True, exist_ok=True)
 
     receipt = {
+        **payload,
         "step": step_name,
         "ts": now_iso(),
         "valid": True,
         "contract_version": RECEIPT_CONTRACT_VERSION,
-        **payload,
     }
 
     receipt_path = receipts / f"{step_name}.json"

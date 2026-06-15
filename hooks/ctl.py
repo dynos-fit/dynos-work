@@ -2591,6 +2591,13 @@ def cmd_spawn_prep(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # AC 5: Validate role immediately after task_dir guard — before any artifact
+    # parsing or grant logic.  Non-allowlisted roles are rejected here even on
+    # the continuation / resume path.
+    role = _validated_grant_role("spawn-prep", args.role)
+    if role is None:
+        return 1
+
     artifact_path = Path(args.artifact)
     basename = artifact_path.name
     m = _SPAWN_PREP_ARTIFACT_RE.match(basename)
@@ -2624,9 +2631,8 @@ def cmd_spawn_prep(args: argparse.Namespace) -> int:
         )
         return 1
 
-    role = args.role
-
     # AC 9: If artifact already exists with status='partial', return continuation.
+    # Continuation resumes without appending a new grant — no privilege escalation.
     if artifact_path.exists():
         try:
             existing = load_json(artifact_path)

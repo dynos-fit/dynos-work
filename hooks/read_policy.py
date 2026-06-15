@@ -195,6 +195,11 @@ def _handle_dead_code_grep_quota(attempt: ReadAttempt) -> ReadDecision:
             # allow. The quota state is corrupt (slot consumed but not
             # persisted); subsequent calls would re-read the old count and
             # over-grant. Spec AC 9 mandates fail-closed on quota corruption.
+            # AC 8: clean up the stray .tmp file if os.replace raised
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             return ReadDecision(
                 allowed=False,
                 reason="read-policy: quota state unwritable; denying repo-wide grep",
