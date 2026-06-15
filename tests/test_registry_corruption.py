@@ -79,7 +79,9 @@ class TestQuarantineOnChecksumMismatch:
             register_project(new_project)
 
         live = json.loads((tmp_path / "registry.json").read_text())
-        live_paths = {p["path"] for p in live["projects"]}
+        # load_registry migrates each project into the v2 nested id/paths[]
+        # shape, so the registered path is under paths[], not a top-level key.
+        live_paths = {pp["path"] for p in live["projects"] for pp in p["paths"]}
         assert live_paths == {str(new_project)}, \
             "live registry should contain only the freshly registered project"
 
@@ -106,7 +108,13 @@ class TestQuarantineOnChecksumMismatch:
 
         from registry import load_registry
         loaded = load_registry()
-        assert loaded["projects"] == reg["projects"]
+        # load_registry normalizes the v1 flat schema into the v2 nested
+        # id/paths[] shape in memory, so raw dict equality no longer holds.
+        # Compare on the normalized projection and confirm the entry was
+        # preserved (not quarantined).
+        loaded_paths = {pp["path"] for p in loaded["projects"] for pp in p["paths"]}
+        assert loaded_paths == {"/x"}
+        assert all(p["status"] == "active" for p in loaded["projects"])
         assert list(tmp_path.glob("registry.json.corrupt-*")) == [], \
             "clean registry must not produce a quarantine file"
 

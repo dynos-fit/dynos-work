@@ -42,6 +42,10 @@ _GHOST_TEST_ALLOWLIST: dict[str, str] = {
         "Static AST guard delegating to _assert_no_include_unverified_true helper. Same justification "
         "as the policy_engine variant — wrapper binds module path → guard, helper holds the assert."
     ),
+    "test_source_filter_downstream.py::test_postmortem_never_calls_with_include_unverified_true": (
+        "Static AST guard delegating to _assert_no_include_unverified_true helper. Same justification "
+        "as the policy_engine variant — wrapper binds module path → guard, helper holds the assert."
+    ),
     "test_lib_chain_perf.py::test_append_entry_function_exists": (
         "Crash-guard precondition for the perf-001 / perf-002 sibling tests in TestPerf001And002. "
         "Asserts _append_entry is found by _find_function; if the function is renamed or removed, "

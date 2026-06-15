@@ -74,6 +74,8 @@ violation is returned. This matches the negative-case approach used by
 PR #171 and PR #175.
 """
 
+from __future__ import annotations
+
 import ast
 from collections.abc import Iterator
 from pathlib import Path

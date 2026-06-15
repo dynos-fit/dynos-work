@@ -16,12 +16,20 @@ import errno
 import fcntl
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
 import uuid
 from pathlib import Path
 from typing import Optional
+
+# Resolve the git binary once at import time so subprocess calls route through
+# the absolute path rather than PATH-based resolution. Mirrors lib_core's _GIT
+# constant; the structural regression test in
+# tests/test_no_raw_subprocess_python_git.py requires `_GIT or "git"` rather
+# than a bare "git" list literal.
+_GIT: "str | None" = shutil.which("git")
 
 # ---------------------------------------------------------------------------
 # Public exception
@@ -217,7 +225,7 @@ def _git_common_dir(root: Path) -> Optional[Path]:
     root_str = str(root)
     try:
         result = subprocess.run(
-            ["git", "-C", root_str, "rev-parse", "--git-common-dir"],
+            [_GIT or "git", "-C", root_str, "rev-parse", "--git-common-dir"],
             capture_output=True,
             text=True,
             timeout=5,
