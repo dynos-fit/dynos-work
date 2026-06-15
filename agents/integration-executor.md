@@ -83,3 +83,11 @@ Additionally, if prevention rules were provided in your spawn instructions, add 
 - All integration failure paths handled
 - Always write evidence file
 - If you cannot show the exact handshake between systems, keep working
+
+## Durability Protocol
+
+Maintain a `## Progress Ledger` section in your artifact with three subsections: `### Done`, `### In-Flight`, and `### Next`.
+
+- Set `status="partial"` in your artifact until all sections complete.
+- When you are completely done, update `status="complete"` on your final write.
+- If a continuation spawn resumes your work: FIRST action is reading your predecessor artifact from the same attempt file. Do NOT redo sections listed in `### Done` — skip them and continue from `### In-Flight` or `### Next`. Write to the SAME attempt file, not a new one.

@@ -89,6 +89,7 @@ _CONTROL_PLANE_EXACT = frozenset({
     "audit-grep-quota.json",
     "role-grants.json",
     "role-bindings.json",
+    "tool-call-counters.json",
 })
 
 _WRAPPER_REQUIRED = {
@@ -466,6 +467,19 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             "deny",
         )
 
+    if rel_posix == "tool-call-counters.json":
+        # tool-call-counters.json is hook-owned telemetry (D3 artifact-durability).
+        # The hook subprocess writes it via direct file I/O (atomic rename),
+        # bypassing this policy entirely. All agent roles are denied — including
+        # executors, orchestrators, and receipt-writers. This closes the
+        # fabrication vector: an agent cannot increment or reset its own counters.
+        return WriteDecision(
+            False,
+            "tool-call-counters.json is hook-owned telemetry; only the "
+            "hook subprocess may write it",
+            "deny",
+        )
+
     if rel_posix is not None and rel_posix.startswith("receipts/"):
         if attempt.role == "receipt-writer":
             return WriteDecision(True, "receipts are receipt-writer-owned control-plane state", "direct")
@@ -477,6 +491,8 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         return WriteDecision(False, "handoff json is code-owned control-plane state", "deny")
 
     if rel_posix is not None and rel_posix.startswith("audit-reports/"):
+        if attempt.role == "ctl" and attempt.operation == "create":
+            return WriteDecision(True, "ctl skeleton pre-creation", "direct")
         if attempt.role.startswith("audit-"):
             return WriteDecision(True, "audit report is auditor-owned evidence", "direct")
         return WriteDecision(False, "audit reports are reserved for auditor roles", "deny")

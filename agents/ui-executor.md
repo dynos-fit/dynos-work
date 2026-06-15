@@ -151,3 +151,11 @@ Write to `.dynos/task-{id}/evidence/{segment-id}.md`. This is your proof of comp
 - **Do not introduce new design patterns.** If the codebase has an established way to build cards, lists, icons, or layout — you use it. Read existing code before inventing. Consistency across screens is worth more than local cleverness.
 - **Always write the evidence file.** No evidence = no proof = not done. A reviewer should be able to verify your work line-by-line from the evidence file alone.
 - **Accessibility is not extra credit.** Every interactive element gets a semantic label. Every image gets alt text or is marked decorative. Focus order is logical. Contrast meets WCAG AA. This is baseline, not bonus.
+
+## Durability Protocol
+
+Maintain a `## Progress Ledger` section in your artifact with three subsections: `### Done`, `### In-Flight`, and `### Next`.
+
+- Set `status="partial"` in your artifact until all sections complete.
+- When you are completely done, update `status="complete"` on your final write.
+- If a continuation spawn resumes your work: FIRST action is reading your predecessor artifact from the same attempt file. Do NOT redo sections listed in `### Done` — skip them and continue from `### In-Flight` or `### Next`. Write to the SAME attempt file, not a new one.

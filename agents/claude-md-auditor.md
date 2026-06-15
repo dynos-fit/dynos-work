@@ -159,3 +159,11 @@ Follow the canonical schema defined in `agents/_shared/audit-report.md` with the
 - You MUST always write a report — even on tool-error and no-rules-found paths.
 - You MUST NOT modify any files other than the audit report you write.
 - Every finding MUST carry a `citation` block; missing citation = invalid finding.
+
+## Durability Protocol
+
+Maintain a `## Progress Ledger` section in your artifact with three subsections: `### Done`, `### In-Flight`, and `### Next`.
+
+- Set `status="partial"` in your artifact until all sections complete.
+- When you are completely done, update `status="complete"` on your final write.
+- If a continuation spawn resumes your work: FIRST action is reading your predecessor artifact from the same attempt file. Do NOT redo sections listed in `### Done` — skip them and continue from `### In-Flight` or `### Next`. Write to the SAME attempt file, not a new one.

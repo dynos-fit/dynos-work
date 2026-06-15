@@ -1114,6 +1114,18 @@ def build_audit_plan(
     return plan
 
 
+def _measure_loc(path: Path) -> int:
+    """Return the number of lines in *path*, or 0 on any OSError.
+
+    Used to compute a per-file LOC surcharge for compute_segment_budget.
+    Returns 0 for files that do not yet exist or cannot be read.
+    """
+    try:
+        return sum(1 for _ in path.open("rb"))
+    except OSError:
+        return 0
+
+
 def build_executor_plan(
     root: Path,
     task_type: str,
@@ -1198,7 +1210,8 @@ def build_executor_plan(
         # length and the resolved model so executors get a deterministic,
         # spec-derived ceiling instead of an unbounded tool quota.
         files_expected = seg.get("files_expected") or []
-        tool_budget = compute_segment_budget(len(files_expected), model_decision["model"])
+        files_loc = [_measure_loc(Path(f)) for f in files_expected]
+        tool_budget = compute_segment_budget(len(files_expected), model_decision["model"], files_loc=files_loc)
 
         seg_entry: dict = {
             "segment_id": seg_id,
@@ -1322,6 +1335,14 @@ def build_executor_prompt(
             f"Your tool-use budget for this spawn is **{tool_budget}** tool calls. "
             f"Stop and emit evidence within 3 calls of that budget."
         )
+        expected_artifact = segment.get("expected_artifact") or plan_entry.get("expected_artifact")
+        if expected_artifact:
+            checkpoint_call = math.ceil(tool_budget / 3)
+            parts.append(
+                f"Budget {tool_budget}. Your artifact at {expected_artifact} must hold real content "
+                f"and a progress ledger (done / in-flight / next) by tool call {checkpoint_call}; "
+                f"update it incrementally — work not on disk does not exist."
+            )
 
     return "\n".join(parts)
 
@@ -1741,9 +1762,11 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
                     # discarding any other plan_entry data.
                     if "tool_budget" not in plan_entry:
                         files_expected = target_seg.get("files_expected") or []
+                        files_loc = [_measure_loc(Path(f)) for f in files_expected]
                         plan_entry["tool_budget"] = compute_segment_budget(
                             len(files_expected),
                             plan_entry.get("model", ""),
+                            files_loc=files_loc,
                         )
             else:
                 cache_status = "fingerprint_drift"

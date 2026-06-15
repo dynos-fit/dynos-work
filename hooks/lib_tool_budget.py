@@ -46,12 +46,19 @@ STATIC_CAPS_BY_MODEL: dict[str, int] = {"haiku": 15, "sonnet": 20, "opus": 25}  
 # Used by compute_segment_budget when model=None and a tier is supplied.
 STATIC_CAPS_BY_TIER: dict[str, int] = {"fast": 15, "balanced": 20, "deep": 25}
 
+# LOC below this per file are free (no surcharge added to raw budget).
+LOC_BASE: int = 400
+
+# LOC per +1 additional tool-call surcharge above LOC_BASE.
+LOC_SLOPE: int = 400
+
 
 def compute_segment_budget(
     files_expected_count: int,
     model: "str | None",
     *,
     tier: "str | None" = None,
+    files_loc: "list[int] | None" = None,
 ) -> int:
     """Return the tool-call budget for a segment.
 
@@ -68,16 +75,26 @@ def compute_segment_budget(
       3. Otherwise (model is None and tier is None or unknown), default to 15
          (haiku-equivalent — preserves pre-task behavior when model is null).  # noqa: model-literal
 
+    When *files_loc* is provided (non-None), the raw budget is augmented by:
+        loc_surcharge = sum(max(0, loc - LOC_BASE) // LOC_SLOPE for loc in files_loc)
+    The surcharge is added to raw BEFORE the min(ceiling, max(raw, floor)) clamp.
+    Passing files_loc=None is byte-identical to calling without the kwarg.
+
     Args:
         files_expected_count: Number of files in the segment's files_expected.
         model: Model family name ("haiku" | "sonnet" | "opus" | other), or None.  # noqa: model-literal
         tier: Optional tier name ("fast" | "balanced" | "deep").  Keyword-only.
               Only consulted when model is None.
+        files_loc: Optional list of on-disk line counts for each expected file.
+                   Use 0 for files that do not yet exist.  Keyword-only.
 
     Returns:
         Integer tool-call budget, always 1 <= budget <= TOOL_BUDGET_CEILING.
     """
     raw = files_expected_count * PER_FILE_COST + FIXED_OVERHEAD
+    if files_loc is not None:
+        for loc in files_loc:
+            raw += max(0, loc - LOC_BASE) // LOC_SLOPE
     if model is not None:
         floor = STATIC_CAPS_BY_MODEL.get(model, 15)
     elif tier is not None:

@@ -218,7 +218,15 @@ def test_watchdog_deny_once_then_silent(
     stderr2 = io.StringIO()
     with contextlib.redirect_stderr(stderr2):
         code2 = pre_tool_use.main()
-    assert code2 == 0, f"Second call after deny must be ALLOWED (exit 0), got {code2}"
+    # SEC-001: after its single deny the watchdog is SILENT (one deny per session) —
+    # it must NOT emit a second write-first deny. Crucially it returns None and defers
+    # to write_policy rather than short-circuiting main() with a 0 (which would let the
+    # session bypass the write-boundary policy entirely). The watchdog's job is to nudge
+    # write-first, never to GRANT a write the policy would deny.
+    assert "write-first checkpoint" not in stderr2.getvalue(), (
+        f"Watchdog must be silent after its one deny (no second nudge), "
+        f"got stderr: {stderr2.getvalue()!r}"
+    )
 
 
 def test_watchdog_artifact_write_always_allowed(

@@ -368,23 +368,135 @@ def derive_user_summary(audit_summary: dict) -> str:
     return "\n".join(parts)
 
 
-def _collect_audit_findings(task_dir: Path) -> dict[str, dict]:
-    """Return audit findings keyed by finding id from live audit reports."""
-    findings_by_id: dict[str, dict] = {}
+# Filename pattern: {auditor}-{model}-attempt-{n}.json (ADR-2: hard cutover, no legacy)
+_REPORT_FILENAME_RE: re.Pattern[str] = re.compile(
+    r"^([a-zA-Z0-9_-]+)-([a-zA-Z0-9_-]+)-attempt-(\d+)\.json$"
+)
+
+
+def select_eligible_reports(
+    task_dir: Path,
+    stage: str | None = None,
+) -> list[tuple]:
+    """Return eligible audit report tuples (report_path, payload) for gating or repair-planning.
+
+    Two paths:
+    (A) GATE PATH (stage is not None): requires status=='complete', matching receipt
+        (min_version=2) with report_path/report_sha256 match, and receipt stage match.
+    (B) REPAIR-PLANNING PATH (stage is None): returns every report with any matching
+        receipt (any lifecycle status: complete, partial, in_progress) as advisory context.
+
+    Returns empty list (not an error) when no eligible reports exist.
+    Receipts are checked at both audit-{auditor_name} and audit-{shard_step_name}
+    (the filename stem without -attempt-N suffix doubles as the shard step key prefix).
+    """
+    from lib_receipts import read_receipt as _read_receipt
+
     audit_dir = task_dir / "audit-reports"
     if not audit_dir.is_dir():
-        return findings_by_id
-    for report_path in sorted(audit_dir.glob("*.json")):
+        return []
+
+    results: list[tuple] = []
+    for report_file in sorted(audit_dir.glob("*.json")):
         try:
-            payload = load_json(report_path)
+            payload = load_json(report_file)
         except (json.JSONDecodeError, OSError, ValueError):
             continue
         if not isinstance(payload, dict):
             continue
+
+        # REPAIR-PLANNING PATH (stage is None): permissive. Every readable
+        # report is advisory context regardless of filename scheme, lifecycle
+        # status, or receipt presence. This preserves the pre-cutover
+        # _collect_audit_findings behavior — legacy ``{auditor}.json`` reports
+        # and receipt-less reports stay visible to repair-log cross-checks —
+        # and satisfies AC 1/AC 2 ("repair planning sees all findings,
+        # including incomplete ones, as advisory context").
+        if stage is None:
+            results.append((report_file, payload))
+            continue
+
+        # GATE PATH (stage is not None): strict attempt-isolated naming +
+        # status=='complete' + receipted + receipt-stage match (AC 1; ADR-2
+        # hard cutover — legacy filename patterns are silently inert).
+        m = _REPORT_FILENAME_RE.match(report_file.name)
+        if not m:
+            continue
+        auditor_name = m.group(1)
+        model_name = m.group(2)
+
+        if payload.get("status") != "complete":
+            continue
+
+        # Compute sha256 of this report file for receipt matching
+        try:
+            report_bytes = report_file.read_bytes()
+        except OSError:
+            continue
+        import hashlib as _hashlib
+        report_sha256 = _hashlib.sha256(report_bytes).hexdigest()
+        report_path_str = str(report_file)
+
+        # Candidate receipt step names to check:
+        # 1. audit-{auditor_name} (canonical per-auditor receipt)
+        # 2. audit-{auditor_name}-{model_name} (per-model shard receipt)
+        candidate_step_names = [
+            f"audit-{auditor_name}",
+            f"audit-{auditor_name}-{model_name}",
+        ]
+
+        matched_receipt: dict | None = None
+        for step_name in candidate_step_names:
+            receipt = _read_receipt(task_dir, step_name, min_version=2)
+            if receipt is None:
+                continue
+            # SEC-003: the content hash is the ONLY integrity-binding term. The
+            # receipt's report_sha256 must equal the hash recomputed from the
+            # report's CURRENT bytes — a path-only match would gate a report whose
+            # bytes were mutated after the receipt was written (audit-reports/ is
+            # auditor-writable, so an auditor could rewrite its own report post-
+            # receipt to hide or inject findings). Path identity is required too so
+            # a receipt cannot vouch for a different file that happens to share a hash.
+            r_path = receipt.get("report_path")
+            r_sha = receipt.get("report_sha256")
+            if r_sha == report_sha256 and (r_path is None or r_path == report_path_str):
+                matched_receipt = receipt
+                break
+
+        if matched_receipt is None:
+            continue
+
+        # GATE PATH: require receipt stage to match exactly
+        if matched_receipt.get("stage") != stage:
+            continue
+
+        results.append((report_file, payload))
+
+    return results
+
+
+def _collect_audit_findings(
+    task_dir: Path,
+    stage: str | None = None,
+) -> dict[str, dict]:
+    """Return audit findings keyed by finding id from live audit reports.
+
+    When stage is provided (gate path), only eligible receipted+complete reports
+    are included. When stage is None (repair-planning path), all receipted reports
+    (including partial/in_progress) are included as advisory context.
+    """
+    findings_by_id: dict[str, dict] = {}
+    # Secondary dedup key: {file}:{line}:{category} tuple (AC 8 shard-merged correctness)
+    seen_flc: set[tuple] = set()
+
+    eligible = select_eligible_reports(task_dir, stage=stage)
+    for report_file, payload in eligible:
         findings = payload.get("findings")
         if not isinstance(findings, list):
             continue
-        auditor_name = payload.get("auditor_name") or payload.get("auditor") or report_path.stem
+        auditor_name = (
+            payload.get("auditor_name") or payload.get("auditor") or report_file.stem
+        )
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
@@ -393,6 +505,14 @@ def _collect_audit_findings(task_dir: Path) -> dict[str, dict]:
                 continue
             if finding_id in findings_by_id:
                 continue
+            # Secondary dedup by {file}:{line}:{category}
+            f_file = finding.get("file") or finding.get("location") or ""
+            f_line = finding.get("line", "")
+            f_cat = finding.get("category") or ""
+            flc_key = (str(f_file), str(f_line), str(f_cat))
+            if flc_key in seen_flc and flc_key != ("", "", ""):
+                continue
+            seen_flc.add(flc_key)
             row = dict(finding)
             row["_auditor_name"] = auditor_name
             findings_by_id[finding_id] = row

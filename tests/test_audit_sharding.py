@@ -24,11 +24,51 @@ CTL_PY = ROOT / "hooks" / "ctl.py"
 
 
 def _create_task_dir(tmp_path: Path) -> Path:
-    """Create a minimal task dir with manifest for CHECKPOINT_AUDIT stage."""
+    """Create a minimal task dir with manifest for CHECKPOINT_AUDIT stage.
+
+    Initializes a real git repo inside the project directory so that
+    cmd_run_audit_setup can run 'git diff --name-only <base_sha>' and
+    actually detect changed files.  Two files are committed under different
+    directories (hooks/ and src/) then modified in the working tree; the
+    base commit SHA is stored in snapshot.head_sha so the production sharding
+    path is exercised with a 2-file diff.
+    """
     project = tmp_path / "project"
     task_dir = project / ".dynos" / "task-20260612-sharding"
     task_dir.mkdir(parents=True)
-    # Write a minimal manifest
+
+    # --- bootstrap a real git repo in project/ ---
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+
+    def _git(*args: str) -> str:
+        r = subprocess.run(
+            ["git", *args], cwd=str(project), capture_output=True, text=True,
+            check=True, env=git_env,
+        )
+        return r.stdout.strip()
+
+    _git("init", "-b", "main")
+    _git("config", "user.email", "t@t.com")
+    _git("config", "user.name", "Test")
+
+    # Create two files in different directories so 'git diff' sees >= 2 files
+    hooks_dir = project / "hooks"
+    src_dir = project / "src"
+    hooks_dir.mkdir()
+    src_dir.mkdir()
+    (hooks_dir / "file_a.py").write_text("# original a\n", encoding="utf-8")
+    (src_dir / "file_b.py").write_text("# original b\n", encoding="utf-8")
+
+    _git("add", ".")
+    _git("commit", "-m", "base commit")
+    base_sha = _git("rev-parse", "HEAD")
+
+    # Modify both files so 'git diff <base_sha>' reports them as changed
+    (hooks_dir / "file_a.py").write_text("# modified a\n", encoding="utf-8")
+    (src_dir / "file_b.py").write_text("# modified b\n", encoding="utf-8")
+
+    # Write a minimal manifest with the real base commit SHA
     manifest = {
         "task_id": "task-20260612-sharding",
         "stage": "CHECKPOINT_AUDIT",
@@ -38,7 +78,7 @@ def _create_task_dir(tmp_path: Path) -> Path:
             "risk_level": "medium",
             "domains": ["backend"],
         },
-        "snapshot": {"head_sha": ""},
+        "snapshot": {"head_sha": base_sha},
         "created_at": "2026-06-12T00:00:00Z",
         "raw_input": "test sharding",
     }

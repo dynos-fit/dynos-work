@@ -107,3 +107,11 @@ The full findings JSON lives on disk via your Write or Bash heredoc call. It NEV
 Returning the full report inline = failed run, will be re-spawned.
 
 This applies regardless of findings count — even zero findings requires the envelope with counts set to 0.
+
+## Durability Protocol
+
+Maintain a `## Progress Ledger` section in your artifact with three subsections: `### Done`, `### In-Flight`, and `### Next`.
+
+- Set `status="partial"` in your artifact until all sections complete.
+- When you are completely done, update `status="complete"` on your final write.
+- If a continuation spawn resumes your work: FIRST action is reading your predecessor artifact from the same attempt file. Do NOT redo sections listed in `### Done` — skip them and continue from `### In-Flight` or `### Next`. Write to the SAME attempt file, not a new one.
