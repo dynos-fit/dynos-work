@@ -173,6 +173,32 @@ not, key on `transcript_path` (also harness-provided) instead. If *neither*
 distinguishes actors, fall back to a reduced design: keep the role file for subagents
 but exclude the orchestrator by D3-1/2 — that alone fixes P0-c and the worst of P1-a.
 
+**Update — 7.5.1 (orchestrator role adoption; PR #212).** The phase-0 verification
+above resolved to the worst case: **Claude Code subagents carry neither a distinct
+`session_id` nor a distinct `transcript_path`** (claude-code #7881; no separate
+subagent transcript file). The documented fallback ("keep the role file for subagents
+but exclude the orchestrator") does not help, because the subagent *is* the
+orchestrator session — D3-2's "*never* the role file" rule therefore made every
+planner/executor/auditor subagent resolve as `orchestrator` and denied all of its
+role-scoped writes (design-doc/spec/plan, repo source, `evidence/`, `audit-reports/`).
+The pipeline only completed in fast-track inline mode.
+
+The shipped resolution amends D3-2 with a `subagent_isolation` capability flag
+(`.dynos/config/policy.json`, default **false**):
+- **`false` (Claude Code default):** the pinned orchestrator session *adopts* the
+  stamped `active-segment-role` (validated against the executor/planning/audit
+  allowlist; an unset or non-allowlisted role file still resolves to `orchestrator`),
+  so the `ctl stamp-role` calls already issued before every spawn become effective.
+- **`true`:** strict D3 is preserved — the orchestrator never adopts a stamped role
+  (for a future harness that genuinely isolates subagent sessions).
+
+The self-elevation analysis still holds: `control-plane.json` and the
+orchestrator-session pin are denied to all roles regardless, and
+`receipt_audit_done`'s spawn-log cross-check still rejects any `audit-reports/` write
+not backed by a real receipted spawn — adoption moves provenance enforcement to
+receipt time, it does not weaken it. Implementation:
+`hooks/pre_tool_use.py` (`_subagent_isolation`, `_adoptable_stamped_role`).
+
 **Self-elevation analysis.**
 - Roles still come only from the ctl allowlist; sessions never name their own role.
 - The orchestrator cannot consume a grant (its session is pinned first, at startup).
