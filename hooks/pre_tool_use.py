@@ -258,10 +258,11 @@ def _extract_bash_destinations(command: str) -> list[str]:
         tok = tokens[i]
         # Redirection operator: next token is the destination. Punctuation
         # runs may glue a trailing newline onto the operator; normalize.
-        op = tok.strip()
+        # Strip backticks so tokens like `` `cp `` resolve correctly as verbs.
+        op = tok.strip().strip("`")
         if op in _REDIRECT_TOKENS:
             if i + 1 < n:
-                _add(tokens[i + 1])
+                _add(tokens[i + 1].strip("`"))
                 i += 2
                 continue
         # Write verb: collect its argv tail up to the next separator. The
@@ -274,7 +275,7 @@ def _extract_bash_destinations(command: str) -> list[str]:
             args: list[str] = []
             j = i + 1
             while j < n and tokens[j] not in _COMMAND_SEPARATOR_TOKENS:
-                t = tokens[j]
+                t = tokens[j].strip("`")
                 if t in _REDIRECT_TOKENS:
                     break
                 if t != "--" and not t.startswith("-"):
@@ -403,6 +404,20 @@ def _watchdog_targets_artifact(
                 except Exception:
                     if dest == artifact_abs:
                         return True
+    elif tool_name == "MultiEdit":
+        for edit in tool_input.get("edits", []):
+            if not isinstance(edit, dict):
+                continue
+            raw = edit.get("file_path", edit.get("path", ""))
+            if not raw:
+                continue
+            try:
+                if Path(raw).resolve() == Path(artifact_abs).resolve():
+                    return True
+            except Exception:
+                pass
+            if raw == artifact_abs or os.path.abspath(raw) == artifact_abs:
+                return True
     return False
 
 

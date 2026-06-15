@@ -355,6 +355,48 @@ def test_executor_cannot_forge_sibling_task_receipt(tmp_path: Path) -> None:
     )
 
 
+def test_cross_task_uppercase_control_plane_denied(tmp_path: Path) -> None:
+    """sec-cross-task-caseinsensitive: on a case-insensitive filesystem the
+    on-disk casing (MANIFEST.JSON, RECEIPTS/x.JSON) the executor typed is
+    preserved by Path.resolve().name, but the OS still writes the real
+    manifest.json / receipts/ control-plane file. The cross-task guard must
+    case-fold and DENY these, not fall through to the executor ALLOW branch.
+    """
+    task_a, task_b = _two_task_dirs(tmp_path)
+
+    # Uppercase exact control-plane name.
+    decision = decide_write(
+        WriteAttempt(
+            role="ui-executor",
+            task_dir=task_a,
+            path=task_b / "MANIFEST.JSON",
+            operation="modify",
+            source="agent",
+        )
+    )
+    assert decision.allowed is False, "cross-task MANIFEST.JSON write must be denied"
+    assert decision.mode == "deny"
+    assert "cross-task" in decision.reason, (
+        f"reason must contain 'cross-task'; got: {decision.reason!r}"
+    )
+
+    # Uppercase prefixed control-plane path (receipts/).
+    decision = decide_write(
+        WriteAttempt(
+            role="backend-executor",
+            task_dir=task_a,
+            path=task_b / "RECEIPTS" / "x.JSON",
+            operation="create",
+            source="agent",
+        )
+    )
+    assert decision.allowed is False, "cross-task RECEIPTS/x.JSON forge must be denied"
+    assert decision.mode == "deny"
+    assert "cross-task" in decision.reason, (
+        f"reason must contain 'cross-task'; got: {decision.reason!r}"
+    )
+
+
 def test_executor_cannot_write_sibling_role_grants(tmp_path: Path) -> None:
     """AC 3: task-A executor → task-B/role-grants.json must be denied."""
     task_a, task_b = _two_task_dirs(tmp_path)

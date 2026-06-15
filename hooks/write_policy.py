@@ -119,6 +119,52 @@ def _task_relative(path: Path, task_dir: Path | None) -> Path | None:
         return None
 
 
+def _owning_task_dir(path: Path) -> Path | None:
+    """Walk path.resolve().parents; return the first parent p where
+    p.parent.name == ".dynos" and p.name.startswith("task-").
+    Pure path operations — no I/O.
+    """
+    resolved = path.resolve()
+    for p in resolved.parents:
+        if p.parent.name == ".dynos" and p.name.startswith("task-"):
+            return p
+    return None
+
+
+def _is_cross_task_control_plane(rel_posix: str) -> bool:
+    """Return True iff rel_posix names a control-plane artifact within a task dir.
+
+    Covers: _CONTROL_PLANE_EXACT names, _WRAPPER_REQUIRED keys,
+    audit-summary.json / audit-plan.json, and the path prefixes
+    receipts/, audit-reports/, evidence/verification/, and
+    handoff-*.json patterns.
+
+    Case-insensitive: on case-insensitive filesystems (macOS/Windows),
+    Path.resolve().name preserves the on-disk casing the caller typed
+    (e.g. MANIFEST.JSON), but the OS still writes the real control-plane
+    file. We case-fold the input once and match against the
+    (already-lowercase) sets and prefixes so a mixed-case spelling cannot
+    bypass the cross-task guard. All _CONTROL_PLANE_EXACT and
+    _WRAPPER_REQUIRED keys are lowercase, so the lowercased compare is exact.
+    """
+    r = rel_posix.lower()
+    if r in _CONTROL_PLANE_EXACT:
+        return True
+    if r in _WRAPPER_REQUIRED:
+        return True
+    if r in {"audit-summary.json", "audit-plan.json"}:
+        return True
+    if r.startswith("receipts/"):
+        return True
+    if r.startswith("audit-reports/"):
+        return True
+    if r.startswith("evidence/verification/"):
+        return True
+    if r.startswith("handoff-") and r.endswith(".json"):
+        return True
+    return False
+
+
 def _matches_role(role: str, pattern: str) -> bool:
     if pattern.endswith("*"):
         return role.startswith(pattern[:-1])
@@ -364,6 +410,24 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         if attempt.role == "daemon":
             return WriteDecision(True, ".dynos/.rules_corrupt allowed for daemon role", "direct")
         return WriteDecision(False, ".dynos/.rules_corrupt is daemon-owned kill-switch state; agent writes denied", "deny")
+    # FINDING #1: cross-task control-plane write bypass guard.
+    # Agent roles (execute-inline, *-executor) must not write control-plane
+    # artifacts that belong to a DIFFERENT task directory, regardless of which
+    # task directory the role is bound to.  _FRAMEWORK_ROLES are exempt because
+    # they are deterministic code, not LLM tool calls.
+    if attempt.role not in _FRAMEWORK_ROLES:
+        target = _owning_task_dir(path)
+        if target is not None and (
+            attempt.task_dir is None
+            or target.resolve() != attempt.task_dir.resolve()
+        ):
+            tgt_rel = path.resolve().relative_to(target.resolve()).as_posix()
+            if _is_cross_task_control_plane(tgt_rel):
+                return WriteDecision(
+                    False,
+                    f"cross-task control-plane write denied: {path.name}",
+                    "deny",
+                )
     rel = _task_relative(path, attempt.task_dir)
     rel_posix = rel.as_posix() if rel is not None else None
 
