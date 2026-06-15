@@ -846,3 +846,65 @@ def test_non_audit_role_decide_read_passthrough(tmp_path: Path) -> None:
         f"Expected non-audit role to always get allowed=True from decide_read; "
         f"got allowed={decision.allowed}, reason={decision.reason!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# TDD-first regression — task-20260615-002 — AC 8
+# ---------------------------------------------------------------------------
+
+
+def test_quota_tempfile_cleaned_up_on_replace_failure(tmp_path: Path) -> None:
+    """AC 8: When os.replace raises OSError, the .tmp file must be unlinked and
+    ReadDecision.allowed must be False (fail-closed).
+
+    References _handle_dead_code_grep_quota INSIDE the function body so that
+    collection never errors if the fix isn't yet implemented.
+    """
+    import sys
+    import os
+    import importlib
+    from unittest.mock import patch
+
+    hooks_str = str(ROOT / "hooks")
+    if hooks_str not in sys.path:
+        sys.path.insert(0, hooks_str)
+    rp = importlib.import_module("read_policy")
+
+    fn = getattr(rp, "_handle_dead_code_grep_quota", None)
+    assert fn is not None, "_handle_dead_code_grep_quota must exist in read_policy"
+
+    _, task_dir = _make_task_dir(tmp_path)
+
+    attempt = rp.ReadAttempt(
+        role="audit-dead-code",
+        task_dir=task_dir,
+        target=tmp_path / "hooks" / "some_module.py",
+        tool_name="Grep",
+        raw_pattern=None,
+    )
+
+    # Capture the tmp_path that _handle_dead_code_grep_quota creates so we can
+    # assert it was cleaned up. We intercept os.replace to raise after the
+    # NamedTemporaryFile has been created and closed (delete=False).
+    created_tmp_files: list[str] = []
+    original_replace = os.replace
+
+    def _raising_replace(src: str, dst: str) -> None:
+        created_tmp_files.append(src)
+        raise OSError("injected failure for test")
+
+    with patch.object(rp.os, "replace", side_effect=_raising_replace):
+        decision = fn(attempt)
+
+    assert decision.allowed is False, (
+        f"ReadDecision must be fail-closed (allowed=False) when os.replace raises; "
+        f"got {decision.allowed!r}"
+    )
+    assert len(created_tmp_files) > 0, (
+        "os.replace must have been called (i.e. the NamedTemporaryFile was created)"
+    )
+    tmp_file_path = created_tmp_files[0]
+    assert not os.path.exists(tmp_file_path), (
+        f"The .tmp file {tmp_file_path!r} must be unlinked after os.replace failure; "
+        "it still exists, indicating the cleanup fix is missing"
+    )
