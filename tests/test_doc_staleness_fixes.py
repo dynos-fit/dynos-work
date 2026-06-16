@@ -364,3 +364,137 @@ class TestAC6ReadmeRegressionGuard:
         assert not matches, (
             f"{self.DYNOS_BIN} must not have a 'global)' arm: {matches}"
         )
+
+
+# ===========================================================================
+# AC7 — docs/write-boundary-spec.md + hooks/write_policy.py  (#task-20260616-004)
+# ===========================================================================
+
+class TestAC7WriteBoundaryDaemonRole:
+    """AC7 (task-20260616-004): 'daemon' is enumerated in both doc sites and is a
+    member of _FRAMEWORK_ROLES in hooks/write_policy.py.
+
+    Two doc enumeration sites must list 'daemon':
+      1. The _FRAMEWORK_ROLES bullet in the Enforcement subsection (line ~181).
+      2. The "Initial role set" list in the Role-Based Policy section (line ~208).
+
+    And the code must back this up: 'daemon' is in _FRAMEWORK_ROLES.
+    """
+
+    DOC = "docs/write-boundary-spec.md"
+    SOURCE = "hooks/write_policy.py"
+
+    def test_doc_enforcement_subsection_lists_daemon(self):
+        """The _FRAMEWORK_ROLES bullet in the Enforcement subsection names 'daemon'.
+
+        The Enforcement subsection describes _FRAMEWORK_ROLES as a frozenset
+        whose members are listed inline in backtick code spans. The fixed state
+        must include 'daemon' in that enumeration.
+        """
+        text = _read(self.DOC)
+        # Locate the _FRAMEWORK_ROLES bullet — it contains the inline role list
+        framework_roles_lines = [
+            line for line in text.splitlines() if "_FRAMEWORK_ROLES" in line
+        ]
+        assert framework_roles_lines, (
+            f"{self.DOC} must contain at least one line referencing _FRAMEWORK_ROLES"
+        )
+        # At least one of those lines must mention 'daemon'
+        daemon_in_framework_roles = any("daemon" in line for line in framework_roles_lines)
+        assert daemon_in_framework_roles, (
+            f"{self.DOC}: the _FRAMEWORK_ROLES description must enumerate 'daemon'. "
+            f"Lines found: {framework_roles_lines}"
+        )
+
+    def test_doc_role_based_policy_section_lists_daemon(self):
+        """The Initial role set list in the Role-Based Policy section includes 'daemon'.
+
+        The role-based policy section enumerates every recognized role as a
+        markdown list item. 'daemon' must appear as one of those items after the
+        fix. This is the second enumeration site.
+        """
+        text = _read(self.DOC)
+        lines = text.splitlines()
+
+        # Find the Role-Based Policy section header
+        role_section_idx = None
+        for i, line in enumerate(lines):
+            if re.search(r"^#{1,6}\s+Role-Based Policy", line, re.IGNORECASE):
+                role_section_idx = i
+                break
+
+        assert role_section_idx is not None, (
+            f"{self.DOC} must contain a 'Role-Based Policy' section header"
+        )
+
+        # Collect lines from that section until the next same-level or higher header
+        section_header_level = len(lines[role_section_idx]) - len(lines[role_section_idx].lstrip("#"))
+        section_lines = []
+        for line in lines[role_section_idx + 1:]:
+            m = re.match(r"^(#{1,6})\s+", line)
+            if m and len(m.group(1)) <= section_header_level:
+                break
+            section_lines.append(line)
+
+        section_text = "\n".join(section_lines)
+        assert "daemon" in section_text, (
+            f"{self.DOC}: the Role-Based Policy 'Initial role set' list must include 'daemon'. "
+            f"Section text (first 400 chars): {section_text[:400]!r}"
+        )
+
+    def test_write_policy_FRAMEWORK_ROLES_contains_daemon(self):
+        """doc-matches-code: 'daemon' is a member of _FRAMEWORK_ROLES in hooks/write_policy.py.
+
+        We parse the _FRAMEWORK_ROLES frozenset literal from the source text to
+        confirm membership. Source parsing avoids Python-version-specific importlib
+        issues with `from __future__ import annotations` and is sufficient because
+        _FRAMEWORK_ROLES is a simple frozenset literal at module scope.
+        """
+        source = _read(self.SOURCE)
+
+        # Locate the _FRAMEWORK_ROLES = frozenset({...}) block
+        match = re.search(
+            r"_FRAMEWORK_ROLES\s*=\s*frozenset\s*\(\s*\{([^}]+)\}\s*\)",
+            source,
+        )
+        assert match is not None, (
+            f"{self.SOURCE} must define _FRAMEWORK_ROLES as a frozenset literal"
+        )
+
+        # Extract the contents of the frozenset and collect string literals
+        frozenset_body = match.group(1)
+        members = re.findall(r'"([^"]+)"|\'([^\']+)\'', frozenset_body)
+        role_names = {m[0] or m[1] for m in members}
+
+        assert "daemon" in role_names, (
+            f"{self.SOURCE}: 'daemon' must be a member of _FRAMEWORK_ROLES. "
+            f"Parsed members from frozenset literal: {sorted(role_names)}"
+        )
+
+    def test_write_policy_FRAMEWORK_ROLES_is_frozenset_with_expected_core_roles(self):
+        """_FRAMEWORK_ROLES literal contains all six expected core roles.
+
+        Regression guard: adding 'daemon' must not remove the original core roles
+        (ctl, scheduler, receipt-writer, eventbus, system). All six must be present.
+        Uses source-text parsing to avoid importlib/Python-version issues.
+        """
+        source = _read(self.SOURCE)
+
+        match = re.search(
+            r"_FRAMEWORK_ROLES\s*=\s*frozenset\s*\(\s*\{([^}]+)\}\s*\)",
+            source,
+        )
+        assert match is not None, (
+            f"{self.SOURCE} must define _FRAMEWORK_ROLES as a frozenset literal"
+        )
+
+        frozenset_body = match.group(1)
+        members = re.findall(r'"([^"]+)"|\'([^\']+)\'', frozenset_body)
+        role_names = {m[0] or m[1] for m in members}
+
+        required = {"ctl", "scheduler", "receipt-writer", "eventbus", "system", "daemon"}
+        missing = required - role_names
+        assert not missing, (
+            f"_FRAMEWORK_ROLES is missing required roles: {missing}. "
+            f"Parsed members from frozenset literal: {sorted(role_names)}"
+        )
