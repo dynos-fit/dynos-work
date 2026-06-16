@@ -150,6 +150,49 @@ def test_skips_retro_without_path(tmp_path: Path) -> None:
     assert len(matched) == 0
 
 
+def test_matches_persistent_retro_via_model_used_by_agent(tmp_path: Path) -> None:
+    """Regression: a PERSISTENT retro (flushed to .../retrospectives/, with NO
+    sibling execution-graph.json) must still match on its model_used_by_agent
+    role keys. Reading the absent graph alone made every persistent retro
+    unmatchable, so the generator could never produce a specialist."""
+    persist = tmp_path / "persistent" / "retrospectives"
+    persist.mkdir(parents=True)
+    retro_path = persist / "task-20260616-001.json"
+    retro = {
+        "task_id": "task-20260616-001",
+        "task_type": "bugfix",
+        "model_used_by_agent": {"planning": "opus", "backend-executor": "sonnet"},
+        "_path": str(retro_path),
+    }
+    retro_path.write_text(json.dumps(retro))
+    # No execution-graph.json sibling exists next to the persistent retro.
+    assert not (persist / "execution-graph.json").exists()
+
+    matched = _matching_retrospectives([retro], "backend-executor", "bugfix", tmp_path)
+    assert len(matched) == 1
+    assert matched[0]["task_id"] == "task-20260616-001"
+
+
+def test_excludes_persistent_retro_when_role_absent_from_model_used_by_agent(
+    tmp_path: Path,
+) -> None:
+    """A persistent retro whose model_used_by_agent does NOT include the role
+    (and has no graph sibling) is correctly excluded."""
+    persist = tmp_path / "persistent" / "retrospectives"
+    persist.mkdir(parents=True)
+    retro_path = persist / "task-20260616-002.json"
+    retro = {
+        "task_id": "task-20260616-002",
+        "task_type": "bugfix",
+        "model_used_by_agent": {"planning": "opus", "ui-executor": "sonnet"},
+        "_path": str(retro_path),
+    }
+    retro_path.write_text(json.dumps(retro))
+
+    matched = _matching_retrospectives([retro], "backend-executor", "bugfix", tmp_path)
+    assert len(matched) == 0
+
+
 # --- _build_agent_content restructure (criteria 3, 4, 5, 6, 11) ---
 
 def test_contains_imperative_rules_not_telemetry(tmp_path: Path) -> None:
