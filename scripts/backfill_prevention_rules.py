@@ -10,7 +10,7 @@ Migration pipeline (AC 4):
      - rule == "" AND legacy_text non-empty: copy legacy_text -> rule, drop
        legacy_text key, generate rule_id via _generate_rule_id(rule, category).
      - rule == "" AND legacy_text absent/empty: drop entry entirely.
-     - rule non-empty AND missing/non-conformant rule_id: generate rule_id.
+     - rule non-empty AND missing rule_id: generate rule_id.
      - already valid: untouched.
   3. Enforcement audit (AC 8): for entries with template == "advisory" AND
      enforcement in the demote-set, rewrite enforcement -> "prompt-constraint".
@@ -165,7 +165,7 @@ def run_backfill(registry_path: Path) -> int:
         rule_text = entry.get("rule", "").strip()
         category = entry.get("category", "unknown") or "unknown"
         if _validate_rule_entry(entry) is not None:
-            # Missing or non-conformant rule_id — regenerate.
+            # Missing rule_id — regenerate.
             entry = dict(entry)
             entry["rule_id"] = _generate_rule_id(rule_text, category)
             migrated[i] = entry

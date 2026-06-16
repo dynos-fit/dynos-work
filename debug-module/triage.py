@@ -42,16 +42,17 @@ RULES_PATH = os.path.join(_SCRIPT_DIR, "rules", "silent-accomplices.yml")
 # Bug-type-specific semgrep rule_id filters. None means "no filter".
 _SEMGREP_RULE_FILTERS: dict[str, list[str] | None] = {
     "data-corruption": [
-        "silent-accomplices.swallowed-exception",
-        "silent-accomplices.python-bare-except",
-        "silent-accomplices.python-broad-except-pass",
-        "silent-accomplices.js-empty-catch",
-        "silent-accomplices.go-discard-error",
+        "silent-accomplices.swallowed-error-python",
+        "silent-accomplices.swallowed-error-js",
+        "silent-accomplices.swallowed-error-java",
+        "silent-accomplices.swallowed-error-ruby",
+        "silent-accomplices.default-masking-python",
+        "silent-accomplices.default-masking-js",
     ],
     "race-condition": [
-        "silent-accomplices.js-floating-promise",
-        "silent-accomplices.js-async-no-await",
-        "silent-accomplices.python-asyncio-create-task-orphan",
+        "silent-accomplices.missing-await-js",
+        "silent-accomplices.missing-await-python",
+        "silent-accomplices.go-map-range-order",
     ],
 }
 

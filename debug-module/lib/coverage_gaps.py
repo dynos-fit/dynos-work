@@ -142,7 +142,7 @@ def _parse_pytest_cov(path: Path) -> list[dict]:
     for file_name, entry in files.items():
         if not isinstance(entry, dict):
             continue
-        missing = entry.get("missing_lines") or entry.get("excluded_lines") or []
+        missing = entry.get("missing_lines") or []
         if not isinstance(missing, list):
             continue
         uncovered = [int(n) for n in missing if isinstance(n, (int, float)) and not isinstance(n, bool)]

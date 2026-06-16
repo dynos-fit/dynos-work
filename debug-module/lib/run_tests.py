@@ -100,8 +100,17 @@ _MAVEN_SUMMARY = re.compile(
     r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+)",
     re.IGNORECASE,
 )
-_DART_PASS = re.compile(r"\+(\d+)")
-_DART_FAIL = re.compile(r"-(\d+)")
+# Dart summary lines look like: "+N: desc", "+N -M: desc", or "HH:MM +N: desc".
+# +N must appear at line-start (with optional whitespace) or after a time token
+# (digits:digits whitespace). -N must appear at line-start or after a +digits token.
+_DART_PASS = re.compile(
+    r"(?:(?:^[ \t]*)|(?:\d+:\d+[ \t]))\+(\d+)(?=[ \t:]|$)",
+    re.MULTILINE,
+)
+_DART_FAIL = re.compile(
+    r"(?:(?:^[ \t]*)|(?:\+\d+[ \t]))-(\d+)(?=[ \t:]|$)",
+    re.MULTILINE,
+)
 _RSPEC_SUMMARY = re.compile(
     r"(\d+)\s+examples?,\s*(\d+)\s+failures?",
     re.IGNORECASE,
