@@ -1,23 +1,23 @@
 # Project Identity — Design Doc
 
-**Status:** draft, 2026-05-10
+**Status:** IMPLEMENTED
 **Owner:** to be assigned
 **Context branch:** none yet (this doc lives on main as a proposal)
 
 ---
 
-## 1. Problem
+## 1. Problem (historical — now resolved)
 
-Today, a project is identified by a **path-derived slug**:
+Before this design was implemented, a project was identified by a **path-derived slug**:
 
 ```
-slug = git_toplevel.strip("/").replace("/", "-")    # hooks/lib_core.py:279-299
+slug = git_toplevel.strip("/").replace("/", "-")    # old scheme, removed
 # → "-Users-hassam-Documents-dynos-work"
 ```
 
 `_persistent_project_dir(root)` returns `~/.dynos/projects/{slug}/`, and 60+ callers depend on this for postmortems, prevention rules, learned-agent registry, benchmark history, model/skip/route policy JSON, effectiveness scores, project_rules.md, and per-project policy.json.
 
-The 2026-04-XX worktree fix made the slug derive from the **main worktree's** toplevel (via `git rev-parse --git-common-dir`), so multiple worktrees of one clone now share a slug. But the slug is still path-based, which still breaks identity in three ways that matter:
+The 2026-04-XX worktree fix made the slug derive from the **main worktree's** toplevel (via `git rev-parse --git-common-dir`), so multiple worktrees of one clone now share a slug. But the slug was still path-based, which broke identity in three ways:
 
 1. **Path moves.** Renaming `~/code/foo` to `~/projects/foo` produces a different slug. Learned state orphans on disk.
 2. **Cross-clone identity.** Two clones of the same OSS repo at `~/work/x` and `~/scratch/x` get two slugs. They could legitimately be two contexts (good) — but the system can't *tell* whether they should be unified.
@@ -49,19 +49,18 @@ This doc fixes the identity problem in a way that's stable across worktrees, mac
 
 ---
 
-## 3. Existing state (what's already wired)
+## 3. Implemented seam (what's now wired)
 
 ```
-_persistent_project_dir(root)            ← lib_core.py:279
+_persistent_project_dir(root)            ← lib_core.py:306
    │
-   ├─ resolved_str = str(root.resolve())
-   ├─ canonical = _resolve_git_toplevel(resolved_str)    ← worktree-aware
-   ├─ base = canonical if canonical else resolved_str
-   ├─ slug = base.strip("/").replace("/", "-")           ← path-derived (the problem)
-   └─ return dynos_home / "projects" / slug
+   └─ slug = resolve_project_id(root)    ← hooks/lib_project_id.py (UUID4 or path-fallback)
+      └─ return dynos_home / "projects" / slug
 ```
 
-This means **only one line needs to change** to swap the identity scheme: the slug derivation. Every downstream caller is unaffected.
+The slug derivation was changed to a single call to `resolve_project_id` from `hooks/lib_project_id.py` (wired at `lib_core.py` line 326: `slug = resolve_project_id(root)`). Every downstream caller is unaffected — the path shape and file format are unchanged.
+
+The old path-derived slug derivation (`base.strip("/").replace("/", "-")`) no longer exists in the primary code path.
 
 The worktree migration tool `hooks/worktree.py` already exists and consolidates orphaned worktree-slug dirs into the main slug. We extend it rather than replace it.
 

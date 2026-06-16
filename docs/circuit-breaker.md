@@ -8,11 +8,11 @@ Six conditions are evaluated across two stages:
 
 **EXECUTION stage** (evaluated in this priority order):
 
-1. `wasted_spawns_abort` — wasted spawn count >= 3; task is burning tokens with no useful output.
-2. `small_task_token_overrun` — task classified as bugfix/feature with <= 2 unique files and token usage >= 1,000,000.
-3. `bugfix_token_overrun` — task classified as bugfix and token usage >= 5,000,000.
-4. `small_task_token_downgrade` — small task token usage >= 800,000 but < 1,000,000 (warning tier).
-5. `bugfix_token_downgrade` — bugfix token usage >= 4,000,000 but < 5,000,000 (warning tier).
+1. `wasted_spawns_abort` — wasted spawn count >= `WASTED_SPAWN_ABORT_THRESHOLD` (9); task is burning tokens with no useful output.
+2. `small_task_token_overrun` — task classified as bugfix/feature with <= 2 unique files and token usage >= `SMALL_TASK_TOKEN_LIMIT` (9,371,185).
+3. `bugfix_token_overrun` — task classified as bugfix and token usage >= `BUGFIX_TOKEN_LIMIT` (68,283,719).
+4. `small_task_token_downgrade` — small task token usage >= `SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD` (7,496,948) but < `SMALL_TASK_TOKEN_LIMIT` (9,371,185) (warning tier).
+5. `bugfix_token_downgrade` — bugfix token usage >= `BUGFIX_TOKEN_DOWNGRADE_THRESHOLD` (54,626,975) but < `BUGFIX_TOKEN_LIMIT` (68,283,719) (warning tier).
 
 **AUDITING stage**:
 

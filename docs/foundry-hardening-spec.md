@@ -4,7 +4,7 @@
 
 **Predecessor docs:** `docs/write-boundary-spec.md`, `ARCHITECTURE.md`, `memory/project_audit_forgery_incident.md`, `memory/project_open_trust_residuals.md`.
 
-**Scope:** This spec covers what an open-source `dynos-work` should ship. It closes the two CRITICAL findings (C1: native Python I/O bypasses write-policy; C2: predictable HMAC project-secret) and one HIGH finding (H1: cross-task `eventbus_handler` forgery) without degrading the single-developer workflow. Higher-assurance controls (signed artifacts, two-actor approval, off-host append-only logs, confidential computing, post-quantum crypto) are explicitly out of scope and tracked as Tier 2+ for downstream/proprietary forks.
+**Scope:** This spec covers what an open-source `dynos-work` should ship. It closes one CRITICAL finding (C1: native Python I/O bypasses write-policy) and one HIGH finding (H1: cross-task `eventbus_handler` forgery) without degrading the single-developer workflow. **C2 (predictable HMAC project-secret) is resolved**: `hooks/lib_log.py::_resolve_event_secret` now generates the project secret via `secrets.token_hex(32)` and persists it in a 0o600 file — the `sha256(path:hostname)` derivation no longer exists in the codebase. Phase 2 of this spec upgrades the secret storage to an OS keychain (Tier 1) but the original predictability vulnerability is already closed. Higher-assurance controls (signed artifacts, two-actor approval, off-host append-only logs, confidential computing, post-quantum crypto) are explicitly out of scope and tracked as Tier 2+ for downstream/proprietary forks.
 
 ---
 
@@ -82,9 +82,11 @@ Each phase becomes one `/dynos-work:start` task. ACs are concrete and testable.
 
 **Audit gate:** After implementation, run a one-shot adversarial test pack that exercises every documented write_policy denial path through a Tier 1 subagent's Bash → Python escape route. All must produce `EACCES`, not silent success.
 
-### Phase 2 — OS-keychain-anchored project secret (closes C2)
+### Phase 2 — OS-keychain-anchored project secret (closes C2 at Tier 1)
 
-**Goal:** Eliminate the predictable `sha256(path:hostname)` derivation in `hooks/lib_log.py:192-195`.
+**Goal:** Upgrade the project secret from the 0o600 file written by `hooks/lib_log.py::_resolve_event_secret` (which already uses `secrets.token_hex(32)` — the original `sha256(path:hostname)` derivation is no longer present) to an OS-keychain-anchored secret at Tier 1.
+
+**Historical note:** C2 as originally filed (predictable `sha256(path:hostname)` derivation) is **resolved** — `_resolve_event_secret` in `hooks/lib_log.py` (function starting at line 194) now generates secrets via `secrets.token_hex(32)` written to a 0o600 file. Phase 2 advances the storage from a 0o600 file to the OS keychain (Tier 1) and adds HKDF-SHA256 per-task derivation.
 
 **Acceptance criteria:**
 
@@ -95,7 +97,7 @@ Each phase becomes one `/dynos-work:start` task. ACs are concrete and testable.
      - **Linux**: libsecret / Secret Service API via `keyring` Python library (already a common dep). Falls through if no D-Bus session (e.g., headless server) — see R2.
    - (c) **Tier 1 only**: if no keychain entry exists, generate a 32-byte secret from `secrets.token_bytes(32)` and store it in the keychain. First-run is automatic; no operator gesture required.
    - (d) **Tier 0 only**: existing 0o600 file at `_persistent_project_dir(root) / "event-secret"`. Behavior unchanged.
-2. `hooks/lib_log.py::_resolve_event_secret` delegates to `secret_anchor.get_project_secret` when `compliance-tier=tier-1`. The deterministic `sha256(f"{root.resolve()}:{platform.node()}")` fallback at lines 192-195 is REMOVED FROM THE TIER 1 PATH (still present in the Tier 0 path because removing it would break existing repos).
+2. `hooks/lib_log.py::_resolve_event_secret` delegates to `secret_anchor.get_project_secret` when `compliance-tier=tier-1`. The Tier 0 path (0o600 file with `secrets.token_hex(32)`) is preserved unchanged.
 3. Per-task derivation moves from string concatenation to HKDF-SHA256:
    - Replace `_derive_per_task_secret(secret, task_id)` body with `HKDF(salt=task_id.encode(), info=b"dynos-work/v1/per-task-event-secret", length=32, algorithm=SHA256).derive(secret)`.
    - The HKDF call lives in `hooks/secret_anchor.py`. `lib_log.py` imports the helper.

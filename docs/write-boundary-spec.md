@@ -170,6 +170,18 @@ def is_control_plane_path(path: Path, task_dir: Path | None) -> bool: ...
 def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]: ...
 ```
 
+### Enforcement
+
+The unconditional Class B control-plane guarantee is enforced inside `decide_write` in `hooks/write_policy.py` via three internal helpers:
+
+- **`_owning_task_dir(path: Path) -> Path | None`** — computes the task directory that *owns* a given path based on the path itself, independent of the caller's bound `task_dir`. This means an executor bound to `task-A` cannot claim that a path under `task-B` belongs to its own task dir.
+
+- **`_is_cross_task_control_plane(rel_posix: str) -> bool`** — classifies the target path by its own task-relative name (case-folded). Returns `True` if the relative name matches a Class B control-plane filename (e.g., `manifest.json`, `receipts/`, `handoff-*.json`). The case-fold prevents bypasses like `MANIFEST.JSON`.
+
+- **`_FRAMEWORK_ROLES`** — a `frozenset` of roles (`ctl`, `scheduler`, `receipt-writer`, `eventbus`, `system`) that are unconditionally exempt from cross-task control-plane denial. These are the only roles whose writes bypass `_owning_task_dir` and `_is_cross_task_control_plane` checking inside `decide_write`.
+
+Together, these three pieces ensure that the Class B guarantee is unconditional for non-framework roles: even if a role's prompt is compromised and it claims a different `task_dir`, the path-derived `_owning_task_dir` logic and name-based `_is_cross_task_control_plane` classify the write correctly.
+
 ## Role-Based Policy
 
 Policy should be defined by framework role, not by prompt text.
