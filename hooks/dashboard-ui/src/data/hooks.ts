@@ -87,6 +87,11 @@ export function usePollingData<T>(
         setError((body as { error?: string }).error ?? "Request failed");
         return;
       }
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        setError("Endpoint returned non-JSON response");
+        return;
+      }
       const json = (await res.json()) as T;
       setData(json);
       setError(null);

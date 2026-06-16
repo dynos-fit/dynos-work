@@ -568,16 +568,18 @@ def _build_model_policy_data(
         model_scores: dict[str, list[float]] = {}
         for model, quality in obs_list:
             model_scores.setdefault(model, []).append(quality)
-        ranked = sorted(model_scores.items(), key=lambda x: -_mean(x[1]))
-        if ranked and len(ranked[0][1]) >= 2:
-            best_model = ranked[0][0]
-            scores = ranked[0][1]
-            key = f"{role}:{task_type}"
-            result[key] = {
-                "model": best_model,
-                "sample_count": len(scores),
-                "mean_quality": round(_mean(scores), 4),
-            }
+        eligible = [(m, s) for m, s in model_scores.items() if len(s) >= 2]
+        if not eligible:
+            continue
+        ranked = sorted(eligible, key=lambda x: -_mean(x[1]))
+        best_model = ranked[0][0]
+        scores = ranked[0][1]
+        key = f"{role}:{task_type}"
+        result[key] = {
+            "model": best_model,
+            "sample_count": len(scores),
+            "mean_quality": round(_mean(scores), 4),
+        }
     return result
 
 

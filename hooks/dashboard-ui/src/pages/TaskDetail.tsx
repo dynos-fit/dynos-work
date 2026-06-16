@@ -158,20 +158,25 @@ function eventChipClass(event: string): string {
 
 const STAGE_ORDER = [
   'FOUNDRY_INITIALIZED',
-  'DISCOVERY',
+  'CLASSIFY_AND_SPEC',
   'SPEC_NORMALIZATION',
   'SPEC_REVIEW',
   'PLANNING',
   'PLAN_REVIEW',
   'PLAN_AUDIT',
+  'TDD_REVIEW',
   'PRE_EXECUTION_SNAPSHOT',
+  'EXECUTION_GRAPH_BUILD',
   'EXECUTION',
   'TEST_EXECUTION',
   'CHECKPOINT_AUDIT',
+  'FINAL_AUDIT',
   'REPAIR_PLANNING',
   'REPAIR_EXECUTION',
-  'FINAL_AUDIT',
   'DONE',
+  'CALIBRATED',
+  'CANCELLED',
+  'FAILED',
 ] as const;
 
 // ---------------------------------------------------------------------------

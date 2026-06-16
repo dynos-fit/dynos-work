@@ -147,6 +147,7 @@ export default function CommandPalette() {
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [paletteIndex, setPaletteIndex] = useState<PaletteIndex | null>(paletteCache ?? null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -185,6 +186,7 @@ export default function CommandPalette() {
           return;
         }
         paletteCache = (await res.json()) as PaletteIndex;
+        setPaletteIndex(paletteCache);
       } catch {
         setFetchError('Network error loading palette index');
       } finally {
@@ -223,10 +225,10 @@ export default function CommandPalette() {
   // AC 57 — fuzzy search results
   // ---------------------------------------------------------------------------
   const results = useMemo<PaletteResult[]>(() => {
-    if (!paletteCache) return [];
+    if (!paletteIndex) return [];
     const q = query.trim().toLowerCase();
-    const repos = paletteCache.repos ?? [];
-    const tasks = paletteCache.tasks ?? [];
+    const repos = paletteIndex.repos ?? [];
+    const tasks = paletteIndex.tasks ?? [];
 
     let filteredRepos: typeof repos = [];
     let filteredTasks: typeof tasks = [];
@@ -284,7 +286,7 @@ export default function CommandPalette() {
 
     const combined: PaletteResult[] = [...actions, ...repoRows, ...taskRows];
     return combined.slice(0, 50);
-  }, [query]); // eslint-disable-line react-hooks/exhaustive-deps — paletteCache is module-level
+  }, [query, paletteIndex]);
 
   // Reset selected index when results change
   useEffect(() => {

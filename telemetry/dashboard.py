@@ -1924,7 +1924,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                                 bucket["input_tokens"] += int(inp)
                                 bucket["output_tokens"] += int(outp)
                                 bucket["estimated_usd"] += cost
-                        tt = usage.get("total_tokens")
+                        tt = usage.get("total")
                         if not isinstance(tt, (int, float)):
                             tt = 0
                             agents_obj = usage.get("agents", {})

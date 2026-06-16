@@ -46,11 +46,17 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     fetch("/api/registry")
-      .then((r) => r.json())
-      .then((data: { projects: ProjectRegistryEntry[] }) => {
-        setProjects(data.projects);
-        if (!selectedProject && data.projects.length > 0) {
-          setSelectedProject(data.projects[0].path);
+      .then((r) => {
+        if (!r.ok) throw new Error("registry fetch failed");
+        return r.json();
+      })
+      .then((data: { projects?: unknown }) => {
+        const list = Array.isArray((data as { projects?: unknown }).projects)
+          ? (data as { projects: ProjectRegistryEntry[] }).projects
+          : [];
+        setProjects(list);
+        if (!selectedProject && list.length > 0) {
+          setSelectedProject(list[0].path);
         }
       })
       .catch(() => {});
