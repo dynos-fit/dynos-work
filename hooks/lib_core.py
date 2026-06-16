@@ -1262,10 +1262,17 @@ def _flush_retrospective_on_done(*, task_dir: Path, manifest: dict) -> None:
         dst_hash = ""
     try:
         from lib_log import log_event as _log_flush
+        # NOTE: do NOT pass task=task_id here. log_event routes events with a
+        # `task` arg to the TASK-SCOPED .dynos/{task}/events.jsonl, but the
+        # SEC-003 verifier `_flushed_sha_by_task_id` reads only the GLOBAL
+        # .dynos/events.jsonl. Routing this event task-scoped made every
+        # persistent retrospective `persistent-unverified`, so
+        # collect_retrospectives() filtered them all out and calibration's
+        # generation gate could never see them. The task_id is still recorded
+        # in the payload below for the verifier's {task_id: sha256} map.
         _log_flush(
             root,
             "retrospective_flushed",
-            task=task_id,
             task_id=task_id,
             source=str(src),
             destination=str(dst),
