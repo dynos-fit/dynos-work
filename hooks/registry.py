@@ -473,7 +473,7 @@ def load_registry() -> dict:
         # AC 22: back up the v1 file BEFORE the swap, atomically, and never
         # auto-delete it.  Then migrate in memory and persist v2.
         try:
-            _backup_registry_before_swap(path)
+            backup = _backup_registry_before_swap(path)
         except OSError as exc:
             # Refuse to migrate without a backup — better to surface the
             # IO failure than silently destroy the v1 copy.
@@ -481,6 +481,14 @@ def load_registry() -> dict:
             raise RegistryCorruptError(
                 f"registry v1 backup failed ({exc}); refusing to migrate"
             ) from exc
+        if backup is None:
+            # The helper returned None — it encountered a silent read failure
+            # and could not create a valid backup.  Refuse to proceed rather
+            # than overwriting (and losing) the v1 data.
+            log_global("registry v1→v2: backup returned None; refusing migration to protect v1 data")
+            raise RegistryCorruptError(
+                "registry v1 backup failed (helper returned None); refusing to migrate"
+            )
         plain_migrated = _migrate_v1_to_v2(reg)
         # Persist v2 form so we don't keep migrating on every load.  We use
         # a tiny inline atomic-write here rather than ``save_registry`` so
@@ -592,11 +600,11 @@ def register_project(root: Path) -> dict:
         existing["status"] = "active"
         # Preserve the canonical id on the existing entry — never silently
         # rewrite it from a stale value.  If the entry was created from a
-        # v1 migration with an unresolvable id and we now have a real one,
+        # v1 migration with a path-based fallback id (either "path-unresolved-"
+        # or any other "path-" slug) and we now have a real canonical UUID,
         # adopt the real id rather than keeping the placeholder.
-        if existing.get("id", "").startswith("path-unresolved-") and not pid.startswith(
-            "path-unresolved-"
-        ):
+        existing_id = existing.get("id") or ""
+        if existing_id.startswith("path-") and not pid.startswith("path-"):
             existing["id"] = pid
         save_registry(reg)
         log_global(f"re-registered project: {root}")
@@ -631,8 +639,8 @@ def unregister_project(root: Path) -> dict:
             continue
         before = len(entry.get("paths", []) or [])
         if before == 0:
-            # Defensive: drop empty entries (legacy or corrupt).
-            removed = True
+            # Defensive: drop empty entries (legacy or corrupt), but do NOT
+            # treat this as a real removal — no matching path was present.
             continue
         entry["paths"] = [
             p for p in entry.get("paths", []) or []
@@ -640,6 +648,7 @@ def unregister_project(root: Path) -> dict:
         ]
         after = len(entry["paths"])
         if after != before:
+            # A path record was actually removed from this entry.
             removed = True
         if after == 0:
             # No paths left — drop the entry entirely.

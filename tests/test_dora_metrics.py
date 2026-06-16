@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _make_task_dir(tmp_path: Path, created_at: str, completed_at: str | None = None,
-                   stage: str = "DONE", log_content: str = "") -> Path:
+                   stage: str = "DONE", log_content: str = "",
+                   repair_cycle_count: int = 0) -> Path:
     """Create a minimal task directory for compute_reward."""
     task_dir = tmp_path / ".dynos" / "task-test-001"
     task_dir.mkdir(parents=True)
@@ -33,6 +34,7 @@ def _make_task_dir(tmp_path: Path, created_at: str, completed_at: str | None = N
         "title": "Test",
         "raw_input": "Test task",
         "stage": stage,
+        "repair_cycle_count": repair_cycle_count,
         "classification": {"type": "feature", "domains": ["backend"], "risk_level": "medium", "notes": ""},
     }
     (task_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -61,8 +63,12 @@ class TestComputeRewardDora:
         assert result["lead_time_seconds"] is None
 
     def test_change_failure_true_on_repair_failed(self, tmp_path: Path):
+        # change_failure is keyed on the REAL terminal signal: a task that
+        # reached stage FAILED after entering repair (repair_cycle_count > 0).
+        # The old 'REPAIR_FAILED' stage never existed (audit finding #24).
         from lib_validate import compute_reward
-        task_dir = _make_task_dir(tmp_path, created_at="2026-04-15T10:00:00Z", stage="REPAIR_FAILED")
+        task_dir = _make_task_dir(tmp_path, created_at="2026-04-15T10:00:00Z",
+                                  stage="FAILED", repair_cycle_count=1)
         result = compute_reward(task_dir)
         assert result["change_failure"] is True
 

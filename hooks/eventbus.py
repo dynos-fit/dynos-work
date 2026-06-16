@@ -147,14 +147,33 @@ def run_register(root: Path, _payload: dict) -> bool:
     try:
         from datetime import datetime, timezone  # noqa: PLC0415
         import json  # noqa: PLC0415
-        registry_path = Path.home() / ".dynos" / "registry.json"
+        # Canonical registry location, matching registry._registry_path():
+        # $DYNOS_HOME/registry.json (default ~/.dynos/registry.json). Do NOT
+        # use ~/registry.json — that resolves to the wrong path in production.
+        registry_path = (
+            Path(os.environ.get("DYNOS_HOME") or str(Path.home() / ".dynos"))
+            / "registry.json"
+        )
         if registry_path.is_file():
             data = json.loads(registry_path.read_text(encoding="utf-8"))
             target = str(root.resolve())
             for proj in data.get("projects", []) or []:
-                if proj.get("path") != target:
-                    continue
-                last = proj.get("last_active_at", "")
+                last: str = ""
+                # v2 schema: paths is a list of path dicts, each with their own last_active_at.
+                v2_paths = proj.get("paths")
+                if isinstance(v2_paths, list):
+                    for path_entry in v2_paths:
+                        if isinstance(path_entry, dict) and path_entry.get("path") == target:
+                            last = path_entry.get("last_active_at", "")
+                            break
+                    else:
+                        # No matching path in this project's paths list.
+                        continue
+                else:
+                    # v1 fallback: flat key lookup.
+                    if proj.get("path") != target:
+                        continue
+                    last = proj.get("last_active_at", "")
                 if not isinstance(last, str) or not last:
                     break
                 try:

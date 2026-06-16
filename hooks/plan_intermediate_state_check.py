@@ -27,7 +27,7 @@ Output JSON to stdout.  Exit 0 on pass; 1 on blocked.
 Conservatism rule (AC 41):
     AST parse failures, unresolvable patterns, and OS errors are
     recorded as warnings only.  Only confirmed topology mismatches
-    AND confirmed smoke-test failures trigger `blocked`.  Err toward
+    OR confirmed smoke-test failures trigger `blocked`.  Err toward
     false negatives.
 
 This module imports only from the standard library and does NOT import

@@ -21,6 +21,9 @@ from lib_core import load_json, write_json, now_iso, _persistent_project_dir
 from lib_log import log_event
 from lib_project_id import ProjectIdSecurityError
 
+# Imported at module level so tests can patch daemon.drain directly.
+from eventbus import drain
+
 
 def maintenance_dir(root: Path) -> Path:
     return root / ".dynos" / "maintenance"
@@ -218,9 +221,7 @@ def calibration_recovery_sweep(root: Path, max_recoveries: int = 5) -> dict:
             continue
         attempted += 1
         try:
-            _sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from eventbus import drain as _drain  # deferred
-            _drain(root)
+            drain(root)
             # Check if drain wrote a calibration receipt this cycle
             ok = (
                 (receipts / "calibration-applied.json").exists()

@@ -40,6 +40,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
@@ -102,6 +103,7 @@ class Rule:
     template: str
     params: dict
     severity: str = "error"
+    description: str = ""
     source_finding: str = ""
     rationale: str = ""
     scope_override: Optional[dict] = None
@@ -244,12 +246,18 @@ def _safe_compile_regex(pattern: str, rule_id: str, field: str) -> "re.Pattern |
         return None
     # Runtime canary: run against adversarial input under a wall-clock alarm.
     # signal.alarm is main-thread-only on Unix; skip on other platforms and
-    # rely on the static check alone.
-    if hasattr(_signal, "SIGALRM"):
+    # rely on the static check alone.  Also skip when called from a worker
+    # thread — signal.signal raises ValueError off the main thread.
+    if hasattr(_signal, "SIGALRM") and threading.current_thread() is threading.main_thread():
         def _on_alarm(signum, frame):
             raise TimeoutError("regex canary exceeded budget")
-        prev_handler = _signal.signal(_signal.SIGALRM, _on_alarm)
-        _signal.alarm(_REGEX_BUDGET_S)
+        try:
+            prev_handler = _signal.signal(_signal.SIGALRM, _on_alarm)
+            _signal.alarm(_REGEX_BUDGET_S)
+        except ValueError:
+            # signal.signal raised even though we checked main_thread; fall
+            # through to return the compiled pattern without the canary run.
+            return compiled
         try:
             compiled.search(_REGEX_CANARY)
         except TimeoutError:
@@ -807,9 +815,9 @@ def check_caller_count_required(rule: Rule, scope: ScanScope) -> list[Violation]
     min_count = params.get("min_count")
     if not symbol or not glob or min_count is None:
         return []
-    if not isinstance(min_count, int):
+    if not isinstance(min_count, int) or isinstance(min_count, bool):
         _warn(
-            f"[rules_engine] WARN rule={rule.rule_id}: min_count must be int"
+            f"[rules_engine] WARN rule={rule.rule_id}: min_count must be int (bool not allowed)"
         )
         return []
 
@@ -938,6 +946,10 @@ TEMPLATES: dict[str, Callable[[Rule, ScanScope], list[Violation]]] = {
     "import_constant_only": check_import_constant_only,
     "advisory": check_advisory,
 }
+
+# Convenience aliases used by tests and external callers.
+Scope = ScanScope
+_handler_require_symbol_count = check_caller_count_required
 
 
 # ---------------------------------------------------------------------------
@@ -1135,18 +1147,18 @@ def _cmd_check(args: argparse.Namespace) -> int:
         print(_format_violation_line(v))
 
     # Summary to stderr. Count distinct rule ids across violations.
-    error_count = sum(1 for v in violations if v.severity == "error")
+    blocking = sum(1 for v in violations if v.severity != "warn")
     warn_count = sum(1 for v in violations if v.severity == "warn")
     rule_ids = {v.rule_id for v in violations}
     if violations:
         _warn(
             f"{len(violations)} violations "
-            f"({error_count} error, {warn_count} warn) "
+            f"({blocking} blocking, {warn_count} warn) "
             f"across {len(rule_ids)} rules"
         )
     sys.stdout.flush()
     sys.stderr.flush()
-    return 1 if error_count > 0 else 0
+    return 1 if blocking > 0 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1323,9 @@ def _cmd_install_hook(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+_VALID_SEVERITIES = {"error", "warn"}
+
+
 def _validate_rule_entry(raw: Any) -> Optional[str]:
     """Validate one raw rule entry against TEMPLATE_SCHEMAS.
 
@@ -1327,6 +1342,13 @@ def _validate_rule_entry(raw: Any) -> Optional[str]:
     schema = TEMPLATE_SCHEMAS.get(template)
     if schema is None:
         return f"rule {rule_id!r}: unknown template {template!r}"
+    # Validate severity at load time — only "error" and "warn" are legal.
+    severity = raw.get("severity", "error")
+    if severity not in _VALID_SEVERITIES:
+        return (
+            f"rule {rule_id!r}: severity {severity!r} not in "
+            f"{sorted(_VALID_SEVERITIES)}"
+        )
     params = raw.get("params") or {}
     if not isinstance(params, dict):
         return f"rule {rule_id!r}: params must be a dict"
@@ -1340,11 +1362,20 @@ def _validate_rule_entry(raw: Any) -> Optional[str]:
                 f"not in enum {enum_values}"
             )
     for key, declared_type in (schema.get("types") or {}).items():
-        if key in params and not isinstance(params[key], declared_type):
-            return (
-                f"rule {rule_id!r}: param {key!r} must be "
-                f"{declared_type.__name__}, got {type(params[key]).__name__}"
-            )
+        if key in params:
+            val = params[key]
+            # Reject bool for int-typed fields: bool is an int subclass but
+            # min_count:true is a YAML/JSON accident, not a valid integer.
+            if declared_type is int and isinstance(val, bool):
+                return (
+                    f"rule {rule_id!r}: param {key!r} must be int (bool not allowed), "
+                    f"got bool"
+                )
+            if not isinstance(val, declared_type):
+                return (
+                    f"rule {rule_id!r}: param {key!r} must be "
+                    f"{declared_type.__name__}, got {type(val).__name__}"
+                )
     return None
 
 

@@ -1066,12 +1066,10 @@ class TestDebounceV2Registry:
             ],
         }
 
-        # Write it to the expected location.
-        registry_path = Path.home() / ".dynos" / "registry.json"
-        original_exists = registry_path.exists()
-        original_content = registry_path.read_text() if original_exists else None
-
-        # Use a tmp registry path via monkeypatching the read inside run_register.
+        # Point the canonical registry location ($DYNOS_HOME/registry.json,
+        # matching registry._registry_path()) at the tmp dir, then write the
+        # v2 registry there. This exercises the REAL path convention rather
+        # than the wrong ~/registry.json.
         tmp_registry = tmp_path / "registry.json"
         tmp_registry.write_text(json.dumps(registry_data))
 
@@ -1082,7 +1080,7 @@ class TestDebounceV2Registry:
             return True
 
         with mock.patch("eventbus._run", side_effect=mock_run), \
-             mock.patch("pathlib.Path.home", return_value=tmp_path):
+             mock.patch.dict(os.environ, {"DYNOS_HOME": str(tmp_path)}):
             result = eventbus.run_register(root, {})
 
         assert result is True, "run_register must return True (debounce triggered)"

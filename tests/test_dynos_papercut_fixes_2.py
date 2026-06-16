@@ -58,6 +58,10 @@ def test_run_register_skips_when_last_active_at_is_fresh(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: fake_home)
+    # Pin DYNOS_HOME so run_register's canonical registry path resolves to
+    # fake_home/.dynos deterministically, regardless of any DYNOS_HOME leaked
+    # by an earlier test (eventbus now matches registry._registry_path()).
+    monkeypatch.setenv("DYNOS_HOME", str(fake_home / ".dynos"))
 
     project_root = tmp_path / "project"
     project_root.mkdir()

@@ -211,7 +211,7 @@ def validate_outputs(skill_name: str, task_dir: Path) -> list[str]:
 # Pipeline chain validation (dry-run)
 # ---------------------------------------------------------------------------
 
-PIPELINE_ORDER = ["start", "plan", "execute", "audit", "learn"]
+PIPELINE_ORDER = ["start", "plan", "execute", "audit", "memory"]
 
 
 def validate_chain() -> list[str]:
