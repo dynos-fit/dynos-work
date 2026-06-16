@@ -135,8 +135,14 @@ def validate_retrospective_scores(retro: dict, task_dir: Optional[Path] = None) 
     return retro
 
 
-def make_trajectory_entry(retrospective: dict) -> dict:
-    """Create a trajectory entry from a retrospective."""
+def make_trajectory_entry(retrospective: dict) -> "dict | None":
+    """Create a trajectory entry from a retrospective.
+
+    Returns None if the retrospective lacks a non-empty string task_id.
+    """
+    task_id = retrospective.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return None
     findings = retrospective.get("findings_by_category", {})
     categories = findings if isinstance(findings, dict) else {}
     task_domains = retrospective.get("task_domains", "")
@@ -167,8 +173,8 @@ def make_trajectory_entry(retrospective: dict) -> dict:
     wq, we, wc = COMPOSITE_WEIGHTS
     reward = round(wq * quality_score + we * efficiency_score + wc * cost_score, 6)
     return {
-        "trajectory_id": retrospective["task_id"],
-        "source_task_id": retrospective["task_id"],
+        "trajectory_id": task_id,
+        "source_task_id": task_id,
         "version": 1,
         "created_at": now_iso(),
         "state": {
@@ -199,7 +205,10 @@ def make_trajectory_entry(retrospective: dict) -> dict:
 def rebuild_trajectory_store(root: Path) -> dict:
     """Rebuild the trajectory store from all retrospectives."""
     store = ensure_trajectory_store(root)
-    trajectories = [make_trajectory_entry(item) for item in collect_retrospectives(root)]
+    trajectories = [
+        entry for item in collect_retrospectives(root)
+        if (entry := make_trajectory_entry(item)) is not None
+    ]
     store["version"] = 1
     store["updated_at"] = now_iso()
     store["trajectories"] = sorted(trajectories, key=lambda item: item["trajectory_id"])

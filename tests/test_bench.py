@@ -75,25 +75,31 @@ def test_bench_rejects_sh_c(sandbox_path):
 # AC 9: -c rejected for python3/python.
 # ---------------------------------------------------------------------------
 
-def test_bench_rejects_python3_c(sandbox_path):
-    """['python3','-c','import os'] must raise SystemExit (-c inline code)."""
+def test_bench_allows_python3_c(sandbox_path):
+    """#33 Option B: python3 -c is NOT blocked. It is the rollout's practical
+    ad-hoc-command mechanism, and the allowlist already permits arbitrary code
+    via `python3 script.py` — so a -c guard would not reduce the
+    (operator-trusted) arbitrary-code surface. Only sh/bash were removed."""
     bench = _import_bench()
-    with pytest.raises(SystemExit):
-        bench._validate_command(["python3", "-c", "import os"], sandbox_path)
+    assert bench._validate_command(["python3", "-c", "import os"], sandbox_path) is None
+    assert "python3" in bench.ALLOWED_COMMAND_PREFIXES
 
 
-def test_bench_rejects_python_c(sandbox_path):
-    """['python','-c','import os'] must raise SystemExit (-c inline code)."""
+def test_bench_allows_python_c(sandbox_path):
+    """#33 Option B: python -c is likewise allowed (no -c guard)."""
     bench = _import_bench()
-    with pytest.raises(SystemExit):
-        bench._validate_command(["python", "-c", "import os"], sandbox_path)
+    assert bench._validate_command(["python", "-c", "import os"], sandbox_path) is None
+    assert "python" in bench.ALLOWED_COMMAND_PREFIXES
 
 
-def test_bench_rejects_python3_c_anywhere(sandbox_path):
-    """'-c' appearing later in the arg list must also be rejected."""
+def test_bench_allows_python3_c_anywhere(sandbox_path):
+    """#33 Option B: '-c' anywhere in the arg list is allowed — there is no
+    python -c guard; only the shell interpreters sh/bash were removed."""
     bench = _import_bench()
-    with pytest.raises(SystemExit):
-        bench._validate_command(["python3", "-X", "dev", "-c", "import os"], sandbox_path)
+    assert bench._validate_command(
+        ["python3", "-X", "dev", "-c", "import os"], sandbox_path
+    ) is None
+    assert "python3" in bench.ALLOWED_COMMAND_PREFIXES
 
 
 # ---------------------------------------------------------------------------
@@ -101,19 +107,27 @@ def test_bench_rejects_python3_c_anywhere(sandbox_path):
 # ---------------------------------------------------------------------------
 
 def test_bench_allows_python3_script(sandbox_path):
-    """['python3','run.py'] must not raise — a script invocation is legit."""
+    """['python3','run.py'] must not raise — a script invocation is legit, and
+    python3 must remain on the allowlist (only sh/bash were removed)."""
     bench = _import_bench()
-    bench._validate_command(["python3", "run.py"], sandbox_path)
+    # _validate_command returns None on success and raises SystemExit on reject.
+    assert bench._validate_command(["python3", "run.py"], sandbox_path) is None
+    assert "python3" in bench.ALLOWED_COMMAND_PREFIXES
 
 
 def test_bench_allows_pytest(sandbox_path):
-    """['pytest','tests/'] must not raise."""
+    """['pytest','tests/'] must not raise; pytest stays allowlisted."""
     bench = _import_bench()
-    bench._validate_command(["pytest", "tests/"], sandbox_path)
+    assert bench._validate_command(["pytest", "tests/"], sandbox_path) is None
+    assert "pytest" in bench.ALLOWED_COMMAND_PREFIXES
 
 
 def test_bench_allows_python3_config_flag(sandbox_path):
-    """'--config' must NOT be treated as a '-c' match (exact-string, not
-    substring). ['python3','--config','x','run.py'] must not raise."""
+    """A flag like '--config' is accepted (it is a normal in-sandbox arg).
+    #33 Option B removed sh/bash but added NO python -c guard, so neither
+    '--config' nor '-c' is special-cased at the validator level."""
     bench = _import_bench()
-    bench._validate_command(["python3", "--config", "x", "run.py"], sandbox_path)
+    assert bench._validate_command(
+        ["python3", "--config", "x", "run.py"], sandbox_path
+    ) is None
+    assert "python3" in bench.ALLOWED_COMMAND_PREFIXES

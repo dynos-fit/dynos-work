@@ -23,7 +23,7 @@ from lib_benchmark import (
 )
 ALLOWED_COMMAND_PREFIXES = (
     "python3", "python", "node", "npm", "npx", "pytest", "jest",
-    "go", "cargo", "make", "sh", "bash",
+    "go", "cargo", "make",
 )
 
 
@@ -36,6 +36,15 @@ def _validate_command(command: list[str], sandbox: Path) -> None:
         raise SystemExit(
             f"command {command[0]!r} not in sandbox allowlist: {ALLOWED_COMMAND_PREFIXES}"
         )
+    # NOTE (#33, Option B): 'sh' and 'bash' are removed from
+    # ALLOWED_COMMAND_PREFIXES above, closing the shell-metacharacter escape
+    # (e.g. ['bash','-c','rm -rf "$HOME/../.."'] — shell globbing/env-expansion/
+    # path tricks the per-arg traversal check below cannot reason about).
+    # `python3 -c` is intentionally NOT blocked: it is the rollout's practical
+    # ad-hoc-command mechanism, and the allowlist already permits arbitrary code
+    # via `python3 script.py` / node / make, so a python -c guard would not
+    # reduce the (operator-trusted) arbitrary-code surface — only the
+    # shell-escape vector is meaningfully closed here.
     for arg in command[1:]:
         resolved = (sandbox / arg).resolve()
         if resolved.is_absolute() and not str(resolved).startswith(str(sandbox)):

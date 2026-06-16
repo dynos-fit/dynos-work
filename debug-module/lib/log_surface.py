@@ -5,7 +5,7 @@ surface(repo_path, bug_text) auto-detects the project's logging surface,
 filters error-level lines, sorts by recency, and returns up to 50 entries.
 
 Detection (presence-based, in order):
-    logs/                directory of *.log files
+    logs/                directory of *.log and *.txt files
     *.log                top-level log files
     pm2 logs             ~/.pm2/logs/ when pm2 is on PATH
     docker compose       docker-compose.yml or compose.yaml

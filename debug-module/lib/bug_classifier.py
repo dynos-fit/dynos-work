@@ -6,7 +6,7 @@ Deterministic, keyword-regex driven classifier for bug descriptions.
 Public API:
     classify(bug_text: str) -> dict
         Returns a dict with keys:
-            - bug_type: str, one of the 9 allowed enum values
+            - bug_type: str, one of the values in ALLOWED_BUG_TYPES
             - mentioned_files: list[dict] with keys path, line, col
             - mentioned_symbols: list[str]
 
@@ -274,12 +274,6 @@ def _extract_files(text: str) -> list[dict[str, Any]]:
 
         line = int(line_str) if line_str is not None else None
         col = int(col_str) if col_str is not None else None
-
-        # Skip pure dotted-version-like tokens (e.g. "1.2.3" — handled by ext
-        # whitelist, but defensive).
-        if not path or path.startswith(".") and "/" not in path and path.count(".") > 1:
-            # Allow ".env" style? Skip leading-dot multi-dot tokens only.
-            pass
 
         key = (path, line, col)
         if key in seen:
