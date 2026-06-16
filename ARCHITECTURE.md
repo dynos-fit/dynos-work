@@ -121,7 +121,7 @@ These provide machine-readable status, lineage graphs, and real-time dashboard a
 
 **Forwarding to `sandbox/calibration/`** (9 wrappers):
 - `hooks/bench.py`, `hooks/rollout.py`, `hooks/challenge.py`, `hooks/fixture.py`, `hooks/eval.py`
-- `hooks/route.py`, `hooks/auto.py`
+- `hooks/auto.py`
 - `hooks/lib_benchmark.py`, `hooks/lib_registry.py`, `hooks/bench_backfill_model.py`
 
 **Forwarding to `sandbox/trajectory/`** (2 wrappers):
