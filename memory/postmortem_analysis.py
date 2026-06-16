@@ -863,6 +863,8 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 existing = load_json(rules_path)
             except (FileNotFoundError, json.JSONDecodeError, OSError):
                 existing = {}
+            if not isinstance(existing, dict):
+                existing = {}
 
             current_rules = existing.get("rules", [])
             existing_rule_texts = {r.get("rule", "").lower() for r in current_rules}

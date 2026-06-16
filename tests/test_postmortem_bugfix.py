@@ -22,7 +22,6 @@ All tests encode the FIXED behavior and will FAIL on current (unfixed) code.
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import sys
@@ -211,8 +210,14 @@ class TestDetectPatternsAgentSourceGuard:
                 "AC6 (#62): isinstance(r.get('agent_source'), dict) guard must be added at line 189."
             )
 
-        # Result must be a list (possibly empty — this entry is not all-generic)
+        # Behavioral contract: a list agent_source must be safely SKIPPED, never
+        # miscounted toward generic-routing detection (a guard that treated the list
+        # as iterable values could wrongly contribute to the pattern).
         assert isinstance(result, list), f"Expected list result, got {type(result)}"
+        assert "persistent_generic_routing" not in [p.get("pattern") for p in result], (
+            "A list agent_source must be excluded from generic-routing detection, "
+            "not counted as an all-generic entry."
+        )
 
     def test_detect_patterns_string_agent_source(self):
         """
@@ -239,7 +244,11 @@ class TestDetectPatternsAgentSourceGuard:
                 "AC6 (#62): isinstance guard must handle string agent_source."
             )
 
+        # A string agent_source must be safely skipped, not iterated as a dict.
         assert isinstance(result, list)
+        assert "persistent_generic_routing" not in [p.get("pattern") for p in result], (
+            "A string agent_source must be excluded from generic-routing detection."
+        )
 
     def test_detect_patterns_dict_agent_source_still_works(self):
         """
@@ -279,11 +288,18 @@ class TestDetectPatternsAgentSourceGuard:
         import postmortem
         threshold = postmortem.GENERIC_ROUTING_PATTERN_THRESHOLD
 
+        # threshold+2 NON-dict agent_sources (list/string/None). If the guard were
+        # missing/wrong and these were miscounted as "all generic", they would exceed
+        # the threshold and wrongly fire the pattern. Correct behavior excludes them all.
+        bad_kinds = [["executor"], "generic", None]
         retrospectives = [
-            {"task_id": "task-001", "agent_source": {"executor": "generic"}, "task_type": "feature", "quality_score": 0.8},
-            {"task_id": "task-002", "agent_source": ["executor"],             "task_type": "feature", "quality_score": 0.8},
-            {"task_id": "task-003", "agent_source": "generic",               "task_type": "feature", "quality_score": 0.8},
-            {"task_id": "task-004", "agent_source": None,                    "task_type": "feature", "quality_score": 0.8},
+            {
+                "task_id": f"task-{i:03d}",
+                "agent_source": bad_kinds[i % len(bad_kinds)],
+                "task_type": "feature",
+                "quality_score": 0.8,
+            }
+            for i in range(threshold + 2)
         ]
 
         try:
@@ -293,7 +309,13 @@ class TestDetectPatternsAgentSourceGuard:
                 f"_detect_recurring_patterns raised AttributeError({e}) with mixed agent_source types."
             )
 
+        # All entries are non-dict, so NONE are valid all-generic → the pattern must
+        # not fire despite exceeding the count threshold.
         assert isinstance(result, list)
+        assert "persistent_generic_routing" not in [p.get("pattern") for p in result], (
+            "Non-dict agent_sources must be excluded from generic-routing detection "
+            "even when their count exceeds the threshold."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -308,13 +330,13 @@ class TestCountLogPatternAbsent:
         After deletion of lines 87-88 in postmortem.py,
         `hasattr(postmortem, '_count_log_pattern')` must return False.
 
-        Uses importlib.reload to avoid stale import cache giving a false negative.
+        The in-session import reflects the current on-disk source (dead code removed),
+        so a fresh hasattr check is authoritative without reloading the shared module
+        (reloading re-executes the module body and pollutes cross-test global state).
 
         FAILS today: the function is defined at lines 87-88 and hasattr returns True.
         """
         import postmortem as pm
-        # Force fresh import to avoid stale cache
-        importlib.reload(pm)
 
         assert not hasattr(pm, "_count_log_pattern"), (
             "memory/postmortem.py still defines _count_log_pattern. "
@@ -328,7 +350,6 @@ class TestCountLogPatternAbsent:
         """
         import inspect
         import postmortem as pm
-        importlib.reload(pm)
 
         src = inspect.getsource(pm)
         assert "def _count_log_pattern" not in src, (
@@ -342,7 +363,6 @@ class TestCountLogPatternAbsent:
         it must not be present at all.
         """
         import postmortem as pm
-        importlib.reload(pm)
 
         fn = getattr(pm, "_count_log_pattern", None)
         assert fn is None, (

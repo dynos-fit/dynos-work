@@ -607,6 +607,15 @@ def _esc(value: object) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+class _SafeDict(dict):
+    """A dict subclass for use with str.format_map that returns the key literal
+    for any missing key, preventing KeyError when user-supplied values contain
+    brace-enclosed strings that look like format placeholders."""
+
+    def __missing__(self, key: str) -> str:  # type: ignore[override]
+        return "{" + key + "}"
+
+
 def _score_color(value: float) -> str:
     """Return semantic CSS color for a score value: green >0.7, amber 0.4-0.7, red <0.4."""
     if value > 0.7:
@@ -1152,9 +1161,9 @@ def _render_project_detail(proj: dict, index: int) -> str:
                 st_style = 'style="font-size:10px;padding:2px 7px;background:hsla(210 14% 64% / 0.14);color:var(--muted);border-color:hsla(210 14% 64% / 0.22);"'
             pr_rows += (
                 f'<div class="pr-row">'
-                f'<span class="mono" style="flex-shrink:0;">#{pr_num}</span>'
+                f'<span class="mono" style="flex-shrink:0;">#{_esc(str(pr_num))}</span>'
                 f'<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{pr_title}</span>'
-                f'<span class="tag" {st_style}>{pr_state}</span>'
+                f'<span class="tag" {st_style}>{_esc(pr_state)}</span>'
                 f'<span class="mini" style="flex-shrink:0;">{pr_created}</span>'
                 f'</div>'
             )
@@ -1390,16 +1399,21 @@ def _render_html(payload: dict) -> str:
             f'</section>'
         )
 
-    # Assemble final HTML
-    html = GLOBAL_HTML_TEMPLATE.replace("{{", "{").replace("}}", "}")
-    html = html.replace("__DAEMON_PANEL__", daemon_panel)
-    html = html.replace("__STAT_CARDS__", stat_cards)
-    html = html.replace("__CROSS_PANEL__", cross_panel)
-    html = html.replace("__PRS_PANEL__", "")
-    html = html.replace("__CARDS_SECTION__", cards_section)
-    html = html.replace("__DETAIL_CONTAINER__", detail_container)
-    html = html.replace("__INACTIVE_SECTION__", inactive_section)
-    html = html.replace("__GENERATED_AT__", generated_at)
+    # Assemble final HTML — single-pass substitution via format_map so that
+    # user-supplied values (project names, paths) containing brace sequences
+    # or __TOKEN__ strings cannot corrupt the template (AC3 / issue #45).
+    # _SafeDict ensures unknown keys return a literal "{key}" rather than
+    # raising KeyError.
+    html = GLOBAL_HTML_TEMPLATE.format_map(_SafeDict(
+        DAEMON_PANEL=daemon_panel,
+        STAT_CARDS=stat_cards,
+        CROSS_PANEL=cross_panel,
+        PRS_PANEL="",
+        CARDS_SECTION=cards_section,
+        DETAIL_CONTAINER=detail_container,
+        INACTIVE_SECTION=inactive_section,
+        GENERATED_AT=generated_at,
+    ))
 
     return html
 
@@ -1935,23 +1949,23 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
     <span class="topbar-wordmark">dynos-work Global</span>
     <div class="topbar-right">
       <span class="live-dot" aria-label="Live status indicator"></span>
-      <span class="topbar-updated" id="updated">Generated: __GENERATED_AT__</span>
+      <span class="topbar-updated" id="updated">Generated: {GENERATED_AT}</span>
     </div>
   </nav>
   <div class="shell">
     <!-- Section 1: Global Overview -->
-    __DAEMON_PANEL__
-    __STAT_CARDS__
-    __CROSS_PANEL__
-    __PRS_PANEL__
+    {DAEMON_PANEL}
+    {STAT_CARDS}
+    {CROSS_PANEL}
+    {PRS_PANEL}
     <!-- Section 2: Project Cards Grid -->
-    __CARDS_SECTION__
+    {CARDS_SECTION}
     <!-- Section 3: Project Detail (hidden, toggled by JS) -->
-    __DETAIL_CONTAINER__
+    {DETAIL_CONTAINER}
     <!-- Section 4: Paused/Archived -->
-    __INACTIVE_SECTION__
+    {INACTIVE_SECTION}
     <div class="mini" style="text-align:center;margin-top:28px;padding-bottom:16px;">
-      Generated: __GENERATED_AT__
+      Generated: {GENERATED_AT}
     </div>
   </div>
   <!-- Hidden elements to satisfy validate_generated_html() required IDs -->

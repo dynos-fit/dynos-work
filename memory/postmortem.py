@@ -84,10 +84,6 @@ def _read_audit_reports(task_dir: Path) -> list[dict]:
     return reports
 
 
-def _count_log_pattern(log_text: str, pattern: str) -> int:
-    return sum(1 for line in log_text.splitlines() if pattern in line)
-
-
 def _find_similar_tasks(retro: dict, all_retros: list[dict], limit: int = SIMILAR_TASKS_LIMIT) -> list[dict]:
     """Find similar past tasks by type + domain match."""
     task_type = retro.get("task_type", "")
@@ -186,7 +182,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DET
     # Recurring all-generic routing
     generic_count = sum(
         1 for r in recent
-        if r.get("agent_source") and all(v == "generic" for v in r.get("agent_source", {}).values())
+        if isinstance(r.get("agent_source"), dict) and r["agent_source"] and all(v == "generic" for v in r["agent_source"].values())
     )
     if generic_count >= GENERIC_ROUTING_PATTERN_THRESHOLD:
         patterns.append({

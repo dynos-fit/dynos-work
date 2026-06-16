@@ -528,9 +528,59 @@ function findRepoRoot(startDir: string): string {
   return path.resolve(startDir);
 }
 
-export function dynosApi(): Plugin {
-  // Walk up from cwd to find the repo root (directory containing .dynos/)
-  const repoRoot = findRepoRoot(process.cwd());
+// ---------------------------------------------------------------------------
+// Registry v2 normalisation helpers
+// ---------------------------------------------------------------------------
+
+interface NormalisedProject {
+  path: string;
+  slug: string;
+  status: string;
+  last_active_at: string | null;
+}
+
+function getRegistryV2(): NormalisedProject[] {
+  try {
+    const registryPath = path.join(homedir(), ".dynos", "registry.json");
+    const raw = fs.readFileSync(registryPath, "utf-8");
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    const projects = Array.isArray(data.projects) ? data.projects as Record<string, unknown>[] : [];
+    const schemaVersion = typeof data.schema_version === "number" ? data.schema_version : 1;
+
+    if (schemaVersion >= 2) {
+      // v2: proj.id = slug, proj.paths[0].path = fs path
+      return projects.map((proj) => {
+        const projPath = Array.isArray(proj.paths) && proj.paths.length > 0
+          ? (proj.paths as Array<{ path: string }>)[0].path
+          : typeof proj.path === "string" ? proj.path : "";
+        const slug = typeof proj.id === "string" ? proj.id : computeSlug(projPath);
+        return {
+          path: projPath,
+          slug,
+          status: typeof proj.status === "string" ? proj.status : "unknown",
+          last_active_at: typeof proj.last_active_at === "string" ? proj.last_active_at : null,
+        };
+      }).filter((p) => p.path !== "");
+    } else {
+      // v1: proj.path = fs path
+      return projects.map((proj) => {
+        const projPath = typeof proj.path === "string" ? proj.path : "";
+        return {
+          path: projPath,
+          slug: computeSlug(projPath),
+          status: typeof proj.status === "string" ? proj.status : "unknown",
+          last_active_at: typeof proj.last_active_at === "string" ? proj.last_active_at : null,
+        };
+      }).filter((p) => p.path !== "");
+    }
+  } catch {
+    return [];
+  }
+}
+
+export function dynosApi(options?: { root?: string }): Plugin {
+  // Walk up from cwd (or provided root) to find the repo root
+  const repoRoot = options?.root ?? findRepoRoot(process.cwd());
   const ctlPath = path.resolve(repoRoot, "hooks", "ctl.py");
 
   return {
@@ -1639,6 +1689,385 @@ export function dynosApi(): Plugin {
                 recent_runs: recentRuns,
                 agent_summary: agentSummary,
               });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+          // GET /api/projects-summary -> ProjectSummary[]
+          if (pathname === "/api/projects-summary") {
+            try {
+              const normProjects = getRegistryV2();
+              const result = normProjects.map((proj): Record<string, unknown> => {
+                const taskDirs = listTaskDirs(proj.path);
+                let taskCount = 0;
+                let avgQualityScore: number | null = null;
+                let activeTaskStage: string | null = null;
+                let daemonRunning = false;
+                let preventionRuleCount: number | null = null;
+                let learnedRoutesCount: number | null = null;
+                const qualityScores: number[] = [];
+
+                for (const td of taskDirs) {
+                  try {
+                    const manifest = readJsonFile(path.join(localDynosDir(proj.path), td, "manifest.json")) as Record<string, unknown>;
+                    taskCount++;
+                    if (typeof manifest.stage === "string") {
+                      activeTaskStage = manifest.stage;
+                    }
+                    // Try token-usage / retrospective for quality score
+                    try {
+                      const retro = readJsonFile(path.join(localDynosDir(proj.path), td, "task-retrospective.json")) as Record<string, unknown>;
+                      if (typeof retro.quality_score === "number") {
+                        qualityScores.push(retro.quality_score);
+                      }
+                    } catch {
+                      // skip missing retrospective
+                    }
+                  } catch {
+                    // skip corrupt/missing manifest
+                  }
+                }
+
+                if (qualityScores.length > 0) {
+                  avgQualityScore = Number((qualityScores.reduce((s, v) => s + v, 0) / qualityScores.length).toFixed(3));
+                }
+
+                // Try reading learned-agents registry for routes count
+                try {
+                  const agentReg = readJsonFile(path.join(persistentDir(proj.slug), "learned-agents", "registry.json")) as Record<string, unknown>;
+                  const agents = Array.isArray(agentReg.agents) ? agentReg.agents as Record<string, unknown>[] : [];
+                  learnedRoutesCount = agents.filter((a) => Boolean(a.route_allowed)).length;
+                } catch {
+                  learnedRoutesCount = null;
+                }
+
+                // Infer daemon running from maintainer status
+                try {
+                  const maint = readJsonFile(path.join(persistentDir(proj.slug), "maintainer-status.json")) as Record<string, unknown>;
+                  daemonRunning = maint.running === true;
+                } catch {
+                  daemonRunning = false;
+                }
+
+                return {
+                  slug: proj.slug,
+                  name: path.basename(proj.path),
+                  path: proj.path,
+                  task_count: taskCount,
+                  avg_quality_score: avgQualityScore,
+                  active_task_stage: activeTaskStage,
+                  daemon_running: daemonRunning,
+                  last_active_at: proj.last_active_at,
+                  prevention_rule_count: preventionRuleCount,
+                  learned_routes_count: learnedRoutesCount,
+                };
+              });
+              jsonResponse(res, 200, result);
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/palette-index -> PaletteIndex { repos:[{slug,name}], tasks:[{task_id,title,repo_slug,stage}] }
+          if (pathname === "/api/palette-index") {
+            try {
+              const normProjects = getRegistryV2();
+              const repos: Array<{ slug: string; name: string }> = [];
+              const tasks: Array<{ task_id: string; title: string; repo_slug: string; stage: string }> = [];
+
+              for (const proj of normProjects) {
+                repos.push({ slug: proj.slug, name: path.basename(proj.path) });
+                const taskDirs = listTaskDirs(proj.path);
+                for (const td of taskDirs) {
+                  try {
+                    const manifest = readJsonFile(path.join(localDynosDir(proj.path), td, "manifest.json")) as Record<string, unknown>;
+                    tasks.push({
+                      task_id: typeof manifest.task_id === "string" ? manifest.task_id : td,
+                      title: typeof manifest.title === "string" ? manifest.title : td,
+                      repo_slug: proj.slug,
+                      stage: typeof manifest.stage === "string" ? manifest.stage : "UNKNOWN",
+                    });
+                  } catch {
+                    // skip corrupt/missing manifest
+                  }
+                }
+              }
+              jsonResponse(res, 200, { repos, tasks });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/machine-summary -> MachineSummary
+          if (pathname === "/api/machine-summary") {
+            try {
+              const normProjects = getRegistryV2();
+              const TERMINAL_SET = new Set(["DONE", "FAILED", "CALIBRATED", "CANCELLED"]);
+              const STALL_THRESHOLD_MS = 15 * 60 * 1000;
+              const now = Date.now();
+
+              let activeTasks = 0;
+              let activeRepos = 0;
+              let activeAgents = 0;
+              let queueDepth = 0;
+              const currentCostByModel: Record<string, { input_tokens: number; output_tokens: number; estimated_usd: number }> = {};
+              const stalledAgents: Array<{ task_id: string; repo_slug: string; stage: string; stage_age_seconds: number }> = [];
+              const reposFailed: Array<{ slug: string; reason: string }> = [];
+              const reposSkipped: string[] = [];
+              let totalTasks = 0;
+              let errorTasks = 0;
+
+              for (const proj of normProjects) {
+                try {
+                  const taskDirs = listTaskDirs(proj.path);
+                  let repoActive = false;
+                  for (const td of taskDirs) {
+                    try {
+                      const manifest = readJsonFile(path.join(localDynosDir(proj.path), td, "manifest.json")) as Record<string, unknown>;
+                      totalTasks++;
+                      const stage = typeof manifest.stage === "string" ? manifest.stage : "";
+                      if (!TERMINAL_SET.has(stage)) {
+                        activeTasks++;
+                        repoActive = true;
+                        // Check stall
+                        const updatedAt = typeof manifest.updated_at === "string" ? manifest.updated_at : null;
+                        if (updatedAt) {
+                          const ageMs = now - new Date(updatedAt).getTime();
+                          if (ageMs > STALL_THRESHOLD_MS) {
+                            stalledAgents.push({
+                              task_id: typeof manifest.task_id === "string" ? manifest.task_id : td,
+                              repo_slug: proj.slug,
+                              stage,
+                              stage_age_seconds: Math.floor(ageMs / 1000),
+                            });
+                          }
+                        }
+                      }
+                      if (stage === "FAILED") {
+                        errorTasks++;
+                      }
+                      // Accumulate cost from token-usage.json
+                      try {
+                        const tokenUsage = readJsonFile(path.join(localDynosDir(proj.path), td, "token-usage.json")) as Record<string, unknown>;
+                        const byModel = typeof tokenUsage.by_model === "object" && tokenUsage.by_model !== null
+                          ? tokenUsage.by_model as Record<string, Record<string, unknown>>
+                          : {};
+                        for (const [model, usage] of Object.entries(byModel)) {
+                          if (!currentCostByModel[model]) {
+                            currentCostByModel[model] = { input_tokens: 0, output_tokens: 0, estimated_usd: 0 };
+                          }
+                          currentCostByModel[model].input_tokens += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+                          currentCostByModel[model].output_tokens += typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+                          currentCostByModel[model].estimated_usd += typeof usage.estimated_usd === "number" ? usage.estimated_usd : 0;
+                        }
+                      } catch {
+                        // skip missing token-usage
+                      }
+                    } catch {
+                      // skip corrupt manifest
+                    }
+                  }
+                  if (repoActive) activeRepos++;
+                  // Try agents count
+                  try {
+                    const agentReg = readJsonFile(path.join(persistentDir(proj.slug), "learned-agents", "registry.json")) as Record<string, unknown>;
+                    const agents = Array.isArray(agentReg.agents) ? agentReg.agents as Record<string, unknown>[] : [];
+                    activeAgents += agents.filter((a) => Boolean(a.route_allowed)).length;
+                  } catch {
+                    // skip
+                  }
+                  // Try queue depth
+                  try {
+                    const queue = readJsonFile(path.join(persistentDir(proj.slug), "automation-queue.json")) as Record<string, unknown>;
+                    const items = Array.isArray(queue.items) ? queue.items : [];
+                    queueDepth += items.length;
+                  } catch {
+                    // skip missing queue
+                  }
+                } catch (projErr) {
+                  reposFailed.push({ slug: proj.slug, reason: String(projErr) });
+                  reposSkipped.push(proj.slug);
+                }
+              }
+
+              const errorRate = totalTasks > 0 ? errorTasks / totalTasks : null;
+
+              jsonResponse(res, 200, {
+                active_repos: activeRepos,
+                active_tasks: activeTasks,
+                active_agents: activeAgents,
+                token_burn_rate_per_min: 0,
+                current_cost_by_model: currentCostByModel,
+                error_rate: errorRate,
+                stalled_agents: stalledAgents,
+                orphan_token_events: 0,
+                receipt_failures: 0,
+                stage_lag: [],
+                queue_depth: queueDepth,
+                retry_rate: null,
+                top_failing_repos: [],
+                top_expensive_repos: [],
+                top_expensive_tasks: [],
+                repos_failed: reposFailed,
+                degraded: reposFailed.length > 0,
+                repos_skipped: reposSkipped,
+                computed_at: new Date().toISOString(),
+                data_source_caveats: ["token_burn_rate_per_min not computable from static files"],
+              });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/trust-summary -> TrustSummary
+          if (pathname === "/api/trust-summary") {
+            try {
+              const normProjects = getRegistryV2();
+              const DETERMINISTIC_EVENTS = new Set([
+                "write_boundary_allowed", "write_boundary_denied", "write_boundary_wrapper_required",
+                "stage_transition", "task_started", "task_completed", "task_failed",
+                "audit_started", "audit_completed", "spec_approved", "plan_approved",
+              ]);
+              let deterministicOps = 0;
+              let promptOwnedOps = 0;
+              const missingReceipts: Array<{ task_id: string; repo_slug: string; receipt_name: string }> = [];
+              const skippedGates: Array<{ task_id: string; repo_slug: string; stage: string }> = [];
+              const unverifiableTransitions: Array<{ task_id: string; repo_slug: string; reason: string }> = [];
+              const dataCaveats: string[] = [
+                "stale_skill_installs not computable from available data sources",
+              ];
+
+              for (const proj of normProjects) {
+                const taskDirs = listTaskDirs(proj.path);
+                for (const td of taskDirs) {
+                  // Read events.jsonl per task
+                  try {
+                    const eventsPath = path.join(localDynosDir(proj.path), td, "events.jsonl");
+                    const lines = readJsonLines(eventsPath);
+                    for (const line of lines) {
+                      const evtName = typeof line.event === "string" ? line.event : "";
+                      if (DETERMINISTIC_EVENTS.has(evtName)) {
+                        deterministicOps++;
+                      } else {
+                        promptOwnedOps++;
+                      }
+                    }
+                  } catch {
+                    // skip missing events.jsonl
+                  }
+                }
+                // Read project-root events.jsonl
+                try {
+                  const rootEventsPath = path.join(proj.path, ".dynos", "events.jsonl");
+                  const lines = readJsonLines(rootEventsPath);
+                  for (const line of lines) {
+                    const evtName = typeof line.event === "string" ? line.event : "";
+                    if (DETERMINISTIC_EVENTS.has(evtName)) {
+                      deterministicOps++;
+                    } else {
+                      promptOwnedOps++;
+                    }
+                  }
+                } catch {
+                  // skip missing project-root events.jsonl
+                }
+              }
+
+              jsonResponse(res, 200, {
+                deterministic_ops: deterministicOps,
+                prompt_owned_ops: promptOwnedOps,
+                missing_receipts: missingReceipts,
+                skipped_gates: skippedGates,
+                stale_skill_installs: null,
+                unverifiable_transitions: unverifiableTransitions,
+                computed_at: new Date().toISOString(),
+                data_source_caveats: dataCaveats,
+              });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/events-feed -> EventsFeedResponse
+          if (pathname === "/api/events-feed") {
+            try {
+              const limitParam = parsed.searchParams.get("limit");
+              const limit = limitParam ? Math.max(1, parseInt(limitParam, 10) || 50) : 50;
+              const allEvents: Array<Record<string, unknown>> = [];
+
+              const normProjects = getRegistryV2();
+              const scopedProjects = (projectParam && !isGlobal)
+                ? normProjects.filter((p) => path.resolve(p.path) === path.resolve(projectPath))
+                : normProjects;
+
+              for (const proj of scopedProjects) {
+                // Read project-root .dynos/events.jsonl
+                try {
+                  const eventsPath = path.join(proj.path, ".dynos", "events.jsonl");
+                  const lines = readJsonLines(eventsPath);
+                  for (const line of lines) {
+                    allEvents.push({ ...line, repo_slug: proj.slug });
+                  }
+                } catch {
+                  // skip missing events.jsonl
+                }
+              }
+
+              // Sort descending by ts, limit
+              allEvents.sort((a, b) => {
+                const ta = typeof a.ts === "string" ? a.ts : "";
+                const tb = typeof b.ts === "string" ? b.ts : "";
+                return tb.localeCompare(ta);
+              });
+
+              jsonResponse(res, 200, { events: allEvents.slice(0, limit) });
+            } catch (err) {
+              handleFsError(res, err);
+            }
+            return;
+          }
+
+          // GET /api/cross-repo-timeline -> CrossRepoTimelineEntry[]
+          if (pathname === "/api/cross-repo-timeline") {
+            try {
+              const normProjects = getRegistryV2();
+              const scopedProjects = (projectParam && !isGlobal)
+                ? normProjects.filter((p) => path.resolve(p.path) === path.resolve(projectPath))
+                : normProjects;
+              const timeline: Array<Record<string, unknown>> = [];
+
+              for (const proj of scopedProjects) {
+                const taskDirs = listTaskDirs(proj.path);
+                for (const td of taskDirs) {
+                  try {
+                    const manifest = readJsonFile(path.join(localDynosDir(proj.path), td, "manifest.json")) as Record<string, unknown>;
+                    timeline.push({
+                      task_id: typeof manifest.task_id === "string" ? manifest.task_id : td,
+                      repo_slug: proj.slug,
+                      title: typeof manifest.title === "string" ? manifest.title : td,
+                      stage: typeof manifest.stage === "string" ? manifest.stage : "UNKNOWN",
+                      created_at: typeof manifest.created_at === "string" ? manifest.created_at : "",
+                      updated_at: typeof manifest.updated_at === "string" ? manifest.updated_at : "",
+                    });
+                  } catch {
+                    // skip corrupt/missing manifest
+                  }
+                }
+              }
+
+              // Sort descending by updated_at
+              timeline.sort((a, b) => {
+                const ta = typeof a.updated_at === "string" ? a.updated_at : "";
+                const tb = typeof b.updated_at === "string" ? b.updated_at : "";
+                return tb.localeCompare(ta);
+              });
+
+              jsonResponse(res, 200, timeline);
             } catch (err) {
               handleFsError(res, err);
             }

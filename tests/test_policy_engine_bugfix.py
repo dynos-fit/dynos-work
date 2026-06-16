@@ -60,18 +60,18 @@ class TestPolicyRankingFilterThenSort:
             {
                 "task_type": "feature",
                 "quality_score": 1.0,
-                "agent_roles": {"executor": "model-A"},
+                "model_used_by_agent": {"executor": "model-A"},
             },
             # Model B: 2 observations, slightly lower quality
             {
                 "task_type": "feature",
                 "quality_score": 0.9,
-                "agent_roles": {"executor": "model-B"},
+                "model_used_by_agent": {"executor": "model-B"},
             },
             {
                 "task_type": "feature",
                 "quality_score": 0.9,
-                "agent_roles": {"executor": "model-B"},
+                "model_used_by_agent": {"executor": "model-B"},
             },
         ]
 
@@ -108,12 +108,12 @@ class TestPolicyRankingFilterThenSort:
             {
                 "task_type": "bugfix",
                 "quality_score": 0.95,
-                "agent_roles": {"executor": "model-X"},
+                "model_used_by_agent": {"executor": "model-X"},
             },
             {
                 "task_type": "bugfix",
                 "quality_score": 0.85,
-                "agent_roles": {"executor": "model-Y"},
+                "model_used_by_agent": {"executor": "model-Y"},
             },
         ]
 
@@ -135,11 +135,11 @@ class TestPolicyRankingFilterThenSort:
 
         retrospectives = [
             # D: 1 observation, very high quality
-            {"task_type": "refactor", "quality_score": 0.99, "agent_roles": {"planner": "model-D"}},
+            {"task_type": "refactor", "quality_score": 0.99, "model_used_by_agent": {"planner": "model-D"}},
             # C: 3 observations, decent quality
-            {"task_type": "refactor", "quality_score": 0.75, "agent_roles": {"planner": "model-C"}},
-            {"task_type": "refactor", "quality_score": 0.80, "agent_roles": {"planner": "model-C"}},
-            {"task_type": "refactor", "quality_score": 0.70, "agent_roles": {"planner": "model-C"}},
+            {"task_type": "refactor", "quality_score": 0.75, "model_used_by_agent": {"planner": "model-C"}},
+            {"task_type": "refactor", "quality_score": 0.80, "model_used_by_agent": {"planner": "model-C"}},
+            {"task_type": "refactor", "quality_score": 0.70, "model_used_by_agent": {"planner": "model-C"}},
         ]
 
         result = fn(retrospectives)
@@ -162,11 +162,11 @@ class TestPolicyRankingFilterThenSort:
 
         retrospectives = [
             # E: 2 obs, mean 0.60
-            {"task_type": "feature", "quality_score": 0.60, "agent_roles": {"auditor": "model-E"}},
-            {"task_type": "feature", "quality_score": 0.60, "agent_roles": {"auditor": "model-E"}},
+            {"task_type": "feature", "quality_score": 0.60, "model_used_by_agent": {"auditor": "model-E"}},
+            {"task_type": "feature", "quality_score": 0.60, "model_used_by_agent": {"auditor": "model-E"}},
             # F: 2 obs, mean 0.90
-            {"task_type": "feature", "quality_score": 0.90, "agent_roles": {"auditor": "model-F"}},
-            {"task_type": "feature", "quality_score": 0.90, "agent_roles": {"auditor": "model-F"}},
+            {"task_type": "feature", "quality_score": 0.90, "model_used_by_agent": {"auditor": "model-F"}},
+            {"task_type": "feature", "quality_score": 0.90, "model_used_by_agent": {"auditor": "model-F"}},
         ]
 
         result = fn(retrospectives)
