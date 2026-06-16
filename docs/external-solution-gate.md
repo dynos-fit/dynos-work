@@ -48,7 +48,7 @@ The three-layer check above is a direct application of the trust-substrate patte
 Applied to the external-solution gate:
 
 - The **gate artifact** (`external-solution-gate.json`) is written by a deterministic hook, not by the orchestrator. The orchestrator can read it but cannot write it legitimately.
-- The **WebSearch / WebFetch events** in `web-tool-log.jsonl` are written by the harness's `pre_tool_use.py` hook at call time, before the orchestrator can observe the result. They cannot be inserted retroactively.
+- The **WebSearch / WebFetch events** in `web-tool-log.jsonl` are written by the `PostToolUse` hook (`hooks/web_tool_log.py`) after each tool call completes. They cannot be inserted retroactively.
 - The **receipt** (`write-search-receipt`) is the orchestrator's commitment. Its `artifact_sha256` is computed over the live gate file. Mutating the gate file after the receipt is written causes the hash to drift, which `receipt_postmortem_generated` flags during the audit phase.
 
 This three-layer design means a forged claim of "search was performed" requires simultaneously: (a) a plausible-looking `write-search-receipt` receipt, (b) at least one `WebFetch` event in `web-tool-log.jsonl` for a URL that appears in `--urls-consulted`, and (c) a `external-solution-gate.json` whose sha256 matches the receipt's `artifact_sha256`. All three must be consistent. Forging all three in-flight is the trust trapdoor the 2026-04-30 incident surfaced; subsequent harness changes made (b) write-once append-only, making the trapdoor unworkable.
