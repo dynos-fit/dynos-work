@@ -17,7 +17,7 @@ python3 hooks/eval.py evaluate candidate.json baseline.json
 python3 hooks/eval.py promote <agent_name> <role> <task_type> candidate.json baseline.json --root .
 python3 hooks/bench.py run benchmarks/fixtures/<fixture>.json --root . --update-registry
 python3 hooks/rollout.py benchmarks/fixtures/<rollout-fixture>.json --root . --update-registry
-python3 hooks/route.py <role> <task_type> --root .
+python3 hooks/router.py resolve <role> <task_type> --root .
 python3 hooks/fixture.py sync --root .
 python3 hooks/report.py --root .
 python3 hooks/auto.py sync --root .
@@ -91,7 +91,7 @@ Create any missing directories. The `.staging/` directory holds new agents enter
 
 ### Step 2 -- Agent Routing
 
-Maintain the `## Agent Routing` section in `project_rules.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/route.py` as the live routing source of truth.
+Maintain the `## Agent Routing` section in `project_rules.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/router.py` as the live routing source of truth.
 
 #### 2a -- Routing composites (deterministic)
 
