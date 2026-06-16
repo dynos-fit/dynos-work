@@ -37,26 +37,47 @@ CATEGORY_INSTRUCTIONS: dict[str, str] = {
 def _matching_retrospectives(
     retrospectives: list[dict], role: str, task_type: str, root: Path
 ) -> list[dict]:
-    """Return retrospectives where *role* participated per the execution graph and task_type matches."""
+    """Return retrospectives where *role* participated and task_type matches.
+
+    Role participation is read primarily from the retrospective's own
+    ``model_used_by_agent`` mapping (keyed by role). That mapping lives inside
+    the flushed retrospective JSON, so it SURVIVES worktree removal. For
+    completeness / backward-compat it is unioned with the executors declared in
+    a sibling ``execution-graph.json`` when that file is present (the
+    in-worktree case).
+
+    Reading the execution graph ALONE was a bug: persistent retrospectives
+    (the post-worktree-removal case the DONE-edge flush exists for) have no
+    graph sibling — their ``_path`` points at ``.../retrospectives/{task}.json``
+    — so role matching always failed and the generator could never produce a
+    specialist even when signal was present.
+    """
     matched: list[dict] = []
     for retro in retrospectives:
         if retro.get("task_type") != task_type:
             continue
-        if "_path" not in retro:
-            continue
-        try:
-            task_dir = Path(retro["_path"]).parent
-            graph_path = task_dir / "execution-graph.json"
-            graph = json.loads(graph_path.read_text())
-            executors = {
-                seg.get("executor")
-                for seg in graph.get("segments", [])
-                if seg.get("executor")
-            }
-            if role in executors:
-                matched.append(retro)
-        except (json.JSONDecodeError, OSError, KeyError):
-            continue
+        participants: set[str] = set()
+        mua = retro.get("model_used_by_agent")
+        if isinstance(mua, dict):
+            participants.update(k for k in mua if isinstance(k, str))
+        # Union in execution-graph executors when a sibling graph is present
+        # (in-worktree retros). Absent graph (persistent retros) is expected —
+        # model_used_by_agent already carries participation.
+        path = retro.get("_path")
+        if path:
+            try:
+                graph_path = Path(path).parent / "execution-graph.json"
+                if graph_path.exists():
+                    graph = json.loads(graph_path.read_text())
+                    participants.update(
+                        seg.get("executor")
+                        for seg in graph.get("segments", [])
+                        if isinstance(seg, dict) and seg.get("executor")
+                    )
+            except (json.JSONDecodeError, OSError, KeyError):
+                pass
+        if role in participants:
+            matched.append(retro)
     return matched
 
 
