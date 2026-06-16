@@ -113,6 +113,17 @@ def _read_events(td: Path) -> list[dict]:
     return [json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
 
 
+def _read_global_events(root: Path) -> list[dict]:
+    """Read the GLOBAL .dynos/events.jsonl (root-scoped). The
+    `retrospective_flushed` event MUST land here (not in the task-scoped
+    .dynos/{task}/events.jsonl) because the SEC-003 verifier
+    `_flushed_sha_by_task_id` reads only this global file."""
+    events_path = root / ".dynos" / "events.jsonl"
+    if not events_path.exists():
+        return []
+    return [json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
+
+
 # ---------------------------------------------------------------------------
 # Success path
 # ---------------------------------------------------------------------------
@@ -197,22 +208,83 @@ def test_flush_rejects_path_traversal_task_id(tmp_path: Path) -> None:
 def test_flush_emits_success_event(tmp_path: Path,
                                     monkeypatch: pytest.MonkeyPatch) -> None:
     """Successful DONE flush emits a `retrospective_flushed` event with
-    task_id, source, destination, and sha256 fields populated."""
+    task_id, source, destination, and sha256 fields populated.
+
+    The event MUST be written to the GLOBAL .dynos/events.jsonl (NOT the
+    task-scoped .dynos/{task}/events.jsonl), because that is the only file
+    the SEC-003 verifier `_flushed_sha_by_task_id` reads. (Regression: it
+    was previously routed task-scoped via task=task_id, which made every
+    persistent retro `persistent-unverified` and silently disabled the
+    calibration generation gate.)"""
     _install_dynos_home(monkeypatch, tmp_path)
     td = _setup_done_ready(tmp_path, slug="FLUSH-EVT")
+    root = td.parent.parent
 
     transition_task(td, "DONE")
 
-    events = _read_events(td)
+    events = _read_global_events(root)
     flushed = [e for e in events if e.get("event") == "retrospective_flushed"]
     assert len(flushed) >= 1, (
-        f"expected a retrospective_flushed event — got events: "
-        f"{[e.get('event') for e in events]}"
+        f"expected a retrospective_flushed event in the GLOBAL events.jsonl — "
+        f"got events: {[e.get('event') for e in events]}"
     )
     ev = flushed[0]
     assert ev.get("task_id") == td.name
     assert str(ev.get("source", "")).endswith("task-retrospective.json")
     assert str(ev.get("destination", "")).endswith(f"{td.name}.json")
+    assert ev.get("sha256"), "flush event must carry the destination sha256"
+
+    # The task-scoped events file must NOT carry the flush event — routing
+    # it there is exactly the bug this regression guards against.
+    task_scoped = [e for e in _read_events(td)
+                   if e.get("event") == "retrospective_flushed"]
+    assert not task_scoped, (
+        "retrospective_flushed must NOT be in the task-scoped events.jsonl — "
+        "the SEC-003 verifier only reads the global file"
+    )
+
+
+def test_flush_event_verifies_persistent_retro_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: after a DONE flush, the SEC-003 verifier finds the
+    sha and `collect_retrospectives` returns the persistent retro as
+    VERIFIED (not filtered as `persistent-unverified`).
+
+    This is the bug's real-world symptom: with the event mis-routed to the
+    task-scoped file, `_flushed_sha_by_task_id(root)` returned {} → every
+    persistent retro was `persistent-unverified` → `collect_retrospectives`
+    (default) filtered them all → calibration's generation gate saw 0
+    retrospectives and could never fire."""
+    from lib_core import _flushed_sha_by_task_id, collect_retrospectives
+    from lib_receipts import hash_file
+
+    _install_dynos_home(monkeypatch, tmp_path)
+    td = _setup_done_ready(tmp_path, slug="FLUSH-E2E")
+    root = td.parent.parent
+
+    transition_task(td, "DONE")
+
+    # 1) The verifier reads the global file and finds this task's sha.
+    flushed = _flushed_sha_by_task_id(root)
+    assert td.name in flushed, (
+        f"_flushed_sha_by_task_id must find {td.name} — got {list(flushed)}"
+    )
+    persistent = _persistent_project_dir(root) / "retrospectives" / f"{td.name}.json"
+    assert flushed[td.name] == hash_file(persistent), (
+        "recorded sha must match the persistent file's current hash"
+    )
+
+    # 2) The default (verified-only) collection includes the persistent retro,
+    #    proving it was NOT filtered as persistent-unverified.
+    retros = collect_retrospectives(root)
+    mine = [r for r in retros if r.get("task_id") == td.name]
+    assert mine, (
+        "collect_retrospectives() (verified-only) must include the flushed "
+        "retro — if empty, the SEC-003 verification failed and calibration "
+        "would see 0 retrospectives"
+    )
+    assert mine[0].get("_source") != "persistent-unverified"
 
 
 # ---------------------------------------------------------------------------
