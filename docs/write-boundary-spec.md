@@ -178,7 +178,7 @@ The unconditional Class B control-plane guarantee is enforced inside `decide_wri
 
 - **`_is_cross_task_control_plane(rel_posix: str) -> bool`** — classifies the target path by its own task-relative name (case-folded). Returns `True` if the relative name matches a Class B control-plane filename (e.g., `manifest.json`, `receipts/`, `handoff-*.json`). The case-fold prevents bypasses like `MANIFEST.JSON`.
 
-- **`_FRAMEWORK_ROLES`** — a `frozenset` of roles (`ctl`, `scheduler`, `receipt-writer`, `eventbus`, `system`) that are unconditionally exempt from cross-task control-plane denial. These are the only roles whose writes bypass `_owning_task_dir` and `_is_cross_task_control_plane` checking inside `decide_write`.
+- **`_FRAMEWORK_ROLES`** — a `frozenset` of roles (`ctl`, `scheduler`, `receipt-writer`, `eventbus`, `system`, `daemon`) that are unconditionally exempt from cross-task control-plane denial. These are the only roles whose writes bypass `_owning_task_dir` and `_is_cross_task_control_plane` checking inside `decide_write`.
 
 Together, these three pieces ensure that the Class B guarantee is unconditional for non-framework roles: even if a role's prompt is compromised and it claims a different `task_dir`, the path-derived `_owning_task_dir` logic and name-based `_is_cross_task_control_plane` classify the write correctly.
 
@@ -205,6 +205,7 @@ Initial role set:
 - `receipt-writer`
 - `eventbus`
 - `system`
+- `daemon`
 
 ## Initial Allowlist Matrix
 

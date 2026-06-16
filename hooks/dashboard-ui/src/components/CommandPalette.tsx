@@ -212,6 +212,7 @@ export default function CommandPalette() {
           .then(res => res.ok ? res.json() : Promise.reject(new Error('Failed')))
           .then((data: PaletteIndex) => {
             paletteCache = data;
+            setPaletteIndex(data);
           })
           .catch(() => setFetchError('Refresh failed'))
           .finally(() => setLoading(false));
