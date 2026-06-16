@@ -119,3 +119,37 @@ def test_ac16_info_lines_excluded(log_dir_with_errors):
         assert "info" not in level or "error" in level, (
             f"INFO entry leaked into error surface: {entry}"
         )
+
+
+# ---------------------------------------------------------------------------
+# AC 13 (task-20260616-002, finding #68): the module docstring must mention
+# that .txt files under logs/ are also gathered; .txt-collection behaviour is
+# preserved.
+# ---------------------------------------------------------------------------
+
+def test_log_surface_docstring_mentions_txt():
+    """The module docstring must mention '.txt' so it matches the actual
+    _gather_log_files behaviour. FAILS while the docstring only describes
+    '*.log files'."""
+    m = _import_log_surface()
+    docstring = m.__doc__ or ""
+    assert ".txt" in docstring, (
+        "log_surface module docstring does not mention '.txt'; it must state "
+        "that .txt files under logs/ are also gathered. Docstring:\n"
+        f"{docstring}"
+    )
+
+
+def test_log_surface_txt_file_still_gathered(tmp_path):
+    """A .txt file placed under a logs/ directory is returned by
+    _gather_log_files — non-regression guard for the preserved behaviour."""
+    m = _import_log_surface()
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    txt_file = logs_dir / "service.txt"
+    txt_file.write_text("2026-06-15 ERROR boom\n", encoding="utf-8")
+
+    gathered = m._gather_log_files(tmp_path)
+    assert txt_file in gathered, (
+        f".txt file under logs/ was not gathered: {[str(p) for p in gathered]}"
+    )

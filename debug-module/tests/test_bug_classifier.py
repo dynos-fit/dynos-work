@@ -150,3 +150,61 @@ def test_ac9_bug_type_is_always_from_allowed_set():
         assert result["bug_type"] in allowed, (
             f"classify({text!r}) returned invalid bug_type {result['bug_type']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# AC 11 (task-20260616-002, finding #66): the dead `if not path or ...: pass`
+# block and its comment must be deleted; behaviour for dotted-version tokens
+# is unchanged (they are already filtered by the extension whitelist upstream).
+# ---------------------------------------------------------------------------
+
+_BUG_CLASSIFIER_SRC = (
+    Path(__file__).parent.parent / "lib" / "bug_classifier.py"
+).read_text(encoding="utf-8")
+
+
+def test_bug_classifier_dead_pass_block_removed():
+    """The dead no-op branch must be gone from the source text. FAILS while
+    the `if not path or path.startswith(...)` block remains."""
+    assert "if not path or path.startswith" not in _BUG_CLASSIFIER_SRC, (
+        "dead `if not path or path.startswith(...)` block still present in "
+        "bug_classifier.py — AC 11 requires its deletion"
+    )
+    assert "Skip pure dotted-version-like tokens" not in _BUG_CLASSIFIER_SRC, (
+        "orphaned comment for the dead block still present — AC 11 requires "
+        "both the comment and the if/pass block to be removed"
+    )
+
+
+def test_bug_classifier_dotted_version_token_handling_unchanged():
+    """A dotted-version-like token (e.g. '1.2.3') is still NOT extracted as a
+    file path (filtered by the extension whitelist), while a real path token
+    IS extracted — confirming the dead-block deletion introduces no behaviour
+    change."""
+    m = _import_classifier()
+
+    version_files = m._extract_files("version 1.2.3 crashed at startup")
+    assert version_files == [], (
+        f"dotted-version token leaked as a file path: {version_files!r}"
+    )
+
+    real_files = m._extract_files("error in app.py:12:3 failed")
+    assert real_files == [{"path": "app.py", "line": 12, "col": 3}], (
+        f"real path extraction changed unexpectedly: {real_files!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC 12 (finding #67): module docstring must not hardcode the stale '9' count.
+# ---------------------------------------------------------------------------
+
+def test_bug_classifier_docstring_no_stale_count():
+    """The source must not contain the stale '9 allowed' substring; the count
+    of allowed bug types is 11, so the hardcoded '9' is wrong."""
+    m = _import_classifier()
+    assert "9 allowed" not in _BUG_CLASSIFIER_SRC, (
+        "stale '9 allowed' count still present in bug_classifier.py docstring "
+        f"(ALLOWED_BUG_TYPES has {len(m.ALLOWED_BUG_TYPES)} entries)"
+    )
+    # Guard the premise: the real count must not be 9 (else '9' would be valid).
+    assert len(m.ALLOWED_BUG_TYPES) != 9

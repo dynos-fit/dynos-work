@@ -119,3 +119,60 @@ def test_ac12_format_is_from_allowed_set(istanbul_coverage_dir):
         assert gap["format"] in allowed, (
             f"format {gap['format']!r} not in allowed set {allowed}"
         )
+
+
+# ---------------------------------------------------------------------------
+# AC 6 / AC 7 (task-20260616-002, finding #32): _parse_pytest_cov must NOT
+# fall back to excluded_lines. Pragma-excluded lines are not uncovered lines.
+# ---------------------------------------------------------------------------
+
+def _write_pytest_cov(tmp_path, files: dict) -> Path:
+    """Write a coverage.json (pytest-cov shape) and return its path."""
+    path = tmp_path / "coverage.json"
+    path.write_text(json.dumps({"files": files}), encoding="utf-8")
+    return path
+
+
+def test_coverage_gaps_excluded_lines_not_reported(tmp_path):
+    """An entry with empty missing_lines but non-empty excluded_lines yields
+    NO gap. excluded_lines (pragma: no cover) must not be reported as
+    uncovered. FAILS while the `or entry.get("excluded_lines")` fallback
+    remains in _parse_pytest_cov."""
+    m = _import_coverage_gaps()
+    cov = _write_pytest_cov(
+        tmp_path,
+        {
+            "src/app.py": {
+                "missing_lines": [],
+                "excluded_lines": [10, 11],
+                "summary": {"percent_covered": 100.0},
+            }
+        },
+    )
+    gaps = m._parse_pytest_cov(cov)
+    assert gaps == [], (
+        "excluded_lines were reported as a coverage gap; "
+        f"expected no gaps, got {gaps!r}"
+    )
+
+
+def test_coverage_gaps_missing_lines_reported(tmp_path):
+    """An entry with non-empty missing_lines still produces a gap for those
+    lines — non-regression guard ensuring the fallback removal does not
+    silence real uncovered lines."""
+    m = _import_coverage_gaps()
+    cov = _write_pytest_cov(
+        tmp_path,
+        {
+            "src/app.py": {
+                "missing_lines": [5, 6],
+                "excluded_lines": [],
+                "summary": {"percent_covered": 80.0},
+            }
+        },
+    )
+    gaps = m._parse_pytest_cov(cov)
+    assert len(gaps) == 1, f"expected exactly one gap, got {gaps!r}"
+    assert gaps[0]["uncovered_lines"] == [5, 6], (
+        f"missing_lines were not reported correctly: {gaps[0]!r}"
+    )
