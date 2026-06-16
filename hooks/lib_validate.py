@@ -1549,8 +1549,20 @@ def compute_reward(task_dir: Path) -> dict:
         except (ValueError, TypeError):
             pass
 
+    # #24: If no repair-log.json was present, fall back to the manifest's own
+    # repair_cycle_count field (written by the pipeline before any repair log
+    # is created).  The repair-log value wins when the file exists.
+    if repair_cycle_count == 0:
+        try:
+            repair_cycle_count = int(manifest.get("repair_cycle_count", 0) or 0)
+        except (ValueError, TypeError):
+            pass
+
     stage = manifest.get("stage", "")
-    change_failure = stage == "REPAIR_FAILED"
+    # #24: change_failure is True when the task reached FAILED after at least one
+    # repair cycle. 'REPAIR_FAILED' is not a real stage; the terminal failure
+    # stage emitted by the pipeline is 'FAILED'.
+    change_failure = stage == "FAILED" and repair_cycle_count > 0
 
     recovery_time_seconds: int | None = None
     if change_failure and log_path.exists():
@@ -1559,7 +1571,8 @@ def compute_reward(task_dir: Path) -> dict:
             fail_time = None
             done_time = None
             for line in log_path.read_text().splitlines():
-                if "REPAIR_FAILED" in line and fail_time is None:
+                # _auto_log emits '[FAILED]' (via the FAILED transition tag).
+                if "[FAILED]" in line and fail_time is None:
                     ts = line.split("]")[0].lstrip("[").strip() if "]" in line else ""
                     if ts:
                         try:
@@ -1623,7 +1636,9 @@ def compute_reward(task_dir: Path) -> dict:
     # quality_score — only blocking findings affect quality.
     # Non-blocking findings are informational and don't penalize.
     if total_blocking == 0:
-        quality_score = 0.9 if total_findings > 0 else 0.9
+        # #47: zero findings = perfect quality; non-zero informational-only
+        # findings still score 0.9 (non-blocking don't penalise quality).
+        quality_score = 1.0 if total_findings == 0 else 0.9
     else:
         # AC 15: surviving_blocking is the SET INTERSECTION of
         # (findings that were blocking BEFORE repair) ∩ (findings that are

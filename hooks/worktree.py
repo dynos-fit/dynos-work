@@ -242,7 +242,7 @@ def _plan_migration(source: Path, target: Path) -> dict[str, Any]:
     return plan
 
 
-def _execute_migration(source: Path, target: Path, main_root: Path) -> dict[str, Any]:
+def _execute_migration(source: Path, target: Path) -> dict[str, Any]:
     """Actually perform the migration. Backs up both dirs first.
 
     Backups and copies use symlinks=True so planted symlinks inside the
@@ -439,7 +439,7 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
     # Execute
     main_root = _original_path_for_slug(target_slug)
-    applied = _execute_migration(source, target, main_root or target)
+    applied = _execute_migration(source, target)
 
     # Regenerate project_rules.md on target (if main_root exists)
     if main_root and main_root.exists():

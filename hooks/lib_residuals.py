@@ -98,6 +98,17 @@ def queue_path(root: Path) -> Path:
     return Path(root) / ".dynos" / "proactive-findings.json"
 
 
+def _stable_lockfile_path(root: Path) -> Path:
+    """Return the stable lock-file path (never renamed, never the queue itself).
+
+    The lock is held on THIS file's FD. The queue file is written via
+    os.rename(tmp, qpath) which replaces the queue inode; the lock inode
+    is separate and stable across all renames, so concurrent callers always
+    contend on the same inode and serialize correctly.
+    """
+    return queue_path(root).with_suffix(".json.lock")
+
+
 def load_queue(qpath: Path) -> dict:
     """Read the queue file and return ``{"findings": [...]}``.
 
@@ -217,15 +228,17 @@ def update_row_status(root: Path, row_id: str, new_status: str) -> None:
 
     qp = queue_path(root)
     qp.parent.mkdir(parents=True, exist_ok=True)
+    lp = _stable_lockfile_path(root)
 
-    # Open with O_CREAT|O_RDWR so the FD exists for LOCK_EX even if the
-    # file was just created. The lock is held for the entire RMW window.
-    fd: int = -1
+    # Lock a SEPARATE stable lock file (never renamed) so the inode that
+    # fcntl.flock binds to is never replaced by os.rename(tmp, qpath).
+    # Concurrent callers contend on the same stable inode and serialize.
+    lock_fd: int = -1
     try:
-        fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_fd = os.open(str(lp), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
-            current = _read_locked_queue(fd)
+            current = load_queue(qp)
             findings = current.get("findings", [])
 
             target_index = None
@@ -242,82 +255,128 @@ def update_row_status(root: Path, row_id: str, new_status: str) -> None:
 
             _atomic_write_under_lock(qp, {"findings": findings})
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:
-        if fd >= 0:
-            os.close(fd)
+        if lock_fd >= 0:
+            os.close(lock_fd)
 
 
-def ingest_findings(task_dir: Path, root: Path, summary: dict) -> int:
+def ingest_findings(
+    task_dir_or_root: Path,
+    root_or_findings: "Path | list",
+    summary: Optional[dict] = None,
+) -> int:
     """Producer entry point. Append admitted residuals to the queue.
+
+    Supports two call signatures:
+
+    Legacy (3-arg): ingest_findings(task_dir, root, summary)
+        Reads per-auditor report files referenced in ``summary["reports"]``
+        and applies the four-condition residual filter before appending.
+
+    Direct (2-arg): ingest_findings(root, findings)
+        Appends a list of pre-built finding dicts directly.  Each dict must
+        carry a ``"fingerprint"`` key; rows whose fingerprint already exists
+        in the queue with a DEDUP_BLOCKING_STATUSES status are skipped.
 
     Returns the number of rows actually appended (after filter and dedup).
     Concurrency-safe: dedup check + append happen under a single
-    ``fcntl.LOCK_EX`` held on the queue file FD.
+    ``fcntl.LOCK_EX`` held on the STABLE lock file (never renamed), so
+    os.rename inside _atomic_write_under_lock never orphans the lock inode.
 
     Never raises on a filtered or malformed finding — those are silently
     skipped. May raise on irrecoverable IO (caller in cmd_run_audit_finish
     is expected to catch and log).
     """
-    if not isinstance(summary, dict):
-        return 0
-
-    task_id = summary.get("task_id", "")
-    if not isinstance(task_id, str):
-        task_id = ""
-
-    reports = summary.get("reports", [])
-    if not isinstance(reports, list):
-        return 0
-
-    # Stage 1: collect candidate rows from per-auditor reports (no IO into
-    # the queue yet). Each candidate is a fully-formed row dict ready for
-    # dedup and append.
-    candidates: list[dict] = []
-    for report_entry in reports:
-        if not isinstance(report_entry, dict):
-            continue
-        auditor_name = report_entry.get("auditor_name")
-        report_path = report_entry.get("report_path")
-        if not isinstance(auditor_name, str) or not isinstance(report_path, str):
-            continue
-        if auditor_name not in ALLOWED_AUDITORS:
-            # Whole report skipped — no need to read it.
-            continue
-
-        try:
-            report_data = load_json(Path(report_path))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            # Missing or corrupt per-auditor report is a soft failure for
-            # the residual pipeline; the audit-summary itself is the
-            # authoritative pipeline output.
-            continue
-        if not isinstance(report_data, dict):
-            continue
-        findings = report_data.get("findings", [])
-        if not isinstance(findings, list):
-            continue
-
-        for finding in findings:
-            if not _accept_finding(finding, auditor_name):
+    # --- Signature dispatch ---
+    if isinstance(root_or_findings, list):
+        # 2-arg direct API: ingest_findings(root, findings_list)
+        root: Path = Path(task_dir_or_root)
+        raw_candidates: list[dict] = root_or_findings
+        candidates: list[dict] = []
+        for item in raw_candidates:
+            if not isinstance(item, dict):
                 continue
-            row = _build_row(finding, auditor_name, task_id)
+            fp = item.get("fingerprint")
+            if not isinstance(fp, str) or not fp:
+                continue
+            # Use the item as-is: preserve its fingerprint field so the
+            # caller's fingerprint reaches the queue unchanged.
+            row: dict = dict(item)
+            if "id" not in row:
+                row["id"] = str(uuid.uuid4())
+            if "created_at" not in row:
+                row["created_at"] = _now_iso_z()
             candidates.append(row)
+    else:
+        # 3-arg legacy API: ingest_findings(task_dir, root, summary)
+        root = Path(root_or_findings)
+        if not isinstance(summary, dict):
+            return 0
+
+        task_id = summary.get("task_id", "")
+        if not isinstance(task_id, str):
+            task_id = ""
+
+        reports = summary.get("reports", [])
+        if not isinstance(reports, list):
+            return 0
+
+        # Stage 1: collect candidate rows from per-auditor reports (no IO
+        # into the queue yet).  Each candidate is a fully-formed row dict
+        # ready for dedup and append.
+        candidates = []
+        for report_entry in reports:
+            if not isinstance(report_entry, dict):
+                continue
+            auditor_name = report_entry.get("auditor_name")
+            report_path = report_entry.get("report_path")
+            if not isinstance(auditor_name, str) or not isinstance(report_path, str):
+                continue
+            if auditor_name not in ALLOWED_AUDITORS:
+                # Whole report skipped — no need to read it.
+                continue
+
+            try:
+                report_data = load_json(Path(report_path))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                # Missing or corrupt per-auditor report is a soft failure
+                # for the residual pipeline; the audit-summary itself is
+                # the authoritative pipeline output.
+                continue
+            if not isinstance(report_data, dict):
+                continue
+            findings = report_data.get("findings", [])
+            if not isinstance(findings, list):
+                continue
+
+            for finding in findings:
+                if not _accept_finding(finding, auditor_name):
+                    continue
+                candidates.append(_build_row(finding, auditor_name, task_id))
 
     if not candidates:
         return 0
 
-    # Stage 2: critical section — open queue, lock, dedup, append, atomic
-    # rename. The lock is on the queue file FD (not on the temp file) so
-    # concurrent ingest calls serialize correctly.
+    # Stage 2: critical section — acquire STABLE lock, read queue, dedup,
+    # append, atomic rename.
+    #
+    # The lock is held on a SEPARATE stable lock file (never renamed), NOT
+    # on the queue file FD.  os.rename(tmp, qpath) inside
+    # _atomic_write_under_lock replaces the queue inode; if we locked the
+    # queue FD directly, the second caller would open a brand-new inode
+    # after the rename and get an uncontended lock, causing lost rows.
+    # Locking the stable .lock file means every caller competes on the
+    # same inode regardless of how many times the queue is renamed.
     qp = queue_path(root)
     qp.parent.mkdir(parents=True, exist_ok=True)
-    fd: int = -1
+    lp = _stable_lockfile_path(root)
+    lock_fd: int = -1
     try:
-        fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_fd = os.open(str(lp), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
-            current = _read_locked_queue(fd)
+            current = load_queue(qp)
             existing = current.get("findings", [])
 
             # Build a set of fingerprints that BLOCK new appends —
@@ -337,11 +396,12 @@ def ingest_findings(task_dir: Path, root: Path, summary: dict) -> int:
             # get appended.
             appended = 0
             for cand in candidates:
-                fp = cand["fingerprint"]
+                fp = cand.get("fingerprint", "")
                 if fp in blocking_fps:
                     continue
                 existing.append(cand)
-                blocking_fps.add(fp)
+                if fp:
+                    blocking_fps.add(fp)
                 appended += 1
 
             if appended > 0:
@@ -349,10 +409,10 @@ def ingest_findings(task_dir: Path, root: Path, summary: dict) -> int:
 
             return appended
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:
-        if fd >= 0:
-            os.close(fd)
+        if lock_fd >= 0:
+            os.close(lock_fd)
 
 
 def ingest_prevention_rules(root: Path, rules: list) -> int:
@@ -432,12 +492,13 @@ def ingest_prevention_rules(root: Path, rules: list) -> int:
 
     qp = queue_path(root)
     qp.parent.mkdir(parents=True, exist_ok=True)
-    fd: int = -1
+    lp = _stable_lockfile_path(root)
+    lock_fd: int = -1
     try:
-        fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_fd = os.open(str(lp), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
-            current = _read_locked_queue(fd)
+            current = load_queue(qp)
             existing = current.get("findings", [])
 
             blocking_fps: set[str] = set()
@@ -463,10 +524,10 @@ def ingest_prevention_rules(root: Path, rules: list) -> int:
 
             return appended
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:
-        if fd >= 0:
-            os.close(fd)
+        if lock_fd >= 0:
+            os.close(lock_fd)
 
 
 # ---------------------------------------------------------------------------

@@ -100,36 +100,79 @@ _SKIP_DIRS = {".git", "node_modules", ".dynos", "__pycache__", "dist", "build", 
 # Markdown table parser
 # ---------------------------------------------------------------------------
 
-def parse_markdown_table(section_text: str) -> list[dict[str, str]]:
-    """Parse a markdown table from a plan section into list of row dicts.
+def _parse_single_table(table_lines: list[str]) -> list[dict[str, str]]:
+    """Parse a single contiguous block of markdown table lines into row dicts.
 
-    Returns empty list if no table found or table is malformed.
+    table_lines must include the header row, separator row, and data rows.
+    Returns empty list if fewer than 3 lines or header is empty.
     """
-    lines = [l.strip() for l in section_text.splitlines() if l.strip()]
-    table_lines: list[str] = []
-    in_table = False
-
-    for line in lines:
-        if line.startswith("|") and line.endswith("|"):
-            in_table = True
-            table_lines.append(line)
-        elif in_table:
-            break  # End of table block
-
-    if len(table_lines) < 3:  # header + separator + at least 1 row
+    if len(table_lines) < 3:
         return []
 
-    # Parse header
     headers = [h.strip() for h in table_lines[0].strip("|").split("|")]
+    if not headers:
+        return []
 
     # Skip separator (line 1)
     rows: list[dict[str, str]] = []
     for line in table_lines[2:]:
         cells = [c.strip() for c in line.strip("|").split("|")]
-        if len(cells) == len(headers):
+        n_headers = len(headers)
+        n_cells = len(cells)
+        if n_cells == n_headers:
             rows.append(dict(zip(headers, cells)))
+        elif n_cells > n_headers:
+            # Overflow: join trailing cells into the last column
+            merged = cells[: n_headers - 1] + ["|".join(cells[n_headers - 1 :])]
+            rows.append(dict(zip(headers, merged)))
+        elif n_cells < n_headers:
+            # Pad with empty strings for missing columns
+            padded = cells + [""] * (n_headers - n_cells)
+            rows.append(dict(zip(headers, padded)))
 
     return rows
+
+
+def parse_table_rows(section_text: str) -> list[dict[str, str]]:
+    """Parse ALL markdown tables in a section into a unified list of row dicts.
+
+    Accumulates every pipe-delimited table block in the section (including
+    tables separated by prose), parses each independently, and unions the
+    rows. Short rows (fewer cells than headers) are padded with empty strings;
+    overflow rows (more cells than headers) have trailing cells merged into
+    the last column. No row is silently discarded.
+
+    Returns empty list if no table found or all tables are malformed.
+    """
+    lines = [ln.strip() for ln in section_text.splitlines()]
+    all_rows: list[dict[str, str]] = []
+    current_block: list[str] = []
+
+    for line in lines:
+        if line.startswith("|") and line.endswith("|"):
+            current_block.append(line)
+        else:
+            if current_block:
+                all_rows.extend(_parse_single_table(current_block))
+                current_block = []
+            # Non-table line: continue accumulating for next block
+
+    # Flush any trailing block
+    if current_block:
+        all_rows.extend(_parse_single_table(current_block))
+
+    return all_rows
+
+
+def parse_markdown_table(section_text: str) -> list[dict[str, str]]:
+    """Parse markdown tables from a plan section into list of row dicts.
+
+    Delegates to parse_table_rows which handles multiple tables, padded
+    short rows, and merged overflow rows.
+
+    Returns empty list if no table found or all tables are malformed.
+    """
+    return parse_table_rows(section_text)
 
 
 def extract_section(plan_text: str, heading: str) -> str:

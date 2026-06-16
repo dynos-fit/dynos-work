@@ -58,18 +58,21 @@ _BACKTICK_SIG_RE = re.compile(
 
 
 def _split_args(arg_str: str) -> list[str]:
-    """Split a top-level comma-separated argument list, respecting [] brackets.
+    """Split a top-level comma-separated argument list, respecting [], (), {} brackets.
 
     Conservative: used only for surface-level token counting/normalization.
+    Tracks depth for all three bracket types so that dict/set literals with
+    internal commas (e.g. opts={"a": 1, "b": 2}) are not split into multiple
+    spurious arguments.
     """
     args: list[str] = []
     depth = 0
     buf: list[str] = []
     for ch in arg_str:
-        if ch in "[(":
+        if ch in "[({":
             depth += 1
             buf.append(ch)
-        elif ch in "])":
+        elif ch in "])}":
             depth -= 1
             buf.append(ch)
         elif ch == "," and depth == 0:

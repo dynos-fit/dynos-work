@@ -446,6 +446,33 @@ def _validate_execution_graph_payload(task_dir: Path, payload: dict) -> None:
         if not isinstance(criteria_ids, list) or not criteria_ids:
             raise ValueError(f"{seg_id}: criteria_ids must be a non-empty array")
 
+    # Cycle detection via Kahn's algorithm (topological sort).
+    # Build in-degree map and adjacency list.
+    in_degree: dict[str, int] = {seg["id"]: 0 for seg in segments if isinstance(seg, dict)}
+    adj: dict[str, list[str]] = {seg["id"]: [] for seg in segments if isinstance(seg, dict)}
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        seg_id = seg["id"]
+        for dep in seg.get("depends_on", []) or []:
+            if isinstance(dep, str) and dep in adj:
+                adj[dep].append(seg_id)
+                in_degree[seg_id] = in_degree.get(seg_id, 0) + 1
+    from collections import deque
+    queue: deque = deque(node for node, deg in in_degree.items() if deg == 0)
+    visited = 0
+    while queue:
+        node = queue.popleft()
+        visited += 1
+        for child in adj.get(node, []):
+            in_degree[child] -= 1
+            if in_degree[child] == 0:
+                queue.append(child)
+    if visited != len(in_degree):
+        raise ValueError(
+            "execution graph contains a cyclic dependency; acyclic graph required"
+        )
+
 
 def _normalize_repair_log_payload(task_dir: Path, payload: dict) -> dict:
     batches_in = payload.get("batches", [])
@@ -1561,6 +1588,101 @@ def cmd_set_auto_approve_gates(args: argparse.Namespace) -> int:
     return 0
 
 
+def apply_auto_approve_veto(
+    *,
+    task_dir: Path,
+    manifest: dict,
+    row: "dict | None",
+    risk_level: str,
+    domains: "set | list",
+    root: Path,
+    row_source_auditor: "str | None" = None,
+) -> dict:
+    """Pure-function variant of the veto-ceiling evaluation.
+
+    Single source of truth for the veto-ceiling decision: ``cmd_apply_auto_approve_veto``
+    delegates its ceiling computation here. Returns a dict with keys:
+      - decision: "blocked" | "auto"
+      - blocked_by: str | None  — the first ceiling that tripped, or None
+      - basis: dict — the AC-6/AC-11 ``auto_approval_policy.basis`` shape
+        (includes ``no_residual_row`` only when ``row is None``, per sc-003)
+      - ceilings_checked: list[str] — the fixed ceiling-name order
+
+    Ceiling order:
+      1. risk_level (missing/high/critical -> blocked)
+      2. domain_security ("security" in domains -> blocked)
+      3. source_auditor_security (row.source_auditor == "security-auditor" -> blocked)
+      4. source_auditor_allowlist (row.source_auditor not in _AUTO_APPROVE_ALLOWED_AUDITORS -> blocked)
+      5. external_surface_path (row.location matches surface glob -> blocked)
+      6. global_policy (auto_approve_gates_disabled -> blocked)
+      7. spawn_budget_paused (manifest.blocked_reason == "wasted_spawns_exceeded" -> blocked)
+    """
+    if row_source_auditor is None and row is not None:
+        sa = row.get("source_auditor")
+        row_source_auditor = sa if isinstance(sa, str) else None
+
+    row_location: str = ""
+    if row is not None:
+        loc = row.get("location")
+        row_location = loc if isinstance(loc, str) else ""
+
+    surface_match = _check_external_surface_path(row_location) if row is not None else False
+    global_disabled = _read_auto_approve_gates_disabled(root)
+    spawn_budget_paused = (manifest.get("blocked_reason") == "wasted_spawns_exceeded")
+
+    ceilings_checked = [
+        "risk_level",
+        "domain_security",
+        "source_auditor_security",
+        "external_surface_path",
+        "source_auditor_allowlist",
+        "global_policy",
+        "spawn_budget_paused",
+    ]
+
+    basis: dict = {
+        "risk_level": risk_level,
+        "domains": list(domains),
+        "source_auditor": row_source_auditor,
+        "external_surface_path_match": bool(surface_match),
+        "global_policy_disabled": bool(global_disabled),
+        # AC-11b: spawn_budget_paused is always present in basis.
+        "spawn_budget_paused": spawn_budget_paused,
+    }
+    if row is None:
+        # sc-003: when no row is found basis is still fully populated, with
+        # an explicit no_residual_row=true disambiguator. Downstream consumers
+        # can distinguish "row exists but auditor was null" from "no row".
+        basis["no_residual_row"] = True
+
+    blocked_by: "str | None" = None
+
+    if not isinstance(risk_level, str) or not risk_level.strip():
+        blocked_by = "risk_level"
+    elif risk_level in {"high", "critical"}:
+        blocked_by = "risk_level"
+    elif "security" in set(domains):
+        blocked_by = "domain_security"
+    elif row is not None and row_source_auditor == "security-auditor":
+        blocked_by = "source_auditor_security"
+    elif row is not None and row_source_auditor not in _AUTO_APPROVE_ALLOWED_AUDITORS:
+        blocked_by = "source_auditor_allowlist"
+    elif row is not None and surface_match:
+        blocked_by = "external_surface_path"
+    elif global_disabled:
+        blocked_by = "global_policy"
+    elif spawn_budget_paused:
+        blocked_by = "spawn_budget_paused"
+
+    decision = "blocked" if blocked_by is not None else "auto"
+    return {
+        "decision": decision,
+        "blocked_by": blocked_by,
+        "basis": basis,
+        "ceilings_checked": ceilings_checked,
+    }
+
+
 def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
     """Apply classification-time veto ceilings to ``manifest.auto_approve_gates``.
 
@@ -1672,67 +1794,31 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
             row = None
 
     row_source_auditor: str | None = None
-    row_location: str = ""
     if row is not None:
         sa = row.get("source_auditor")
         row_source_auditor = sa if isinstance(sa, str) else None
-        loc = row.get("location")
-        row_location = loc if isinstance(loc, str) else ""
 
-    surface_match = _check_external_surface_path(row_location) if row is not None else False
-    global_disabled = _read_auto_approve_gates_disabled(root)
-
-    ceilings_checked = [
-        "risk_level",
-        "domain_security",
-        "source_auditor_security",
-        "external_surface_path",
-        "source_auditor_allowlist",
-        "global_policy",
-        "spawn_budget_paused",
-    ]
-
-    basis: dict = {
-        "risk_level": risk_level,
-        "domains": list(domains),
-        "source_auditor": row_source_auditor,
-        "external_surface_path_match": bool(surface_match),
-        "global_policy_disabled": bool(global_disabled),
-        # AC-11b: spawn_budget_paused is always present in basis.
-        "spawn_budget_paused": (manifest.get("blocked_reason") == "wasted_spawns_exceeded"),
-    }
-    if row is None:
-        # sc-003: when no row is found basis is still fully populated, with
-        # an explicit no_residual_row=true disambiguator. Downstream consumers
-        # can distinguish "row exists but auditor was null" from "no row".
-        basis["no_residual_row"] = True
-
-    blocked_by: str | None = None
-
-    # AC-5a: missing risk level -> blocked (fail-closed). AC-5a (continued):
-    # explicit high/critical -> blocked.
-    if not isinstance(risk_level, str) or not risk_level.strip():
-        blocked_by = "risk_level"
-    elif risk_level in {"high", "critical"}:
-        blocked_by = "risk_level"
-    elif "security" in domains:
-        blocked_by = "domain_security"
-    elif row is not None and row_source_auditor == "security-auditor":
-        blocked_by = "source_auditor_security"
-    elif row is not None and surface_match:
-        blocked_by = "external_surface_path"
-    elif global_disabled:
-        blocked_by = "global_policy"
-    # AC-11c: 7th ceiling — evaluated only when blocked_by is still None.
-    elif basis["spawn_budget_paused"]:
-        blocked_by = "spawn_budget_paused"
-
-    decision = "blocked" if blocked_by is not None else "auto"
+    # Single source of truth for the veto-ceiling decision (AC-5a/AC-11b/c,
+    # AC-21b/#27 source_auditor_allowlist enforcement): delegate the entire
+    # ceiling if/elif chain — and the basis/ceilings_checked it produces — to
+    # the standalone apply_auto_approve_veto. cmd_ owns only persistence and
+    # side effects below.
+    result = apply_auto_approve_veto(
+        task_dir=task_dir,
+        manifest=manifest,
+        row=row,
+        risk_level=risk_level,
+        domains=domains,
+        root=root,
+        row_source_auditor=row_source_auditor,
+    )
+    decision = result["decision"]
+    blocked_by = result["blocked_by"]
 
     policy = {
         "decision": decision,
-        "basis": basis,
-        "ceilings_checked": ceilings_checked,
+        "basis": result["basis"],
+        "ceilings_checked": result["ceilings_checked"],
         "blocked_by": blocked_by,
     }
 
@@ -2133,25 +2219,6 @@ def cmd_check_ownership(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_run_external_solution_gate(args: argparse.Namespace) -> int:
-    task_dir = Path(args.task_dir).resolve()
-    try:
-        gate = _compute_external_solution_gate(task_dir)
-        gate_path = task_dir / "external-solution-gate.json"
-        _write_ctl_json(task_dir, gate_path, gate)
-        print(json.dumps({
-            "status": "external_solution_gate_ready",
-            "task_dir": str(task_dir),
-            "gate_path": str(gate_path),
-            **gate,
-        }, indent=2))
-        return 0
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-
-
-
 def cmd_check_retro_integrity(args: argparse.Namespace) -> int:
     """Report persistent retrospectives with no matching flush event in events.jsonl.
 
@@ -2187,72 +2254,6 @@ def cmd_check_retro_integrity(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
-
-
-def cmd_write_execute_handoff(args: argparse.Namespace) -> int:
-    task_dir = Path(args.task_dir).resolve()
-    try:
-        manifest = load_json(task_dir / "manifest.json")
-        handoff = {
-            "from_skill": "execute",
-            "to_skill": "audit",
-            "handoff_at": datetime.now(timezone.utc).isoformat(),
-            "contract_version": "1.0.0",
-            "manifest_stage": str(manifest.get("stage", "unknown")),
-        }
-        handoff_path = task_dir / "handoff-execute-audit.json"
-        _write_ctl_json(task_dir, handoff_path, handoff)
-        print(json.dumps({
-            "status": "execute_handoff_ready",
-            "task_dir": str(task_dir),
-            "handoff_path": str(handoff_path),
-            **handoff,
-        }, indent=2))
-        return 0
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-
-
-def cmd_write_execution_graph(args: argparse.Namespace) -> int:
-    task_dir = Path(args.task_dir).resolve()
-    try:
-        payload = _normalize_execution_graph_payload(task_dir, _read_json_input(args.from_path))
-        _validate_execution_graph_payload(task_dir, payload)
-        out_path = task_dir / "execution-graph.json"
-        _write_ctl_json(task_dir, out_path, payload)
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    print(json.dumps({"status": "execution_graph_written", "path": str(out_path)}, indent=2))
-    return 0
-
-
-def cmd_write_repair_log(args: argparse.Namespace) -> int:
-    task_dir = Path(args.task_dir).resolve()
-    try:
-        payload = _normalize_repair_log_payload(task_dir, _read_json_input(args.from_path))
-        _validate_repair_log_payload(task_dir, payload)
-        out_path = task_dir / "repair-log.json"
-        _write_ctl_json(task_dir, out_path, payload)
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    print(json.dumps({"status": "repair_log_written", "path": str(out_path)}, indent=2))
-    return 0
-
-
-def cmd_write_classification(args: argparse.Namespace) -> int:
-    task_dir = Path(args.task_dir).resolve()
-    try:
-        payload = _normalize_classification_payload(task_dir, _read_json_input(args.from_path))
-        _persist_classification(task_dir, payload)
-        out_path = task_dir / "classification.json"
-    except Exception as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    print(json.dumps({"status": "classification_written", "path": str(out_path)}, indent=2))
-    return 0
 
 
 # Roles that may be stamped to active-segment-role through this wrapper.
@@ -2904,15 +2905,20 @@ def _dependency_depths(segments: list[dict]) -> dict[str, int]:
 
     memo: dict[str, int] = {}
 
-    def walk(seg_id: str) -> int:
+    def walk(seg_id: str, in_progress: frozenset = frozenset()) -> int:
         cached = memo.get(seg_id)
         if cached is not None:
             return cached
+        # Cycle guard: if we encounter a node already in the current recursion
+        # path, treat it as depth 0 to break the cycle.
+        if seg_id in in_progress:
+            return 0
         downstream = children.get(seg_id, [])
         if not downstream:
             memo[seg_id] = 0
             return 0
-        depth = 1 + max(walk(child) for child in downstream)
+        next_in_progress = in_progress | {seg_id}
+        depth = 1 + max(walk(child, next_in_progress) for child in downstream)
         memo[seg_id] = depth
         return depth
 

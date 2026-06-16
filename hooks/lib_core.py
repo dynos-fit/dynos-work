@@ -96,7 +96,7 @@ ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
     "PRE_EXECUTION_SNAPSHOT": {"EXECUTION", "FAILED"},
     "EXECUTION": {"TEST_EXECUTION", "REPAIR_PLANNING", "FAILED"},
     "TEST_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
-    "CHECKPOINT_AUDIT": {"REPAIR_PLANNING", "DONE", "FAILED"},
+    "CHECKPOINT_AUDIT": {"REPAIR_PLANNING", "DONE", "FAILED", "FINAL_AUDIT"},
     "REPAIR_PLANNING": {"REPAIR_EXECUTION", "FAILED"},
     "REPAIR_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
     "FINAL_AUDIT": {"CHECKPOINT_AUDIT", "DONE", "FAILED"},
@@ -1873,20 +1873,32 @@ def _replay_gates_for_transition(
     if next_stage == "REPAIR_PLANNING" and current_stage == "REPAIR_EXECUTION":
         repair_log_path = task_dir / "repair-log.json"
         if repair_log_path.exists():
-            repair_log = load_json(repair_log_path)
-            exhausted: list[str] = []
-            for batch in repair_log.get("batches", []):
-                for task_entry in batch.get("tasks", []):
-                    fid = task_entry.get("finding_id", "unknown")
-                    retries = task_entry.get("retry_count", 0)
-                    if retries >= MAX_REPAIR_RETRIES:
-                        exhausted.append(f"{fid} (retry_count={retries})")
-            if exhausted:
-                gate_errors.append(
-                    f"repair cap exceeded (max {MAX_REPAIR_RETRIES} retries) "
-                    f"for finding(s): {', '.join(exhausted)}. "
-                    f"Transition to FAILED instead — human review needed."
-                )
+            try:
+                repair_log = load_json(repair_log_path)
+            except (OSError, ValueError):
+                repair_log = None
+            if isinstance(repair_log, dict):
+                exhausted: list[str] = []
+                for batch in repair_log.get("batches", []):
+                    if not isinstance(batch, dict):
+                        continue
+                    for task_entry in batch.get("tasks", []):
+                        if not isinstance(task_entry, dict):
+                            continue
+                        fid = task_entry.get("finding_id", "unknown")
+                        retries = task_entry.get("retry_count", 0)
+                        try:
+                            retries_int = int(retries)
+                        except (TypeError, ValueError):
+                            retries_int = 0
+                        if retries_int >= MAX_REPAIR_RETRIES:
+                            exhausted.append(f"{fid} (retry_count={retries_int})")
+                if exhausted:
+                    gate_errors.append(
+                        f"repair cap exceeded (max {MAX_REPAIR_RETRIES} retries) "
+                        f"for finding(s): {', '.join(exhausted)}. "
+                        f"Transition to FAILED instead — human review needed."
+                    )
 
     # DONE requires retrospective + audit reports (post-completion receipt
     # is written AFTER the transition by the event bus, so cannot be gated here)
@@ -2254,7 +2266,7 @@ def _flush_and_record_transition(
 
     manifest["stage"] = next_stage
     if next_stage == "DONE":
-        manifest["completion_at"] = now_iso()
+        manifest["completed_at"] = now_iso()
     if next_stage == "FAILED" and manifest.get("blocked_reason") is None:
         manifest["blocked_reason"] = "transitioned to FAILED"
     write_ctl_json(task_dir, manifest_path, manifest)
