@@ -484,6 +484,7 @@ class TestRoleResolutionChain:
         DYNOS_TASK_DIR) can never elevate above execute-inline.
         """
         _, task_dir = _make_task_dir(tmp_path, "task-RR-ancestor")
+        (task_dir / "manifest.json").write_text(json.dumps({"stage": "EXECUTION"}))
         role_file = task_dir / "active-segment-role"
         role_file.write_text("planning")
 

@@ -287,6 +287,18 @@ _FRAMEWORK_ROLES = frozenset({
 })
 
 
+def _is_plugin_source_checkout(root: Path) -> bool:
+    """True when root is a checked-out plugin source repo.
+
+    Key off the project root, not _PLUGIN_ROOT: the running hook may be the
+    cached install while the developer is editing the source checkout.
+    """
+    try:
+        return (root / ".claude-plugin").is_dir() and (root / ".git").exists()
+    except Exception:
+        return False
+
+
 def _protected_host_paths() -> tuple[Path, ...]:
     home = Path.home()
     return (
@@ -312,17 +324,11 @@ def _self_modification_denial(attempt: WriteAttempt, path: Path) -> WriteDecisio
     if _is_under(path, _PLUGIN_ROOT):
         if attempt.task_dir is not None:
             project_root = attempt.task_dir.resolve().parent.parent
-            dev_mode = (
-                project_root == _PLUGIN_ROOT
-                and (project_root / ".claude-plugin").is_dir()
-            )
+            dev_mode = project_root == _PLUGIN_ROOT and _is_plugin_source_checkout(project_root)
         else:
             # No active task: developer mode iff the plugin root is a source
             # checkout (marketplace cache installs ship without .git).
-            dev_mode = (
-                (_PLUGIN_ROOT / ".claude-plugin").is_dir()
-                and (_PLUGIN_ROOT / ".git").exists()
-            )
+            dev_mode = _is_plugin_source_checkout(_PLUGIN_ROOT)
         if not dev_mode:
             return WriteDecision(
                 False,
@@ -670,6 +676,17 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
                     True,
                     "repo work artifact allowed for orchestrator during "
                     "inline fast-track execution",
+                    "direct",
+                )
+            _proot = (
+                attempt.task_dir.resolve().parent.parent
+                if attempt.task_dir is not None
+                else _nearest_project_root_from_cwd(Path.cwd())
+            )
+            if _proot is not None and _is_plugin_source_checkout(_proot):
+                return WriteDecision(
+                    True,
+                    "repo work artifact allowed: orchestrator developer mode",
                     "direct",
                 )
             return WriteDecision(

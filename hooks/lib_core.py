@@ -107,6 +107,12 @@ ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
     "FAILED": set(),
 }
 
+# CALIBRATED has no outgoing transitions and is reached after DONE; treat it
+# as terminal everywhere active-task state is derived.
+TERMINAL_STAGES: frozenset[str] = frozenset({
+    "DONE", "FAILED", "CANCELLED", "CALIBRATED",
+})
+
 NEXT_COMMAND: dict[str, str] = {
     "CLASSIFY_AND_SPEC": "/dynos-work:start",
     "FOUNDRY_INITIALIZED": "/dynos-work:start",
@@ -2281,7 +2287,7 @@ def _flush_and_record_transition(
     # ---- Active-task pointer for O(1) SubagentStop attribution ----
     try:
         _pointer_path = task_dir.parent / "active-task.json"
-        _terminal = next_stage in {"DONE", "FAILED", "CANCELLED"}
+        _terminal = next_stage in TERMINAL_STAGES
         _pointer_data: dict = {"task_id": None} if _terminal else {
             "task_id": manifest.get("task_id") or task_dir.name,
             "task_dir": str(task_dir),
@@ -2537,7 +2543,7 @@ def find_active_tasks(root: Path) -> list[Path]:
             manifest = load_json(manifest_path)
         except (json.JSONDecodeError, FileNotFoundError, OSError):
             continue
-        if manifest.get("stage") not in {"DONE", "FAILED", "CANCELLED"}:
+        if manifest.get("stage") not in TERMINAL_STAGES:
             tasks.append(manifest_path.parent)
     tasks.sort()
     return tasks

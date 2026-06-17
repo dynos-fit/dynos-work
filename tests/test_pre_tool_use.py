@@ -15,10 +15,13 @@ but are not yet implemented correctly.
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks"))
+
+import pre_tool_use as _ptu  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -89,3 +92,43 @@ def test_extract_bash_backtick_verb_detected() -> None:
         f"_extract_bash_destinations must detect /task/b.json from backtick-wrapped cp; "
         f"got {destinations!r}"
     )
+
+
+def _write_manifest(task_dir: Path, stage: str) -> None:
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "manifest.json").write_text(json.dumps({"task_id": task_dir.name, "stage": stage}))
+
+
+def test_find_task_dir_from_ancestors_pointer_null_returns_none(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    dynos = project / ".dynos"
+    dynos.mkdir(parents=True)
+    (dynos / "active-task.json").write_text(json.dumps({"task_id": None}))
+
+    assert _ptu._find_task_dir_from_ancestors(project) is None
+
+
+def test_find_task_dir_from_ancestors_pointer_calibrated_returns_none(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    dynos = project / ".dynos"
+    task_dir = dynos / "task-20260617-999"
+    _write_manifest(task_dir, "CALIBRATED")
+    (dynos / "active-task.json").write_text(
+        json.dumps({"task_id": task_dir.name, "task_dir": str(task_dir)})
+    )
+
+    assert _ptu._find_task_dir_from_ancestors(project) is None
+
+
+def test_find_task_dir_from_ancestors_fallback_skips_calibrated(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    newest = project / ".dynos" / "task-99999999-999"
+    active = project / ".dynos" / "task-20260617-001"
+    _write_manifest(newest, "CALIBRATED")
+    _write_manifest(active, "EXECUTION")
+
+    assert _ptu._find_task_dir_from_ancestors(project / "src") == active
+
+
+def test_find_task_dir_from_ancestors_returns_none_without_dynos(tmp_path: Path) -> None:
+    assert _ptu._find_task_dir_from_ancestors(tmp_path) is None

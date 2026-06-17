@@ -1,0 +1,66 @@
+name: Release Hygiene
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  release-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch base branch
+        run: |
+          git fetch "${{ github.event.pull_request.base.repo.clone_url }}" \
+            "${{ github.event.pull_request.base.ref }}:refs/remotes/base/${{ github.event.pull_request.base.ref }}" \
+            --depth=1
+
+      - name: Resolve bump type
+        id: bump
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels.map(label => label.name);
+            const ordered = ["release:major", "release:minor", "release:patch", "release:none"];
+            const selected = ordered.find(label => labels.includes(label)) || "release:patch";
+            core.setOutput("type", selected.replace("release:", ""));
+
+      - name: Bump release metadata
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+          BASE_REF: refs/remotes/base/${{ github.event.pull_request.base.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 scripts/bump_version.py \
+            --bump "$BUMP_TYPE" \
+            --base-ref "$BASE_REF" \
+            --message "$PR_TITLE"
+
+      - name: Commit generated release metadata
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          if git diff --quiet -- package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .codex-plugin/plugin.json CHANGELOG.md; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json .claude-plugin/plugin.json .claude-plugin/marketplace.json .codex-plugin/plugin.json CHANGELOG.md
+          git commit -m "chore: update release metadata"
+          git push
+
+      - name: Verify release hygiene
+        env:
+          BASE_REF: refs/remotes/base/${{ github.event.pull_request.base.ref }}
+        run: python3 scripts/check_release_hygiene.py --base-ref "$BASE_REF"
