@@ -1,0 +1,13 @@
+# Line-count hygiene: keep generated, local, and dependency artifacts out of cloc-style reports.
+.dynos/
+.git/
+.pytest_cache/
+__pycache__/
+node_modules/
+dist/
+cli/dist/
+hooks/dashboard-ui/node_modules/
+hooks/dashboard-ui/dist/
+hooks/dashboard-ui/src/**/*.js
+hooks/dashboard-ui/src/**/*.js.map
+benchmarks/generated/

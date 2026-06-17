@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Run a project's test suite at two git refs and assert no regression.
 
-Catches refactors that silently change behavior. Pairs naturally with
-`agents/refactor-executor.md`: refactor agents promise "no behavior change",
-but they're prone to regressions that LLM auditors miss. A real test runner
-is the deterministic ground truth.
+Catches refactors that silently change behavior. It can be run alongside
+`agents/refactor-executor.md` work, where refactor agents promise "no behavior
+change", but no current skill invokes it automatically. A real test runner is
+the deterministic ground truth when this check is run.
 
 How it works:
   1. Create a temporary git worktree at the BEFORE ref.
