@@ -172,6 +172,18 @@ def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]: ...
 
 ### Enforcement
 
+The write boundary governs dynos-work project artifacts only: the active
+project root (the repository containing `.dynos/`), the active task directory
+under that root, and the project's persistent state directory under
+`~/.dynos/projects/<project-id>/`. A write target outside those roots is
+outside dynos-work project scope and is allowed directly by this policy.
+
+This project-scope carve-out is applied only after the global guardrail
+self-modification check. Writes under the installed plugin root,
+`~/.claude/plugins/`, `~/.claude/settings.json`,
+`~/.claude/settings.local.json`, and `~/.dynos/` remain protected globally
+for all agent roles even when those paths are outside the active project.
+
 The unconditional Class B control-plane guarantee is enforced inside `decide_write` in `hooks/write_policy.py` via three internal helpers:
 
 - **`_owning_task_dir(path: Path) -> Path | None`** — computes the task directory that *owns* a given path based on the path itself, independent of the caller's bound `task_dir`. This means an executor bound to `task-A` cannot claim that a path under `task-B` belongs to its own task dir.

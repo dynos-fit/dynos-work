@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -341,6 +342,67 @@ def _self_modification_denial(attempt: WriteAttempt, path: Path) -> WriteDecisio
     return None
 
 
+def _nearest_project_root_from_cwd(cwd: Path) -> Path | None:
+    """Return nearest ancestor containing .dynos, or None if not in a project."""
+    resolved = cwd.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if (candidate / ".dynos").is_dir():
+            return candidate
+    return None
+
+
+def _persistent_project_root(project_root: Path) -> Path | None:
+    """Resolve the persistent project dir without importing lib_core.
+
+    write_policy is imported by lib_core, so importing _persistent_project_dir
+    here would create a cycle. This mirrors lib_core's pure path derivation and
+    intentionally swallows identity-resolution failures: inability to compute a
+    persistence path must not widen the governed project scope.
+    """
+    try:
+        from lib_project_id import resolve_project_id  # noqa: PLC0415
+
+        dynos_home = Path(os.environ.get("DYNOS_HOME", str(Path.home() / ".dynos")))
+        return (dynos_home / "projects" / resolve_project_id(project_root)).resolve()
+    except Exception:
+        return None
+
+
+def _project_scope_roots(attempt: WriteAttempt) -> tuple[Path, ...]:
+    """Return roots governed by dynos-work for this attempt."""
+    project_root: Path | None = None
+    roots: list[Path] = []
+    if attempt.task_dir is not None:
+        task_dir = attempt.task_dir.resolve()
+        project_root = task_dir.parent.parent.resolve()
+        roots.extend([project_root, task_dir])
+    else:
+        project_root = _nearest_project_root_from_cwd(Path.cwd())
+        if project_root is not None:
+            roots.append(project_root.resolve())
+
+    if project_root is not None:
+        persistent = _persistent_project_root(project_root)
+        if persistent is not None:
+            roots.append(persistent)
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(root)
+    return tuple(deduped)
+
+
+def _is_inside_project_scope(attempt: WriteAttempt, path: Path) -> bool:
+    roots = _project_scope_roots(attempt)
+    if not roots:
+        return True
+    return any(path == root or _is_under(path, root) for root in roots)
+
+
 # Task-root files the orchestrator authors directly: logs, escalation notes,
 # the audit-context sidecar, the raw task input, and the discovery/design Q&A
 # records it appends user answers to. spec.md / plan.md / audit-reports /
@@ -428,6 +490,12 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
                     f"cross-task control-plane write denied: {path.name}",
                     "deny",
                 )
+    if not _is_inside_project_scope(attempt, path):
+        return WriteDecision(
+            True,
+            "outside dynos-work project scope - not governed",
+            "direct",
+        )
     rel = _task_relative(path, attempt.task_dir)
     rel_posix = rel.as_posix() if rel is not None else None
 
