@@ -129,6 +129,96 @@ def test_task_scoped_role_cannot_escape_task_boundary(tmp_path: Path) -> None:
     assert decision.mode == "deny"
     assert "escapes task boundary" in decision.reason
 
+def test_orchestrator_repo_write_allowed_in_plugin_source_checkout(tmp_path: Path) -> None:
+    project = tmp_path / "dynos-work-src"
+    (project / ".claude-plugin").mkdir(parents=True)
+    (project / ".git").mkdir()
+    task_dir = project / ".dynos" / "task-20260617-001"
+    task_dir.mkdir(parents=True)
+
+    decision = decide_write(
+        WriteAttempt(
+            role="orchestrator",
+            task_dir=task_dir,
+            path=project / "hooks" / "write_policy.py",
+            operation="modify",
+            source="agent",
+        )
+    )
+
+    assert decision.allowed is True
+    assert decision.reason == "repo work artifact allowed: orchestrator developer mode"
+
+
+def test_orchestrator_repo_write_denied_in_non_plugin_repo(tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    task_dir = project / ".dynos" / "task-20260617-002"
+    task_dir.mkdir(parents=True)
+
+    decision = decide_write(
+        WriteAttempt(
+            role="orchestrator",
+            task_dir=task_dir,
+            path=project / "src" / "main.py",
+            operation="modify",
+            source="agent",
+        )
+    )
+
+    assert decision.allowed is False
+    assert "orchestrator may not write repo files outside inline fast-track execution" in decision.reason
+
+
+def test_orchestrator_plugin_source_task_artifacts_stay_denied(tmp_path: Path) -> None:
+    project = tmp_path / "dynos-work-src"
+    (project / ".claude-plugin").mkdir(parents=True)
+    (project / ".git").mkdir()
+    task_dir = project / ".dynos" / "task-20260617-003"
+    task_dir.mkdir(parents=True)
+
+    decision = decide_write(
+        WriteAttempt(
+            role="orchestrator",
+            task_dir=task_dir,
+            path=task_dir / "manifest.json",
+            operation="modify",
+            source="agent",
+        )
+    )
+
+    assert decision.allowed is False
+    assert "control-plane" in decision.reason
+
+
+def test_self_modification_denies_cached_plugin_from_nonmatching_project(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import write_policy
+
+    project = tmp_path / "dynos-work-src"
+    (project / ".claude-plugin").mkdir(parents=True)
+    (project / ".git").mkdir()
+    task_dir = project / ".dynos" / "task-20260617-004"
+    task_dir.mkdir(parents=True)
+    cached_plugin = tmp_path / "cache" / "dynos-work"
+    (cached_plugin / "hooks").mkdir(parents=True)
+    (cached_plugin / ".claude-plugin").mkdir()
+    (cached_plugin / ".git").mkdir()
+    monkeypatch.setattr(write_policy, "_PLUGIN_ROOT", cached_plugin.resolve())
+
+    decision = decide_write(
+        WriteAttempt(
+            role="orchestrator",
+            task_dir=task_dir,
+            path=cached_plugin / "hooks" / "write_policy.py",
+            operation="modify",
+            source="agent",
+        )
+    )
+
+    assert decision.allowed is False
+    assert "self-modification" in decision.reason
+
 
 def test_orchestrator_outside_project_scope_is_allowed(
     tmp_path: Path, monkeypatch

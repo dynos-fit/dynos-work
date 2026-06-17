@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.2] - 2026-06-17
+### Changed
+- Add repo-level release hygiene automation.
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.2`.
+
+---
+
 ## [7.5.1] - 2026-06-15
 ### "Claude Subagent Compatibility": Stamped Roles Work Where Subagents Share a Session
 

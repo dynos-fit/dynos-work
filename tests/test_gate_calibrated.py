@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
-from lib_core import transition_task  # noqa: E402
+from lib_core import TERMINAL_STAGES, find_active_tasks, transition_task  # noqa: E402
 from lib_receipts import receipt_calibration_applied  # noqa: E402
 
 
@@ -56,3 +56,32 @@ def test_force_bypass_succeeds(tmp_path: Path):
     )
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "CALIBRATED"
+
+
+def test_calibrated_is_terminal_stage() -> None:
+    assert TERMINAL_STAGES == frozenset({"DONE", "FAILED", "CANCELLED", "CALIBRATED"})
+
+
+def test_done_to_calibrated_clears_active_task_pointer(tmp_path: Path):
+    td = _setup(tmp_path)
+    transition_task(
+        td,
+        "CALIBRATED",
+        force=True,
+        force_reason="test: DONE->CALIBRATED pointer clears active task",
+        force_approver="test-suite",
+    )
+    pointer = json.loads((td.parent / "active-task.json").read_text())
+    assert pointer == {"task_id": None}
+
+
+def test_find_active_tasks_excludes_calibrated(tmp_path: Path):
+    project = tmp_path / "project"
+    calibrated = project / ".dynos" / "task-20260418-CAL"
+    active = project / ".dynos" / "task-20260418-ACT"
+    calibrated.mkdir(parents=True)
+    active.mkdir()
+    (calibrated / "manifest.json").write_text(json.dumps({"stage": "CALIBRATED"}))
+    (active / "manifest.json").write_text(json.dumps({"stage": "EXECUTION"}))
+
+    assert find_active_tasks(project) == [active]

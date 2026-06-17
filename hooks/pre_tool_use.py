@@ -33,6 +33,11 @@ _EXECUTOR_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui", "audit-claude-md",
 })
 
+# Mirrors lib_core.TERMINAL_STAGES without importing lib_core from this hook.
+_TERMINAL_STAGES: frozenset[str] = frozenset({
+    "DONE", "FAILED", "CANCELLED", "CALIBRATED",
+})
+
 
 def _subagent_isolation(task_dir: "Path | None") -> bool:
     """True only when the host harness gives each subagent a DISTINCT
@@ -98,18 +103,59 @@ _emit_read_policy_event = None  # type: ignore[assignment]
 log_event = None  # type: ignore[assignment]
 
 
+def _task_is_non_terminal(task_dir: Path) -> bool:
+    try:
+        manifest = json.loads((task_dir / "manifest.json").read_text(encoding="utf-8"))
+        return isinstance(manifest, dict) and manifest.get("stage") not in _TERMINAL_STAGES
+    except Exception:
+        return False
+
+
+def _active_task_from_pointer(dynos: Path) -> Path | None:
+    try:
+        pointer = json.loads((dynos / "active-task.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    task_id = pointer.get("task_id") if isinstance(pointer, dict) else None
+    if not task_id:
+        return None
+    raw_task_dir = pointer.get("task_dir")
+    task_dir = Path(raw_task_dir) if isinstance(raw_task_dir, str) and raw_task_dir else dynos / str(task_id)
+    try:
+        if not task_dir.exists():
+            return None
+        if _task_is_non_terminal(task_dir):
+            return task_dir
+    except Exception:
+        return None
+    return None
+
+
 def _find_task_dir_from_ancestors(cwd: Path) -> Path | None:
-    """Walk upward from cwd, looking for the nearest .dynos/task-* directory."""
+    """Walk upward from cwd, returning only a genuinely active task."""
     current = cwd.resolve()
     for ancestor in [current, *current.parents]:
         dynos = ancestor / ".dynos"
         if dynos.is_dir():
+            pointer_path = dynos / "active-task.json"
+            if pointer_path.exists():
+                try:
+                    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+                else:
+                    if isinstance(pointer, dict) and not pointer.get("task_id"):
+                        return None
+                    task_dir = _active_task_from_pointer(dynos)
+                    return task_dir
             try:
                 candidates = sorted(dynos.glob("task-*"), reverse=True)
-                if candidates:
-                    return candidates[0]
+                for candidate in candidates:
+                    if _task_is_non_terminal(candidate):
+                        return candidate
             except Exception:
                 pass
+            return None
     return None
 
 
