@@ -129,7 +129,6 @@ def test_task_scoped_role_cannot_escape_task_boundary(tmp_path: Path) -> None:
     assert decision.mode == "deny"
     assert "escapes task boundary" in decision.reason
 
-
 def test_orchestrator_repo_write_allowed_in_plugin_source_checkout(tmp_path: Path) -> None:
     project = tmp_path / "dynos-work-src"
     (project / ".claude-plugin").mkdir(parents=True)
