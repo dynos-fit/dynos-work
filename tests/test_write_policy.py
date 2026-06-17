@@ -130,6 +130,94 @@ def test_task_scoped_role_cannot_escape_task_boundary(tmp_path: Path) -> None:
     assert "escapes task boundary" in decision.reason
 
 
+def test_orchestrator_outside_project_scope_is_allowed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    task_dir = _task_dir(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    targets = [
+        fake_home / ".claude" / "skills" / "ruthless-review" / "SKILL.md",
+        Path("/tmp") / "dynos-write-policy-outside.txt",
+        tmp_path / "unrelated-repo" / "src" / "main.py",
+    ]
+    for target in targets:
+        decision = decide_write(
+            WriteAttempt(
+                role="orchestrator",
+                task_dir=task_dir,
+                path=target,
+                operation="modify",
+                source="agent",
+            )
+        )
+        assert decision.allowed is True, f"{target} should be out of scope"
+        assert decision.mode == "direct"
+        assert "outside dynos-work project scope" in decision.reason
+
+
+def test_executor_outside_project_scope_is_allowed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    task_dir = _task_dir(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    for target in (
+        fake_home / ".claude" / "skills" / "ruthless-review" / "SKILL.md",
+        Path("/tmp") / "dynos-executor-outside.txt",
+        tmp_path / "other-repo" / "tests" / "test_example.py",
+    ):
+        decision = decide_write(
+            WriteAttempt(
+                role="backend-executor",
+                task_dir=task_dir,
+                path=target,
+                operation="modify",
+                source="agent",
+            )
+        )
+        assert decision.allowed is True, f"{target} should be out of scope"
+        assert decision.mode == "direct"
+        assert "outside dynos-work project scope" in decision.reason
+
+
+def test_outside_scope_carveout_does_not_bypass_self_modification(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import write_policy
+
+    task_dir = _task_dir(tmp_path / "project")
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    plugin_root = tmp_path / "installed-plugin" / "dynos-work"
+    (plugin_root / "hooks").mkdir(parents=True)
+    monkeypatch.setattr(write_policy, "_PLUGIN_ROOT", plugin_root.resolve())
+
+    protected_targets = [
+        fake_home / ".claude" / "settings.json",
+        fake_home / ".claude" / "plugins" / "dynos-work" / "hooks.json",
+        plugin_root / "hooks" / "pre_tool_use.py",
+        fake_home / ".dynos" / "x",
+    ]
+    for target in protected_targets:
+        decision = decide_write(
+            WriteAttempt(
+                role="orchestrator",
+                task_dir=task_dir,
+                path=target,
+                operation="modify",
+                source="agent",
+            )
+        )
+        assert decision.allowed is False, f"{target} must remain protected"
+        assert "self-modification" in decision.reason
+
+
 def test_require_write_allowed_emits_denial_event(tmp_path: Path) -> None:
     task_dir = _task_dir(tmp_path)
     events = task_dir / "events.jsonl"
