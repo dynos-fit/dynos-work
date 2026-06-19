@@ -8,10 +8,15 @@ description: "Internal dynos-work executor skill group. Routes execution graph s
 This directory is the container for specialized executor skills:
 
 - `backend-executor`
+- `data-executor`
 - `db-executor`
+- `infra-executor`
 - `integration-executor`
 - `ml-executor`
+- `observability-executor`
+- `release-executor`
 - `refactor-executor`
+- `security-executor`
 - `testing-executor`
 - `ui-executor`
 

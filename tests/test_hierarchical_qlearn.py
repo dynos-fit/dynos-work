@@ -37,7 +37,7 @@ class TestExecutorActionSpace:
 
     def test_db_restricted(self):
         from memory.lib_qlearn import _executors_for_category
-        assert _executors_for_category("db") == ["db-executor"]
+        assert _executors_for_category("db") == ["db-executor", "data-executor"]
 
     def test_unknown_category_gets_all(self):
         from memory.lib_qlearn import _executors_for_category, ALL_EXECUTORS

@@ -129,9 +129,17 @@ _KEY_ROLES = [
     "spec-writer",
     "backend-executor",
     "ui-executor",
+    "infra-executor",
+    "security-executor",
+    "data-executor",
+    "observability-executor",
+    "release-executor",
     "security-auditor",
     "code-quality-auditor",
     "spec-completion-auditor",
+    "architecture-auditor",
+    "threat-model-auditor",
+    "test-strategy-auditor",
 ]
 
 def _build_policy_packet(root: Path, task_id: str) -> dict:

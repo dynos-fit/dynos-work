@@ -167,7 +167,7 @@ Write to `.dynos/task-{id}/spec.md`:
 
 ## Phase: Implementation Planning (+ Execution Graph)
 
-When given this phase, generate BOTH the implementation plan (`plan.md`) AND the execution graph payload. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. This eliminates the need for a separate execution-coordinator spawn.
+When given this phase, generate BOTH the implementation plan (`plan.md`) AND the execution graph payload. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from -`, piping the payload over stdin. This eliminates the need for a separate execution-coordinator spawn.
 
 Before writing the plan, read the normalized spec and ask:
 
@@ -211,7 +211,7 @@ Write to `.dynos/task-{id}/plan.md`:
 [Any unresolved decisions executor subagents should be aware of. For each: state the question, the options considered, and a recommended default if the executor needs to proceed without an answer.]
 ```
 
-Write the execution graph payload to `/tmp/execution-graph-{id}.json` with this shape, then run `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`:
+Persist the execution graph payload only through the ctl wrapper with `--from -`.
 
 ```json
 {
@@ -219,7 +219,7 @@ Write the execution graph payload to `/tmp/execution-graph-{id}.json` with this 
   "segments": [
     {
       "id": "seg-1",
-      "executor": "ui-executor | backend-executor | ml-executor | db-executor | refactor-executor | testing-executor | integration-executor",
+      "executor": "ui-executor | backend-executor | ml-executor | db-executor | refactor-executor | testing-executor | integration-executor | docs-executor | infra-executor | security-executor | data-executor | observability-executor | release-executor",
       "description": "What this segment implements",
       "files_expected": ["path/to/file"],
       "depends_on": [],
@@ -266,7 +266,7 @@ When given this phase, you act as the **Project Lead for a specific subsystem**.
 - **Do not write the `stage` field to manifest.json** — do not touch it.
 - **Do not hand-write `.dynos/task-{id}/classification.json` or mutate `manifest.json` directly during CLASSIFY_AND_SPEC.**
 - **During CLASSIFY_AND_SPEC you may write** `spec.md` directly, and you may persist classification only via `write-classification`.
-- **Do not hand-write `.dynos/task-{id}/execution-graph.json`.** Write the payload to `/tmp/execution-graph-{id}.json` and call the ctl wrapper.
+- **Do not hand-write `.dynos/task-{id}/execution-graph.json`.** Pipe the payload over stdin to the ctl wrapper with `--from -`.
 - **Do not advance lifecycle stages.**
 - **Do not spawn other agents.**
 - **Every ambiguity must be resolved or flagged.** If you encounter something unclear, do not silently pick an interpretation and move on. Either resolve it by reading more code, or flag it explicitly in Assumptions with "needs confirmation."

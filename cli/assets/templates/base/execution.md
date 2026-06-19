@@ -1,6 +1,6 @@
 ---
 name: execution
-description: "Container for executor sub-agents (backend, db, integration, ml, refactor, testing, ui). Each executor implements a segment from the execution graph."
+description: "Container for executor sub-agents. Each executor implements a segment from the execution graph."
 ---
 
 # dynos-work: Execution Container
@@ -8,10 +8,16 @@ description: "Container for executor sub-agents (backend, db, integration, ml, r
 The `execution` skill is a container for the following executor sub-agents, each invoked during `/dynos-work:execute` based on the segment's declared executor type:
 
 - `backend-executor` — backend code segments
+- `data-executor` — ETL, analytics, backfill, reconciliation, and data-quality segments
 - `db-executor` — database-only segments
+- `docs-executor` — documentation updates and accuracy fixes
+- `infra-executor` — infrastructure, deployment, CI/CD, and environment segments
 - `integration-executor` — cross-system wiring
 - `ml-executor` — ML/data-pipeline segments
+- `observability-executor` — logs, metrics, traces, alerts, and reliability instrumentation
+- `release-executor` — version, changelog, rollout, rollback, and release-operation segments
 - `refactor-executor` — restructuring with no behavior change
+- `security-executor` — auth, authorization, secret-handling, validation, and vulnerability remediation
 - `testing-executor` — test-suite additions and TDD
 - `ui-executor` — UI-only segments
 

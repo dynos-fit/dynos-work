@@ -35,7 +35,7 @@ Append the spawn line to the execution log:
 {timestamp} [SPAWN] planning — generate implementation plan
 ```
 
-Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, write the JSON payload to `/tmp/execution-graph-{id}.json`, then persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy, and explicit file ownership per segment. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
+Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, pipe the JSON payload over stdin and persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from -`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy, and explicit file ownership per segment. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
 
 Wait for completion. Finalize planning through the deterministic control-plane entrypoint:
 

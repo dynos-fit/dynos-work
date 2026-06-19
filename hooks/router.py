@@ -870,7 +870,12 @@ def load_prevention_rules(root: Path) -> list[dict]:
 
 # Ensemble voting defaults — overridable via .dynos/config/policy.json
 ENSEMBLE_SAMPLE_RATE: float = 0.20
-_DEFAULT_ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
+_DEFAULT_ENSEMBLE_AUDITORS = {
+    "security-auditor",
+    "db-schema-auditor",
+    "threat-model-auditor",
+    "supply-chain-auditor",
+}
 
 # Auditors whose verdict comes from deterministic analysis (AST, glob,
 # rule lookup, structured JSON) rather than from LLM judgment that varies
@@ -890,17 +895,43 @@ _DEFAULT_ENSEMBLE_ESCALATION_MODEL = _resolve_model_for_tier(_HOST_CLAUDE, "deep
 
 # Default auditor registry — overridable via .dynos/config/auditors.json
 _DEFAULT_AUDITOR_REGISTRY = {
-    "always": ["spec-completion-auditor", "security-auditor", "claude-md-auditor"],
+    "always": [
+        "spec-completion-auditor",
+        "security-auditor",
+        "claude-md-auditor",
+        "architecture-auditor",
+        "test-strategy-auditor",
+        "docs-accuracy-auditor",
+    ],
     "fast_track": ["spec-completion-auditor", "security-auditor", "claude-md-auditor"],
     "domain_conditional": {
-        "ui": ["ui-auditor", "code-quality-auditor"],
-        "db": ["db-schema-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
-        "backend": ["performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+        "ui": ["ui-auditor", "accessibility-auditor", "code-quality-auditor"],
+        "db": [
+            "db-schema-auditor",
+            "data-integrity-auditor",
+            "performance-auditor",
+            "dead-code-auditor",
+            "code-quality-auditor",
+        ],
+        "backend": [
+            "api-contract-auditor",
+            "observability-auditor",
+            "performance-auditor",
+            "dead-code-auditor",
+            "code-quality-auditor",
+        ],
         "ml": ["code-quality-auditor"],
-        "testing": ["code-quality-auditor"],
+        "testing": ["test-strategy-auditor", "code-quality-auditor"],
         "refactor": ["code-quality-auditor"],
-        "infra": ["code-quality-auditor"],
-        "security": ["code-quality-auditor"],
+        "infra": [
+            "infrastructure-auditor",
+            "supply-chain-auditor",
+            "release-auditor",
+            "code-quality-auditor",
+        ],
+        "security": ["threat-model-auditor", "privacy-auditor", "code-quality-auditor"],
+        "migration": ["release-auditor", "data-integrity-auditor"],
+        "docs": ["docs-accuracy-auditor"],
     },
 }
 

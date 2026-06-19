@@ -103,7 +103,7 @@ If `inject-prompt` fails or is unavailable, stop and fix the deterministic routi
 Spawn the `next_batch` executor agents in parallel.
 
 Executor agents by type:
-- `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`.
+- `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`, `docs-executor`, `infra-executor`, `security-executor`, `data-executor`, `observability-executor`, `release-executor`.
 
 The base prompt for each executor (before inject-prompt) must include:
 1. Its specific segment object from `execution-graph.json`

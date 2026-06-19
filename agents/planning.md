@@ -328,7 +328,7 @@ Build the execution graph payload with this shape and persist it by piping it to
   "segments": [
     {
       "id": "seg-1",
-      "executor": "ui-executor | backend-executor | ml-executor | db-executor | refactor-executor | testing-executor | integration-executor | docs-executor",
+      "executor": "ui-executor | backend-executor | ml-executor | db-executor | refactor-executor | testing-executor | integration-executor | docs-executor | infra-executor | security-executor | data-executor | observability-executor | release-executor",
       "description": "What this segment implements",
       "files_expected": ["path/to/file"],
       "depends_on": [],

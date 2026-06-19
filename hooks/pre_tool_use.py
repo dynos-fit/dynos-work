@@ -28,9 +28,15 @@ from pathlib import Path
 _EXECUTOR_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "backend-executor", "ui-executor", "testing-executor", "integration-executor",
     "ml-executor", "db-executor", "refactor-executor", "docs-executor",
+    "infra-executor", "security-executor", "data-executor",
+    "observability-executor", "release-executor",
     "planning", "execute-inline", "repair-coordinator", "investigator",
     "audit-spec-completion", "audit-security", "audit-code-quality",
     "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui", "audit-claude-md",
+    "audit-architecture", "audit-threat-model", "audit-api-contract",
+    "audit-test-strategy", "audit-accessibility", "audit-privacy",
+    "audit-supply-chain", "audit-infrastructure", "audit-observability",
+    "audit-release", "audit-data-integrity", "audit-docs-accuracy",
 })
 
 # Mirrors lib_core.TERMINAL_STAGES without importing lib_core from this hook.

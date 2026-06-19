@@ -582,7 +582,7 @@ The JSON must have this exact top-level shape:
       "root_cause": "Single sentence naming the underlying mechanism",
       "immediate_cause": "What directly produced the failure",
       "detection_failure": "Why checks, tests, review, or routing did not catch it",
-      "affected_executor": "backend-executor|ui-executor|db-executor|integration-executor|testing-executor|docs-executor|refactor-executor|ml-executor|all|null",
+      "affected_executor": "backend-executor|ui-executor|db-executor|integration-executor|testing-executor|docs-executor|refactor-executor|ml-executor|infra-executor|security-executor|data-executor|observability-executor|release-executor|all|null",
       "severity": "high|medium|low",
       "evidence": [
         "Concrete fact from the task data"
@@ -593,7 +593,7 @@ The JSON must have this exact top-level shape:
     {{
       "template": "every_name_in_X_satisfies_Y|pattern_must_not_appear|co_modification_required|signature_lock|caller_count_required|import_constant_only|advisory",
       "params": {{}},
-      "executor": "backend-executor|ui-executor|db-executor|integration-executor|testing-executor|docs-executor|refactor-executor|ml-executor|all",
+      "executor": "backend-executor|ui-executor|db-executor|integration-executor|testing-executor|docs-executor|refactor-executor|ml-executor|infra-executor|security-executor|data-executor|observability-executor|release-executor|all",
       "rule": "Specific preventive rule in imperative voice, max 100 chars",
       "category": "sec|cq|dc|perf|comp|ui|db|test|process|unknown",
       "source_finding": "Finding ID, repair entry, or exact finding description",

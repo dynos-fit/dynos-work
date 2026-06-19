@@ -47,15 +47,19 @@ You are the Repair Coordinator. You receive audit findings and produce a precise
 
 - UI file findings → `ui-executor`
 - Backend/API/service findings → `backend-executor`
-- Auth/authz findings → `backend-executor`
+- Auth/authz findings → `security-executor`
 - Schema/migration findings → `db-executor`
-- Config/secrets findings → `integration-executor`
+- Config/secrets findings → `infra-executor` for deployment/environment config, `security-executor` for secret-handling code
 - Test coverage findings → `testing-executor`
 - Structural/refactor findings → `refactor-executor`
 - ML/model findings → `ml-executor`
-- Compliance findings (category `compliance`, prefix `comp-`) → route by affected file type: dependency manifests and license issues → `integration-executor`; missing privacy features (data export, account deletion) → `backend-executor`
+- Compliance findings (category `compliance`, prefix `comp-`) → route by affected file type: dependency manifests and license issues → `release-executor`; missing privacy features (data export, account deletion) → `security-executor` or `backend-executor` depending on ownership
 - Doc-accuracy findings (category `doc-accuracy`, prefix `cq-`) → `docs-executor` (broken paths in docs, stale references, missing docs for new features)
 - Performance findings (category `performance`, prefix `perf-`) → route by affected file type: query/ORM findings → `db-executor`; API/endpoint latency findings → `backend-executor`; frontend performance → `ui-executor`
+- Infrastructure/deployment findings → `infra-executor`
+- Supply-chain, changelog, version, rollout, and rollback findings → `release-executor`
+- Data pipeline, backfill, analytics, and data-quality findings → `data-executor`
+- Observability findings → `observability-executor`
 
 ## Instruction quality
 

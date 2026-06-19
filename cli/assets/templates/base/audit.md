@@ -223,7 +223,7 @@ Use this JSON output as authoritative:
 Do NOT infer parallelism, shared-file conflicts, or execution order from prompt logic.
 
 For each batch, spawn executor agents as assigned in `repair-log.json`:
-- `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`
+- `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`, `docs-executor`, `infra-executor`, `security-executor`, `data-executor`, `observability-executor`, `release-executor`
 
 **Model escalation:** Use the `model_override` values returned by `run-repair-batch-plan` / `repair-log.json`. Do NOT recompute escalation from prose rules.
 

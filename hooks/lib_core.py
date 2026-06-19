@@ -795,17 +795,26 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
     except Exception:
         _load_auditor_registry = None  # type: ignore
         _DEFAULT_AUDITOR_REGISTRY = {
-            "always": ["spec-completion-auditor", "security-auditor"],
+            "always": [
+                "spec-completion-auditor",
+                "security-auditor",
+                "claude-md-auditor",
+                "architecture-auditor",
+                "test-strategy-auditor",
+                "docs-accuracy-auditor",
+            ],
             "fast_track": ["spec-completion-auditor", "security-auditor"],
             "domain_conditional": {
-                "ui": ["ui-auditor", "code-quality-auditor"],
-                "db": ["db-schema-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
-                "backend": ["performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+                "ui": ["ui-auditor", "accessibility-auditor", "code-quality-auditor"],
+                "db": ["db-schema-auditor", "data-integrity-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+                "backend": ["api-contract-auditor", "observability-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
                 "ml": ["code-quality-auditor"],
-                "testing": ["code-quality-auditor"],
+                "testing": ["test-strategy-auditor", "code-quality-auditor"],
                 "refactor": ["code-quality-auditor"],
-                "infra": ["code-quality-auditor"],
-                "security": ["code-quality-auditor"],
+                "infra": ["infrastructure-auditor", "supply-chain-auditor", "release-auditor", "code-quality-auditor"],
+                "security": ["threat-model-auditor", "privacy-auditor", "code-quality-auditor"],
+                "migration": ["release-auditor", "data-integrity-auditor"],
+                "docs": ["docs-accuracy-auditor"],
             },
         }
     try:
