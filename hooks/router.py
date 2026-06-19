@@ -1076,6 +1076,11 @@ def build_audit_plan(
         # Fast-track model override: fast-tier for spec-completion
         if fast_track and auditor == "spec-completion-auditor" and model_decision["source"] == "default":
             model_decision = {"model": _resolve_model_for_tier(_HOST_CLAUDE, "fast"), "source": "fast_track_override"}
+        if auditor in _DETERMINISTIC_FIRST_AUDITORS and model_decision["source"] != "explicit_policy":
+            model_decision = {
+                "model": _default_model_for_role(auditor, _HOST_CLAUDE),
+                "source": "deterministic_default",
+            }
 
         # Route selection (uses cached registry via ctx)
         route_decision = resolve_route(root, auditor, task_type, ctx=ctx)

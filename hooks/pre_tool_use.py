@@ -44,7 +44,6 @@ _TERMINAL_STAGES: frozenset[str] = frozenset({
     "DONE", "FAILED", "CANCELLED", "CALIBRATED",
 })
 
-
 def _subagent_isolation(task_dir: "Path | None") -> bool:
     """True only when the host harness gives each subagent a DISTINCT
     session_id, making per-subagent write-role enforcement meaningful.
