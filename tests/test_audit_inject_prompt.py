@@ -15,7 +15,8 @@ ROUTER = ROOT / "hooks" / "router.py"
 
 
 def _setup(tmp_path: Path, *, route_mode: str, agent_path: str | None,
-           agent_content: str = "Be careful.") -> tuple[Path, Path]:
+           agent_content: str = "Be careful.",
+           plan_extra: dict | None = None) -> tuple[Path, Path]:
     project = tmp_path / "project"
     td = project / ".dynos" / "task-20260418-X"
     td.mkdir(parents=True)
@@ -33,6 +34,8 @@ def _setup(tmp_path: Path, *, route_mode: str, agent_path: str | None,
             }
         ]
     }
+    if plan_extra:
+        plan.update(plan_extra)
     plan_path = td / "audit-plan.json"
     plan_path.write_text(json.dumps(plan))
     return project, plan_path
@@ -72,6 +75,7 @@ def test_replace_mode_sidecar_matches_stdout(tmp_path: Path):
     expected = hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
     assert on_disk == expected
     # The injected heading must appear in stdout
+    assert "## Ruthless Audit Brief" in r.stdout
     assert "## Learned Auditor Instructions" in r.stdout
     assert "Hard rule: deny all." in r.stdout
 
@@ -86,6 +90,7 @@ def test_alongside_mode_sidecar_matches_stdout(tmp_path: Path):
     on_disk = sha_path.read_text().strip()
     expected = hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
     assert on_disk == expected
+    assert "## Ruthless Audit Brief" in r.stdout
     assert "## Learned Auditor Instructions" in r.stdout
 
 
@@ -99,7 +104,53 @@ def test_generic_mode_no_injection_but_sidecar_still_written(tmp_path: Path):
     on_disk = sha_path.read_text().strip()
     expected = hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
     assert on_disk == expected
+    assert "## Ruthless Audit Brief" in r.stdout
     assert "## Learned Auditor Instructions" not in r.stdout
+
+
+def test_ruthless_brief_includes_diff_scope_and_process_artifacts(tmp_path: Path):
+    project, plan_path = _setup(
+        tmp_path,
+        route_mode="generic",
+        agent_path=None,
+        plan_extra={
+            "diff_base": "abc123",
+            "diff_files": ["src/api.py", "tests/test_api.py"],
+            "diff_loc": 42,
+        },
+    )
+    (project / "src").mkdir()
+    (project / "src" / "api.py").write_text("def route():\n    return 1\n")
+    (project / "tests").mkdir()
+    (project / "tests" / "test_api.py").write_text("def test_route():\n    assert True\n")
+    task_dir = plan_path.parent
+    (task_dir / "manifest.json").write_text(json.dumps({
+        "classification": {
+            "type": "feature",
+            "domains": ["backend", "testing"],
+            "risk_level": "high",
+        }
+    }))
+    (task_dir / "raw-input.md").write_text("Build a safer route.")
+    (task_dir / "spec.md").write_text("Spec")
+    (task_dir / "plan.md").write_text("Plan")
+    (task_dir / "evidence").mkdir()
+    (task_dir / "evidence" / "segment-1.md").write_text("Evidence")
+
+    r = _run(project, plan_path, model="opus")
+
+    assert r.returncode == 0, r.stderr
+    assert "## Ruthless Audit Brief" in r.stdout
+    assert "Default posture: distrust self-reported DONE/PASS" in r.stdout
+    assert "- diff_base: abc123; changed_files: 2; diff_loc: 42" in r.stdout
+    assert "- src/api.py (2 lines)" in r.stdout
+    assert "- tests/test_api.py (2 lines)" in r.stdout
+    assert "- spec.md" in r.stdout
+    assert "- plan.md" in r.stdout
+    assert "- evidence/* (1 files)" in r.stdout
+    assert "Process-integrity checks:" in r.stdout
+    sha_path = _sidecar_dir(plan_path) / "security-auditor-opus.sha256"
+    assert sha_path.read_text().strip() == hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
 
 
 def test_per_model_disambiguation(tmp_path: Path):

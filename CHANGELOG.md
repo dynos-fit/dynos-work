@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.4] - 2026-06-19
+### Changed
+- Inject ruthless self-implicating audit briefs into dynos auditor prompts.
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.4`.
+
+---
+
 ## [7.5.3] - 2026-06-19
 ### Changed
 - Expand foundry auditor and executor role coverage for architecture, threat modeling, contracts, accessibility, privacy, supply chain, infrastructure, observability, release, and data integrity work.

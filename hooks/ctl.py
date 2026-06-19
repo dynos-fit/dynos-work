@@ -4342,6 +4342,10 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
             task_id=derived_task_id,
             diff_files=diff_files if (diff_base is not None and diff_error is None) else None,
         )
+        plan["diff_base"] = diff_base
+        plan["diff_files"] = diff_files
+        plan["diff_error"] = diff_error
+        plan["diff_loc"] = diff_loc
         # AC 8: Attach shard_briefs to spawned auditors when diff exceeds threshold.
         # Sub-threshold diffs: no shard_briefs key (absent, not null/empty).
         if should_shard:
