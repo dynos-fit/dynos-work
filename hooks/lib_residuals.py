@@ -43,8 +43,12 @@ ALLOWED_AUDITORS: frozenset[str] = frozenset({
     "claude-md-auditor",
     "code-quality-auditor",
     "dead-code-auditor",
+    "docs-accuracy-auditor",
     "performance-auditor",
+    "release-auditor",
     "security-auditor",
+    "test-strategy-auditor",
+    "ui-auditor",
 })
 
 # Postmortem prevention-rule enforcement values that are actionable

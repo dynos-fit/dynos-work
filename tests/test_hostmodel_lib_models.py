@@ -152,8 +152,8 @@ class TestLibModelsValidModelsForHost:
 # AC-4: ROLE_DEFAULT_TIERS completeness
 # ---------------------------------------------------------------------------
 
-# The 17 roles from ROLE_DEFAULT_MODELS in router.py (pre-task) and their
-# expected tier assignments, plus security-auditor added by this task.
+# Runtime roles and their expected default tiers. Keep this aligned with
+# agents/*-{executor,auditor}.md plus the planner/spec writer roles.
 _EXPECTED_ROLE_TIERS = {
     "planning": "balanced",
     "spec-writer": "balanced",
@@ -165,6 +165,11 @@ _EXPECTED_ROLE_TIERS = {
     "ml-executor": "balanced",
     "testing-executor": "balanced",
     "docs-executor": "fast",
+    "infra-executor": "balanced",
+    "security-executor": "deep",
+    "data-executor": "balanced",
+    "observability-executor": "balanced",
+    "release-executor": "balanced",
     "spec-completion-auditor": "balanced",
     "code-quality-auditor": "balanced",
     "dead-code-auditor": "fast",
@@ -172,7 +177,19 @@ _EXPECTED_ROLE_TIERS = {
     "db-schema-auditor": "fast",
     "ui-auditor": "fast",
     "claude-md-auditor": "balanced",
-    "security-auditor": "deep",  # added by this task
+    "security-auditor": "deep",
+    "architecture-auditor": "balanced",
+    "threat-model-auditor": "deep",
+    "api-contract-auditor": "balanced",
+    "test-strategy-auditor": "balanced",
+    "accessibility-auditor": "balanced",
+    "privacy-auditor": "balanced",
+    "supply-chain-auditor": "deep",
+    "infrastructure-auditor": "balanced",
+    "observability-auditor": "balanced",
+    "release-auditor": "balanced",
+    "data-integrity-auditor": "balanced",
+    "docs-accuracy-auditor": "balanced",
 }
 
 # Original 17 roles from router.py:174-192 ROLE_DEFAULT_MODELS
@@ -199,7 +216,7 @@ _ORIGINAL_ROLE_DEFAULT_MODELS = {
 
 class TestRoleDefaultTiersComplete:
     def test_role_default_tiers_complete(self) -> None:
-        """AC-4: ROLE_DEFAULT_TIERS contains all 18 roles with correct tier assignments."""
+        """AC-4: ROLE_DEFAULT_TIERS contains all runtime roles."""
         rdt = lib_models.ROLE_DEFAULT_TIERS
 
         # Every key from the original 17-role ROLE_DEFAULT_MODELS must be present.
@@ -226,12 +243,12 @@ class TestRoleDefaultTiersComplete:
                 f"Role {role!r} mapped to sonnet should map to TIER_BALANCED, got {rdt[role]!r}"
             )
 
-        # No key in ROLE_DEFAULT_TIERS should be absent from the 18-role set.
+        # No key in ROLE_DEFAULT_TIERS should be absent from the known role set.
         expected_keys = set(_EXPECTED_ROLE_TIERS.keys())
         for role in rdt:
             assert role in expected_keys, (
                 f"Unexpected role {role!r} in ROLE_DEFAULT_TIERS; "
-                f"not in the expected 18-role set"
+                f"not in the expected runtime role set"
             )
 
     def test_role_default_tiers_exact_tier_assignments(self) -> None:
@@ -243,9 +260,9 @@ class TestRoleDefaultTiersComplete:
             )
 
     def test_role_default_tiers_total_count(self) -> None:
-        """AC-4: ROLE_DEFAULT_TIERS must have exactly 18 entries."""
-        assert len(lib_models.ROLE_DEFAULT_TIERS) == 18, (
-            f"Expected 18 roles, got {len(lib_models.ROLE_DEFAULT_TIERS)}"
+        """AC-4: ROLE_DEFAULT_TIERS must cover the known runtime role set exactly."""
+        assert len(lib_models.ROLE_DEFAULT_TIERS) == len(_EXPECTED_ROLE_TIERS), (
+            f"Expected {len(_EXPECTED_ROLE_TIERS)} roles, got {len(lib_models.ROLE_DEFAULT_TIERS)}"
         )
 
 

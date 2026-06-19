@@ -25,8 +25,20 @@ DEFAULT_AUDITOR_ROLES = [
     "security-auditor",
     "spec-completion-auditor",
     "code-quality-auditor",
+    "architecture-auditor",
+    "threat-model-auditor",
+    "api-contract-auditor",
+    "test-strategy-auditor",
+    "accessibility-auditor",
+    "privacy-auditor",
+    "supply-chain-auditor",
+    "infrastructure-auditor",
+    "observability-auditor",
+    "release-auditor",
+    "data-integrity-auditor",
+    "docs-accuracy-auditor",
 ]
-SKIP_EXEMPT_AUDITORS = {"security-auditor", "spec-completion-auditor"}
+SKIP_EXEMPT_AUDITORS = {"security-auditor", "spec-completion-auditor", "threat-model-auditor"}
 from lib_models import (
     ALL_TIERS as _ALL_TIERS,
     valid_models_for_host as _valid_models_for_host,

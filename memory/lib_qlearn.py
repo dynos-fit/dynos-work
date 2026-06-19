@@ -60,14 +60,17 @@ ALL_EXECUTORS = sorted(_DISCOVERED_EXECUTORS)
 
 # Default per-category action spaces — overridable via .dynos/config/action-spaces.json
 _DEFAULT_ACTION_SPACE: dict[str, list[str]] = {
-    "sec":  ["backend-executor", "integration-executor"],
-    "comp": ["integration-executor", "backend-executor"],
+    "sec":  ["security-executor", "backend-executor", "integration-executor"],
+    "comp": ["release-executor", "integration-executor", "backend-executor"],
     "cq":   ["backend-executor", "refactor-executor", "testing-executor"],
     "dc":   ["refactor-executor"],
-    "db":   ["db-executor"],
+    "db":   ["db-executor", "data-executor"],
     "ui":   ["ui-executor"],
-    "perf": ["backend-executor", "db-executor"],
+    "perf": ["backend-executor", "db-executor", "observability-executor"],
     "sc":   ["backend-executor", "ui-executor", "db-executor", "integration-executor"],
+    "infra": ["infra-executor", "release-executor"],
+    "data": ["data-executor", "db-executor"],
+    "obs": ["observability-executor", "backend-executor"],
 }
 
 EXECUTOR_ACTION_SPACE = _DEFAULT_ACTION_SPACE  # module-level default

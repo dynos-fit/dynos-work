@@ -2270,10 +2270,16 @@ def cmd_check_retro_integrity(args: argparse.Namespace) -> int:
 _STAMP_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "backend-executor", "ui-executor", "testing-executor", "integration-executor",
     "ml-executor", "db-executor", "refactor-executor", "docs-executor",
+    "infra-executor", "security-executor", "data-executor",
+    "observability-executor", "release-executor",
     "planning", "execute-inline", "repair-coordinator", "investigator",
     "audit-spec-completion", "audit-security", "audit-code-quality",
     "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui",
     "audit-claude-md",
+    "audit-architecture", "audit-threat-model", "audit-api-contract",
+    "audit-test-strategy", "audit-accessibility", "audit-privacy",
+    "audit-supply-chain", "audit-infrastructure", "audit-observability",
+    "audit-release", "audit-data-integrity", "audit-docs-accuracy",
 })
 
 
@@ -4336,6 +4342,10 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
             task_id=derived_task_id,
             diff_files=diff_files if (diff_base is not None and diff_error is None) else None,
         )
+        plan["diff_base"] = diff_base
+        plan["diff_files"] = diff_files
+        plan["diff_error"] = diff_error
+        plan["diff_loc"] = diff_loc
         # AC 8: Attach shard_briefs to spawned auditors when diff exceeds threshold.
         # Sub-threshold diffs: no shard_briefs key (absent, not null/empty).
         if should_shard:

@@ -870,7 +870,12 @@ def load_prevention_rules(root: Path) -> list[dict]:
 
 # Ensemble voting defaults — overridable via .dynos/config/policy.json
 ENSEMBLE_SAMPLE_RATE: float = 0.20
-_DEFAULT_ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
+_DEFAULT_ENSEMBLE_AUDITORS = {
+    "security-auditor",
+    "db-schema-auditor",
+    "threat-model-auditor",
+    "supply-chain-auditor",
+}
 
 # Auditors whose verdict comes from deterministic analysis (AST, glob,
 # rule lookup, structured JSON) rather than from LLM judgment that varies
@@ -890,17 +895,43 @@ _DEFAULT_ENSEMBLE_ESCALATION_MODEL = _resolve_model_for_tier(_HOST_CLAUDE, "deep
 
 # Default auditor registry — overridable via .dynos/config/auditors.json
 _DEFAULT_AUDITOR_REGISTRY = {
-    "always": ["spec-completion-auditor", "security-auditor", "claude-md-auditor"],
+    "always": [
+        "spec-completion-auditor",
+        "security-auditor",
+        "claude-md-auditor",
+        "architecture-auditor",
+        "test-strategy-auditor",
+        "docs-accuracy-auditor",
+    ],
     "fast_track": ["spec-completion-auditor", "security-auditor", "claude-md-auditor"],
     "domain_conditional": {
-        "ui": ["ui-auditor", "code-quality-auditor"],
-        "db": ["db-schema-auditor", "performance-auditor", "dead-code-auditor", "code-quality-auditor"],
-        "backend": ["performance-auditor", "dead-code-auditor", "code-quality-auditor"],
+        "ui": ["ui-auditor", "accessibility-auditor", "code-quality-auditor"],
+        "db": [
+            "db-schema-auditor",
+            "data-integrity-auditor",
+            "performance-auditor",
+            "dead-code-auditor",
+            "code-quality-auditor",
+        ],
+        "backend": [
+            "api-contract-auditor",
+            "observability-auditor",
+            "performance-auditor",
+            "dead-code-auditor",
+            "code-quality-auditor",
+        ],
         "ml": ["code-quality-auditor"],
-        "testing": ["code-quality-auditor"],
+        "testing": ["test-strategy-auditor", "code-quality-auditor"],
         "refactor": ["code-quality-auditor"],
-        "infra": ["code-quality-auditor"],
-        "security": ["code-quality-auditor"],
+        "infra": [
+            "infrastructure-auditor",
+            "supply-chain-auditor",
+            "release-auditor",
+            "code-quality-auditor",
+        ],
+        "security": ["threat-model-auditor", "privacy-auditor", "code-quality-auditor"],
+        "migration": ["release-auditor", "data-integrity-auditor"],
+        "docs": ["docs-accuracy-auditor"],
     },
 }
 
@@ -1045,6 +1076,11 @@ def build_audit_plan(
         # Fast-track model override: fast-tier for spec-completion
         if fast_track and auditor == "spec-completion-auditor" and model_decision["source"] == "default":
             model_decision = {"model": _resolve_model_for_tier(_HOST_CLAUDE, "fast"), "source": "fast_track_override"}
+        if auditor in _DETERMINISTIC_FIRST_AUDITORS and model_decision["source"] != "explicit_policy":
+            model_decision = {
+                "model": _default_model_for_role(auditor, _HOST_CLAUDE),
+                "source": "deterministic_default",
+            }
 
         # Route selection (uses cached registry via ctx)
         route_decision = resolve_route(root, auditor, task_type, ctx=ctx)
@@ -1850,6 +1886,131 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _safe_repo_line_count(root: Path, rel_path: str) -> int | None:
+    try:
+        path = (root / rel_path).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            return None
+        with path.open("r", encoding="utf-8", errors="ignore") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return None
+
+
+def _read_task_json_object(task_dir: Path, name: str) -> dict:
+    try:
+        data = load_json(task_dir / name)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _read_task_text_preview(task_dir: Path, name: str, *, max_chars: int = 180) -> str:
+    try:
+        text = (task_dir / name).read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return ""
+    text = " ".join(text.split())
+    if len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def _count_files(path: Path, pattern: str) -> int:
+    if not path.exists():
+        return 0
+    try:
+        return sum(1 for p in path.glob(pattern) if p.is_file())
+    except OSError:
+        return 0
+
+
+def _build_ruthless_audit_brief(root: Path, task_dir: Path, plan: dict, auditor_name: str) -> str:
+    """Build a self-implicating audit brief from deterministic task evidence."""
+    manifest = _read_task_json_object(task_dir, "manifest.json")
+    classification = manifest.get("classification") if isinstance(manifest, dict) else {}
+    if not isinstance(classification, dict):
+        classification = {}
+
+    raw_input = _read_task_text_preview(task_dir, "raw-input.md")
+    task_type = str(classification.get("type") or "unknown")
+    domains = classification.get("domains")
+    domain_text = ", ".join(str(d) for d in domains) if isinstance(domains, list) and domains else "unknown"
+    risk_level = str(classification.get("risk_level") or "unknown")
+
+    diff_base = plan.get("diff_base")
+    diff_base_text = str(diff_base) if diff_base else "unknown"
+    diff_error = plan.get("diff_error")
+    diff_loc = plan.get("diff_loc")
+    diff_files_raw = plan.get("diff_files")
+    diff_files = [str(f) for f in diff_files_raw] if isinstance(diff_files_raw, list) else []
+
+    file_lines: list[str] = []
+    for rel_path in diff_files[:25]:
+        line_count = _safe_repo_line_count(root, rel_path)
+        suffix = f" ({line_count} lines)" if line_count is not None else ""
+        file_lines.append(f"- {rel_path}{suffix}")
+    if len(diff_files) > 25:
+        file_lines.append(f"- ... {len(diff_files) - 25} more files omitted from this prompt; inspect audit-plan.json.")
+    if not file_lines:
+        file_lines.append("- No diff_files in audit-plan; establish the changed-file scope before trusting any DONE/PASS claim.")
+
+    artifact_lines = []
+    for name in ("spec.md", "plan.md", "execution-graph.json", "repair-log.json", "audit-summary.json", "task-retrospective.json"):
+        if (task_dir / name).exists():
+            artifact_lines.append(f"- {name}")
+    evidence_count = _count_files(task_dir / "evidence", "*")
+    report_count = _count_files(task_dir / "audit-reports", "*.json")
+    receipt_count = _count_files(task_dir / "receipts", "*.json")
+    if evidence_count:
+        artifact_lines.append(f"- evidence/* ({evidence_count} files)")
+    if report_count:
+        artifact_lines.append(f"- audit-reports/*.json ({report_count} files)")
+    if receipt_count:
+        artifact_lines.append(f"- receipts/*.json ({receipt_count} files)")
+    if not artifact_lines:
+        artifact_lines.append("- No process artifacts found beyond audit-plan.json.")
+
+    lines = [
+        "## Ruthless Audit Brief",
+        "Default posture: distrust self-reported DONE/PASS. Treat specs, plans, evidence, receipts, audit reports, retrospectives, and validator output as claims to verify, not proof.",
+        "",
+        f"Auditor hat: {auditor_name}. Keep this specialist lens, and also audit process integrity.",
+        "",
+        "Target facts:",
+        f"- task_dir: {task_dir.name}",
+        f"- task_type: {task_type}; domains: {domain_text}; risk_level: {risk_level}",
+        f"- diff_base: {diff_base_text}; changed_files: {len(diff_files)}; diff_loc: {diff_loc if diff_loc is not None else 'unknown'}",
+    ]
+    if raw_input:
+        lines.append(f"- raw request preview: {raw_input}")
+    if diff_error:
+        lines.append(f"- diff_error: {diff_error}")
+
+    lines.extend([
+        "",
+        "Changed files to attack first:",
+        *file_lines,
+        "",
+        "Process artifacts to distrust first:",
+        *artifact_lines,
+        "",
+        "Attack directives:",
+        "- Reproduce the risky behavior from clean evidence; do not accept narrative summaries.",
+        "- Exercise untested runtime surfaces named by the diff, spec, plan, and evidence. Hit valid, empty, malformed, missing-field, wrong-type, nonexistent-ID, and unauthorized cases when applicable.",
+        "- Treat inferred contracts, validator accommodations, skipped auditors, cached evidence, carry-forward receipts, and self-graded pass/fail as suspect until verified.",
+        "- Every finding must cite file:line evidence or a command plus output. If you cannot cite it, keep digging.",
+        "",
+        "Process-integrity checks:",
+        "- Did any gate pass because an artifact was shaped to satisfy the validator rather than because the underlying behavior is correct?",
+        "- Were blockers downgraded, deferred, hidden in residual work, or converted into non-blocking advisories without proof?",
+        "- Do evidence files prove behavior with commands and outputs, or merely narrate completion?",
+        "",
+        "Output pressure: if you report no blocking findings, explicitly name the untested or highest-risk surface you exercised and why it is trustworthy.",
+    ])
+    return "\n".join(lines)
+
+
 def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     """Inject learned-auditor instructions into a base auditor prompt.
 
@@ -1906,6 +2067,15 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     agent_path = target.get("agent_path")
 
     final_text = base_prompt
+    task_dir = plan_path.resolve().parent
+
+    # Ruthless-review style framing: ground each auditor in the real diff and
+    # force process artifacts to be treated as claims until verified.
+    final_text = (
+        final_text.rstrip()
+        + "\n\n"
+        + _build_ruthless_audit_brief(root, task_dir, plan, auditor_name)
+    )
 
     # Inject aggregate category-trend prevention rules (executor="auditor-only").
     # These are cross-task signals that auditors can act on when reviewing
@@ -1940,7 +2110,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
                     if end != -1:
                         agent_content = agent_content[end + 3:].strip()
                 final_text = (
-                    base_prompt.rstrip()
+                    final_text.rstrip()
                     + "\n\n## Learned Auditor Instructions\n"
                     + f"You are running as the **{auditor_name}** learned auditor "
                     + f"(mode={route_mode}). These rules were learned from past audit "
@@ -1971,7 +2141,6 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
 
     # Locate task_dir from the audit plan path: the plan lives at
     # .dynos/task-{id}/audit-plan.json so task_dir is plan.parent.
-    task_dir = plan_path.resolve().parent
     if not task_dir.name.startswith("task-"):
         print(json.dumps({
             "error": f"audit plan not under a task dir: {task_dir}",
