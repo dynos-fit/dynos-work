@@ -458,6 +458,13 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             "the SessionStart hook subprocess may write it",
             "deny",
         )
+    if path.name == "session-tasks.json" and path.parent.name == ".dynos":
+        return WriteDecision(
+            False,
+            "session-tasks.json is hook-owned task identity; only "
+            "dynos hook subprocesses may write it",
+            "deny",
+        )
     # control-plane.json is hook-owned actor/host identity (same elevation
     # class as orchestrator-session.json above). It drives host resolution for
     # receipt anti-forgery validation (receipts/stage.py) and token capture

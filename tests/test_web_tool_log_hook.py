@@ -200,6 +200,53 @@ def test_web_tool_log_hook_silent_exit_when_no_task_dir(tmp_path: Path) -> None:
     assert not list(tmp_path.rglob("web-tool-log.jsonl"))
 
 
+def test_web_tool_log_hook_silent_exit_when_multiple_active_tasks_ambiguous(tmp_path: Path) -> None:
+    """When no explicit/session task exists, do not log to highest task."""
+    mod = _import_hook()
+    task_a = _make_task_dir(tmp_path)
+    task_b = tmp_path / ".dynos" / "task-20260507-006"
+    task_b.mkdir()
+    (task_b / "manifest.json").write_text(json.dumps({"task_id": task_b.name, "stage": "EXECUTION"}))
+    (task_a / "manifest.json").write_text(json.dumps({"task_id": task_a.name, "stage": "EXECUTION"}))
+    payload = {
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "ambiguous"},
+        "cwd": str(tmp_path),
+    }
+    env_no_task = {k: v for k, v in os.environ.items() if k != "DYNOS_TASK_DIR"}
+    with mock.patch.dict(os.environ, env_no_task, clear=True):
+        rc = mod.main(["web_tool_log.py"], payload=payload)
+
+    assert rc == 0
+    assert not (task_a / "web-tool-log.jsonl").exists()
+    assert not (task_b / "web-tool-log.jsonl").exists()
+
+
+def test_web_tool_log_uses_session_task_binding(tmp_path: Path) -> None:
+    import actor_identity
+
+    mod = _import_hook()
+    task_a = _make_task_dir(tmp_path)
+    task_b = tmp_path / ".dynos" / "task-20260507-006"
+    task_b.mkdir()
+    (task_b / "manifest.json").write_text(json.dumps({"task_id": task_b.name, "stage": "EXECUTION"}))
+    (task_a / "manifest.json").write_text(json.dumps({"task_id": task_a.name, "stage": "EXECUTION"}))
+    actor_identity.bind_session_task(tmp_path, "sess-bound", task_a)
+    payload = {
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "bound"},
+        "cwd": str(tmp_path),
+        "session_id": "sess-bound",
+    }
+    env_no_task = {k: v for k, v in os.environ.items() if k != "DYNOS_TASK_DIR"}
+    with mock.patch.dict(os.environ, env_no_task, clear=True):
+        rc = mod.main(["web_tool_log.py"], payload=payload)
+
+    assert rc == 0
+    assert (task_a / "web-tool-log.jsonl").exists()
+    assert not (task_b / "web-tool-log.jsonl").exists()
+
+
 def test_web_tool_log_hook_appends_multiple_entries(tmp_path: Path) -> None:
     """AC 3: Multiple calls append multiple lines (one per invocation)."""
     task_dir = _make_task_dir(tmp_path)

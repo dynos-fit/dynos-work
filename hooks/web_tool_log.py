@@ -49,29 +49,73 @@ from typing import Any
 _WEB_TOOLS = frozenset({"WebSearch", "WebFetch"})
 
 
-def _find_task_dir_from_ancestors(cwd: Path) -> Path | None:
-    """Walk upward from cwd to the nearest .dynos/task-* directory."""
-    current = cwd.resolve()
+def _task_is_non_terminal(task_dir: Path) -> bool:
+    try:
+        manifest = json.loads((task_dir / "manifest.json").read_text(encoding="utf-8"))
+        return isinstance(manifest, dict) and manifest.get("stage") not in {
+            "DONE", "FAILED", "CANCELLED", "CALIBRATED",
+        }
+    except Exception:
+        return False
+
+
+def _task_dir_from_path(path: Path) -> Path | None:
+    try:
+        current = path.resolve()
+    except Exception:
+        return None
     for ancestor in [current, *current.parents]:
-        dynos = ancestor / ".dynos"
-        if dynos.is_dir():
-            try:
-                candidates = sorted(dynos.glob("task-*"), reverse=True)
-                if candidates:
-                    return candidates[0]
-            except OSError:
-                pass
+        if ancestor.parent.name == ".dynos" and ancestor.name.startswith("task-"):
+            return ancestor if _task_is_non_terminal(ancestor) else None
     return None
 
 
-def _resolve_task_dir(cwd: Path) -> Path | None:
-    """Resolve task dir from DYNOS_TASK_DIR env or by ancestor walk."""
+def _project_root_from_ancestors(cwd: Path) -> Path | None:
+    current = cwd.resolve()
+    for ancestor in [current, *current.parents]:
+        if (ancestor / ".dynos").is_dir():
+            return ancestor
+    return None
+
+
+def _find_task_dir_from_ancestors(cwd: Path) -> Path | None:
+    """Walk upward from cwd, returning only an unambiguous active task."""
+    direct = _task_dir_from_path(cwd)
+    if direct is not None:
+        return direct
+    project_root = _project_root_from_ancestors(cwd)
+    if project_root is None:
+        return None
+    try:
+        candidates = [
+            task for task in sorted((project_root / ".dynos").glob("task-*"), reverse=True)
+            if _task_is_non_terminal(task)
+        ]
+    except OSError:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _resolve_task_dir(cwd: Path, payload: dict[str, Any]) -> Path | None:
+    """Resolve task dir from DYNOS_TASK_DIR, session binding, or unambiguous cwd."""
     env_task = os.environ.get("DYNOS_TASK_DIR", "").strip()
     if env_task:
         try:
             return Path(env_task).resolve()
         except OSError:
             return None
+    session_id = str(payload.get("session_id") or "").strip()
+    project_root = _project_root_from_ancestors(cwd)
+    if session_id and project_root is not None:
+        try:
+            import actor_identity
+            bound = actor_identity.lookup_session_task(project_root, session_id)
+            if bound is not None:
+                return bound
+        except Exception:
+            pass
     return _find_task_dir_from_ancestors(cwd)
 
 
@@ -159,7 +203,7 @@ def main(argv: list[str], *, payload: dict[str, Any] | None = None) -> int:
     except OSError:
         return 0
 
-    task_dir = _resolve_task_dir(cwd)
+    task_dir = _resolve_task_dir(cwd, payload)
     if task_dir is None or not task_dir.is_dir():
         # No active task — exit 0 silently (AC 1)
         return 0

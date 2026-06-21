@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 import lib_host
+import actor_identity
 from lib_models import valid_models_for_host
 from lib_tokens import record_tokens
 
@@ -48,19 +49,40 @@ def _attribution_window_seconds() -> float:
     return float(_DEFAULT_ATTRIBUTION_WINDOW_SECONDS)
 
 
-def _find_active_task(root: Path) -> Path | None:
+def _active_tasks_from_manifests(dynos: Path) -> list[tuple[float, Path]]:
+    candidates: list[tuple[float, Path]] = []
+    for td in dynos.iterdir():
+        if not td.is_dir() or not re.match(r"task-\d{8}-\d{3}$", td.name):
+            continue
+        manifest_path = td / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            stage = manifest.get("stage", "")
+            if stage in ("DONE", "FAILED", "CANCELLED", "CALIBRATED"):
+                continue
+            candidates.append((manifest_path.stat().st_mtime, td))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return candidates
+
+
+def _find_active_task(root: Path, session_id: str = "") -> Path | None:
     """Find the active task that should receive SubagentStop token attribution.
 
     Selection rules (in order):
-    1. Fast path: read .dynos/active-task.json (written by transition_task on
-       every stage advance). O(1) — one file read + one stat.
-    2. Fallback: full O(N) scan of all task manifests, for backward compat
+    1. Fast path: use the hook-owned session->task binding when session_id is
+       available.
+    2. Legacy path: read .dynos/active-task.json only when it is unambiguous
+       because there is at most one active task.
+    3. Fallback: full O(N) scan of all task manifests, for backward compat
        with repos that pre-date the pointer file or when the pointer is absent.
-    3. Skip tasks whose manifest is in a terminal stage (DONE, FAILED, CANCELLED).
-    4. Among remaining, pick the task whose manifest.json was most recently
+    4. Skip tasks whose manifest is in a terminal stage (DONE, FAILED, CANCELLED).
+    5. Among remaining, pick the task whose manifest.json was most recently
        modified (freshest mtime). An actively-progressing task always has a
        fresh manifest because transition_task rewrites it atomically.
-    5. If even the freshest manifest is older than the attribution window
+    6. If even the freshest manifest is older than the attribution window
        (default 1h, override via DYNOS_TASK_ATTRIBUTION_WINDOW_SECONDS),
        return None to avoid mis-attributing unrelated subagents to a stalled
        task.
@@ -69,7 +91,14 @@ def _find_active_task(root: Path) -> Path | None:
     if not dynos.exists():
         return None
 
-    # ---- Fast path: active-task pointer ----
+    if session_id:
+        task_dir = actor_identity.lookup_session_task(root, session_id)
+        if task_dir is not None:
+            return task_dir
+
+    candidates = _active_tasks_from_manifests(dynos)
+
+    # ---- Legacy path: active-task pointer, only when unambiguous ----
     pointer_path = dynos / "active-task.json"
     if pointer_path.exists():
         try:
@@ -78,6 +107,19 @@ def _find_active_task(root: Path) -> Path | None:
             if task_id is None:
                 return None  # Pointer explicitly cleared (terminal stage).
             task_dir_str = pointer.get("task_dir")
+            fresh_candidates = [
+                (mtime, td)
+                for mtime, td in candidates
+                if time.time() - mtime <= _attribution_window_seconds()
+            ]
+            if len(fresh_candidates) > 1:
+                return None
+            if (
+                len(fresh_candidates) == 1
+                and task_dir_str
+                and fresh_candidates[0][1].resolve() != Path(task_dir_str).resolve()
+            ):
+                return None
             if task_dir_str:
                 td = Path(task_dir_str)
                 manifest_path = td / "manifest.json"
@@ -94,31 +136,20 @@ def _find_active_task(root: Path) -> Path | None:
             pass  # Fall through to full scan.
 
     # ---- Fallback: full O(N) scan ----
-    candidates: list[tuple[float, Path]] = []
-    for td in dynos.iterdir():
-        if not td.is_dir() or not re.match(r"task-\d{8}-\d{3}$", td.name):
-            continue
-        manifest_path = td / "manifest.json"
-        if not manifest_path.exists():
-            continue
-        try:
-            manifest = json.loads(manifest_path.read_text())
-            stage = manifest.get("stage", "")
-            if stage in ("DONE", "FAILED", "CANCELLED"):
-                continue
-            mtime = manifest_path.stat().st_mtime
-            candidates.append((mtime, td))
-        except (json.JSONDecodeError, OSError):
-            continue
-
     if not candidates:
         return None
 
     candidates.sort(key=lambda x: x[0], reverse=True)
-    newest_mtime, newest_dir = candidates[0]
-    age_seconds = time.time() - newest_mtime
-    if age_seconds > _attribution_window_seconds():
+    fresh_candidates = [
+        (mtime, td)
+        for mtime, td in candidates
+        if time.time() - mtime <= _attribution_window_seconds()
+    ]
+    if not fresh_candidates:
         return None  # All active tasks are stale; refuse attribution.
+    if len(fresh_candidates) > 1:
+        return None  # Ambiguous concurrent active tasks; require session binding.
+    _, newest_dir = fresh_candidates[0]
     return newest_dir
 
 
@@ -318,6 +349,7 @@ def main() -> int:
     parser.add_argument("--agent-type", default="unknown", help="Agent type (e.g. dynos-work:backend-executor)")
     parser.add_argument("--agent-desc", default="", help="Agent description")
     parser.add_argument("--root", required=True, help="Project root path")
+    parser.add_argument("--session-id", default="", help="Host session id for task attribution")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
@@ -339,7 +371,7 @@ def main() -> int:
     # Find active task. If no fresh non-terminal task exists, the tokens
     # would otherwise be silently dropped — record to orphan-tokens.jsonl
     # so the data is preserved for reconciliation.
-    task_dir = _find_active_task(root)
+    task_dir = _find_active_task(root, session_id=args.session_id)
     if task_dir is None:
         result = _parse_transcript(transcript_path, host=_active_host)
         if result["input_tokens"] > 0 or result["output_tokens"] > 0:

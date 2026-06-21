@@ -43,6 +43,7 @@ from typing import Any
 PIN_FILENAME = "orchestrator-session.json"
 GRANTS_FILENAME = "role-grants.json"
 BINDINGS_FILENAME = "role-bindings.json"
+SESSION_TASKS_FILENAME = "session-tasks.json"
 
 # A grant not consumed within this window is dead — it cannot be picked up
 # by a session that appears hours later (e.g. a stale ledger after a crash).
@@ -51,6 +52,10 @@ GRANT_TTL_SECONDS = 7200
 
 def pin_path(project_root: Path) -> Path:
     return project_root / ".dynos" / PIN_FILENAME
+
+
+def session_tasks_path(project_root: Path) -> Path:
+    return project_root / ".dynos" / SESSION_TASKS_FILENAME
 
 
 def grants_path(task_dir: Path) -> Path:
@@ -104,14 +109,115 @@ def pin_orchestrator(project_root: Path, payload: dict) -> dict | None:
         "source": str(payload.get("source") or ""),
         "pinned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    _atomic_write_json(pin_path(project_root), pin)
+    project_root = project_root.resolve()
+    lock_file = project_root / ".dynos" / ".orchestrator-session.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            existing = _load_json(pin_path(project_root))
+            if isinstance(existing, dict) and isinstance(existing.get("sessions"), dict):
+                data = existing
+            elif isinstance(existing, dict) and existing.get("session_id"):
+                data = {
+                    "session_id": existing.get("session_id"),
+                    "latest_session_id": existing.get("session_id"),
+                    "sessions": {str(existing["session_id"]): existing},
+                }
+            else:
+                data = {"sessions": {}}
+            sessions = data.setdefault("sessions", {})
+            sessions[session_id] = pin
+            data["session_id"] = session_id
+            data["latest_session_id"] = session_id
+            _atomic_write_json(pin_path(project_root), data)
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
     return pin
 
 
-def read_pin(project_root: Path) -> dict | None:
+def read_pin(project_root: Path, session_id: str | None = None) -> dict | None:
     data = _load_json(pin_path(project_root))
-    if isinstance(data, dict) and data.get("session_id"):
+    if not isinstance(data, dict):
+        return None
+    if session_id and isinstance(data.get("sessions"), dict):
+        entry = data["sessions"].get(session_id)
+        if isinstance(entry, dict) and entry.get("session_id"):
+            return entry
+        return None
+    if session_id:
+        if data.get("session_id") == session_id:
+            return data
+        return None
+    if isinstance(data.get("sessions"), dict):
+        latest = str(data.get("latest_session_id") or data.get("session_id") or "")
+        entry = data["sessions"].get(latest)
+        if isinstance(entry, dict) and entry.get("session_id"):
+            return entry
+    if data.get("session_id"):
         return data
+    return None
+
+
+def _task_is_non_terminal(task_dir: Path) -> bool:
+    try:
+        manifest = json.loads((task_dir / "manifest.json").read_text(encoding="utf-8"))
+        return isinstance(manifest, dict) and manifest.get("stage") not in {
+            "DONE", "FAILED", "CANCELLED", "CALIBRATED",
+        }
+    except Exception:
+        return False
+
+
+def bind_session_task(project_root: Path, session_id: str, task_dir: Path) -> None:
+    """Persist the task currently associated with a host session.
+
+    This is hook-owned state used to avoid the old project-global
+    ``active-task.json`` singleton when multiple dynos-work sessions run at
+    the same time.
+    """
+    if not session_id:
+        return
+    project_root = project_root.resolve()
+    task_dir = task_dir.resolve()
+    try:
+        task_dir.relative_to(project_root / ".dynos")
+    except ValueError:
+        return
+    lock_file = project_root / ".dynos" / ".session-tasks.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            data = _load_json(session_tasks_path(project_root))
+            if not isinstance(data, dict) or not isinstance(data.get("sessions"), dict):
+                data = {"sessions": {}}
+            data["sessions"][session_id] = {
+                "task_dir": str(task_dir),
+                "task_id": task_dir.name,
+                "bound_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _atomic_write_json(session_tasks_path(project_root), data)
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
+def lookup_session_task(project_root: Path, session_id: str) -> Path | None:
+    if not session_id:
+        return None
+    data = _load_json(session_tasks_path(project_root.resolve()))
+    if not isinstance(data, dict) or not isinstance(data.get("sessions"), dict):
+        return None
+    entry = data["sessions"].get(session_id)
+    if not isinstance(entry, dict) or not isinstance(entry.get("task_dir"), str):
+        return None
+    task_dir = Path(entry["task_dir"]).resolve()
+    try:
+        task_dir.relative_to(project_root.resolve() / ".dynos")
+    except ValueError:
+        return None
+    if task_dir.exists() and _task_is_non_terminal(task_dir):
+        return task_dir
     return None
 
 

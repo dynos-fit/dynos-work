@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ sys.path.insert(0, str(ROOT / "hooks"))
 
 import actor_identity  # noqa: E402
 import pre_tool_use  # noqa: E402
+from lib_core import _persistent_project_dir  # noqa: E402
 from write_policy import WriteAttempt, decide_write  # noqa: E402
 
 ORCH_SESSION = "session-orchestrator-0001"
@@ -374,6 +376,133 @@ def test_clear_role_expires_grants_and_removes_role_file(project: Path) -> None:
     # Existing bindings untouched: clear-role only reduces privilege.
 
 
+def test_multiple_orchestrator_sessions_remain_pinned(project: Path) -> None:
+    actor_identity.pin_orchestrator(project, {"session_id": "session-main-2"})
+
+    first = actor_identity.read_pin(project, session_id=ORCH_SESSION)
+    second = actor_identity.read_pin(project, session_id="session-main-2")
+    latest = actor_identity.read_pin(project)
+
+    assert first is not None
+    assert first["session_id"] == ORCH_SESSION
+    assert second is not None
+    assert second["session_id"] == "session-main-2"
+    assert latest is not None
+    assert latest["session_id"] == "session-main-2"
+
+
+def test_session_task_binding_is_task_scoped(project: Path) -> None:
+    task_dir = _task_dir(project)
+    other = project / ".dynos" / "task-20260611-002"
+    other.mkdir()
+    (other / "manifest.json").write_text(json.dumps({
+        "task_id": other.name,
+        "stage": "EXECUTION",
+    }))
+
+    actor_identity.bind_session_task(project, ORCH_SESSION, task_dir)
+    actor_identity.bind_session_task(project, "session-main-2", other)
+
+    assert actor_identity.lookup_session_task(project, ORCH_SESSION) == task_dir
+    assert actor_identity.lookup_session_task(project, "session-main-2") == other
+
+
+def test_live_session_state_is_worktree_local_even_when_persistent_state_is_shared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git not available")
+    monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "home"))
+    main = tmp_path / "repo"
+    wt = tmp_path / "repo-wt"
+    main.mkdir()
+    subprocess.run([git, "init"], cwd=main, check=True, capture_output=True, text=True)
+    subprocess.run([git, "config", "user.email", "test@example.com"], cwd=main, check=True)
+    subprocess.run([git, "config", "user.name", "Test User"], cwd=main, check=True)
+    (main / "README.md").write_text("x\n")
+    subprocess.run([git, "add", "README.md"], cwd=main, check=True)
+    subprocess.run([git, "commit", "-m", "init"], cwd=main, check=True, capture_output=True, text=True)
+    subprocess.run(
+        [git, "worktree", "add", "--detach", str(wt), "HEAD"],
+        cwd=main,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert _persistent_project_dir(main) == _persistent_project_dir(wt)
+    assert actor_identity.pin_path(main) != actor_identity.pin_path(wt)
+    assert actor_identity.session_tasks_path(main) != actor_identity.session_tasks_path(wt)
+
+    task_main = main / ".dynos" / "task-20260621-001"
+    task_wt = wt / ".dynos" / "task-20260621-002"
+    for task in (task_main, task_wt):
+        task.mkdir(parents=True)
+        (task / "manifest.json").write_text(json.dumps({"task_id": task.name, "stage": "EXECUTION"}))
+    actor_identity.pin_orchestrator(main, {"session_id": "main-session"})
+    actor_identity.pin_orchestrator(wt, {"session_id": "wt-session"})
+    actor_identity.bind_session_task(main, "main-session", task_main)
+    actor_identity.bind_session_task(wt, "wt-session", task_wt)
+
+    assert actor_identity.lookup_session_task(main, "wt-session") is None
+    assert actor_identity.lookup_session_task(wt, "main-session") is None
+    assert actor_identity.read_pin(main, session_id="wt-session") is None
+    assert actor_identity.read_pin(wt, session_id="main-session") is None
+
+
+def test_worktree_target_path_wins_when_subagent_cwd_points_at_main(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git not available")
+    monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "home"))
+    main = tmp_path / "repo"
+    wt = tmp_path / "repo-wt"
+    main.mkdir()
+    subprocess.run([git, "init"], cwd=main, check=True, capture_output=True, text=True)
+    subprocess.run([git, "config", "user.email", "test@example.com"], cwd=main, check=True)
+    subprocess.run([git, "config", "user.name", "Test User"], cwd=main, check=True)
+    (main / "README.md").write_text("x\n")
+    subprocess.run([git, "add", "README.md"], cwd=main, check=True)
+    subprocess.run([git, "commit", "-m", "init"], cwd=main, check=True, capture_output=True, text=True)
+    subprocess.run(
+        [git, "worktree", "add", "--detach", str(wt), "HEAD"],
+        cwd=main,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    task_main = main / ".dynos" / "task-20260621-001"
+    task_wt = wt / ".dynos" / "task-20260621-002"
+    for task in (task_main, task_wt):
+        task.mkdir(parents=True)
+        (task / "manifest.json").write_text(json.dumps({"task_id": task.name, "stage": "EXECUTION"}))
+    actor_identity.pin_orchestrator(main, {"session_id": "main-session"})
+    actor_identity.pin_orchestrator(wt, {"session_id": "wt-session"})
+    actor_identity.bind_session_task(main, "main-session", task_main)
+    actor_identity.bind_session_task(wt, "wt-session", task_wt)
+    (task_main / "active-segment-role").write_text("planning")
+    (task_wt / "active-segment-role").write_text("audit-security")
+
+    code, err = _run_hook(
+        monkeypatch,
+        session_id="wt-session",
+        tool_name="Write",
+        tool_input={
+            "file_path": str(task_wt / "audit-reports" / "security.json"),
+            "content": "{}",
+        },
+        cwd=main,
+    )
+
+    assert code == 0, err
+    assert actor_identity.lookup_session_task(main, "wt-session") is None
+    assert actor_identity.lookup_session_task(wt, "wt-session") == task_wt
+
+
 @pytest.mark.parametrize(
     ("filename", "roles"),
     [
@@ -397,19 +526,20 @@ def test_ledger_files_not_agent_writable(project: Path, filename: str, roles: li
 
 
 def test_orchestrator_pin_not_agent_writable(project: Path) -> None:
-    pin = project / ".dynos" / "orchestrator-session.json"
-    for role in ("orchestrator", "planning", "backend-executor", "execute-inline"):
-        decision = decide_write(
-            WriteAttempt(
-                role=role,
-                task_dir=_task_dir(project),
-                path=pin,
-                operation="modify",
-                source="agent",
+    for filename in ("orchestrator-session.json", "session-tasks.json"):
+        target = project / ".dynos" / filename
+        for role in ("orchestrator", "planning", "backend-executor", "execute-inline"):
+            decision = decide_write(
+                WriteAttempt(
+                    role=role,
+                    task_dir=_task_dir(project),
+                    path=target,
+                    operation="modify",
+                    source="agent",
+                )
             )
-        )
-        assert decision.allowed is False, f"{role} rewrote the pin"
-        assert "hook-owned" in decision.reason
+            assert decision.allowed is False, f"{role} rewrote {filename}"
+            assert "hook-owned" in decision.reason
 
 
 def test_expired_grant_not_consumable(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

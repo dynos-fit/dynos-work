@@ -11,6 +11,18 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.5] - 2026-06-21
+### Fixed
+- Prevent concurrent dynos-work sessions from sharing project-global active-task and orchestrator-session state by adding session-scoped task bindings and multi-session orchestrator pins.
+- Resolve hook task context from absolute tool target paths before falling back to `cwd`, preventing linked-worktree auditors from inheriting the main worktree's role state when Claude reports an ambiguous subagent cwd.
+- Harden spawn-log and web-tool telemetry hooks so ambiguous multi-task checkouts skip instead of logging to the highest-numbered task, while session bindings and explicit task paths route to the intended worktree task.
+- Avoid token attribution to the wrong task when multiple tasks are active; unbound ambiguous sessions now preserve usage in the orphan token ledger.
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.5`.
+
+---
+
 ## [7.5.4] - 2026-06-19
 ### Changed
 - Inject ruthless self-implicating audit briefs into dynos auditor prompts.

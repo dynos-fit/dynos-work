@@ -197,6 +197,57 @@ def test_no_active_task_dir_exits_zero_silently(tmp_path: Path):
     not _hook_available(HOOK_PATH),
     reason="hooks/agent-spawn-log not present or not executable yet (TDD-first)",
 )
+def test_multiple_active_tasks_do_not_log_to_highest_task(tmp_path: Path):
+    project_root, task_a = _make_task_dir(tmp_path)
+    task_b = project_root / ".dynos" / "task-20260430-998"
+    task_b.mkdir()
+    (task_b / "manifest.json").write_text(json.dumps({"task_id": task_b.name, "stage": "EXECUTION"}))
+    (task_a / "manifest.json").write_text(json.dumps({"task_id": task_a.name, "stage": "EXECUTION"}))
+    payload = {
+        "tool_name": "Agent",
+        "tool_input": {"subagent_type": "audit-security", "prompt": "go"},
+        "cwd": str(project_root),
+    }
+
+    rc = _invoke(payload, phase="pre", cwd=project_root)
+
+    assert rc.returncode == 0
+    assert not (task_a / "spawn-log.jsonl").exists()
+    assert not (task_b / "spawn-log.jsonl").exists()
+
+
+@pytest.mark.skipif(
+    not _hook_available(HOOK_PATH),
+    reason="hooks/agent-spawn-log not present or not executable yet (TDD-first)",
+)
+def test_prompt_task_path_wins_when_cwd_points_elsewhere(tmp_path: Path):
+    main = tmp_path / "main"
+    wt = tmp_path / "worktree"
+    main_task = main / ".dynos" / "task-20260430-001"
+    wt_task = wt / ".dynos" / "task-20260430-002"
+    for task in (main_task, wt_task):
+        task.mkdir(parents=True)
+        (task / "manifest.json").write_text(json.dumps({"task_id": task.name, "stage": "EXECUTION"}))
+    payload = {
+        "tool_name": "Agent",
+        "tool_input": {
+            "subagent_type": "audit-security",
+            "prompt": f"Write report under {wt_task}/audit-reports/security.json",
+        },
+        "cwd": str(main),
+    }
+
+    rc = _invoke(payload, phase="pre", cwd=main)
+
+    assert rc.returncode == 0, rc.stderr
+    assert not (main_task / "spawn-log.jsonl").exists()
+    assert (wt_task / "spawn-log.jsonl").exists()
+
+
+@pytest.mark.skipif(
+    not _hook_available(HOOK_PATH),
+    reason="hooks/agent-spawn-log not present or not executable yet (TDD-first)",
+)
 def test_unknown_phase_argument_exits_one(tmp_path: Path):
     project_root, _ = _make_task_dir(tmp_path)
     payload = {"tool_name": "Agent", "tool_input": {"subagent_type": "x"}, "cwd": str(project_root)}

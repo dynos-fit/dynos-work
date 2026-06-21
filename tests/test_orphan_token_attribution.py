@@ -23,6 +23,7 @@ from unittest import mock
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
+import actor_identity  # noqa: E402
 
 
 def _make_transcript(tmp_path: Path, input_tokens: int, output_tokens: int) -> Path:
@@ -153,3 +154,54 @@ class TestOrphanTokenCapture:
         assert token_log.exists(), "fresh task should receive the attribution"
         data = json.loads(token_log.read_text())
         assert data["total"] == 150
+
+    def test_multiple_active_tasks_without_session_binding_are_orphaned(self, tmp_path: Path):
+        """A global active-task pointer must not steal tokens when another
+        active concurrent task exists and no session binding is available."""
+        task_a = _make_stale_task(tmp_path, "task-20260417-001", age_hours=0.001)
+        task_b = _make_stale_task(tmp_path, "task-20260417-002", age_hours=0.001)
+        (tmp_path / ".dynos" / "active-task.json").write_text(json.dumps({
+            "task_id": task_b.name,
+            "task_dir": str(task_b),
+            "stage": "EXECUTION",
+        }))
+        transcript = _make_transcript(tmp_path, input_tokens=200, output_tokens=25)
+
+        from lib_tokens_hook import main
+        with mock.patch("sys.argv", [
+            "lib_tokens_hook.py",
+            "--transcript", str(transcript),
+            "--agent-type", "dynos-work:executor",
+            "--root", str(tmp_path),
+        ]):
+            assert main() == 0
+
+        assert not (task_a / "token-usage.json").exists()
+        assert not (task_b / "token-usage.json").exists()
+        assert (tmp_path / ".dynos" / "orphan-tokens.jsonl").exists()
+
+    def test_session_binding_attributes_tokens_to_bound_task(self, tmp_path: Path):
+        task_a = _make_stale_task(tmp_path, "task-20260417-001", age_hours=0.001)
+        task_b = _make_stale_task(tmp_path, "task-20260417-002", age_hours=0.001)
+        (tmp_path / ".dynos" / "active-task.json").write_text(json.dumps({
+            "task_id": task_b.name,
+            "task_dir": str(task_b),
+            "stage": "EXECUTION",
+        }))
+        session_id = "session-A"
+        actor_identity.bind_session_task(tmp_path, session_id, task_a)
+        transcript = _make_transcript(tmp_path, input_tokens=300, output_tokens=40)
+
+        from lib_tokens_hook import main
+        with mock.patch("sys.argv", [
+            "lib_tokens_hook.py",
+            "--transcript", str(transcript),
+            "--agent-type", "dynos-work:executor",
+            "--root", str(tmp_path),
+            "--session-id", session_id,
+        ]):
+            assert main() == 0
+
+        assert (task_a / "token-usage.json").exists()
+        assert not (task_b / "token-usage.json").exists()
+        assert not (tmp_path / ".dynos" / "orphan-tokens.jsonl").exists()

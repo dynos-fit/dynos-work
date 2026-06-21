@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks"))
 
 import pre_tool_use as _ptu  # noqa: E402
+import actor_identity  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,48 @@ def test_find_task_dir_from_ancestors_pointer_calibrated_returns_none(tmp_path: 
     )
 
     assert _ptu._find_task_dir_from_ancestors(project) is None
+
+
+def test_find_task_dir_from_ancestors_refuses_global_pointer_with_multiple_active_tasks(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    dynos = project / ".dynos"
+    task_a = dynos / "task-20260617-001"
+    task_b = dynos / "task-20260617-002"
+    _write_manifest(task_a, "EXECUTION")
+    _write_manifest(task_b, "PLANNING")
+    (dynos / "active-task.json").write_text(
+        json.dumps({"task_id": task_b.name, "task_dir": str(task_b), "stage": "PLANNING"})
+    )
+
+    assert _ptu._find_task_dir_from_ancestors(project) is None
+
+
+def test_pre_tool_use_session_task_binding_wins_over_global_pointer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    dynos = project / ".dynos"
+    task_a = dynos / "task-20260617-001"
+    task_b = dynos / "task-20260617-002"
+    _write_manifest(task_a, "EXECUTION")
+    _write_manifest(task_b, "PLANNING")
+    (dynos / "active-task.json").write_text(
+        json.dumps({"task_id": task_b.name, "task_dir": str(task_b), "stage": "PLANNING"})
+    )
+    session_id = "session-A"
+    actor_identity.pin_orchestrator(project, {"session_id": session_id})
+    actor_identity.bind_session_task(project, session_id, task_a)
+    monkeypatch.delenv("DYNOS_TASK_DIR", raising=False)
+    monkeypatch.delenv("DYNOS_ROLE", raising=False)
+    payload = {
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(task_a / "execution-log.md"), "content": "x"},
+        "cwd": str(project),
+        "session_id": session_id,
+    }
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(payload)))
+
+    assert _ptu.main() == 0
 
 
 def test_find_task_dir_from_ancestors_fallback_skips_calibrated(tmp_path: Path) -> None:

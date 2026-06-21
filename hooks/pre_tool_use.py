@@ -136,12 +136,89 @@ def _active_task_from_pointer(dynos: Path) -> Path | None:
     return None
 
 
+def _active_tasks_from_manifests(dynos: Path) -> list[Path]:
+    tasks: list[Path] = []
+    try:
+        candidates = sorted(dynos.glob("task-*"), reverse=True)
+        for candidate in candidates:
+            if _task_is_non_terminal(candidate):
+                tasks.append(candidate)
+    except Exception:
+        pass
+    return tasks
+
+
+def _task_dir_from_ancestor_path(cwd: Path) -> Path | None:
+    current = cwd.resolve()
+    for ancestor in [current, *current.parents]:
+        if ancestor.parent.name == ".dynos" and ancestor.name.startswith("task-"):
+            if _task_is_non_terminal(ancestor):
+                return ancestor
+            return None
+    return None
+
+
+def _project_root_from_ancestors(cwd: Path) -> Path | None:
+    current = cwd.resolve()
+    for ancestor in [current, *current.parents]:
+        if (ancestor / ".dynos").is_dir():
+            return ancestor
+    return None
+
+
+def _task_dir_from_path(path: Path) -> Path | None:
+    try:
+        current = path.resolve()
+    except Exception:
+        return None
+    for ancestor in [current, *current.parents]:
+        if ancestor.parent.name == ".dynos" and ancestor.name.startswith("task-"):
+            if _task_is_non_terminal(ancestor):
+                return ancestor
+            return None
+    return None
+
+
+def _find_task_dir_from_tool_target(tool_name: str, tool_input: object, cwd: Path) -> Path | None:
+    """Infer task context from the actual write target when cwd is unreliable."""
+    raw_paths: list[str] = []
+    if isinstance(tool_input, dict):
+        if tool_name in ("Write", "Edit"):
+            raw = tool_input.get("file_path") or tool_input.get("path")
+            if isinstance(raw, str):
+                raw_paths.append(raw)
+        elif tool_name == "MultiEdit":
+            edits = tool_input.get("edits", [])
+            if isinstance(edits, list):
+                for edit in edits:
+                    if isinstance(edit, dict) and isinstance(edit.get("file_path"), str):
+                        raw_paths.append(edit["file_path"])
+        elif tool_name == "Bash":
+            command = tool_input.get("command", "")
+            if isinstance(command, str):
+                raw_paths.extend(_extract_bash_destinations(command))
+
+    for raw in raw_paths:
+        try:
+            target = _resolve_path(raw, cwd)
+        except Exception:
+            continue
+        task_dir = _task_dir_from_path(target)
+        if task_dir is not None:
+            return task_dir
+    return None
+
+
 def _find_task_dir_from_ancestors(cwd: Path) -> Path | None:
-    """Walk upward from cwd, returning only a genuinely active task."""
+    """Walk upward from cwd, returning only an unambiguous active task."""
+    direct_task = _task_dir_from_ancestor_path(cwd)
+    if direct_task is not None:
+        return direct_task
     current = cwd.resolve()
     for ancestor in [current, *current.parents]:
         dynos = ancestor / ".dynos"
         if dynos.is_dir():
+            active_tasks = _active_tasks_from_manifests(dynos)
             pointer_path = dynos / "active-task.json"
             if pointer_path.exists():
                 try:
@@ -152,14 +229,11 @@ def _find_task_dir_from_ancestors(cwd: Path) -> Path | None:
                     if isinstance(pointer, dict) and not pointer.get("task_id"):
                         return None
                     task_dir = _active_task_from_pointer(dynos)
-                    return task_dir
-            try:
-                candidates = sorted(dynos.glob("task-*"), reverse=True)
-                for candidate in candidates:
-                    if _task_is_non_terminal(candidate):
-                        return candidate
-            except Exception:
-                pass
+                    if task_dir is not None and len(active_tasks) <= 1:
+                        return task_dir
+                    return None
+            if len(active_tasks) == 1:
+                return active_tasks[0]
             return None
     return None
 
@@ -680,29 +754,61 @@ def main() -> int:
         except ImportError:
             pass
 
-    # Resolve role from environment
-    role_from_env = os.environ.get("DYNOS_ROLE", "").strip()
-
-    # Resolve task_dir from environment, falling back to ancestor discovery
-    task_dir_from_env = os.environ.get("DYNOS_TASK_DIR", "").strip()
-    if task_dir_from_env:
-        task_dir: Path | None = Path(task_dir_from_env).resolve()
-    else:
-        task_dir = _find_task_dir_from_ancestors(cwd)
-
     # Actor identity inputs (D3): the harness-provided session_id and the
     # SessionStart-pinned orchestrator identity. Neither is agent-writable.
     session_id = str(payload.get("session_id") or "").strip()
+
+    # Resolve role from environment
+    role_from_env = os.environ.get("DYNOS_ROLE", "").strip()
+
+    # Resolve task_dir from explicit task context first, then from the
+    # hook-owned session binding, and only then from unambiguous ancestors.
+    # The old project-global active-task pointer is deliberately not trusted
+    # when multiple active tasks exist.
+    task_dir_from_env = os.environ.get("DYNOS_TASK_DIR", "").strip()
+    project_root = _project_root_from_ancestors(cwd)
+    if task_dir_from_env:
+        task_dir: Path | None = Path(task_dir_from_env).resolve()
+        project_root = task_dir.parent.parent
+    else:
+        task_dir = None
+        target_task_dir = _find_task_dir_from_tool_target(tool_name, tool_input, cwd)
+        if target_task_dir is not None:
+            task_dir = target_task_dir
+            project_root = task_dir.parent.parent
+        if task_dir is None and project_root is not None and session_id:
+            try:
+                import actor_identity as _ai_task
+                bound_task = _ai_task.lookup_session_task(project_root, session_id)
+                if bound_task is not None:
+                    task_dir = bound_task
+            except Exception:
+                pass
+        if task_dir is None:
+            task_dir = _find_task_dir_from_ancestors(cwd)
+            if task_dir is not None:
+                project_root = task_dir.parent.parent
+
+    if task_dir is not None and session_id:
+        try:
+            import actor_identity as _ai_bind
+            _ai_bind.bind_session_task(task_dir.parent.parent, session_id, task_dir)
+        except Exception:
+            pass
+
     actor_identity = None
     pin = None
+    latest_pin = None
     if task_dir is not None:
         try:
             import actor_identity as _ai
             actor_identity = _ai
-            pin = _ai.read_pin(task_dir.parent.parent)
+            pin = _ai.read_pin(task_dir.parent.parent, session_id=session_id)
+            latest_pin = _ai.read_pin(task_dir.parent.parent)
         except Exception:
             actor_identity = None
             pin = None
+            latest_pin = None
 
     # Role resolution chain:
     # (a) DYNOS_ROLE env var — highest priority (daemon/scheduler/tests)
@@ -731,8 +837,8 @@ def main() -> int:
         # Steps (b)/(c): only meaningful when both a task dir and a pin
         # exist — without a pin we cannot distinguish actors and fall back
         # to the legacy chain wholesale (today's behavior, no regression).
-        if task_dir is not None and actor_identity is not None and pin and session_id:
-            if session_id == pin.get("session_id"):
+        if task_dir is not None and actor_identity is not None and latest_pin and session_id:
+            if pin is not None and session_id == pin.get("session_id"):
                 # Orchestrator session. Strict D3 (subagent_isolation=true):
                 # never adopt a stamped role — prevents self-escalation.
                 # Under a non-isolating harness like Claude Code (default),

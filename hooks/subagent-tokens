@@ -14,6 +14,7 @@ TRANSCRIPT_PATH=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys
 AGENT_TYPE=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('agent_type', d.get('subagent_type', 'unknown')))" 2>/dev/null || true)
 AGENT_DESC=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('description', '')[:80])" 2>/dev/null || true)
 CWD=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('cwd', ''))" 2>/dev/null || true)
+SESSION_ID=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('session_id', ''))" 2>/dev/null || true)
 
 # Need transcript path and cwd
 [ -z "$TRANSCRIPT_PATH" ] && exit 0
@@ -29,4 +30,5 @@ PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/lib_tokens_hook.
   --transcript "$TRANSCRIPT_PATH" \
   --agent-type "$AGENT_TYPE" \
   --agent-desc "$AGENT_DESC" \
-  --root "$CWD" 2>/dev/null || true
+  --root "$CWD" \
+  --session-id "$SESSION_ID" 2>/dev/null || true
