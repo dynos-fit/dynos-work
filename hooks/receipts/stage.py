@@ -1254,10 +1254,21 @@ def receipt_audit_done(
         _sidecar_tier = None  # No sidecar-derived tier available at this call site.
     host, tier, resolved_model = _compute_spawn_host_fields(task_dir, model_used, _sidecar_tier)
 
-    # Determine receipt step name: use shard_step_name when ensemble_context=True
-    # and shard_step_name is provided; otherwise fall back to auditor_name.
-    # Spawn-log cross-check (above) always keys on auditor_name — not shard_step_name.
-    if ensemble_context and shard_step_name is not None:
+    # Ensemble DONE accounting is per model. The DONE gate reads
+    # receipts/audit-{auditor}-{model}.json, so reject ambiguous or
+    # already-prefixed shard names at the writer boundary.
+    if ensemble_context:
+        if not isinstance(model_used, str) or not model_used:
+            raise ValueError(
+                f"audit-{auditor_name}: ensemble_context requires model_used"
+            )
+        expected_shard_step_name = f"{auditor_name}-{model_used}"
+        if shard_step_name != expected_shard_step_name:
+            raise ValueError(
+                f"audit-{auditor_name}: ensemble shard_step_name must be "
+                f"{expected_shard_step_name!r} so the receipt is named "
+                f"audit-{expected_shard_step_name}.json"
+            )
         receipt_step_name = f"audit-{shard_step_name}"
     else:
         receipt_step_name = f"audit-{auditor_name}"

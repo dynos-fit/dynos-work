@@ -140,6 +140,8 @@ For `route_mode == "generic"` the `--final-envelope` argument may be omitted.
 
 `"$DYNOS" ctl audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. `run-audit-setup` writes the `audit-routing` receipt from the deterministic audit plan before prompt injection; the per-auditor `audit-receipt` is the sidecar proof for spawned learned auditors.
 
+For ensemble auditors, write one receipt per model run. Add `--ensemble-context --shard-step-name "{auditor_name}-{model_used}"` to each `audit-receipt` call so the file is named `receipts/audit-{auditor_name}-{model_used}.json`. Do not include the `audit-` prefix in `--shard-step-name`; `audit-{auditor_name}` collapsed receipts do not satisfy the DONE gate for ensemble accounting.
+
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
 **Ensemble Voting:** If the router plan has `"ensemble": true` for an auditor, follow this sequential cascade instead of a single spawn:

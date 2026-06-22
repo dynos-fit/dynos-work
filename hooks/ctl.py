@@ -7233,7 +7233,7 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--shard-step-name",
         dest="shard_step_name",
         default=None,
-        help="Shard step name for attempt-isolated audit receipts (e.g. 'sc-<model>-attempt-1').",
+        help="Ensemble shard step name without audit- prefix; must be '<auditor>-<model>'.",
     )
     audit_receipt_parser.add_argument(
         "--stage",

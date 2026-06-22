@@ -612,16 +612,13 @@ def _check_ensemble_voting(
             )
             continue
 
-        # Gather per-model receipts: prefer per-model shard receipts, fall
-        # back to single-receipt schema via model_used match.
-        single_receipt = read_receipt(task_dir, f"audit-{name}", min_version=2)
+        # Gather per-model receipts. Ensemble accounting is intentionally
+        # per model: receipts/audit-{auditor}-{model}.json.
         per_model: dict[str, dict] = {}
         for model in voting_models:
             shard = read_receipt(task_dir, f"audit-{name}-{model}", min_version=2)
             if shard is not None:
                 per_model[model] = shard
-            elif single_receipt is not None and single_receipt.get("model_used") == model:
-                per_model[model] = single_receipt
 
         # Escalation receipt lookup
         escalation_receipt: dict | None = None
@@ -629,8 +626,6 @@ def _check_ensemble_voting(
             shard = read_receipt(task_dir, f"audit-{name}-{escalation_model}", min_version=2)
             if shard is not None:
                 escalation_receipt = shard
-            elif single_receipt is not None and single_receipt.get("model_used") == escalation_model:
-                escalation_receipt = single_receipt
 
         # Validate every receipt's model_used ∈ allowed_models.
         all_receipts: list[tuple[str, dict]] = []
@@ -753,8 +748,8 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
       c) Ensemble voting (AC 7): when a routing entry has
          ``ensemble: true``, look for per-model receipts
          ``audit-{name}-{model}`` at min_version=2 for every model in
-         ``voting_models``. Fall back to single-receipt
-         ``audit-{name}`` with ``model_used == <model>`` for compat.
+         ``voting_models``. A collapsed ``audit-{name}`` receipt is not
+         accepted for ensemble accounting.
          Accept iff EITHER every voting-model receipt reports
          ``blocking_count == 0`` OR an escalation receipt exists whose
          ``model_used == escalation_model``. Each found receipt's

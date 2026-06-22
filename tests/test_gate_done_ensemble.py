@@ -200,3 +200,23 @@ def test_ensemble_missing_voting_model_receipt_refuses(tmp_path: Path, monkeypat
     gaps = require_receipts_for_done(td)
     assert any("sonnet" in g and ("missing" in g or "escalation" in g) for g in gaps), \
         f"expected missing-model gap in {gaps}"
+
+
+def test_ensemble_collapsed_single_receipt_refuses(tmp_path: Path, monkeypatch):
+    """Ensemble accounting requires audit-{auditor}-{model}, not audit-{auditor}."""
+    _mock_empty_registry(monkeypatch)
+    td = _setup_task(tmp_path)
+    receipt_audit_routing(td, [{
+        "name": "sec",
+        "action": "spawn",
+        "ensemble": True,
+        "ensemble_voting_models": ["haiku", "sonnet"],
+        "ensemble_escalation_model": "opus",
+        "route_mode": "generic",
+        "agent_path": None,
+        "injected_agent_sha256": None,
+    }])
+    _write_audit_receipt(td, "audit-sec", model_used="haiku", blocking_count=0)
+    gaps = require_receipts_for_done(td)
+    assert any("haiku" in g and "sonnet" in g for g in gaps), \
+        f"expected per-model receipt gap, got {gaps}"

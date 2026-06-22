@@ -225,3 +225,26 @@ def test_ensemble_shard_receipt_spawn_log_keys_on_auditor_name(tmp_path: Path) -
             shard_step_name=SHARD_STEP_HAIKU,  # noqa: model-literal
             tier=None,
         )
+
+
+def test_ensemble_shard_receipt_rejects_audit_prefixed_name(tmp_path: Path) -> None:
+    """Prevent audit-audit-* receipts by refusing pre-prefixed shard names."""
+    task_dir = _create_task_dir(tmp_path)
+    _write_spawn_log(task_dir, AUDITOR_NAME)
+    report_haiku = _write_report(task_dir, "sc-haiku-attempt-1.json", blocking_count=0)  # noqa: model-literal
+
+    with pytest.raises(ValueError, match="shard_step_name must be"):
+        receipt_audit_done(
+            task_dir,
+            auditor_name=AUDITOR_NAME,
+            model_used=MODEL_HAIKU,  # noqa: model-literal
+            finding_count=0,
+            blocking_count=0,
+            report_path=str(report_haiku),
+            route_mode="generic",
+            agent_path=None,
+            injected_agent_sha256=None,
+            ensemble_context=True,
+            shard_step_name=f"audit-{SHARD_STEP_HAIKU}",  # noqa: model-literal
+            tier=None,
+        )

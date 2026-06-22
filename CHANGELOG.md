@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.6] - 2026-06-21
+### Fixed
+- Enforce per-model ensemble audit receipt accounting by requiring `audit-{auditor}-{model}` shard receipts, rejecting pre-prefixed `audit-*` shard names, and documenting the required audit skill invocation.
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.6`.
+
+---
+
 ## [7.5.5] - 2026-06-21
 ### Fixed
 - Prevent concurrent dynos-work sessions from sharing project-global active-task and orchestrator-session state by adding session-scoped task bindings and multi-session orchestrator pins.
