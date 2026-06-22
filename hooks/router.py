@@ -2011,6 +2011,62 @@ def _build_ruthless_audit_brief(root: Path, task_dir: Path, plan: dict, auditor_
     return "\n".join(lines)
 
 
+# Tool-call floors for auditor spawns, keyed by either model-family name
+# or routing-tier name (fast/balanced/deep). Mirrors
+# lib_tool_budget.STATIC_CAPS_BY_MODEL / STATIC_CAPS_BY_TIER so the auditor
+# prompt advertises the same numbers the budget arithmetic uses elsewhere.
+_AUDIT_TOOL_BUDGET_BY_LABEL: dict[str, int] = {
+    "haiku": 15, "sonnet": 20, "opus": 25,  # noqa: model-literal
+    "fast": 15, "balanced": 20, "deep": 25,
+}
+
+
+def _audit_tool_budget(model: "str | None") -> int:
+    """Return the tool-call budget advertised to an auditor for this spawn.
+
+    Accepts a model-family name, a routing-tier name, or None. Unknown or
+    null labels fall back to the balanced floor (20) — never lower, so the
+    write-first checkpoint never collapses to an impossibly small value.
+    """
+    if model and model in _AUDIT_TOOL_BUDGET_BY_LABEL:
+        return _AUDIT_TOOL_BUDGET_BY_LABEL[model]
+    return 20
+
+
+def _build_audit_budget_block(auditor_name: str, model: "str | None") -> str:
+    """Deterministic write-first turn-budget block appended to EVERY auditor.
+
+    Auditors run under a hard ``maxTurns`` cap. The recurring failure mode is
+    an auditor that reads the entire diff before writing and is force-stopped
+    with NO report on disk — which counts as an audit failure and forces a
+    re-spawn. This block is injected for every auditor regardless of whether
+    its agent file carries a Turn Budget Discipline section, so the discipline
+    can never drift out of an individual auditor file again. The numbers track
+    the model/tier the router selected for this spawn.
+    """
+    budget = _audit_tool_budget(model)
+    checkpoint = math.ceil(budget / 3)
+    return (
+        "\n\n## Turn Budget Discipline (mandatory — injected)\n"
+        f"You run under a hard limit of about **{budget}** tool calls and are "
+        "force-terminated when you reach it. There are no extra turns. Auditors "
+        "that read the whole diff before writing routinely hit this limit and "
+        "produce NO report — that is an audit failure and forces a re-spawn.\n\n"
+        "1. Your FIRST or SECOND tool call MUST create your audit-report JSON "
+        "file (the path named in your output contract) containing a "
+        "`## Progress Ledger` with `### Done`, `### In-Flight`, and `### Next` "
+        "subsections and `status=\"partial\"`. Write this skeleton BEFORE "
+        "reading the diff in depth.\n"
+        "2. Update that file incrementally as you confirm findings. Work that is "
+        "not on disk does not exist.\n"
+        f"3. By tool call {checkpoint} the file must already hold real content "
+        "(the Progress Ledger plus any findings so far).\n"
+        "4. When within 2 tool calls of the limit, STOP investigating and "
+        "finalize the report with `status=\"complete\"`. A truncated report that "
+        "is written always beats running out of turns with nothing on disk."
+    )
+
+
 def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     """Inject learned-auditor instructions into a base auditor prompt.
 
@@ -2136,6 +2192,13 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
                 auditor_name=auditor_name,
                 error=str(exc),
             )
+
+    # Deterministic write-first turn-budget block (every auditor, every model).
+    # Prefer the model the router selected for this spawn; fall back to the
+    # plan entry's model. Injected last so it survives all the prepended
+    # framing and is the final, most salient instruction the auditor reads.
+    spawn_model = args.model if args.model not in (None, "default") else target.get("model")
+    final_text = final_text.rstrip() + _build_audit_budget_block(auditor_name, spawn_model)
 
     printed_bytes = (final_text + "\n").encode("utf-8")
 

@@ -169,3 +169,33 @@ def test_unknown_auditor_exits_one(tmp_path: Path):
     project, plan_path = _setup(tmp_path, route_mode="generic", agent_path=None)
     r = _run(project, plan_path, auditor="ghost-auditor")
     assert r.returncode == 1
+
+
+@pytest.mark.parametrize("model,budget,checkpoint", [
+    ("haiku", 15, 5),
+    ("sonnet", 20, 7),
+    ("opus", 25, 9),
+])
+def test_turn_budget_block_injected_for_every_model(tmp_path: Path, model, budget, checkpoint):
+    """Every auditor spawn — regardless of agent file — must receive the
+    deterministic write-first turn-budget block. Regression for auditors that
+    ran out of turns before writing any report."""
+    project, plan_path = _setup(tmp_path, route_mode="generic", agent_path=None)
+    r = _run(project, plan_path, model=model)
+    assert r.returncode == 0, r.stderr
+    assert "## Turn Budget Discipline (mandatory — injected)" in r.stdout
+    assert f"about **{budget}** tool calls" in r.stdout
+    assert f"By tool call {checkpoint} the file must already hold real content" in r.stdout
+    # It must be the trailing (most salient) instruction the auditor reads.
+    assert r.stdout.rstrip().endswith(
+        "A truncated report that is written always beats running out of turns "
+        "with nothing on disk."
+    )
+
+
+def test_turn_budget_block_present_when_model_unset(tmp_path: Path):
+    """Null/default model falls back to the balanced floor, never lower."""
+    project, plan_path = _setup(tmp_path, route_mode="generic", agent_path=None)
+    r = _run(project, plan_path, model=None)
+    assert r.returncode == 0, r.stderr
+    assert "about **20** tool calls" in r.stdout

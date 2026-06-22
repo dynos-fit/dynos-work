@@ -11,6 +11,39 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.8] - 2026-06-22
+### Fixed
+- Auditors no longer run out of turns before writing their report. The auditor
+  prompt builder (`router.py audit-inject-prompt`) now deterministically
+  appends a write-first "Turn Budget Discipline" block to **every** auditor
+  spawn — sized to the selected model/tier (15 / 20 / 25 tool calls) —
+  instructing the auditor to write its report skeleton plus a Progress Ledger
+  before reading the diff and to finalize a (possibly truncated) report rather
+  than hit the `maxTurns` cap with nothing on disk. Previously only the
+  executor prompt builder injected this; auditors relied on a per-file section
+  that 16 of 20 auditor agents were missing, so sonnet/haiku auditors
+  (architecture, test-strategy, docs-accuracy, …) routinely died before
+  writing and had to be re-spawned.
+- Normalized all 20 auditor agent files to carry the `## Turn Budget
+  Discipline` and `## Progress Ledger` sections, so standalone spawns that
+  bypass the injector get the same discipline.
+
+### Removed
+- Deleted the dead per-session write-first watchdog (`pre_tool_use.py
+  ::_run_watchdog` and `_watchdog_*` helpers) and the orphaned `ctl spawn-prep`
+  command (plus its constants, argparser, and the `clear-role` attempt-stripping
+  block). The watchdog could never fire: the audit path arms grants via `ctl
+  stamp-role`, which never sets `expected_artifact`/`budget`, and grants are not
+  consumed under the shared-session actor-resolution path, so it always
+  fail-opened. `spawn-prep` (the only writer of those grant fields and the
+  report skeleton) had zero callers. Simplified `actor_identity.append_grant`
+  to drop the now-unused `expected_artifact`/`attempt`/`budget` kwargs, and
+  updated `skills/audit/SKILL.md` to stop documenting a safety net that did not
+  exist. Removed the obsolete `test_watchdog.py`, `test_spawn_prep.py`,
+  `test_ctl_spawn_prep.py`, and `test_pre_tool_use.py`.
+
+---
+
 ## [7.5.7] - 2026-06-22
 ### Fixed
 - Task-id allocation is now collision-resistant across concurrent worktrees.

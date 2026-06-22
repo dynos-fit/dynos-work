@@ -69,15 +69,17 @@ This command reads `manifest.json`, derives the audit plan, writes `.dynos/task-
 
 When spawning auditors, tell them to attack the implementation, not narrate it. Favor findings with proof over summaries with tone.
 
-## Auditor Prompt Discipline (default fallback)
+## Auditor Prompt Discipline
 
-For any auditor that does NOT have a `## Turn Budget Discipline` section in its agent file, the orchestrator applies these defaults when constructing the spawn prompt:
+`router.py audit-inject-prompt` deterministically appends a write-first `## Turn Budget Discipline` block to **every** auditor spawn, sized to the spawn's model/tier (15 / 20 / 25 tool calls). The orchestrator does not need to construct or inject these instructions by hand — they are guaranteed to be in the prompt the router prints. Each spawned auditor is therefore told to:
 
-- Final message MUST contain only a JSON code block matching the canonical audit-report schema. No prose, no commentary, no markdown around the JSON.
-- Tool-use budget: fast ≤ 15, balanced ≤ 20, deep ≤ 25 tool uses.
-- When within 3 tool uses of the budget, stop and emit the report.
+- Write its audit-report file (skeleton + a `## Progress Ledger` with `### Done`, `### In-Flight`, `### Next`, and `status="partial"`) as its FIRST or SECOND tool call, before reading the diff in depth, and update it incrementally.
+- Emit only the canonical audit-report JSON envelope as its final message.
+- When within 2 tool calls of its budget, stop investigating and finalize the report with `status="complete"` — a truncated-but-written report beats hitting the `maxTurns` cap with nothing on disk.
 
-**Auditor Durability and Watchdog Discipline:** All auditors maintain a `## Progress Ledger` section in their artifact with subsections `### Done`, `### In-Flight`, and `### Next`. Set `status="partial"` until complete, then `status="complete"` on the final write. If an auditor fails to update its skeleton (artifact + Progress Ledger) by `ceil(budget/3)` tool calls, the watchdog will emit an instructional deny on the next spawn. Partial reports (status="partial" with ledger content) are excluded from gating decisions but are surfaced to repair planning as advisory context.
+All 20 auditor agent files also carry these sections directly, so standalone spawns that bypass the injector get the same discipline. Partial reports (`status="partial"` with ledger content) are excluded from gating decisions but are surfaced to repair planning as advisory context.
+
+> Note: there is no harness-level write-first watchdog enforcing the above. The discipline is prompt-level (injected + per-file). The previously documented `pre_tool_use.py` write-first watchdog was removed in 7.5.8 — it never fired (audit grants never carried `expected_artifact`/`budget`, and grants are not consumed under the shared-session resolution path), so it gave a false sense of enforcement.
 
 For each auditor in the plan:
 - If `action: "skip"`: log `{timestamp} [SKIP] {name} — {reason}` and do not spawn
