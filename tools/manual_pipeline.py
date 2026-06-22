@@ -58,19 +58,15 @@ def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subproce
 
 
 def generate_task_id(root: Path) -> str:
-    prefix = datetime.now().strftime("task-%Y%m%d-")
-    dynos_dir = root / ".dynos"
-    dynos_dir.mkdir(parents=True, exist_ok=True)
-    existing = {
-        path.name
-        for path in dynos_dir.glob(f"{prefix}*")
-        if path.is_dir() and path.name.startswith(prefix)
-    }
-    for idx in range(1, 1000):
-        candidate = f"{prefix}{idx:03d}"
-        if candidate not in existing:
-            return candidate
-    raise RuntimeError(f"could not allocate task id for prefix {prefix}")
+    # Delegate to the shared allocator so this tool and ctl.py agree on the id
+    # format and the UTC date segment, and so the dir is claimed atomically with
+    # entropy rather than via a local-only counter that collides across
+    # worktrees. allocate_task_id creates the dir; create_task's later
+    # mkdir(exist_ok=True) is then a harmless no-op.
+    from lib_core import allocate_task_id  # noqa: PLC0415
+
+    task_id, _task_dir = allocate_task_id(root / ".dynos")
+    return task_id
 
 
 def ensure_project_bootstrap(root: Path) -> list[str]:

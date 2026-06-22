@@ -476,23 +476,27 @@ describe("POST /api/daemon/:action", () => {
 // ============================================================
 describe("path traversal prevention", () => {
   it("rejects task IDs that do not match the expected pattern", () => {
-    const validPattern = /^task-\d{8}-\d{3}$/;
+    const validPattern = /^task-\d{8}-\d{3}(?:-[0-9a-f]+)?$/;
 
-    // Valid task IDs
+    // Valid task IDs (legacy unsuffixed and new entropy-suffixed)
     expect(validPattern.test("task-20260406-001")).toBe(true);
     expect(validPattern.test("task-20260101-999")).toBe(true);
+    expect(validPattern.test("task-20260622-001-deadbeef")).toBe(true);
 
     // Malicious task IDs - path traversal attempts
     expect(validPattern.test("../../../etc/passwd")).toBe(false);
     expect(validPattern.test("task-20260406-001/../../etc")).toBe(false);
     expect(validPattern.test("task-20260406-001; rm -rf /")).toBe(false);
+    // The optional suffix must not become a traversal foothold.
+    expect(validPattern.test("task-20260622-001-../../etc")).toBe(false);
+    expect(validPattern.test("task-20260622-001-DEAD/beef")).toBe(false);
     expect(validPattern.test("")).toBe(false);
     expect(validPattern.test("task-abc-001")).toBe(false);
   });
 
   it("returns 400 for path traversal attempts in task ID", () => {
     const maliciousId = "../../../etc/passwd";
-    const validPattern = /^task-\d{8}-\d{3}$/;
+    const validPattern = /^task-\d{8}-\d{3}(?:-[0-9a-f]+)?$/;
     const isValid = validPattern.test(maliciousId);
     expect(isValid).toBe(false);
     // Expected response: 400 { error: "Invalid task ID" }

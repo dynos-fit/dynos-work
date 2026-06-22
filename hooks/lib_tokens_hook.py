@@ -52,7 +52,10 @@ def _attribution_window_seconds() -> float:
 def _active_tasks_from_manifests(dynos: Path) -> list[tuple[float, Path]]:
     candidates: list[tuple[float, Path]] = []
     for td in dynos.iterdir():
-        if not td.is_dir() or not re.match(r"task-\d{8}-\d{3}$", td.name):
+        # Accept the optional ``-<hex>`` entropy suffix added to task ids for
+        # cross-worktree collision resistance, while still matching legacy
+        # ``task-YYYYMMDD-NNN`` dirs.
+        if not td.is_dir() or not re.match(r"task-\d{8}-\d{3}(?:-[0-9a-f]+)?$", td.name):
             continue
         manifest_path = td / "manifest.json"
         if not manifest_path.exists():
