@@ -11,6 +11,24 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.9] - 2026-06-22
+### Fixed
+- Ensemble DONE gate now binds escalation on `finding_count`, not just
+  `blocking_count`. The cascade protocol escalates to the deep tier (opus) on
+  **any** voting-model finding — a non-blocking nit at haiku still warrants opus
+  confirmation — but `_check_ensemble_voting` (`lib_core.py`) previously accepted
+  a clean-ish ensemble whenever every voting receipt was zero-*blocking*. That
+  left a seam: an auditor with non-blocking haiku findings could be run at sonnet
+  (or skip escalation entirely) and still pass the gate, silently dropping the
+  protocol-required opus shard while the prose rule was satisfied only on paper.
+  The gate now requires an opus escalation receipt whenever any voting-model
+  receipt reports `finding_count != 0`, so the documented cascade is enforced by
+  the harness instead of left to the spawning agent's discretion under token
+  pressure. Added regression coverage for the non-blocking-finding path
+  (`test_gate_done_ensemble.py`).
+
+---
+
 ## [7.5.8] - 2026-06-22
 ### Fixed
 - Auditors no longer run out of turns before writing their report. The auditor

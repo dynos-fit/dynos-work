@@ -701,22 +701,28 @@ def _check_ensemble_voting(
                     f"auditor {name} receipt model_used={mu} not in voting set"
                 )
 
-        # Acceptance rule: either every voting-model receipt is zero-blocking,
-        # or an escalation receipt exists.
+        # Acceptance rule: either every voting-model receipt found NOTHING
+        # (zero findings, blocking or not), or an escalation receipt exists.
+        # The cascade protocol escalates to the deep tier on ANY finding — a
+        # non-blocking nit at haiku still warrants opus confirmation — so the
+        # gate binds on finding_count, not just blocking_count. Keying the gate
+        # on blocking_count alone left a seam: an auditor with non-blocking
+        # haiku findings could be run at sonnet (or skip escalation entirely)
+        # and still pass, silently dropping the protocol-required opus shard.
         all_voting_present = all(m in per_model for m in voting_models)
         if all_voting_present:
-            all_zero_blocking = True
+            all_clean = True
             for m in voting_models:
                 r = per_model[m]
                 try:
-                    bc = int(r.get("blocking_count", -1))
+                    fc = int(r.get("finding_count", -1))
                 except (TypeError, ValueError):
-                    bc = -1
-                if bc != 0:
-                    all_zero_blocking = False
+                    fc = -1
+                if fc != 0:
+                    all_clean = False
                     break
-            if all_zero_blocking:
-                continue  # ensemble accepted via zero-blocking consensus
+            if all_clean:
+                continue  # ensemble accepted via zero-finding consensus
         # Fall through → need escalation receipt.
         if escalation_receipt is None:
             missing = [m for m in voting_models if m not in per_model]
@@ -727,8 +733,8 @@ def _check_ensemble_voting(
                 )
             else:
                 gaps.append(
-                    f"auditor {name} ensemble voting-model receipts disagree "
-                    f"(non-zero blocking) and no escalation receipt for {escalation_model!r}"
+                    f"auditor {name} ensemble voting-model receipts found issues "
+                    f"(non-zero findings) and no escalation receipt for {escalation_model!r}"
                 )
 
     return gaps
@@ -812,8 +818,10 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
          ``voting_models``. A collapsed ``audit-{name}`` receipt is not
          accepted for ensemble accounting.
          Accept iff EITHER every voting-model receipt reports
-         ``blocking_count == 0`` OR an escalation receipt exists whose
-         ``model_used == escalation_model``. Each found receipt's
+         ``finding_count == 0`` OR an escalation receipt exists whose
+         ``model_used == escalation_model``. The cascade escalates to the
+         deep tier on ANY finding (blocking or not), so the gate binds on
+         ``finding_count``, not ``blocking_count``. Each found receipt's
          ``model_used`` MUST be in ``voting_models ∪ {escalation_model}``;
          otherwise a gap error.
       d) Either ``postmortem-generated`` OR ``postmortem-skipped`` MUST be

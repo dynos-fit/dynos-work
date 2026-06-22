@@ -7,7 +7,7 @@ Cascade protocol (haiku → sonnet → opus):
   - haiku≠0 findings → skip sonnet, escalate directly to opus (haiku+opus receipts only)
 
 The gate accepts iff:
-  - all voting-model receipts present AND all blocking_count==0, OR
+  - all voting-model receipts present AND all finding_count==0, OR
   - an escalation receipt exists with model_used == escalation_model
     (sonnet receipt may be absent when haiku already escalated directly).
 model_used on every receipt must sit in voting_models ∪ {escalation_model}.
@@ -53,14 +53,21 @@ def _mock_empty_registry(monkeypatch):
 
 
 def _write_audit_receipt(td: Path, step: str, *, model_used: str,
-                         blocking_count: int = 0, contract_version: int = 3) -> Path:
-    """Hand-write an audit-* receipt with the full v3 schema the gate reads."""
+                         blocking_count: int = 0, finding_count: int | None = None,
+                         contract_version: int = 3) -> Path:
+    """Hand-write an audit-* receipt with the full v3 schema the gate reads.
+
+    ``finding_count`` defaults to ``blocking_count`` (the common case); pass it
+    explicitly to model a non-blocking finding (finding_count > 0, blocking=0).
+    """
+    if finding_count is None:
+        finding_count = blocking_count
     return write_receipt(
         td,
         step,
         auditor_name=step.split("-", 1)[1] if "-" in step else step,
         model_used=model_used,
-        finding_count=blocking_count,
+        finding_count=finding_count,
         blocking_count=blocking_count,
         report_path=None,
         report_sha256=None,
@@ -89,6 +96,57 @@ def test_ensemble_zero_blocking_consensus_passes(tmp_path: Path, monkeypatch):
     _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet", blocking_count=0)
     gaps = require_receipts_for_done(td)
     assert not any("sec" in g for g in gaps), f"unexpected ensemble gap(s): {gaps}"
+
+
+def test_ensemble_nonblocking_finding_no_escalation_refuses(tmp_path: Path, monkeypatch):
+    """Cascade binds on finding_count, not blocking_count.
+
+    A voting model that finds a NON-blocking issue (finding_count>0, blocking=0)
+    must still escalate to opus. Running it at sonnet with both shards zero-
+    blocking used to pass (the closed seam) — now it must produce a gap.
+    """
+    _mock_empty_registry(monkeypatch)
+    td = _setup_task(tmp_path)
+    receipt_audit_routing(td, [{
+        "name": "sec",
+        "action": "spawn",
+        "ensemble": True,
+        "ensemble_voting_models": ["haiku", "sonnet"],
+        "ensemble_escalation_model": "opus",
+        "route_mode": "generic",
+        "agent_path": None,
+        "injected_agent_sha256": None,
+    }])
+    # haiku reports a non-blocking finding; sonnet clean; no opus escalation.
+    _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku",
+                         blocking_count=0, finding_count=2)
+    _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet", blocking_count=0)
+    gaps = require_receipts_for_done(td)
+    assert any("sec" in g and "non-zero findings" in g for g in gaps), \
+        f"expected escalation gap for non-blocking haiku finding: {gaps}"
+
+
+def test_ensemble_nonblocking_finding_with_opus_passes(tmp_path: Path, monkeypatch):
+    """Non-blocking haiku finding + opus escalation shard → accepted."""
+    _mock_empty_registry(monkeypatch)
+    td = _setup_task(tmp_path)
+    receipt_audit_routing(td, [{
+        "name": "sec",
+        "action": "spawn",
+        "ensemble": True,
+        "ensemble_voting_models": ["haiku", "sonnet"],
+        "ensemble_escalation_model": "opus",
+        "route_mode": "generic",
+        "agent_path": None,
+        "injected_agent_sha256": None,
+    }])
+    _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku",
+                         blocking_count=0, finding_count=2)
+    _write_audit_receipt(td, "audit-sec-opus", model_used="opus",
+                         blocking_count=0, finding_count=0)
+    gaps = require_receipts_for_done(td)
+    assert not any("sec" in g for g in gaps), \
+        f"unexpected gap with opus escalation on non-blocking finding: {gaps}"
 
 
 def test_ensemble_haiku_finds_issues_no_escalation_refuses(tmp_path: Path, monkeypatch):
