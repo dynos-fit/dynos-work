@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -307,6 +308,66 @@ def is_safe_task_id(task_id: object) -> bool:
     update _TASK_ID_SLUG_RE in lockstep.
     """
     return isinstance(task_id, str) and bool(_TASK_ID_SLUG_RE.match(task_id))
+
+
+# Parses an allocated task id back into its (date, seq) fields. The entropy
+# suffix is optional so this also reads legacy ``task-YYYYMMDD-NNN`` dirs that
+# predate the suffix — they still contribute to the local seq high-water mark.
+_TASK_ID_ALLOC_RE: "re.Pattern[str]" = re.compile(
+    r"^task-(\d{8})-(\d{3})(?:-[0-9a-f]+)?$"
+)
+
+
+def allocate_task_id(
+    dynos_dir: Path,
+    *,
+    now: "datetime | None" = None,
+    rand=None,
+) -> "tuple[str, Path]":
+    """Atomically allocate a unique task id and create its dir under ``dynos_dir``.
+
+    Returns ``(task_id, task_dir)`` where ``task_id`` has the form
+    ``task-{YYYYMMDD}-{seq:03d}-{rand}``:
+
+    - ``YYYYMMDD`` is the **UTC** date. All allocators must agree on UTC so two
+      callers near midnight never disagree on the date segment.
+    - ``seq`` is a best-effort, *local* monotonic counter derived from sibling
+      task dirs in *this* ``dynos_dir``. It is NOT a global uniqueness
+      guarantee: concurrent allocations from separate worktrees (each with its
+      own root-relative ``.dynos/``) cannot see each other's dirs and will
+      reuse the same ``seq``. It exists only for human readability.
+    - ``rand`` is 8 hex chars (32 bits) of CSPRNG entropy. This is what makes
+      the id collision-resistant across independent ``.dynos`` roots AND the
+      shared persistent project store (``~/.dynos/projects/{uuid}/``, keyed by
+      task_id), which is what last-writer-wins clobbered when the old
+      date+counter scheme handed concurrent worktrees the same id.
+
+    The dir is claimed with ``mkdir()`` (atomic, no ``exist_ok``) inside a
+    retry loop; on the rare local entropy clash the suffix is re-rolled. The
+    returned id always satisfies :func:`is_safe_task_id`.
+
+    ``now``/``rand`` are injectable for deterministic tests.
+    """
+    dynos_dir.mkdir(parents=True, exist_ok=True)
+    when = now or datetime.now(timezone.utc)
+    today = when.strftime("%Y%m%d")
+    seq = 1
+    for existing in dynos_dir.glob(f"task-{today}-*"):
+        match = _TASK_ID_ALLOC_RE.match(existing.name)
+        if match and match.group(1) == today:
+            seq = max(seq, int(match.group(2)) + 1)
+    rand_fn = rand or (lambda: secrets.token_hex(4))
+    for _ in range(64):
+        task_id = f"task-{today}-{seq:03d}-{rand_fn()}"
+        task_dir = dynos_dir / task_id
+        try:
+            task_dir.mkdir()
+        except FileExistsError:
+            continue
+        return task_id, task_dir
+    raise RuntimeError(
+        f"could not allocate a unique task id for {today} after 64 attempts"
+    )
 
 
 def _persistent_project_dir(root: Path) -> Path:

@@ -22,6 +22,7 @@ from lib_core import (
     VALID_CLASSIFICATION_TYPES,
     VALID_DOMAINS,
     VALID_RISK_LEVELS,
+    allocate_task_id,
     find_active_tasks,
     get_tdd_required,
     load_json,
@@ -2294,8 +2295,6 @@ def cmd_run_start_init(args: argparse.Namespace) -> int:
     The task description arrives via --description, or stdin when
     `--description -` (heredoc-friendly for long inputs).
     """
-    import time as _time
-
     root = Path(args.root or ".").resolve()
     description = args.description or ""
     if description == "-":
@@ -2321,15 +2320,11 @@ def cmd_run_start_init(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
-    today = _time.strftime("%Y%m%d", _time.gmtime())
-    seq = 1
-    for existing in sorted(dynos_dir.glob(f"task-{today}-*")):
-        suffix = existing.name.rsplit("-", 1)[-1]
-        if suffix.isdigit():
-            seq = max(seq, int(suffix) + 1)
-    task_id = f"task-{today}-{seq:03d}"
-    task_dir = dynos_dir / task_id
-    task_dir.mkdir()
+    # Collision-resistant allocation: the id carries CSPRNG entropy so
+    # concurrent allocations from separate worktrees (each with its own
+    # .dynos/) cannot collide on the date+counter and clobber each other in the
+    # shared persistent project store (which is keyed by task_id).
+    task_id, task_dir = allocate_task_id(dynos_dir)
 
     input_type = args.input_type or "text"
     manifest = {

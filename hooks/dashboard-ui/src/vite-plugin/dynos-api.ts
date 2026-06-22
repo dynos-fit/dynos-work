@@ -5,7 +5,11 @@ import { exec } from "node:child_process";
 import { homedir } from "node:os";
 import { URL } from "node:url";
 
-const TASK_ID_PATTERN = /^task-\d{8}-\d{3}$/;
+// Matches ``task-YYYYMMDD-NNN`` with an optional ``-<hex>`` entropy suffix.
+// The suffix makes ids collision-resistant across concurrent worktrees; the
+// group is optional so legacy unsuffixed ids still validate. Keep in lockstep
+// with lib_core._TASK_ID_ALLOC_RE / is_safe_task_id.
+const TASK_ID_PATTERN = /^task-\d{8}-\d{3}(?:-[0-9a-f]+)?$/;
 
 function computeSlug(projectPath: string): string {
   return projectPath.replace(/^\//, "").replace(/\//g, "-");

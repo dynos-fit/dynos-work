@@ -11,6 +11,23 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.7] - 2026-06-22
+### Fixed
+- Task-id allocation is now collision-resistant across concurrent worktrees.
+  The previous `task-{YYYYMMDD}-{seq}` scheme derived the sequence by globbing
+  the local, root-relative `.dynos/`, so worktrees that branched at once each
+  saw an empty set, all landed on `seq=001`, and produced identical ids —
+  causing last-writer-wins clobbering in the shared persistent project store
+  (keyed by task_id). Ids now carry a 32-bit CSPRNG entropy suffix
+  (`task-{YYYYMMDD}-{seq:03d}-{hex}`) via a single shared
+  `lib_core.allocate_task_id` helper used by both `ctl.py` and
+  `manual_pipeline.py`, which also unifies the date segment on UTC and claims
+  the task dir atomically with retry. Strict `\d{3}$` task-id matchers in
+  `lib_tokens_hook.py` and the dashboard vite-plugin were widened to accept the
+  optional suffix while still rejecting path traversal.
+
+---
+
 ## [7.5.6] - 2026-06-21
 ### Fixed
 - Enforce per-model ensemble audit receipt accounting by requiring `audit-{auditor}-{model}` shard receipts, rejecting pre-prefixed `audit-*` shard names, and documenting the required audit skill invocation.
