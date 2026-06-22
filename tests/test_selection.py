@@ -209,8 +209,8 @@ def test_complete_report_with_matching_receipt_is_eligible(tmp_path: Path) -> No
 def test_skeleton_reads_as_not_run(tmp_path: Path) -> None:
     """A skeleton (status='in_progress') with no receipt → zero eligible reports.
 
-    AC 2: A skeleton written by ctl spawn-prep with status='in_progress' that
-    is never updated produces zero eligible reports — 'auditor not run'.
+    AC 2: A skeleton report with status='in_progress' that is never updated
+    produces zero eligible reports — 'auditor not run'.
     """
     task_dir = tmp_path / "task"
     task_dir.mkdir()
