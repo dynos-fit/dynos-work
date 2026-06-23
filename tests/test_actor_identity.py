@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "hooks"))
 
 import actor_identity  # noqa: E402
 import pre_tool_use  # noqa: E402
-from lib_core import _persistent_project_dir  # noqa: E402
+from lib_core import _persistent_project_dir, transition_task  # noqa: E402
 from write_policy import WriteAttempt, decide_write  # noqa: E402
 
 ORCH_SESSION = "session-orchestrator-0001"
@@ -232,6 +232,28 @@ def test_orchestrator_repo_write_allowed_during_inline_fast_track(
     assert code == 0, err
 
 
+def test_stale_terminal_env_task_does_not_govern_repo_writes(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_dir = _task_dir(project)
+    (task_dir / "manifest.json").write_text(json.dumps({
+        "task_id": "task-20260611-001",
+        "stage": "DONE",
+        "fast_track": True,
+    }))
+    monkeypatch.setenv("DYNOS_TASK_DIR", str(task_dir))
+
+    code, err = _run_hook(
+        monkeypatch,
+        session_id=ORCH_SESSION,
+        tool_name="Write",
+        tool_input={"file_path": str(project / "src" / "app.py"), "content": "x"},
+        cwd=project,
+    )
+
+    assert code == 0, err
+
+
 # ---------------------------------------------------------------------------
 # Subagent grant consumption and binding
 # ---------------------------------------------------------------------------
@@ -405,6 +427,39 @@ def test_session_task_binding_is_task_scoped(project: Path) -> None:
 
     assert actor_identity.lookup_session_task(project, ORCH_SESSION) == task_dir
     assert actor_identity.lookup_session_task(project, "session-main-2") == other
+
+
+def test_terminal_session_task_lookup_prunes_stale_binding(project: Path) -> None:
+    task_dir = _task_dir(project)
+    actor_identity.bind_session_task(project, ORCH_SESSION, task_dir)
+    (task_dir / "manifest.json").write_text(json.dumps({
+        "task_id": task_dir.name,
+        "stage": "DONE",
+    }))
+
+    assert actor_identity.lookup_session_task(project, ORCH_SESSION) is None
+
+    data = json.loads(actor_identity.session_tasks_path(project).read_text(encoding="utf-8"))
+    assert ORCH_SESSION not in data["sessions"]
+
+
+def test_terminal_transition_clears_session_task_bindings(project: Path) -> None:
+    task_dir = _task_dir(project)
+    actor_identity.bind_session_task(project, ORCH_SESSION, task_dir)
+    actor_identity.bind_session_task(project, SUB_SESSION_A, task_dir)
+
+    transition_task(
+        task_dir,
+        "FAILED",
+        force=True,
+        force_reason="test terminal cleanup",
+        force_approver="pytest",
+    )
+
+    assert actor_identity.lookup_session_task(project, ORCH_SESSION) is None
+    assert actor_identity.lookup_session_task(project, SUB_SESSION_A) is None
+    data = json.loads(actor_identity.session_tasks_path(project).read_text(encoding="utf-8"))
+    assert data["sessions"] == {}
 
 
 def test_live_session_state_is_worktree_local_even_when_persistent_state_is_shared(

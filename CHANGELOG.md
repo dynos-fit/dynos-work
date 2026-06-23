@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.10] - 2026-06-23
+### Fixed
+- Terminal task transitions now clear per-session task bindings, so a completed
+  dynos-work task no longer leaves the pinned orchestrator session governed by
+  stale write-policy state. Stale `DYNOS_TASK_DIR` values and session-task
+  bindings are also ignored or pruned when their manifest is already terminal.
+
+---
+
 ## [7.5.9] - 2026-06-22
 ### Fixed
 - Ensemble DONE gate now binds escalation on `finding_count`, not just

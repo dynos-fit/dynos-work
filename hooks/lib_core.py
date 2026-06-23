@@ -2357,6 +2357,15 @@ def _flush_and_record_transition(
         manifest["blocked_reason"] = "transitioned to FAILED"
     write_ctl_json(task_dir, manifest_path, manifest)
 
+    # ---- Session-task binding cleanup ----
+    if next_stage in TERMINAL_STAGES:
+        try:
+            import actor_identity as _actor_identity  # noqa: PLC0415
+
+            _actor_identity.clear_session_task_bindings(task_dir.parent.parent, task_dir)
+        except Exception:
+            pass  # Never block a terminal transition.
+
     # ---- Active-task pointer for O(1) SubagentStop attribution ----
     try:
         _pointer_path = task_dir.parent / "active-task.json"

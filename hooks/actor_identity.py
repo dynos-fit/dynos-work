@@ -202,6 +202,39 @@ def bind_session_task(project_root: Path, session_id: str, task_dir: Path) -> No
             fcntl.flock(lock_fh, fcntl.LOCK_UN)
 
 
+def clear_session_task_bindings(project_root: Path, task_dir: Path) -> int:
+    """Remove every live session-task binding that points at ``task_dir``.
+
+    Called after terminal task transitions. This prevents a completed task from
+    continuing to govern later ordinary repo writes made in the same host
+    session. Returns the number of bindings removed.
+    """
+    project_root = project_root.resolve()
+    task_dir = task_dir.resolve()
+    lock_file = project_root / ".dynos" / ".session-tasks.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "w", encoding="utf-8") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            data = _load_json(session_tasks_path(project_root))
+            if not isinstance(data, dict) or not isinstance(data.get("sessions"), dict):
+                return 0
+            sessions = data["sessions"]
+            stale = [
+                sid
+                for sid, entry in sessions.items()
+                if isinstance(entry, dict)
+                and Path(str(entry.get("task_dir") or "")).resolve() == task_dir
+            ]
+            for sid in stale:
+                sessions.pop(sid, None)
+            if stale:
+                _atomic_write_json(session_tasks_path(project_root), data)
+            return len(stale)
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+
 def lookup_session_task(project_root: Path, session_id: str) -> Path | None:
     if not session_id:
         return None
@@ -218,6 +251,10 @@ def lookup_session_task(project_root: Path, session_id: str) -> Path | None:
         return None
     if task_dir.exists() and _task_is_non_terminal(task_dir):
         return task_dir
+    try:
+        clear_session_task_bindings(project_root, task_dir)
+    except Exception:
+        pass
     return None
 
 

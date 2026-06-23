@@ -543,8 +543,12 @@ def main() -> int:
     task_dir_from_env = os.environ.get("DYNOS_TASK_DIR", "").strip()
     project_root = _project_root_from_ancestors(cwd)
     if task_dir_from_env:
-        task_dir: Path | None = Path(task_dir_from_env).resolve()
-        project_root = task_dir.parent.parent
+        env_task_dir = Path(task_dir_from_env).resolve()
+        if _task_is_non_terminal(env_task_dir):
+            task_dir: Path | None = env_task_dir
+            project_root = task_dir.parent.parent
+        else:
+            task_dir = None
     else:
         task_dir = None
         target_task_dir = _find_task_dir_from_tool_target(tool_name, tool_input, cwd)
