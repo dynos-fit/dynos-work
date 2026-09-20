@@ -61,3 +61,51 @@ def get_persisted_host(path: Path) -> Optional[str]:
         return data.get("host")
     except (OSError, json.JSONDecodeError, AttributeError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Host capability: web-tool telemetry
+# ---------------------------------------------------------------------------
+
+# Hosts whose harness fires PostToolUse hooks for the WebSearch / WebFetch
+# tools. Only on those hosts does hooks/web_tool_log.py get a chance to write
+# <task_dir>/web-tool-log.jsonl, the unforgeable substrate that the
+# external-solution gate's temporal cross-check reads.
+#
+# Codex exposes web research through its own built-in tooling, which does not
+# reach this plugin's PostToolUse matcher, so the log stays empty no matter how
+# much research the orchestrator actually does. A validator that treats the
+# empty log as proof of no research turns into a permanent block on that host
+# (see docs/external-solution-gate.md, "Hosts without web-tool telemetry").
+HOSTS_WITHOUT_WEB_TOOL_TELEMETRY: frozenset[str] = frozenset({"codex"})
+
+
+def host_emits_web_tool_telemetry(host: str) -> bool:
+    """Return True iff *host* produces WebSearch/WebFetch PostToolUse events.
+
+    Only the hosts listed in :data:`HOSTS_WITHOUT_WEB_TOOL_TELEMETRY` answer
+    False. Unknown or blank host names are treated as telemetry-capable, so a
+    host name this module has never heard of never silently relaxes a gate.
+    """
+    return (host or "").strip().lower() not in HOSTS_WITHOUT_WEB_TOOL_TELEMETRY
+
+
+def resolve_host(*candidate_paths: Path) -> tuple[str, str]:
+    """Return ``(host, source)`` for the running host.
+
+    *candidate_paths* are control-plane.json paths, consulted in order. The
+    first one carrying a ``host`` key wins and reports source
+    ``"control-plane"`` — that file is hook-written (write_policy denies every
+    agent role), so it is the trustworthy signal. When none carries a host,
+    the env-based :func:`detect_host` result is returned with source
+    ``"env"``; env is agent-reachable, so callers that relax an enforcement
+    path on the strength of it should record the provenance.
+    """
+    for path in candidate_paths:
+        try:
+            persisted = get_persisted_host(path)
+        except Exception:
+            persisted = None
+        if isinstance(persisted, str) and persisted.strip():
+            return persisted.strip(), "control-plane"
+    return detect_host(), "env"
