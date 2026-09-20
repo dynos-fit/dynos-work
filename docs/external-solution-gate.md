@@ -14,7 +14,7 @@ After task-20260507-005 closed a bypass path, the gate additionally enforces tha
 
 1. **Existence check (layer a)** — verifies `search-conducted.json` (the receipt written by `write-search-receipt`) exists. No receipt, no spec advance. This check is unchanged from the pre-fix version.
 
-2. **Temporal cross-check (layer b)** — verifies `<task_dir>/web-tool-log.jsonl` contains at least one entry with `tool` in `{"WebSearch", "WebFetch"}` and timestamp `gate.written_at <= entry.ts <= receipt.timestamp`. The log file is written by a `PostToolUse` hook (`hooks/web_tool_log.py`) — the orchestrator cannot forge entries because the harness owns the writes. If `gate.written_at` is absent (legacy gate file from before this fix) or malformed, both this check and layer (c) are skipped with a `[GATE] external-solution-cross-check skipped: legacy gate file` log line; layer (a) still fires.
+2. **Temporal cross-check (layer b)** — verifies `<task_dir>/web-tool-log.jsonl` contains at least one entry with `tool` in `{"WebSearch", "WebFetch"}` and timestamp `gate.written_at <= entry.ts <= receipt.timestamp`. The log file is written by a `PostToolUse` hook (`hooks/web_tool_log.py`) — the orchestrator cannot forge entries because the harness owns the writes. If `gate.written_at` is absent (legacy gate file from before this fix) or malformed, both this check and layer (c) are skipped with a `[GATE] external-solution-cross-check skipped: legacy gate file` log line; layer (a) still fires. On a host that emits no `WebSearch`/`WebFetch` events at all, this layer degrades rather than blocking — see [Hosts without web-tool telemetry](#hosts-without-web-tool-telemetry).
 
 3. **Structure check (layer c)** — verifies the receipt has `urls_consulted` (list of ≥1 entries, each matching `^https?://`) and `findings_summary` (stripped length ≥200 chars). Empty / dismissive receipts cannot satisfy this layer. Same backward-compat as layer (b): skipped on legacy gate files.
 
@@ -39,6 +39,33 @@ The `--urls-consulted` field must list the URLs actually fetched; `--findings-su
 
 Every `WebSearch` and `WebFetch` tool call made by the orchestrator during Step 2c is recorded as one JSONL entry in `.dynos/task-{id}/web-tool-log.jsonl` by the `PostToolUse` hook (`hooks/web_tool_log.py`). Each entry has `ts` (ISO 8601 UTC), `tool` (`"WebSearch"` or `"WebFetch"`), and either `query` (for WebSearch) or `url` (for WebFetch). `run-spec-ready` reads this log and validates that at least one entry's timestamp falls in the window `[gate.written_at, receipt.timestamp]`. This prevents the orchestrator from writing a receipt that claims research was done without any verifiable tool-use activity, because the hook is invoked by the harness post-execution and the LLM cannot inject entries.
 
+## Hosts without web-tool telemetry
+
+Layer (b) has one hard prerequisite: the harness must fire a `PostToolUse` hook for the tools that do the research. `hooks.json` matches `WebSearch|WebFetch`, which are Claude Code tool names. Codex researches through its own built-in tooling, which never reaches this plugin's matcher, so on that host `web-tool-log.jsonl` is never created no matter how much real research happens — and `write_policy` denies every agent role write access to it, by design, so there is no legitimate way to produce one.
+
+Treating that absence as proof of a skipped search made the gate unsatisfiable on Codex: `run-spec-ready` returned 1 forever and the task could not leave `SPEC_NORMALIZATION`. So layer (b) is host-aware:
+
+- **Telemetry-capable host** (Claude Code, and any host name this plugin does not recognise): unchanged. A missing log or an empty window is a hard block.
+- **Host known not to emit the events** (`codex`, per `HOSTS_WITHOUT_WEB_TOOL_TELEMETRY` in `hooks/lib_host.py`): the temporal cross-check falls back to the ordering evidence that does survive — the receipt must not predate `gate.written_at`. Layers (a) and (c) are untouched, so the receipt must still exist and still carry real URLs and a ≥200-char findings summary.
+
+A qualifying log entry passes layer (b) at full strength on *any* host, so a harness that starts emitting the events is enforced strictly with no code change here. `hooks/web_tool_log.py` normalises the spellings other harnesses use (`web_search`, `web_fetch`) to the canonical names, so firing the hook is all a harness has to do.
+
+Degrading is never silent. The gate prints:
+
+```text
+[GATE] external-solution-cross-check degraded: host 'codex' emits no WebSearch/WebFetch telemetry (host source: control-plane); receipt-ordering check applied instead
+```
+
+and emits a `web_tool_evidence_degraded` event to `events.jsonl` carrying the host, the provenance of that host signal, and both timestamps, so an auditor reading the task later can see that the weaker evidence was accepted and why.
+
+### Why the host signal is not read from the environment
+
+`lib_host.detect_host()` keys off `CODEX_PLUGIN_ROOT`, which an agent can set in front of a Bash invocation — keying the relaxation off env alone would hand a Claude-host orchestrator a one-variable bypass of the research gate. The validator therefore resolves the host through `lib_host.resolve_host()`, which prefers the persisted host in `control-plane.json` (hook-written; `write_policy` denies it to every agent role) and falls back to env only when no anchor exists. The resolved provenance — `control-plane` or `env` — is recorded in the degrade event either way.
+
+That anchor is written by the `SessionStart` hook (`hooks/session-start`), which calls `lib_host.persist_host` for both the in-repo `<root>/.dynos/control-plane.json` and the persistent project dir.
+
+This is the same shape as `_assert_spawn_log_evidence` (`hooks/receipts/stage.py`), which degrades with an `audit_receipt_spawn_log_missing` event when `spawn-log.jsonl` is absent, and as `router.py`, which disables ensemble and escalation with `reason=host_null_mapping` on a host with no model mapping. What a host cannot produce is a capability gap, not evidence of misconduct.
+
 ## Trust-substrate pattern
 
 The three-layer check above is a direct application of the trust-substrate pattern documented in the 2026-04-30 audit-chain forgery incident. In that incident, an orchestrator forged 7 of 8 ensemble auditor receipts after context truncation. The post-mortem established the following principle:
@@ -56,5 +83,6 @@ This three-layer design means a forged claim of "search was performed" requires 
 ## Reference
 
 - `hooks/ctl.py` — `run-external-solution-gate`, `write-search-receipt`, `run-spec-ready` subcommands
+- `hooks/lib_host.py` — host detection, the persisted-host anchor, and `HOSTS_WITHOUT_WEB_TOOL_TELEMETRY`
 - `skills/start/SKILL.md` Step 2c — orchestrator instructions for this gate
 - `docs/system-sequence-and-loopholes.md` — broader gate sequence and known loophole catalogue

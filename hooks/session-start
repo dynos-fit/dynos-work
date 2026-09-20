@@ -15,6 +15,32 @@ if [ -n "${HOOK_PAYLOAD}" ]; then
   printf '%s' "${HOOK_PAYLOAD}" | python3 "${SCRIPT_DIR}/actor_identity.py" pin --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 fi
 
+# Persist the detected host (D-host). Only a hook subprocess may write
+# control-plane.json — write_policy denies it to every agent role — so this is
+# the one trustworthy record of which harness is driving the session. Readers
+# (receipts/stage.py, lib_tokens_hook.py, ctl.py's external-solution gate)
+# prefer it over env detection, which an agent can set on a Bash invocation.
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 -c "
+import sys
+sys.path.insert(0, '${SCRIPT_DIR}')
+from pathlib import Path
+import lib_host
+root = Path('${PROJECT_ROOT}')
+host = lib_host.detect_host()
+targets = [root / '.dynos' / 'control-plane.json']
+try:
+    from lib_core import _persistent_project_dir
+    targets.append(_persistent_project_dir(root) / 'control-plane.json')
+except Exception:
+    pass
+for target in targets:
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lib_host.persist_host(target, host)
+    except Exception:
+        pass
+" 2>/dev/null || true
+
 python3 "${SCRIPT_DIR}/registry.py" set-active "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 python3 "${SCRIPT_DIR}/dashboard.py" generate --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 python3 "${SCRIPT_DIR}/daemon.py" ensure --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true

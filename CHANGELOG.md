@@ -11,6 +11,57 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.18] - 2026-09-20
+### Fixed
+- The external-solution gate's research validator no longer blocks the spec
+  pipeline outright on hosts that cannot produce the evidence it asks for.
+  Layer (b) of `run-spec-ready` required at least one `WebSearch`/`WebFetch`
+  entry in `web-tool-log.jsonl`, which is written by exactly one thing: the
+  `PostToolUse` hook matching those two tool names. They are Claude Code tool
+  names. Codex researches through its own built-in tooling, which never
+  reaches this plugin's matcher, so the log was never created, the check hit
+  its missing-file branch, and the task could not leave `SPEC_NORMALIZATION`
+  no matter how much real research was performed — with no legitimate
+  workaround, since `write_policy` denies every agent role write access to
+  that file by design. The check is now host-aware:
+  - On a telemetry-capable host — Claude Code, and any host name the plugin
+    does not recognise — behaviour is unchanged: a missing log or an empty
+    window is still a hard block.
+  - On a host known not to emit those events (`codex`), the temporal
+    cross-check falls back to the ordering evidence that does survive: the
+    receipt must not predate `gate.written_at`. The receipt-existence and
+    receipt-structure layers are untouched, so real URLs and a ≥200-char
+    findings summary are still required.
+  - A qualifying log entry passes at full strength on any host, so a harness
+    that starts emitting the events is enforced strictly with no further code
+    change. `hooks/web_tool_log.py` now normalises the spellings other
+    harnesses use (`web_search`, `web_fetch`) to the canonical names.
+  - Degrading is never silent: the gate prints a `[GATE]
+    external-solution-cross-check degraded` line and emits a
+    `web_tool_evidence_degraded` event carrying the host, the provenance of
+    that host signal, and both timestamps.
+
+  This follows the pattern already used for harness telemetry a host cannot
+  emit — `_assert_spawn_log_evidence` degrades with a visibility event when
+  `spawn-log.jsonl` is absent, and `router.py` disables ensemble and
+  escalation with `reason=host_null_mapping` on a host with no model mapping.
+- Closed the bypass that a naive version of the above would have opened.
+  `detect_host()` reads `CODEX_PLUGIN_ROOT` from the environment, which an
+  agent can set in front of a Bash invocation, so the validator resolves the
+  host through the new `lib_host.resolve_host()`: the persisted host in
+  `control-plane.json` (hook-written, denied to every agent role by
+  `write_policy`) wins over env detection, and the provenance of whichever
+  signal answered is recorded in the degrade event.
+- Wired the persisted-host anchor that resolution depends on.
+  `lib_host.persist_host` had zero callers — `tests/test_hostmodel_control_plane.py`
+  documented a `SessionStart` write path that was never implemented, so
+  `get_persisted_host` always returned `None` and every reader
+  (`receipts/stage.py`, `lib_tokens_hook.py`) silently fell back to env.
+  `hooks/session-start` now writes it for both the in-repo
+  `<root>/.dynos/control-plane.json` and the persistent project dir.
+
+---
+
 ## [7.5.17] - 2026-09-06
 ### Fixed
 - The audit ensemble cascade (fast tier → balanced tier on zero findings →

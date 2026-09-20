@@ -52,7 +52,7 @@ from lib_receipts import (
 )
 from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, select_eligible_reports, validate_task_artifacts
 from lib_models import TIER_DEEP, resolve_model_for_tier
-from lib_host import detect_host
+from lib_host import detect_host, host_emits_web_tool_telemetry, resolve_host
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 # task-20260504-007: residuals queue producer + run-next consumer.
@@ -3731,37 +3731,37 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
     return 0
 
 
-def _check_web_tool_evidence(
-    task_dir: Path,
-    gate: dict,
-    receipt: dict,
-) -> str | None:
-    """Return None if at least one web-tool-log entry falls within the
-    gate.written_at → receipt.ts window.  Return an error string otherwise.
+def _resolve_task_host(task_dir: Path) -> tuple[str, str]:
+    """Return ``(host, source)`` for the project that owns *task_dir*.
 
-    The window is gate.written_at <= entry_ts <= receipt.ts (inclusive).
-    Entries missing a parseable ``ts`` field are skipped silently.
+    The in-repo ``<root>/.dynos/control-plane.json`` is consulted first: it is
+    hook-written and ``write_policy`` denies it to every agent role, so an
+    enforcement path can lean on it. The persistent project dir is the second
+    candidate (``receipts/stage.py`` resolves host from there). Env detection
+    is last and reports source ``"env"`` — an agent can put CODEX_PLUGIN_ROOT
+    in front of a Bash invocation, so nothing relaxes silently on that signal.
     """
-    log_path = task_dir / "web-tool-log.jsonl"
-    if not log_path.exists():
-        return (
-            "web_search_evidence missing: web-tool-log.jsonl not found; "
-            "0 qualifying web-tool entries in window"
-        )
-
+    root = _root_for_task_dir(task_dir)
+    candidates = [root / ".dynos" / "control-plane.json"]
     try:
-        gate_ts_str = gate.get("written_at", "")
-        gate_dt = datetime.fromisoformat(gate_ts_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None  # malformed written_at — skip (caller already logged)
+        from lib_core import _persistent_project_dir  # noqa: PLC0415
+        candidates.append(_persistent_project_dir(root) / "control-plane.json")
+    except Exception:
+        pass
+    return resolve_host(*candidates)
 
-    receipt_ts_str = receipt.get("ts", "")
-    try:
-        receipt_dt = datetime.fromisoformat(receipt_ts_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        receipt_dt = None
 
-    qualifying = 0
+def _web_tool_log_has_evidence(
+    log_path: Path,
+    gate_dt: datetime,
+    receipt_dt: datetime | None,
+) -> tuple[bool, str | None]:
+    """Return ``(found, read_error)`` for the gate → receipt window.
+
+    ``found`` is True as soon as one qualifying entry lands in the window.
+    ``read_error`` is set only when the file exists but cannot be read — an
+    IO anomaly, which is never treated as a host-capability gap.
+    """
     try:
         with log_path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -3782,25 +3782,139 @@ def _check_web_tool_evidence(
                 if not entry_ts_str:
                     continue
                 try:
-                    entry_dt = datetime.fromisoformat(entry_ts_str.replace("Z", "+00:00"))
+                    entry_dt = datetime.fromisoformat(str(entry_ts_str).replace("Z", "+00:00"))
                 except (ValueError, AttributeError):
                     continue
                 if entry_dt < gate_dt:
                     continue
                 if receipt_dt is not None and entry_dt > receipt_dt:
                     continue
-                qualifying += 1
-                # AC 9: ≥1 qualifying entry is sufficient — early exit.
-                break
+                # AC 9: >=1 qualifying entry is sufficient — early exit.
+                return True, None
     except OSError as exc:
-        return f"web_search_evidence: cannot read web-tool-log.jsonl: {exc}"
+        return False, f"web_search_evidence: cannot read web-tool-log.jsonl: {exc}"
+    return False, None
 
-    if qualifying == 0:
+
+def _record_web_evidence_degraded(
+    task_dir: Path,
+    host: str,
+    host_source: str,
+    gate_ts: str,
+    receipt_ts: str,
+) -> None:
+    """Make a degraded cross-check visible on stdout and in events.jsonl."""
+    print(
+        f"[GATE] external-solution-cross-check degraded: host '{host}' emits no "
+        f"WebSearch/WebFetch telemetry (host source: {host_source}); "
+        f"receipt-ordering check applied instead",
+        flush=True,
+    )
+    try:
+        from lib_log import log_event  # noqa: PLC0415
+        log_event(
+            _root_for_task_dir(task_dir),
+            "web_tool_evidence_degraded",
+            task=task_dir.name,
+            host=host,
+            host_source=host_source,
+            gate_written_at=gate_ts,
+            receipt_ts=receipt_ts,
+            detail=(
+                "web-tool-log.jsonl cannot be produced on this host; the temporal "
+                "cross-check fell back to receipt-vs-gate ordering"
+            ),
+        )
+    except Exception:
+        pass
+
+
+def _check_web_tool_evidence(
+    task_dir: Path,
+    gate: dict,
+    receipt: dict,
+    *,
+    host: str | None = None,
+    host_source: str | None = None,
+) -> str | None:
+    """Return None if research evidence backs the gate → receipt window.
+    Return an error string otherwise.
+
+    On a host whose harness emits WebSearch/WebFetch PostToolUse events, the
+    evidence is at least one qualifying entry in ``web-tool-log.jsonl`` with
+    ``gate.written_at <= entry_ts <= receipt.ts`` (inclusive). Entries missing
+    a parseable ``ts`` are skipped silently.
+
+    On a host that emits no such events (Codex researches through built-in
+    tooling that never reaches this plugin's PostToolUse matcher), the log can
+    never be written, so requiring it would block the spec pipeline outright
+    rather than catching a skipped search. There the check degrades to the
+    ordering evidence that does survive — the receipt must not predate the
+    gate — and records the degrade on stdout and in events.jsonl. This mirrors
+    ``_assert_spawn_log_evidence`` (hooks/receipts/stage.py), which degrades
+    with a visibility event when spawn-log.jsonl is absent.
+
+    A qualifying log entry still passes the check at full strength on any
+    host, so a harness that starts emitting the events is enforced strictly
+    without a code change here.
+    """
+    gate_ts_str = gate.get("written_at", "") if isinstance(gate, dict) else ""
+    try:
+        gate_dt = datetime.fromisoformat(str(gate_ts_str).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None  # malformed written_at — skip (caller already logged)
+
+    receipt_ts_str = receipt.get("ts", "") if isinstance(receipt, dict) else ""
+    try:
+        receipt_dt = datetime.fromisoformat(str(receipt_ts_str).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        receipt_dt = None
+
+    log_path = task_dir / "web-tool-log.jsonl"
+    log_exists = log_path.exists()
+    found = False
+    if log_exists:
+        found, read_error = _web_tool_log_has_evidence(log_path, gate_dt, receipt_dt)
+        if read_error is not None:
+            return read_error
+    if found:
+        return None
+
+    if host is None:
+        host, host_source = _resolve_task_host(task_dir)
+
+    if host_emits_web_tool_telemetry(host):
+        if not log_exists:
+            return (
+                "web_search_evidence missing: web-tool-log.jsonl not found; "
+                "0 qualifying web-tool entries in window"
+            )
         return (
             f"web_search_evidence: 0 qualifying web-tool entries in window "
             f"[{gate_ts_str} → {receipt_ts_str}]; "
             "search evidence must appear after gate was written"
         )
+
+    # Degraded path: the host cannot produce the substrate. The receipt's own
+    # timestamp is the only ordering evidence left, so it must still show the
+    # research followed the gate rather than predating it.
+    if receipt_dt is None:
+        return (
+            f"web_search_evidence: host '{host}' emits no WebSearch/WebFetch "
+            f"telemetry, leaving the receipt timestamp as the only ordering "
+            f"evidence — and it is missing or unparseable ({receipt_ts_str!r})"
+        )
+    if receipt_dt < gate_dt:
+        return (
+            f"web_search_evidence: host '{host}' emits no WebSearch/WebFetch "
+            f"telemetry; degraded ordering check failed: receipt ts "
+            f"{receipt_ts_str} predates gate.written_at {gate_ts_str}, so the "
+            f"receipt cannot describe research this gate prompted"
+        )
+
+    _record_web_evidence_degraded(
+        task_dir, host, host_source or "unknown", gate_ts_str, receipt_ts_str
+    )
     return None
 
 

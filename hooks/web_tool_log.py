@@ -20,7 +20,10 @@ Invocation (two modes):
      Accepts payload directly; stdin is not read when payload is provided.
 
 Stdin: standard Claude Code hook payload — JSON with ``tool_name``,
-``tool_input``, ``cwd``, and (post only) ``tool_response``.
+``tool_input``, ``cwd``, and (post only) ``tool_response``. ``tool_name`` is
+normalised through ``_WEB_TOOL_ALIASES``, so a non-Claude harness that spells
+its web tools differently (``web_search``, ``web_fetch``) still lands canonical
+entries in the log.
 
 Output: appends a JSONL line to ``<task_dir>/web-tool-log.jsonl`` where
 ``<task_dir>`` is resolved from ``DYNOS_TASK_DIR`` env or by walking ``cwd``
@@ -46,7 +49,28 @@ import time
 from pathlib import Path
 from typing import Any
 
-_WEB_TOOLS = frozenset({"WebSearch", "WebFetch"})
+# Every spelling this hook accepts, mapped to the canonical name the
+# external-solution gate reads back out of web-tool-log.jsonl. Non-Claude
+# harnesses name their web tools differently; normalising the known spellings
+# here means a harness that does fire this PostToolUse hook produces the same
+# substrate and gets enforced at full strength, instead of falling to the
+# gate's degraded host path. Matching is case-insensitive; anything not listed
+# is not a web tool as far as this hook is concerned.
+_WEB_TOOL_ALIASES: dict[str, str] = {
+    "websearch": "WebSearch",
+    "web_search": "WebSearch",
+    "web.search": "WebSearch",
+    "webfetch": "WebFetch",
+    "web_fetch": "WebFetch",
+    "web.fetch": "WebFetch",
+}
+
+
+def _canonical_web_tool(tool_name: Any) -> str | None:
+    """Return the canonical web-tool name for *tool_name*, or None."""
+    if not isinstance(tool_name, str):
+        return None
+    return _WEB_TOOL_ALIASES.get(tool_name.strip().lower())
 
 
 def _task_is_non_terminal(task_dir: Path) -> bool:
@@ -192,8 +216,8 @@ def main(argv: list[str], *, payload: dict[str, Any] | None = None) -> int:
         print("web-tool-log: stdin payload must be a JSON object", file=sys.stderr)
         return 1
 
-    tool_name = payload.get("tool_name")
-    if tool_name not in _WEB_TOOLS:
+    tool_name = _canonical_web_tool(payload.get("tool_name"))
+    if tool_name is None:
         # Not a web tool — exit 0 silently (AC 1)
         return 0
 
