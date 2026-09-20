@@ -102,6 +102,12 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # policy_path). Each site already handles the error inline (bail or
     # stub); the event is security observability only, with no consumer.
     "project_id_security_error",
+    # External-solution gate degraded its temporal cross-check because the
+    # host emits no WebSearch/WebFetch PostToolUse events (ctl.py
+    # _check_web_tool_evidence). The gate still enforces receipt structure and
+    # receipt-vs-gate ordering; this event is the visibility trail for the
+    # weaker evidence, with no gate or state machine depending on it.
+    "web_tool_evidence_degraded",
     # Read-policy decision observability (read_policy gate, task-20260501-002).
     # Forensic trace recording allow/deny decisions for read attempts.
     # Observability only — no gate or state machine depends on these events.
