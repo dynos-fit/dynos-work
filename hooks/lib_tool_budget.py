@@ -34,7 +34,10 @@ FIXED_OVERHEAD: int = 5
 # A segment whose raw budget exceeds this must be decomposed at planning time.
 TOOL_BUDGET_CEILING: int = 40
 
-# Soft ceiling: advisory threshold used by self-pacing prompt instruction.
+# Soft ceiling: plan-review advisory threshold. A segment whose computed budget reaches
+# this value is surfaced as a non-blocking `near-budget-ceiling` finding at the plan gate
+# (see skills/start/SKILL.md). It is NOT a runtime stop condition — the injected
+# Tool-Use Budget block presents the budget as an estimate, not a cutoff.
 TOOL_BUDGET_ADVISORY: int = 35
 
 # Static per-model floor (minimum budget) keyed by model family name.
