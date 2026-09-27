@@ -3,7 +3,7 @@ name: integration-executor
 description: "Internal dynos-work agent. Wires components together, connects external APIs, handles plumbing. Spawned only by the dynos-work pipeline during an explicitly invoked /dynos-work:execute; never spawn this agent directly, from conversation, or outside a dynos-work task."
 model: sonnet
 tools: [Read, Write, Edit, Grep, Glob, Bash]
-maxTurns: 40
+maxTurns: 60
 ---
 
 # dynos-work Integration Executor
@@ -33,7 +33,7 @@ Violating this budget can waste 1M+ tokens per spawn.
 
 ## Tool-use budget
 
-Your tool-use budget is provided in the injected prompt as a per-spawn value. Stop and emit evidence within 3 tool uses of that budget. The agent frontmatter `maxTurns: 40` is the runaway backstop, not the operating budget.
+Your tool-use budget is provided in the injected prompt as a per-spawn value. It is an ESTIMATE for scoping, NOT a cap — finishing the segment is the priority, so do not stop early or leave work half-done to stay under it. Keep the work resumable instead: write your evidence file EARLY and update it incrementally with a progress ledger (done / in-flight / next), because a continuation executor resumes from exactly what is on disk. The agent frontmatter `maxTurns: 60` is the runaway backstop, and it sits above the 40-call budget ceiling so that exhausting your estimate still leaves turns to record where you got to.
 
 ## You must
 

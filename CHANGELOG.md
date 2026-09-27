@@ -11,6 +11,50 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.19] - 2026-09-27
+### Fixed
+- Executor spawns no longer end by being killed at the turn cap. The per-spawn
+  tool budget and the runaway backstop were the same number — `hooks/lib_tool_budget.py`
+  clamps a segment's budget at `TOOL_BUDGET_CEILING = 40`, and every executor's
+  frontmatter declared `maxTurns: 40` — so an executor handed a 38–40-call
+  estimate had no turns left for the work the injected prompt asks of it. Since
+  that prompt (`hooks/router.py`) presents the budget as "an ESTIMATE for
+  scoping — NOT a cap", nothing ended a spawn except the harness kill, which is
+  why every segment of a multi-segment task hit the ceiling regardless of its
+  size. Worse, the kill lands before the executor can write the progress ledger
+  that `ctl next-continuation` resumes from, so the continuation had nothing on
+  disk to continue from and two fruitless rounds tripped the `stalled` halt.
+  Every executor's `maxTurns` is now 60, leaving 20 turns of wrap-up headroom
+  above the unchanged 40-call ceiling. Per-spawn scope is unchanged.
+- Reconciled the executor prompts with the budget block they are spawned with.
+  Eight agents (backend, db, docs, integration, ml, refactor, testing, ui) still
+  carried the superseded instruction "Stop and emit evidence within 3 tool uses
+  of that budget. The agent frontmatter `maxTurns: 40` is the runaway backstop,
+  not the operating budget" — the exact opposite of the injected block, in the
+  same context window. They now describe the budget as an estimate and ask for
+  the resumable progress ledger, matching `router.py`.
+- Bumped the five CLI executor templates that declared the old 40-turn cap, so
+  projects scaffolded from `cli/assets/templates/base/agents/` inherit the
+  headroom rather than the bug.
+
+### Changed
+- The runaway-defense seal (`tests/test_runaway_defense_seal.py`) now enforces
+  the headroom instead of the collision. Its ceiling test previously asserted
+  that "the frontmatter maxTurns=40, validator ceiling=40, and max budget=40
+  must all agree", which locked in the defect above. `TOOL_BUDGET_CEILING` is
+  still pinned at exactly 40; what changed is that each executor must now
+  declare a `maxTurns` exceeding it by at least `MIN_WRAPUP_HEADROOM` (10), and
+  no executor prompt may tell the agent to stop at its budget. A CLI template
+  that declares a cap is held to the same headroom; one that omits it is skipped
+  deliberately, since the packaged CLI that assembles that frontmatter is not in
+  this repo.
+- Corrected the `TOOL_BUDGET_ADVISORY` comment, which claimed the constant was
+  "used by self-pacing prompt instruction". No prompt has used it since the
+  self-pacing cutoff was removed; its only consumer is the non-blocking
+  `near-budget-ceiling` finding at the plan gate.
+
+---
+
 ## [7.5.18] - 2026-09-20
 ### Fixed
 - The external-solution gate's research validator no longer blocks the spec

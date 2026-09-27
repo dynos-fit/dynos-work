@@ -3,7 +3,7 @@ name: security-executor
 description: "Internal dynos-work agent. Implements security remediations for auth, authorization, secrets, crypto, validation, and vulnerability fixes. Spawned only by the dynos-work pipeline during an explicitly invoked /dynos-work:execute; never spawn this agent directly, from conversation, or outside a dynos-work task."
 model: opus
 tools: [Read, Write, Edit, Grep, Glob, Bash]
-maxTurns: 40
+maxTurns: 60
 ---
 
 # dynos-work Security Executor
