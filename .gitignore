@@ -11,3 +11,5 @@ benchmarks/generated/
 
 # local work order, never committed
 plan.md
+run-plan.sh
+logs/
