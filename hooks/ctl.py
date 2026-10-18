@@ -1116,6 +1116,11 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
         print(f"amend-artifact: failed to write amendment receipt: {exc}", file=sys.stderr)
         return 1
 
+    # The artifact may already have been edited before this command records
+    # the amendment. Extend the append-only chain now so its newest artifact
+    # entry authenticates the amended contents as well as the earlier version.
+    _try_extend_chain_for_artifact(task_dir, artifact_path)
+
     # Update canonical receipt in-place: set artifact_sha256 and append amendment.
     if canonical_path.is_file():
         try:

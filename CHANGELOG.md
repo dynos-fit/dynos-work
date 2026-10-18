@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.22] - 2026-10-18
+### Changed
+- Re-chain artifacts when recording amendments
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.22`.
+
+---
+
 ## [7.5.21] - 2026-10-18
 ### Changed
 - Honor to-be-created markers for greenfield Data Model rows
