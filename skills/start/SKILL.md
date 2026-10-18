@@ -537,7 +537,7 @@ For `plan.md`:
 2. When domains include backend, ui, or security: `API Contracts` section is required. When domains include db: `Data Model` section is required.
 3. Every component or module section must list exact files.
 4. `Reference Code` paths must exist in the repo unless explicitly marked as to-be-created.
-5. **Gap analysis (deterministic):** if the plan contains `API Contracts` or `Data Model` sections, their claims are verified against the codebase. Endpoints listed in the API Contracts table must correspond to actual route definitions. Tables listed in the Data Model table must correspond to actual model/schema/migration definitions. Claimed-but-not-found entries are validation errors — the planner must either fix the table or mark new entries as to-be-created.
+5. **Gap analysis (deterministic):** if the plan contains `API Contracts` or `Data Model` sections, their claims are verified against the codebase. Endpoints listed in the API Contracts table must correspond to actual route definitions. Tables listed in the Data Model table must correspond to actual model/schema/migration definitions. Claimed-but-not-found entries are validation errors — the planner must either fix the table or mark new entries as to-be-created. For a new Data Model row, include `to-be-created` in any cell of that row; this explicitly exempts it from the existing-code check until its execution segment creates it.
 
 For `execution-graph.json`:
 1. It must parse as valid JSON.
@@ -627,7 +627,7 @@ The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/c
    ```bash
    "$DYNOS" hook plan_gap_analysis --root . --task-dir .dynos/task-{id}
    ```
-   This verifies that claims in `## API Contracts` and `## Data Model` sections correspond to real code. If the plan claims an endpoint or table exists that the codebase doesn't have, the planner must either fix the table or explicitly mark the entry as to-be-created. Gap analysis failures block — repair before continuing.
+   This verifies that claims in `## API Contracts` and `## Data Model` sections correspond to real code. If the plan claims an endpoint or existing table that the codebase doesn't have, the planner must either fix the table or explicitly mark the entry as to-be-created. In a Data Model table, put `to-be-created` in any cell of the new table's row. Gap analysis failures block — repair before continuing.
 
 2. **LLM plan auditor (conditional):** Only spawn `spec-completion-auditor` when `risk_level` is `high` or `critical`. For low/medium risk, the deterministic checks (`validate_task_artifacts` for criteria coverage + gap analysis for code/plan alignment) are authoritative — skip the LLM spawn. Log: `{timestamp} [SKIP] plan-audit-llm — risk_level={risk}`.
 
