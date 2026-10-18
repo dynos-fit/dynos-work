@@ -8,3 +8,6 @@ hooks/dashboard-ui/src/**/*.js.map
 __pycache__/
 *.pyc
 benchmarks/generated/
+
+# local work order, never committed
+plan.md
