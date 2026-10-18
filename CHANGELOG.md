@@ -11,6 +11,17 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.20] - 2026-10-18
+### Changed
+- Classification veto writes append the final hash to the task receipt chain;
+  validation accepts superseded artifact hashes while still checking every
+  chain link and HMAC.
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.20`.
+
+---
+
 ## [7.5.19] - 2026-09-27
 ### Fixed
 - Executor spawns no longer end by being killed at the turn cap. The per-spawn

@@ -1861,6 +1861,8 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
             )
             return 1
 
+    _try_extend_chain_for_artifact(task_dir, task_dir / "classification.json")
+
     final_flag = bool(manifest.get("auto_approve_gates", False))
     print(json.dumps({
         "auto_approve_gates": final_flag,
