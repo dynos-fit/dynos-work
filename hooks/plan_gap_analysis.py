@@ -435,7 +435,11 @@ def analyze_data_model(
     *,
     _precomputed_files: list[Path] | None = None,
 ) -> dict[str, Any]:
-    """Check Data Model section claims against actual schema/model definitions."""
+    """Check existing Data Model claims against schema/model definitions.
+
+    Rows marked ``to-be-created`` are reported separately and exempted from
+    the codebase match check because their execution segment has not run yet.
+    """
     section = extract_section(plan_text, "Data Model")
     if not section.strip():
         return {"skipped": True, "reason": "no Data Model section"}
@@ -446,16 +450,35 @@ def analyze_data_model(
 
     # Extract claimed tables
     claimed_tables: set[str] = set()
+    to_be_created_tables: set[str] = set()
     for row in rows:
-        for key, val in row.items():
-            k = key.lower().strip()
-            if k in ("table", "model", "collection", "entity", "schema"):
-                name = val.strip("`").strip()
-                if name and name != "—":
-                    claimed_tables.add(name.lower())
+        names = [
+            val.strip().strip("`").lower()
+            for key, val in row.items()
+            if key.lower().strip() in ("table", "model", "collection", "entity", "schema")
+            and val.strip().strip("`")
+            and val.strip().strip("`") != "—"
+        ]
+        # Greenfield schemas cannot exist in the repository until their
+        # execution segment runs. Honor the same explicit marker the plan
+        # validation instructions require for planned files. The marker may
+        # appear in the table/model cell or another cell in the row.
+        if any("to-be-created" in value.lower() for value in row.values()):
+            to_be_created_tables.update(names)
+            continue
+        claimed_tables.update(names)
 
-    if not claimed_tables:
+    if not claimed_tables and not to_be_created_tables:
         return {"skipped": True, "reason": "no tables found in Data Model table"}
+    if not claimed_tables:
+        return {
+            "skipped": False,
+            "claimed_tables": [],
+            "to_be_created": sorted(to_be_created_tables),
+            "verified": [],
+            "unverified": [],
+            "models_found_in_code": 0,
+        }
 
     # Two-pass scan: plan-implied paths first, full repo only on fallback.
     plan_paths = _extract_plan_paths(plan_text)
@@ -496,6 +519,7 @@ def analyze_data_model(
     return {
         "skipped": False,
         "claimed_tables": sorted(claimed_tables),
+        "to_be_created": sorted(to_be_created_tables),
         "verified": sorted(verified),
         "unverified": sorted(unverified),
         "models_found_in_code": len(found_models),

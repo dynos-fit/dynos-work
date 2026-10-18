@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.21] - 2026-10-18
+### Changed
+- Honor to-be-created markers for greenfield Data Model rows
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.21`.
+
+---
+
 ## [7.5.20] - 2026-10-18
 ### Changed
 - Classification veto writes append the final hash to the task receipt chain;
