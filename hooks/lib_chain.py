@@ -263,7 +263,9 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
 
     Three independent checks per entry:
       1. content sha256: re-hash the file referenced by file_path,
-         compare to stored sha256 → mismatch is content_mismatch.
+         compare to stored sha256 → mismatch is content_mismatch. For
+         versioned artifacts, check only the newest entry for each path;
+         receipts are checked at every entry.
       2. prev_sha256: recompute from prior entry's canonical_json,
          compare to stored prev_sha256 → mismatch is chain_corrupt.
       3. _sig: HMAC over canonical_json(entry without _sig),
@@ -301,7 +303,8 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
     project_secret = _resolve_event_secret(root)
     task_id = task_dir.name if task_dir.name else None
 
-    expected_prev = _GENESIS_PREV_SHA256
+    entries: list[dict] = []
+    latest_artifact_entry: dict[str, int] = {}
     for idx, line in enumerate(lines):
         try:
             entry = json.loads(line)
@@ -322,36 +325,50 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                 first_failed_file_path=None,
             )
 
+        entries.append(entry)
+        if entry.get("kind") == "artifact":
+            latest_artifact_entry[entry.get("file_path", "")] = idx
+
+    expected_prev = _GENESIS_PREV_SHA256
+    for idx, entry in enumerate(entries):
         rel = entry.get("file_path", "")
 
-        # Check 1: content sha256
-        artifact_path = task_dir / rel if not Path(rel).is_absolute() else Path(rel)
-        if not artifact_path.exists():
-            return ChainValidationResult(
-                status="content_mismatch",
-                first_failed_index=idx,
-                first_failed_field="sha256",
-                error_reason=f"line {idx} references missing file: {rel}",
-                first_failed_file_path=rel,
-            )
-        try:
-            actual_sha = _file_sha256(artifact_path)
-        except OSError as exc:
-            return ChainValidationResult(
-                status="content_mismatch",
-                first_failed_index=idx,
-                first_failed_field="sha256",
-                error_reason=f"line {idx} file unreadable: {exc}",
-                first_failed_file_path=rel,
-            )
-        if actual_sha != entry.get("sha256"):
-            return ChainValidationResult(
-                status="content_mismatch",
-                first_failed_index=idx,
-                first_failed_field="sha256",
-                error_reason=f"line {idx}: file content does not match stored sha256",
-                first_failed_file_path=rel,
-            )
+        # Artifact entries are versioned: later entries for the same path
+        # supersede their live-content hash while preserving the earlier
+        # entry's place in the append-only authenticated chain. Receipts
+        # remain immutable and are checked against every entry.
+        check_live_content = (
+            entry.get("kind") != "artifact"
+            or latest_artifact_entry.get(rel) == idx
+        )
+        if check_live_content:
+            artifact_path = task_dir / rel if not Path(rel).is_absolute() else Path(rel)
+            if not artifact_path.exists():
+                return ChainValidationResult(
+                    status="content_mismatch",
+                    first_failed_index=idx,
+                    first_failed_field="sha256",
+                    error_reason=f"line {idx} references missing file: {rel}",
+                    first_failed_file_path=rel,
+                )
+            try:
+                actual_sha = _file_sha256(artifact_path)
+            except OSError as exc:
+                return ChainValidationResult(
+                    status="content_mismatch",
+                    first_failed_index=idx,
+                    first_failed_field="sha256",
+                    error_reason=f"line {idx} file unreadable: {exc}",
+                    first_failed_file_path=rel,
+                )
+            if actual_sha != entry.get("sha256"):
+                return ChainValidationResult(
+                    status="content_mismatch",
+                    first_failed_index=idx,
+                    first_failed_field="sha256",
+                    error_reason=f"line {idx}: file content does not match stored sha256",
+                    first_failed_file_path=rel,
+                )
 
         # Check 2: prev_sha256 linkage
         if entry.get("prev_sha256") != expected_prev:
