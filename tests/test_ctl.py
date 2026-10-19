@@ -251,6 +251,10 @@ def test_run_planning_mode_standard_vs_hierarchical_and_fast_track(tmp_path) -> 
     manifest_path = task_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["classification"]["risk_level"] = "high"
+    manifest["classification"]["subsystems"] = [
+        {"name": "api", "paths": ["src/api.py"], "independent": True},
+        {"name": "storage", "paths": ["src/storage.py"], "independent": True},
+    ]
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     hierarchical = _run_ctl("run-planning-mode", str(task_dir))
     payload = json.loads(hierarchical.stdout)

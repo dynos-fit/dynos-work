@@ -79,7 +79,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lib_core import load_json, write_json
-from lib_models import valid_models_for_host, resolve_model_for_tier, TIER_DEEP, HOST_CLAUDE
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 
@@ -187,32 +186,10 @@ def _recompute_totals(data: dict) -> None:
     data["total_output_tokens"] = sum(v.get("output_tokens", 0) for v in by_agent.values() if isinstance(v, dict))
 
 
-# Derived from lib_models so that valid model set stays in one authoritative place.
-_KNOWN_MODELS = valid_models_for_host(HOST_CLAUDE)
-_DEFAULT_PARENT_MODEL = resolve_model_for_tier(HOST_CLAUDE, TIER_DEEP)  # "opus"  # noqa: model-literal
-
-# Terminal sentinel: indicates the host does not support the model in question.
-# Must never be upgraded to a vendor model by _resolve_model.
-_HOST_UNSUPPORTED_SENTINEL = "host_unsupported"
-
-
 def _resolve_model(model: str) -> str:
-    """Resolve 'default'/'null'/empty model names to the actual model.
-
-    When the executor router returns model=null it means 'inherit from parent'.
-    The parent (orchestrator) runs on opus, so 'default' → 'opus'.  # noqa: model-literal
-
-    The sentinel value 'host_unsupported' is terminal and must pass through
-    unchanged — it must never be upgraded to a vendor model.
-    """
-    if model == _HOST_UNSUPPORTED_SENTINEL:
-        return _HOST_UNSUPPORTED_SENTINEL  # terminal sentinel — do not upgrade
-    if model in _KNOWN_MODELS:
-        return model
-    if model in ("none", "n/a"):
-        return model  # deterministic events legitimately have no model
-    # Everything else (default, null, empty, unknown) → parent model
-    return _DEFAULT_PARENT_MODEL
+    """Preserve observed model names; label absent model data as unknown."""
+    value = str(model).strip() if model is not None else ""
+    return value if value and value.lower() not in {"none", "n/a"} else "unknown"
 
 
 def record_tokens(
@@ -232,6 +209,11 @@ def record_tokens(
     data = _load_usage(task_dir)
 
     model = _resolve_model(model)
+    model_resolution = (
+        "deterministic" if event_type == "deterministic"
+        else "unknown" if model == "unknown"
+        else "exact"
+    )
 
     total = input_tokens + output_tokens
     now = datetime.now(timezone.utc).isoformat()
@@ -241,6 +223,7 @@ def record_tokens(
         "timestamp": now,
         "agent": agent,
         "model": model,
+        "model_resolution": model_resolution,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "tokens": total,

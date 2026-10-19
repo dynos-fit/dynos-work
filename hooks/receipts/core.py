@@ -251,21 +251,6 @@ _LOG_MESSAGES: dict[str, str] = {
 _WRITE_ROLE = "receipt-writer"
 
 
-def _record_tokens(task_dir: Path, agent: str, model: str, tokens: int) -> None:
-    """Deprecated compatibility shim for old receipt token recording.
-
-    LLM token usage is now attributed exclusively by the SubagentStop hook,
-    which parses the finished transcript and writes the authoritative
-    ``spawn`` record into ``token-usage.json``. Recording ``tokens_used`` a
-    second time from receipt writers double-counts the same work.
-
-    The helper remains in place so older receipt call sites and tests do not
-    need to change shape, but it intentionally performs no write.
-    """
-    _ = (task_dir, agent, model, tokens)
-    return None
-
-
 def _receipts_dir(task_dir: Path) -> Path:
     return task_dir / "receipts"
 

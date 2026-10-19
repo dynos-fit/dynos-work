@@ -189,3 +189,27 @@ def test_check_web_tool_evidence_requires_websearch_or_webfetch_tool(tmp_path: P
         "non-WebSearch/WebFetch entries must not satisfy the cross-check; "
         "regression seal for cq-001"
     )
+
+
+def test_external_gate_narrow_named_system_triggers(tmp_path: Path, monkeypatch):
+    import ctl, lib_core
+    task=_make_task_dir(tmp_path,search_recommended=False)
+    manifest=json.loads((task/"manifest.json").read_text())
+    cases=[("configure the retry queue and cache metrics",False),
+           ("add a Stripe webhook handler",True),
+           ("build a full-stack profile feature",False),
+           ("migrate to Postgres 16",True),
+           ("migrate tests to pytest",False)]
+    for raw,expected in cases:
+        manifest["raw_input"]=raw
+        manifest["classification"]["type"]="migration" if raw.startswith("migrate") else "full-stack" if raw.startswith("build") else "feature"
+        (task/"manifest.json").write_text(json.dumps(manifest))
+        assert ctl._compute_external_solution_gate(task)["search_recommended"] is expected, raw
+    project=task.parent.parent
+    policy_dir=tmp_path/"policy"; policy_dir.mkdir()
+    (policy_dir/"policy.json").write_text(json.dumps({"external_search_terms_extra":["acme-sdk"]}))
+    monkeypatch.setattr(lib_core,"_persistent_project_dir",lambda _root:policy_dir)
+    manifest["raw_input"]="use Acme-SDK"
+    manifest["classification"]["type"]="feature"
+    (task/"manifest.json").write_text(json.dumps(manifest))
+    assert ctl._compute_external_solution_gate(task)["search_recommended"] is True

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -107,10 +108,14 @@ def _insert_changelog_entry(version: str, message: str) -> None:
         f"- Bump package and plugin metadata to `{version}`.\n\n"
         "---\n\n"
     )
-    marker = "## [Unreleased]\n\n---\n\n"
-    if marker not in text:
+    unreleased = re.search(r"(?m)^## \[Unreleased\]\s*$", text)
+    next_release = re.search(r"(?m)^## \[\d+\.\d+\.\d+\](?:\s|$)", text)
+    if unreleased is None or next_release is None or next_release.start() < unreleased.end():
         raise ValueError("CHANGELOG.md must contain the standard [Unreleased] section")
-    CHANGELOG.write_text(text.replace(marker, f"## [Unreleased]\n\n---\n\n{entry}", 1), encoding="utf-8")
+    CHANGELOG.write_text(
+        text[: next_release.start()] + entry + text[next_release.start() :],
+        encoding="utf-8",
+    )
 
 
 def bump_release(*, bump: str, base_ref: str | None, set_version: str | None, message: str) -> str:

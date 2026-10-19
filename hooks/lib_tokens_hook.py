@@ -27,7 +27,6 @@ from pathlib import Path
 
 import lib_host
 import actor_identity
-from lib_models import valid_models_for_host
 from lib_tokens import record_tokens
 
 
@@ -221,24 +220,10 @@ def _parse_transcript(transcript_path: Path, host: str = "claude") -> dict:
                     total_input += usage.get("cache_creation_input_tokens", 0)
                     total_output += usage.get("output_tokens", 0)
 
-    # Normalize model name to short tier identifier.
-    # Use the host's known models list (sorted for deterministic order) so
-    # this block does not need to enumerate model family names literally.
-    # A model string contains at most one family name, so the loop order
-    # is immaterial — the first (and only) match wins identically to the
-    # prior per-family if/elif chain.
-    for _known in sorted(valid_models_for_host(host)):
-        if _known in model:
-            model = _known
-            break
-
-    # NARROW host_unsupported condition:
-    # Only when BOTH token counts are zero AND the model is unrecognized for
-    # this host. Do NOT widen — real usage with unrecognized models is kept as-is.
-    if total_input == 0 and total_output == 0:
-        valid = valid_models_for_host(host)
-        if model not in valid:
-            model = "host_unsupported"
+    # The transcript is authoritative, including model names unknown to this
+    # version of the plugin. Do not normalize by host or model tier.
+    if not model or model.lower() in {"none", "n/a"}:
+        model = "unknown"
 
     return {
         "input_tokens": total_input,
@@ -391,15 +376,9 @@ def main() -> int:
     # Parse transcript
     result = _parse_transcript(transcript_path, host=_active_host)
 
-    # Skip if no tokens recorded (empty transcript).
-    # Exception: a zero-token transcript whose model resolved to the terminal
-    # "host_unsupported" sentinel is NOT a mere empty transcript — it is the
-    # circuit-breaker signal that the active host produced no recognizable
-    # model attribution (binding decision 9). Record it so the sentinel can
-    # fire downstream instead of being silently dropped here.
+    # Skip empty transcripts; there is no usage event to attribute.
     if result["input_tokens"] == 0 and result["output_tokens"] == 0:
-        if result["model"] != "host_unsupported":
-            return 0
+        return 0
 
     # Detect phase, stage, segment
     phase, stage = _detect_phase_and_stage(args.agent_type, task_dir)

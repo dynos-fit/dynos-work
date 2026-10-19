@@ -53,6 +53,9 @@ def decide_read(attempt: ReadAttempt, *, audit_plan: dict | None) -> ReadDecisio
     6. Dead-code Grep quota: allow up to 10, increment quota file
     7. Default deny
     """
+    if attempt.role == "planning":
+        return _handle_planner_read(attempt)
+
     # Decision tree step 1: Non-audit roles bypass all checks
     if not attempt.role.startswith("audit-"):
         return ReadDecision(allowed=True, reason="non-audit role", quota_used=None)
@@ -138,6 +141,65 @@ def decide_read(attempt: ReadAttempt, *, audit_plan: dict | None) -> ReadDecisio
         reason=f"read-policy: target outside allowlist for role={attempt.role}",
         quota_used=None,
     )
+
+
+def _handle_planner_read(attempt: ReadAttempt) -> ReadDecision:
+    """Enforce a per-phase repository read quota for planning agents."""
+    if attempt.task_dir is None:
+        return ReadDecision(True, "planner outside task context", None)
+    task_dir = attempt.task_dir
+    try:
+        attempt.target.resolve().relative_to(task_dir.resolve())
+        return ReadDecision(True, "inside task_dir", None)
+    except ValueError:
+        pass
+    root = task_dir.parent.parent.resolve()
+    try:
+        phase_path = task_dir / "active-planner-phase"
+        phase = phase_path.read_text().strip() if phase_path.is_file() else "plan"
+    except OSError:
+        return ReadDecision(False, "planner phase state unreadable; denying repository read", None)
+    from lib_tool_budget import PLANNER_PHASE_READ_ALLOWANCE
+    quota = PLANNER_PHASE_READ_ALLOWANCE.get(phase, PLANNER_PHASE_READ_ALLOWANCE["plan"])
+    allowlist_file = task_dir / "planner-read-allowlist.json"
+    try:
+        if allowlist_file.is_file():
+            paths = json.loads(allowlist_file.read_text()).get("paths", [])
+        else:
+            import re
+            path_pattern=re.compile(r"(?:\./)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:py|pyi|js|jsx|ts|tsx|json|md|go|rs|java|rb|sh|yaml|yml)")
+            referenced=[]
+            for name in ("raw-input.md", "discovery-notes.md", "design-decisions.md", "design-doc.md", "spec.md"):
+                source=task_dir/name
+                if source.is_file(): referenced.extend(path_pattern.findall(source.read_text(errors="replace")))
+            paths=sorted({str((root/entry).resolve()) for entry in referenced if not Path(entry).is_absolute()})
+            tmp=allowlist_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"paths":paths}))
+            os.replace(tmp,allowlist_file)
+        if attempt.tool_name == "Read" and str(attempt.target.resolve()) in paths:
+            return ReadDecision(True, "planner referenced-file allowlist", None)
+    except Exception:
+        return ReadDecision(False, "planner read allowlist unavailable; denying repository read", None)
+    try:
+        target=attempt.target.resolve()
+        target.relative_to(root)
+    except (ValueError, OSError):
+        return ReadDecision(False, "planner repository reads must stay inside the repository", None)
+    if target == root:
+        return ReadDecision(False, "planner repo-wide Grep/Glob is denied; provide an explicit path", None)
+    quota_file=task_dir/"planner-read-quota.json"
+    try:
+        data=json.loads(quota_file.read_text()) if quota_file.exists() else {}
+        count=int(data.get("count",0)) if data.get("phase",phase)==phase else 0
+        if count >= quota:
+            return ReadDecision(False, f"planner {phase} read quota exhausted ({count}/{quota}); ask for the file as a discovery question or list it in the plan's Reference Code", count)
+        count += 1
+        tmp=quota_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"phase":phase,"count":count}))
+        os.replace(tmp,quota_file)
+        return ReadDecision(True, f"planner {phase} read quota ({count}/{quota})", count)
+    except Exception:
+        return ReadDecision(False, "planner read quota state unavailable; denying repository read", None)
 
 
 def _handle_dead_code_grep_quota(attempt: ReadAttempt) -> ReadDecision:

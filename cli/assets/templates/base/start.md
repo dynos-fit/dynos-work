@@ -11,65 +11,6 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 
 ---
 
-## MANDATORY: Token Recording After Every Agent Spawn
-
-After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
-
-Before EVERY planner receipt write, you MUST first write a per-phase injected-prompt sidecar by piping the planner prompt body into `hooks/router.py planner-inject-prompt`. Capture the printed sha256 digest and pass it back through as the `injected_prompt_sha256=<digest>` kwarg on the receipt call. The receipt will raise `ValueError` if the sidecar is missing or its contents do not match — that is the proof-of-injection gate.
-
-```bash
-# Discovery planner — write sidecar, capture digest:
-DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | python3 "{{HOOKS_PATH}}/router.py" planner-inject-prompt --task-id {id} --phase discovery)
-
-# Spec planner — write sidecar, capture digest:
-SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | python3 "{{HOOKS_PATH}}/router.py" planner-inject-prompt --task-id {id} --phase spec)
-
-# Plan planner — write sidecar, capture digest:
-PLAN_DIGEST=$(printf '%s' "$PLAN_PROMPT" | python3 "{{HOOKS_PATH}}/router.py" planner-inject-prompt --task-id {id} --phase plan)
-```
-
-Then, after each planner subagent returns, write the matching receipt with the captured digest:
-
-```python
-from dynoslib_receipts import receipt_planner_spawn, receipt_plan_audit
-
-# After planner spawn (discovery/design/classification):
-receipt_planner_spawn(
-    task_dir, "discovery",
-    tokens_used=TOTAL_TOKENS,
-    injected_prompt_sha256=DISCOVERY_DIGEST,
-)
-
-# After planner spawn (spec normalization):
-receipt_planner_spawn(
-    task_dir, "spec",
-    tokens_used=TOTAL_TOKENS,
-    injected_prompt_sha256=SPEC_DIGEST,
-)
-
-# After planner spawn (plan generation):
-receipt_planner_spawn(
-    task_dir, "plan",
-    tokens_used=TOTAL_TOKENS,
-    injected_prompt_sha256=PLAN_DIGEST,
-)
-
-# After spec-completion auditor (plan audit; task-007 A-006 restricts the
-# writer to high/critical risk only — for low/medium risk, skip and log
-# plan_audit_skipped_by_risk instead):
-# The writer re-hashes spec.md / plan.md / execution-graph.json from disk
-# at write time (SEC-004: no caller-supplied hashes, no TOCTOU window).
-# The PLAN_AUDIT exit gate re-hashes these artifacts at transition time and
-# refuses to advance when any has drifted since the audit was recorded.
-# finding_count was removed from the v4 signature (task-007 B-006 / AC 14).
-receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS)
-
-```
-
-Each receipt auto-records tokens to `token-usage.json`. If you skip this, the retrospective will show 0 tokens and the effectiveness scores will be wrong. This is the same enforcement pattern as the execute skill's receipts.
-
----
-
 ## Step 0 — Metadata & Initialization
 
 1. Ensure `.dynos/` exists: `mkdir -p .dynos`. Then auto-register this project with the global registry (silent, idempotent): run `python3 "{{HOOKS_PATH}}/registry.py" register "$(pwd)" 2>/dev/null || true`. This creates `~/.dynos/projects/{slug}/` and adds the project to `~/.dynos/registry.json` if not already registered. No user action needed. Then ensure the local maintenance daemon is running (silent, idempotent): run `PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" start --root "$(pwd)" 2>/dev/null || true`. This starts the daemon without autofix. Autofix must be explicitly enabled by the user via `dynos init --autofix` or `dynos local start --autofix`. If already running, it is a no-op.
@@ -107,71 +48,11 @@ python3 "{{HOOKS_PATH}}/ctl.py" validate-task .dynos/task-{id}
 
 ---
 
-## Token & Event Capture (applies to ALL events in this skill)
-
-After every subagent spawn AND every deterministic validation, record the event:
-
-**For LLM subagent spawns** (planner, founder, testing-executor, spec-completion-auditor):
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-  --task-dir .dynos/task-{id} \
-  --agent "{agent_name}" \
-  --model "{model_name}" \
-  --input-tokens {input_tokens} \
-  --output-tokens {output_tokens} \
-  --phase planning \
-  --stage "{current_manifest_stage}" \
-  --type spawn \
-  --detail "{what the agent did}"
-```
-
-**For deterministic Python validations** (validate_task_artifacts, ctl validate-task, spec heading check, etc.):
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-  --task-dir .dynos/task-{id} \
-  --agent "{validation_tool_name}" \
-  --model "none" \
-  --input-tokens 0 \
-  --output-tokens 0 \
-  --phase planning \
-  --stage "{current_manifest_stage}" \
-  --type deterministic \
-  --detail "{validation result summary}"
-```
-
-Where:
-- `input_tokens`/`output_tokens` come from the Agent tool result's usage summary (pass `0` if unavailable)
-- `model_name` is the model used (e.g. "opus", "sonnet", "haiku")
-- `current_manifest_stage` is the current stage from manifest.json (e.g. DISCOVERY, SPEC_NORMALIZATION, PLANNING)
-- `detail` is a short description of what happened (e.g. "Discovery + Design + Classification", "Validated spec.md headings — 0 errors")
-
-This writes to `.dynos/task-{id}/token-usage.json` with a chronological event log. The same hook is used by execute and audit skills — events accumulate across all phases.
-
-**Specific events to record in this skill:**
-- Step 2: Planner spawn (phase=planning, stage=DISCOVERY)
-- Step 2: Founder simulation spawns (phase=planning, stage=DISCOVERY)
-- Step 2: Classification validation (type=deterministic, stage=DISCOVERY)
-- Step 2b: Fast-track gate check (type=deterministic, stage=DISCOVERY)
-- Step 3: Planner spec normalization spawn (phase=planning, stage=SPEC_NORMALIZATION)
-- Step 3: Spec heading/criteria validation (type=deterministic, stage=SPEC_NORMALIZATION)
-- Step 5: Planner plan generation spawn (phase=planning, stage=PLANNING)
-- Step 5: validate_task_artifacts run (type=deterministic, stage=PLANNING)
-- Step 7: spec-completion-auditor plan audit spawn (phase=audit, stage=PLAN_AUDIT)
-- Step 8: testing-executor TDD spawn (phase=tdd, stage=PLAN_AUDIT)
-- Step 8: TDD criteria coverage validation (type=deterministic, stage=PLAN_AUDIT)
-
 ---
 
-## Step 1 — Discovery Intake
+## Step 1 — Assemble Discovery Context
 
-1. Build discovery context from:
-   - `raw-input.md`
-   - relevant existing code in the repo
-   - optional trajectory memory from `.dynos/trajectories.json` if available
-2. If trajectory memory exists, use it only to surface likely ambiguity or failure patterns. Do not treat it as ground truth and do not copy prior solutions blindly.
-3. Generate up to 5 targeted questions that materially reduce implementation risk.
-4. Present the questions to the user using `AskUserQuestion`.
-5. Write `discovery-notes.md` with the Q&A.
+Read `raw-input.md`, the files it names, and optional trajectory memory. Do not ask questions in this step; present planner questions and design choices together in Step 2.
 
 ---
 
@@ -194,17 +75,15 @@ Phase: Discovery + Design + Classification (combined).
 Read raw-input.md and discovery-notes.md if present. Also read any attached trajectory context as advisory prior history only.
 
 Perform three things in one pass:
-1. Discovery: generate only the highest-value unresolved questions.
-2. Design Options: break the task into subtasks. For any subtask rated hard complexity or critical value, generate 2-3 design options with pros and cons. For easy or medium subtasks, decide directly.
-3. Classification: produce type, domains, risk_level, and notes.
+1. Discovery: at most 4 questions, each `Qn: <question> — changes: implementation|risk|acceptance — default: <recommended answer>`. Pre-fill every default.
+2. Design Options: hard/critical subtasks only; include a recommended option.
+3. Assumptions: tag each `safe assumption` or `needs confirmation`.
+4. Classification: type, domains, risk_level, and notes as JSON.
 
-Return three sections:
-- Questions
-- Design Options
-- Classification (JSON)
+Return sections `Questions`, `Design Options`, `Assumptions`, and `Classification (JSON)`.
 ```
 
-Present any remaining discovery questions to the user and append answers to `discovery-notes.md`.
+Present questions and design choices in one `AskUserQuestion` call, at most 4 total. Defer the rest under `## Deferred (needs confirmation)` in `discovery-notes.md` and apply defaults. Write discovery notes and design decisions once after that round.
 
 If hard or critical design options were returned:
 1. Run the Founder skill in simulation mode for each high-risk design option.
@@ -271,9 +150,7 @@ If `search_recommended` is `true`, you may perform bounded external research to 
 
 If `search_recommended` is `false`, proceed directly to Step 3.
 
-Append exactly one line to the execution log:
-
-`{timestamp} [GATE] external-solution — recommended: {true|false}`
+`run-external-solution-gate` appends its own `[GATE] external-solution — recommended: {true|false}` line to the execution log; do not write one by hand. Every other execution-log line in this skill goes through `python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag <TAG> --message "<text>"` — never append to `execution-log.md` directly.
 
 ---
 
@@ -376,10 +253,10 @@ For `execution-graph.json`:
 
 If any validation fails, respawn planning and fix the artifacts before continuing.
 
-Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
+Record completion (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
 
-```text
-{timestamp} [DONE] planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag DONE --message "planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})"
 ```
 
 Transition the stage by running:
@@ -470,11 +347,7 @@ Transition the stage by running:
 python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
-Append to the execution log:
-
-```text
-{timestamp} [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT
-```
+(`transition_task` auto-appends the `[STAGE] → PRE_EXECUTION_SNAPSHOT` line; do not write an `[ADVANCE]` line by hand.)
 
 Print:
 

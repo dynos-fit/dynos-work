@@ -171,17 +171,7 @@ Append to log (transition_task already auto-logged the `[STAGE] → CHECKPOINT_A
 {timestamp} [SPAWN] {N} auditors in parallel ({list of names})
 ```
 
-**Role stamping (MANDATORY — BEFORE each Agent spawn):** Before each auditor's Agent tool invocation, stamp the role file via the deterministic ctl wrapper. The auditor subagent's `pre_tool_use.py` reads `active-segment-role` to resolve role; without this stamp the subagent runs as `execute-inline` and its `audit-reports/` writes are denied by `write_policy`. Issue all stamp-role Bash calls in a single message with multiple Bash tool uses (no inter-dependencies):
-
-```bash
-"$DYNOS" ctl stamp-role .dynos/task-{id} --role "audit-{name-without-suffix}"
-```
-
-The role string strips the `-auditor` suffix from the agent file name: `spec-completion-auditor` → `audit-spec-completion`, `security-auditor` → `audit-security`, `claude-md-auditor` → `audit-claude-md`. The wrapper validates against an allowlist (`hooks/ctl.py::_STAMP_ROLE_ALLOWLIST`) and fails with exit 1 if the resolved string is unknown — a fail-fast guard that catches typos before the spawn.
-
-When auditors run in parallel, the role file is overwritten on each stamp; this is fine because each subagent reads the file at its own first tool call within its own session. The post-spawn cleanup (delete `active-segment-role`) happens after the entire audit batch, not per auditor.
-
-**Spawn budget check (MANDATORY — BEFORE every batch):**
+The Agent spawn hook stamps the auditor role from its agent type.
 
 Before issuing each parallel auditor batch (this includes the first batch AND every subsequent re-audit batch — the check runs once per spawn cycle, before EACH batch, not only the first), run:
 
@@ -192,59 +182,18 @@ Before issuing each parallel auditor batch (this includes the first batch AND ev
 Parse the JSON output. The command emits a single-line JSON object with keys `status`, `count`, `threshold`, `exempt_count`, and `task_class`. If `status` is `'paused'` or `'already_paused'`:
 
 1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the non-converging-repair `count`, the threshold, the `task_class`, and instruct the operator to run `"$DYNOS" ctl spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why repairs are not converging.
-2. Append a line beginning with `[BUDGET-PAUSE]` to `execution-log.md` that records the timestamp, count, and threshold.
+2. Record the pause: `"$DYNOS" ctl log-append .dynos/task-{id} --tag BUDGET-PAUSE --message "count={count} threshold={threshold}"` (never append to `execution-log.md` directly; the stamped auditor role is denied that write).
 3. Exit non-zero.
 
 Do not proceed with spawning auditors. The pause is intentional — the policy is calibrated from this project's retrospective history, and the wasted-spawn count has crossed the learned threshold.
 
 Spawn the determined auditors simultaneously, passing for each auditor the model returned by `ensemble-next` (never the plan `model` for an ensemble auditor) in the subagent spawn configuration. For alongside-mode auditors, this means two spawns for that role (generic + learned), both counted in {N}.
 
-Each auditor writes its own report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`. Every auditor agent has a write capability sufficient for this: auditors with `Bash` use a heredoc; `spec-completion-auditor` has the `Write` tool scoped via `write_policy.py` to its own report path. The role file stamped above is what unlocks the `audit-reports/` write rule for these subagents.
+Each auditor writes its own report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`. Every auditor agent has a write capability sufficient for this: auditors with `Bash` use a heredoc; `spec-completion-auditor` has the `Write` tool scoped via `write_policy.py` to its own report path. The hook-stamped auditor role unlocks the `audit-reports/` write rule for these subagents.
 
-**The orchestrator MUST NOT materialize audit-report files.** Direct `Write`/`Edit`/Bash redirection from the orchestrator (role=`execute-inline`) to `audit-reports/` is denied by `write_policy.decide_write` because the role is not `audit-*`. The orchestrator also cannot self-elevate by stamping the role file directly — `active-segment-role` is wrapper-required (`ctl stamp-role`) and only this skill's prose tells it what to stamp. The only legitimate path for an audit-report file to land on disk is the auditor subagent's own write call. If the auditor returns text instead of writing the file, treat the audit as **failed for this auditor** and re-spawn — do NOT backfill from the auditor's text response. Backfilling is the exact mechanism behind the 2026-04-30 audit-chain forgery incident: 7 of 8 ensemble auditors were synthesized by the orchestrator after one truncation, and the receipt chain validated as clean because there was no harness-level cross-check. The Agent-tool spawn-log hook (`hooks/agent-spawn-log`) now provides that cross-check; the absence of a matching `agent_spawn_post` entry for an auditor whose report is on disk is a hard fail at receipt time (`receipt_audit_done`).
+**The orchestrator MUST NOT materialize audit-report files.** Direct `Write`/`Edit`/Bash redirection from the orchestrator (role=`execute-inline`) to `audit-reports/` is denied by `write_policy.decide_write` because the role is not `audit-*`. The orchestrator cannot self-elevate through direct writes to the wrapper-required role file. The only legitimate path for an audit-report file to land on disk is the auditor subagent's own write call. If the auditor returns text instead of writing the file, treat the audit as **failed for this auditor** and re-spawn — do NOT backfill from the auditor's text response. Backfilling is the exact mechanism behind the 2026-04-30 audit-chain forgery incident: 7 of 8 ensemble auditors were synthesized by the orchestrator after one truncation, and the receipt chain validated as clean because there was no harness-level cross-check. The Agent-tool spawn-log hook (`hooks/agent-spawn-log`) now provides that cross-check; the absence of a matching `agent_spawn_post` entry for an auditor whose report is on disk is a hard fail at receipt time (`receipt_audit_done`).
 
-**Token & event capture (applies to all events in Steps 3-5):** After each subagent spawn AND each deterministic check, record the event:
-
-**For LLM subagent spawns** (auditors, repair executors):
-```bash
-"$DYNOS" hook lib_tokens record \
-  --task-dir .dynos/task-{id} \
-  --agent "{agent_name}" \
-  --model "{model_name}" \
-  --input-tokens {input_tokens} \
-  --output-tokens {output_tokens} \
-  --phase audit \
-  --stage "AUDITING" \
-  --type spawn \
-  --detail "{what the agent did}"
-```
-
-**For deterministic steps** (router decisions, retrospective computation, repair-log validation):
-```bash
-"$DYNOS" hook lib_tokens record \
-  --task-dir .dynos/task-{id} \
-  --agent "{tool_name}" \
-  --model "none" \
-  --input-tokens 0 \
-  --output-tokens 0 \
-  --phase audit \
-  --stage "AUDITING" \
-  --type deterministic \
-  --detail "{result summary}"
-```
-
-**For repair executor spawns**, use `--phase repair` and include `--segment {segment-id}` if the repair targets a specific segment.
-
-Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.json` with a chronological event log plus aggregated totals. The retrospective's token fields are populated from this file.
-
-**Specific events to record in this skill:**
-- Step 3: router audit-plan (type=deterministic, detail="Router decided: spawn X, skip Y")
-- Step 3: Each auditor spawn (type=spawn, phase=audit)
-- Step 4: repair-log build (type=deterministic, phase=repair)
-- Step 4: Each repair executor spawn (type=spawn, phase=repair, include --segment)
-- Step 4: ctl check-ownership after repair (type=deterministic, phase=repair)
-- Step 4: Re-audit spawns (type=spawn, phase=audit, detail="Re-audit after repair cycle N")
-- Step 5: compute_reward / validate_retrospective_scores (type=deterministic, phase=audit, detail="Computed retrospective scores")
+Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
 
 **Audit repair gate (deterministic):**
 
@@ -325,9 +274,9 @@ For each batch, spawn executor agents as assigned in `repair-log.json`:
 
 Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
 
-After all batches complete, append to log:
-```
-{timestamp} [DONE] repair-execution-{phase} — all fixes applied
+After all batches complete, record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "repair-execution-{phase} — all fixes applied"
 ```
 
 **Phase 1 re-audit (domain-aware, incremental scope):** Build the re-audit plan through ctl:
@@ -389,9 +338,9 @@ The written retrospective is complete. Do NOT reopen it to patch `model_used_by_
 
 **agent_source cross-check:** Retrospective claims of `agent_source[role] = "learned:X"` are cross-checked by `memory/policy_engine.py::_extract_quads` against `.dynos/events.jsonl`. Claims without a matching `learned_agent_applied` event (same `task_id`, same `agent_name`, same `segment_id` — or `segment_id` matching `role.removeprefix("audit-")` for auditor roles) are reclassified to `"generic"` and an `agent_source_reclassified` event is emitted. Auditors must continue to populate `agent_source` honestly — the cross-check is verification, not a substitute for honest reporting. Retrospectives are still accepted when unmatched; only the EMA attribution is downgraded, and the `agent_source_reclassified` events are the audit trail a reviewer can use to spot systemic drift.
 
-Append to log:
-```
-{timestamp} [DONE] reflect — task-retrospective.json written
+Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "reflect — task-retrospective.json written"
 ```
 
 **Deterministic Postmortem (Step 5a):** Generate the deterministic postmortem report before the LLM analysis so the LLM has access to anomaly detection, recurring patterns, and similar task comparisons.
@@ -406,9 +355,9 @@ Append to log:
 - When the deterministic engine determines there is literally nothing to learn, it short-circuits the postmortem write and instead emits `receipt_postmortem_skipped(task_dir, reason, retrospective_sha256, subsumed_by)` with `reason` from the enum `{"clean-task", "no-findings"}` and `subsumed_by` as a required list argument. The decision is deterministic: (a) `reason="clean-task"`, `subsumed_by=[]` when ≥2 auditors ran AND every auditor reported `findings: []`; (b) `reason="no-findings"`, `subsumed_by=[]` when exactly 1 auditor ran AND it reported `findings: []`; (c) in every other case — any auditor reporting ≥1 finding — the engine does NOT skip; it runs the LLM postmortem and writes `receipt_postmortem_generated` instead. There is no skip path for high-quality repairs: any task with findings must run the full LLM postmortem. The `task-retrospective.json` is hashed at receipt-emission time.
 - A receipt-write failure is logged as `postmortem_receipt_failed` / `postmortem_skip_receipt_failed` and does NOT corrupt the postmortem files themselves; the script returns its normal result so the audit pipeline keeps moving.
 
-This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the persistent project directory. Append to log:
-```
-{timestamp} [DONE] postmortem — anomalies={N}, recurring_patterns={N}
+This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the persistent project directory. Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "postmortem — anomalies={N}, recurring_patterns={N}"
 ```
 
 **LLM Postmortem Analysis (Step 5b):** After the deterministic postmortem, run LLM-powered failure analysis. This step is skipped for clean tasks (no findings, no repairs, quality >= 0.8).
@@ -433,14 +382,14 @@ This writes `postmortem-analysis.json` to the task dir and merges new prevention
 - When the sanitized analysis yields zero usable rules, it emits `receipt_postmortem_analysis` internally, passing `analysis_path` and `rules_path` as keyword file-path arguments; hashes are derived from the on-disk files — no caller-supplied hashes are accepted. The receipt records `rules_added=0` and the current on-disk hash of `prevention-rules.json` (or 64 zeros when the file does not exist).
 - When the merge appends rules, the same receipt is emitted AFTER the fcntl lock is released so the recorded hash captures the on-disk state visible to other readers. Do not call `receipt_postmortem_analysis` directly from this skill — it is emitted internally by `postmortem_analysis.py apply`.
 
-Append to log:
-```
-{timestamp} [DONE] postmortem-analysis — {N} prevention rules added
+Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "postmortem-analysis — {N} prevention rules added"
 ```
 
-If `has_findings` is false, skip this step and append:
-```
-{timestamp} [SKIP] postmortem-analysis — clean task, nothing to analyze
+If `has_findings` is false, skip this step and record the skip:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag SKIP --message "postmortem-analysis — clean task, nothing to analyze"
 ```
 
 **Post-completion processing:** Improve, policy engine, dashboard, and registry refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.

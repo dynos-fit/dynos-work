@@ -60,28 +60,13 @@ def test_rejects_empty_model_used(tmp_path: Path):
         receipt_tdd_tests(td, ["a.py"], "f" * 64, 100, "")
 
 
-def test_record_tokens_invoked_when_tokens_positive(tmp_path: Path):
+def test_receipt_writer_does_not_record_tokens(tmp_path: Path):
     td = _task_dir(tmp_path)
-    # task-20260505-002: receipt_tdd_tests lives in receipts.planner;
-    # patch the actual call site, not the lib_receipts shim.
-    from receipts import planner as _planner_module
-    with mock.patch.object(_planner_module, "_record_tokens") as rt:
-        receipt_tdd_tests(td, ["a.py"], "f" * 64, 1000, "haiku")
-    assert rt.called
-    args, _kwargs = rt.call_args
-    assert args[1] == "tdd-tests"
-    assert args[2] == "haiku"
-    assert args[3] == 1000
-
-
-def test_record_tokens_skipped_when_zero(tmp_path: Path):
-    td = _task_dir(tmp_path)
-    # task-20260505-002: receipt_tdd_tests lives in receipts.planner;
-    # patch the actual call site, not the lib_receipts shim.
-    from receipts import planner as _planner_module
-    with mock.patch.object(_planner_module, "_record_tokens") as rt:
-        receipt_tdd_tests(td, ["a.py"], "f" * 64, 0, "haiku")
-    assert not rt.called
+    usage = td / "token-usage.json"
+    usage.write_text(json.dumps({"events": [], "total": 0}))
+    before = usage.read_text()
+    receipt_tdd_tests(td, ["a.py"], "f" * 64, 1000, "haiku")
+    assert usage.read_text() == before
 
 
 def test_receipt_tokens_do_not_mutate_token_usage_json(tmp_path: Path):

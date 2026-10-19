@@ -560,6 +560,24 @@ def validate_manifest(manifest: dict) -> list[str]:
             errors.append("classification.tdd_required must be a boolean")
         if "fast_track" in classification and not isinstance(classification.get("fast_track"), bool):
             errors.append("classification.fast_track must be a boolean")
+        if "subsystems" in classification:
+            subsystems = classification.get("subsystems")
+            if not isinstance(subsystems, list):
+                errors.append("classification.subsystems must be an array")
+            else:
+                owners = set()
+                for index, subsystem in enumerate(subsystems):
+                    if (not isinstance(subsystem, dict) or not isinstance(subsystem.get("name"), str)
+                            or not isinstance(subsystem.get("paths"), list)
+                            or not isinstance(subsystem.get("independent"), bool)):
+                        errors.append(f"classification.subsystems[{index}] is malformed")
+                        continue
+                    for path in subsystem["paths"]:
+                        if not isinstance(path, str) or not path.strip():
+                            errors.append(f"classification.subsystems[{index}].paths entries must be non-empty strings")
+                        elif path in owners:
+                            errors.append(f"classification.subsystems path overlaps: {path}")
+                        owners.add(path)
     return errors
 
 
@@ -576,7 +594,41 @@ def compute_fast_track(manifest: dict) -> bool:
     return True
 
 
-def apply_fast_track(task_dir: Path) -> bool:
+def compute_planning_path(manifest: dict, task_dir: Path | None = None) -> str:
+    """Choose combined planning independently from the audit fast_track flag."""
+    override = None
+    if task_dir is not None:
+        try:
+            from lib_core import _persistent_project_dir
+            policy = load_json(_persistent_project_dir(Path(task_dir).parent.parent) / "policy.json")
+            override = policy.get("planning_path_override") if isinstance(policy, dict) else None
+        except Exception:
+            override = None
+    if override in {"combined", "staged"}:
+        return override
+    classification = manifest.get("classification")
+    if not isinstance(classification, dict):
+        return "staged"
+    domains = classification.get("domains", [])
+    if (classification.get("risk_level") in {"low", "medium"}
+            and isinstance(domains, list) and 1 <= len(domains) <= 2
+            and classification.get("type") != "migration"):
+        return "combined"
+    return "staged"
+
+
+def compute_planning_mode(risk_level: str, subsystems: object, policy: dict | None = None) -> str:
+    policy = policy if isinstance(policy, dict) else {}
+    independent = sum(1 for row in subsystems if isinstance(row, dict) and row.get("independent") is True) if isinstance(subsystems, list) else 0
+    min_default = int(policy.get("hierarchical_min_subsystems", 3))
+    min_high = int(policy.get("hierarchical_min_subsystems_high", 2))
+    return "hierarchical" if (
+        (risk_level in {"high", "critical"} and independent >= min_high)
+        or independent >= min_default
+    ) else "standard"
+
+
+def apply_planning_flags(task_dir: Path) -> bool:
     """Compute fast-track eligibility AND persist the result to ``manifest.json``.
 
     This is NOT a pure computation. As a side-effect, this function writes the
@@ -601,6 +653,7 @@ def apply_fast_track(task_dir: Path) -> bool:
     manifest = load_json(manifest_path)
     fast = compute_fast_track(manifest)
     manifest["fast_track"] = fast
+    manifest["planning_path"] = compute_planning_path(manifest, task_dir)
 
     # AC 12: auto-derive tdd_required only when the key is absent from
     # classification. Any explicit True/False value set upstream is preserved.
@@ -611,6 +664,11 @@ def apply_fast_track(task_dir: Path) -> bool:
 
     write_ctl_json(task_dir, manifest_path, manifest)
     return fast
+
+
+def apply_fast_track(task_dir: Path) -> bool:
+    """Backward-compatible name for persisting both planning flags."""
+    return apply_planning_flags(task_dir)
 
 
 # Stages at which each artifact becomes required
@@ -918,6 +976,33 @@ def validate_task_artifacts(
     return errors
 
 
+def validate_task_artifacts_structured(
+    task_dir: Path, strict: bool = False, *, run_gap: bool = True
+) -> list[dict]:
+    """Return stable, artifact-scoped validation errors for repair prompts.
+
+    The human-readable validator remains the source of truth. This adapter
+    assigns deterministic rule identifiers while preserving every message.
+    """
+    result = []
+    for message in validate_task_artifacts(task_dir, strict=strict, run_gap=run_gap):
+        lowered = message.lower()
+        artifact = next(
+            (name for name in ("execution-graph.json", "spec.md", "plan.md", "manifest.json") if name in lowered),
+            "manifest.json",
+        )
+        prefix = message.split(":", 1)[0].strip().lower()
+        rule = re.sub(r"[^a-z0-9]+", "_", prefix).strip("_")[:48] or "validation_error"
+        loc_match = re.search(r"(?:^|\s)([^\s:]+:\d+)(?:\b|$)", message)
+        result.append({
+            "artifact": artifact,
+            "rule": rule,
+            "message": message,
+            "location": loc_match.group(1) if loc_match else None,
+        })
+    return result
+
+
 def validate_repair_log(task_dir: Path) -> list[str]:
     """Validate repair-log.json if present."""
     path = task_dir / "repair-log.json"
@@ -1104,6 +1189,96 @@ def validate_retrospective(task_dir: Path) -> list[str]:
 
 
 RISK_BUDGETS: dict[str, int] = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}
+
+
+def _timeline_time(value: object):
+    from datetime import datetime, timezone
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def compute_planning_timeline(task_dir: Path) -> dict:
+    """Compute pre-execution time buckets from hook and ctl telemetry."""
+    from datetime import timezone
+    td = Path(task_dir)
+    empty = {
+        "pre_execution_seconds": None, "planner_spawns": [], "model_seconds": 0,
+        "approval_waits": [], "approval_seconds": 0, "idle_gaps": [],
+        "idle_seconds": 0, "orchestrator_seconds": 0, "planner_respawns": 0,
+        "human_rounds": 0,
+    }
+    try:
+        manifest = load_json(td / "manifest.json")
+        start = _timeline_time(manifest.get("created_at")) if isinstance(manifest, dict) else None
+    except Exception:
+        start = None
+    transitions = []
+    for line in (td / "stage-transitions.jsonl").read_text().splitlines() if (td / "stage-transitions.jsonl").exists() else []:
+        try:
+            item = json.loads(line); stamp = _timeline_time(item.get("at"))
+            if stamp: transitions.append((stamp, item))
+        except Exception: pass
+    pre_end = next((stamp for stamp, item in transitions if item.get("to") == "PRE_EXECUTION_SNAPSHOT"), None)
+    if start and pre_end:
+        empty["pre_execution_seconds"] = max(0, int((pre_end-start).total_seconds()))
+    paired: dict[str, list] = {}
+    spawns = []
+    for line in (td / "spawn-log.jsonl").read_text().splitlines() if (td / "spawn-log.jsonl").exists() else []:
+        try:
+            row=json.loads(line); role=str(row.get("subagent_type", ""))
+            if not role.endswith(("planning", "spec-completion-auditor", "testing-executor")): continue
+            stamp=_timeline_time(row.get("timestamp"))
+            if not stamp or (pre_end and stamp > pre_end): continue
+            if row.get("phase")=="pre": paired.setdefault(role, []).append((stamp,row))
+            elif row.get("phase")=="post" and paired.get(role):
+                begin,_=paired[role].pop(0); seconds=max(0,int((stamp-begin).total_seconds()))
+                spawns.append({"phase_guess": role.split(":")[-1], "subagent_type":role,
+                    "start":begin.isoformat(),"end":stamp.isoformat(),"seconds":seconds})
+        except Exception: continue
+    spawns.sort(key=lambda row: row["start"])
+    empty["planner_spawns"]=spawns
+    empty["model_seconds"]=sum(row["seconds"] for row in spawns)
+    approval_rows=[]
+    for receipt in (td/"receipts").glob("*-approval-*.json") if (td/"receipts").exists() else []:
+        try:
+            data=load_json(receipt); stamp=_timeline_time(data.get("written_at"))
+            if stamp: approval_rows.append((stamp,receipt.name))
+        except Exception: pass
+    waits=[]
+    for stage in ("SPEC_REVIEW","PLAN_REVIEW","TDD_REVIEW"):
+        requested=next((stamp for stamp,item in transitions if item.get("to")==stage),None)
+        approval=next((stamp for stamp,name in approval_rows if stage in name and (not requested or stamp>=requested)),None)
+        seconds=max(0,int((approval-requested).total_seconds())) if requested and approval else 0
+        waits.append({"stage":stage,"requested_at":requested.isoformat() if requested else None,
+                      "granted_at":approval.isoformat() if approval else None,"seconds":seconds})
+    empty["approval_waits"]=waits
+    empty["approval_seconds"]=sum(w["seconds"] for w in waits)
+    receipts_at=[stamp for stamp,_ in approval_rows]
+    points=sorted([stamp for stamp,_ in transitions]+receipts_at+[ _timeline_time(s[k]) for s in spawns for k in ("start","end") if _timeline_time(s[k])])
+    if start: points=[start]+points
+    if pre_end: points.append(pre_end)
+    points=sorted(set(p for p in points if p and (not start or p>=start) and (not pre_end or p<=pre_end)))
+    idle=[]
+    for left,right in zip(points,points[1:]):
+        seconds=int((right-left).total_seconds())
+        if seconds>1800: idle.append({"start":left.isoformat(),"end":right.isoformat(),"seconds":seconds})
+    empty["idle_gaps"]=idle; empty["idle_seconds"]=sum(x["seconds"] for x in idle)
+    if empty["pre_execution_seconds"] is not None:
+        empty["orchestrator_seconds"]=max(0,empty["pre_execution_seconds"]-empty["model_seconds"]-empty["approval_seconds"]-empty["idle_seconds"])
+    phase_count=len({row["phase_guess"] for row in spawns})
+    empty["planner_respawns"]=max(0,len(spawns)-phase_count)
+    human_markers=0
+    log=td/"execution-log.md"
+    if log.exists():
+        try: human_markers=sum(1 for line in log.read_text().splitlines() if "[HUMAN]" in line or "AskUserQuestion" in line)
+        except OSError: pass
+    empty["human_rounds"]=len(approval_rows)+human_markers
+    return empty
 
 
 def compute_pipeline_budget(task_dir: Path) -> dict:
@@ -1769,6 +1944,7 @@ def compute_reward(task_dir: Path) -> dict:
         "change_failure": change_failure,
         "recovery_time_seconds": recovery_time_seconds,
         "pipeline_budget": compute_pipeline_budget(task_dir),
+        "planning_timeline": compute_planning_timeline(task_dir),
     }
 
 

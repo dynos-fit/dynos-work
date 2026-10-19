@@ -24,6 +24,19 @@ DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in ever
 
 `"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
 
+Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
+Immediately after each planner spawn, make exactly one call to `"$DYNOS" ctl planner-receipt .dynos/task-{id} <phase>`; omit token counts, model labels, and prompt digests. Use `discovery`, `arch-design`, `spec`, or `plan`; a combined Spec + Plan spawn uses `plan` so the plan-stage gate remains satisfied.
+
+### On validation failure
+
+For a deterministic validation failure, run `ctl planner-retry <task_dir> --phase <discovery|spec|plan|combined|arch-design>`. If `allowed` is true, set planner phase to `repair`:
+
+```text
+"$DYNOS" ctl set-planner-phase .dynos/task-{id} repair
+```
+
+Spawn the planner in **Repair** phase with the structured `--json` errors, note whether this was a fresh spawn or session resume in the log, write one planner receipt for the original phase, then rerun the same validator. The repair edits only the named artifact and error location. If `allowed` is false, present the remaining errors with **provide guidance** (one final Repair pass seeded with that guidance), **accept with justification** (run `ctl validation-override-receipt <task_dir> --artifact <name> --justification "<reason>"`, only if policy allows it), and **fail task**. Human requests for changes are distinct from validator retries; judgment feedback gets at most one Repair pass before the artifact is shown again.
+
 JSON payloads (classification, execution-graph, repair-log) are piped to the ctl wrapper over stdin with `--from -` and a heredoc — NEVER staged at `/tmp` or any raw filesystem path (the write policy denies those, by design). Temp files, when genuinely needed, belong in `.dynos/task-{id}/_scratch/`.
 
 ## Ruthlessness Standard
@@ -31,73 +44,9 @@ JSON payloads (classification, execution-graph, repair-log) are piped to the ctl
 - Do not let ambiguity leak downstream.
 - Do not allow vague specs, soft assumptions, or unbounded scope to survive a phase gate.
 - Missing validation, error handling, auth, loading, empty, retry, and rollback requirements are spec defects.
-- If an artifact is weak, send it back. Do not carry weakness forward.
+- For judgment feedback, allow at most one Repair pass before showing the artifact again.
 - Prefer a blocked gate over a rotten artifact.
 - If the work can fail in an obvious way, encode that failure mode before execution starts.
-
----
-
-## MANDATORY: Token Recording After Every Agent Spawn
-
-After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
-
-Before EVERY planner receipt write, you MUST first write a per-phase injected-prompt sidecar by piping the planner prompt body into `"$DYNOS" hook router planner-inject-prompt`. Capture the printed sha256 digest and pass it back through as the `injected_prompt_sha256=<digest>` kwarg on the receipt call. The receipt will raise `ValueError` if the sidecar is missing or its contents do not match — that is the proof-of-injection gate.
-
-```bash
-# Discovery planner — write sidecar, capture digest:
-DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase discovery)
-
-# Architectural Design Doc planner (high/critical-risk only) — write sidecar, capture digest:
-ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase arch-design)
-
-# Spec planner — write sidecar, capture digest:
-SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase spec)
-
-# Plan planner — write sidecar, capture digest:
-PLAN_DIGEST=$(printf '%s' "$PLAN_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase plan)
-```
-
-Then, after each planner subagent returns, write the matching deterministic receipt:
-
-```bash
-# After planner spawn (discovery/design/classification):
-"$DYNOS" ctl planner-receipt .dynos/task-{id} discovery \
-  --tokens-used {TOTAL_TOKENS} \
-  --model {MODEL_USED} \
-  --agent-name planning \
-  --injected-prompt-sha256 "${DISCOVERY_DIGEST}"
-
-# After planner spawn (architectural design doc — high/critical-risk only):
-"$DYNOS" ctl planner-receipt .dynos/task-{id} arch-design \
-  --tokens-used {TOTAL_TOKENS} \
-  --model {MODEL_USED} \
-  --agent-name planning \
-  --injected-prompt-sha256 "${ARCH_DESIGN_DIGEST}"
-
-# After planner spawn (spec normalization):
-"$DYNOS" ctl planner-receipt .dynos/task-{id} spec \
-  --tokens-used {TOTAL_TOKENS} \
-  --model {MODEL_USED} \
-  --agent-name planning \
-  --injected-prompt-sha256 "${SPEC_DIGEST}"
-
-# After planner spawn (plan generation OR combined Spec + Plan):
-"$DYNOS" ctl planner-receipt .dynos/task-{id} plan \
-  --tokens-used {TOTAL_TOKENS} \
-  --model {MODEL_USED} \
-  --agent-name planning \
-  --injected-prompt-sha256 "${PLAN_DIGEST}"
-
-# After validate_task_artifacts passes — REQUIRED before execute skill can run.
-"$DYNOS" ctl plan-validated-receipt .dynos/task-{id}
-
-# After spec-completion auditor on high/critical-risk tasks only:
-"$DYNOS" ctl plan-audit-receipt .dynos/task-{id} \
-  --tokens-used {TOTAL_TOKENS} \
-  --model {MODEL_USED}
-```
-
-Each receipt auto-records tokens to `token-usage.json`. If you skip this, the retrospective will show 0 tokens and the effectiveness scores will be wrong. This is the same enforcement pattern as the execute skill's receipts.
 
 ---
 
@@ -128,96 +77,15 @@ TASK_INPUT
 
 ---
 
-## Token & Event Capture (applies to ALL events in this skill)
-
-After every subagent spawn AND every deterministic validation, record the event:
-
-**For LLM subagent spawns** (planner, testing-executor, spec-completion-auditor):
-```bash
-"$DYNOS" hook lib_tokens record \
-  --task-dir .dynos/task-{id} \
-  --agent "{agent_name}" \
-  --model "{model_name}" \
-  --input-tokens {input_tokens} \
-  --output-tokens {output_tokens} \
-  --phase planning \
-  --stage "{current_manifest_stage}" \
-  --type spawn \
-  --detail "{what the agent did}"
-```
-
-**For deterministic Python validations** (validate_task_artifacts, ctl validate-task, spec heading check, etc.):
-```bash
-"$DYNOS" hook lib_tokens record \
-  --task-dir .dynos/task-{id} \
-  --agent "{validation_tool_name}" \
-  --model "none" \
-  --input-tokens 0 \
-  --output-tokens 0 \
-  --phase planning \
-  --stage "{current_manifest_stage}" \
-  --type deterministic \
-  --detail "{validation result summary}"
-```
-
-Where:
-- `input_tokens`/`output_tokens` come from the Agent tool result's usage summary (pass `0` if unavailable)
-- `model_name` is the model used (e.g. "opus", "sonnet", "haiku")
-- `current_manifest_stage` is the current stage from manifest.json (e.g. DISCOVERY, SPEC_NORMALIZATION, PLANNING)
-- `detail` is a short description of what happened (e.g. "Discovery + Design + Classification", "Validated spec.md headings — 0 errors")
-
-This writes to `.dynos/task-{id}/token-usage.json` with a chronological event log. The same hook is used by execute and audit skills — events accumulate across all phases.
-
-**Specific events to record in this skill:**
-- Step 2: Planner spawn (phase=planning, stage=DISCOVERY)
-- Step 2: Classification validation (type=deterministic, stage=DISCOVERY)
-- Step 2b: Fast-track gate check (type=deterministic, stage=DISCOVERY)
-- Step 3: Planner spec normalization spawn (phase=planning, stage=SPEC_NORMALIZATION)
-- Step 3: Spec heading/criteria validation (type=deterministic, stage=SPEC_NORMALIZATION)
-- Step 5: Planner plan generation spawn (phase=planning, stage=PLANNING)
-- Step 5: validate_task_artifacts run (type=deterministic, stage=PLANNING)
-- Step 7: spec-completion-auditor plan audit spawn (phase=audit, stage=PLAN_AUDIT)
-- Step 8: testing-executor TDD spawn (phase=tdd, stage=PLAN_AUDIT)
-- Step 8: TDD criteria coverage validation (type=deterministic, stage=PLAN_AUDIT)
-
----
-
-## MANDATORY: Role Stamping Before Every Agent Spawn
-
-Every Agent tool spawn in this skill (planner, spec-completion-auditor, testing-executor) requires a stamped `active-segment-role` file. The subagent's `pre_tool_use.py` reads this file to resolve its write role; without it the subagent runs as `execute-inline` and `write_policy.decide_write` denies the writes the subagent is trying to make:
-
-- `planning` is the only role that may write `discovery-notes.md`, `design-decisions.md`, `spec.md`, and `plan.md`. Without the stamp, the planner falls to `execute-inline` and **every spec/plan write is denied**.
-- `audit-*` roles are the only roles that may write `audit-reports/`. Without the stamp, the spec-completion-auditor falls to `execute-inline` and its audit report write is denied.
-- `testing-executor` is the only executor role permitted to write `evidence/tdd-tests.md` plus the test files in this stage; without it the spawn falls to `execute-inline` (works for repo files but not for the executor-scoped invariants downstream).
-
-Direct writes to `active-segment-role` are denied by `write_policy.py` — the file is wrapper-required. Always go through ctl:
-
-```bash
-"$DYNOS" ctl stamp-role .dynos/task-{id} --role "{role}"
-```
-
-The wrapper enforces `_STAMP_ROLE_ALLOWLIST` (`hooks/ctl.py`), which gates the allowed values. Forgery defense for `audit-*` claims is enforced downstream by `receipt_audit_done`, which cross-checks against `spawn-log.jsonl` — stamping a role that no real Agent spawn matches produces an unforgeable audit-trail mismatch at receipt time.
-
-The stamp file is overwritten by each new stamp, so successive phases do not need explicit cleanup between spawns. Step 9 cleans it up before handing off to `/dynos-work:execute`.
-
----
-
-## Step 1 — Discovery Intake
-
-1. Build discovery context from:
-   - `raw-input.md`
-   - relevant existing code in the repo
-   - optional trajectory memory from `.dynos/trajectories.json` if available (**skip when `learning_enabled=false` in project policy.json**)
-2. If trajectory memory exists and learning is enabled, use it only to surface likely ambiguity or failure patterns. Do not treat it as ground truth and do not copy prior solutions blindly.
-3. Generate up to 5 targeted questions that materially reduce implementation risk.
-4. Present the questions to the user using `AskUserQuestion`.
-5. Write `discovery-notes.md` with the Q&A.
-
 ---
 
 ---
 
-# Phase 2: Design
+## Step 1 — Assemble Discovery Context
+
+Read `raw-input.md`, the files it names, and optional trajectory memory. Do not ask the user questions in this step. The planner's questions and any hard/critical design choices are presented together in Step 2.
+
+---
 
 ## Step 2 — Discovery + Design + Classification
 
@@ -233,38 +101,26 @@ Read `agent_path` from the printed JSON.
 
 If a non-empty path is returned AND the file exists, read it, strip frontmatter, and append its contents to the planner's instruction below under a `## Learned Planning Rules` heading. This injects project-specific planning patterns (e.g., tighter acceptance criteria, better segment sizing) derived from past task retrospectives. Log: `{timestamp} [ROUTE] plan-skill route={mode} agent={agent_name}`.
 
-**Stamp role BEFORE the spawn (MANDATORY):**
-
-```bash
-"$DYNOS" ctl stamp-role .dynos/task-{id} --role "planning"
-```
-
-Without this stamp the planner subagent resolves to `execute-inline` and its writes to `discovery-notes.md` and `design-decisions.md` are denied by `write_policy`.
+Before the spawn, set the read-policy phase: `"$DYNOS" ctl set-planner-phase .dynos/task-{id} discovery`.
 
 Spawn the Planner subagent (`dynos-work:planning`) with instruction:
 
-```text
+```prompt
 Phase: Discovery + Design + Classification (combined).
 Read raw-input.md and discovery-notes.md if present. Also read any attached trajectory context as advisory prior history only.
 
 Be ruthless. Surface ambiguity, hidden requirements, failure modes, and soft assumptions. Do not produce generic questions or generic design options.
 
 Perform three things in one pass:
-1. Discovery: generate only the highest-value unresolved questions.
-2. Design Options: break the task into subtasks. For any subtask rated hard complexity or critical value, generate 2-3 design options with pros and cons. For easy or medium subtasks, decide directly.
-3. Classification: produce type, domains, risk_level, and notes.
+1. Discovery: return at most 4 unresolved questions. Format each as `Qn: <question> — changes: implementation|risk|acceptance — default: <recommended answer>`. Pre-fill a default for every question.
+2. Design Options: for hard/critical subtasks only, give options and one recommended option. Resolve other choices directly.
+3. Assumptions: list decisions you resolved, each tagged `safe assumption` or `needs confirmation`.
+4. Classification: return type, domains, risk_level, and notes as JSON.
 
-Return three sections:
-- Questions
-- Design Options
-- Classification (JSON)
+Return four sections named `Questions`, `Design Options`, `Assumptions`, and `Classification (JSON)`.
 ```
 
-Reject lazy output mentally before accepting it. If the planner returns generic questions, generic design options, or a mushy classification, send it back.
-
-Present any remaining discovery questions to the user and append answers to `discovery-notes.md`.
-
-If hard or critical design options were returned, present each option to the user with pros/cons and record the chosen design in `design-decisions.md`.
+Validate the response against the required format. Present up to 4 highest-impact questions and design choices together in one `AskUserQuestion` call. If there are more than 4 total, append the remainder to `discovery-notes.md` under `## Deferred (needs confirmation)` and apply each supplied default. Write `discovery-notes.md` once with Q&A, assumptions, and deferred items; write `design-decisions.md` once with the selected options and rationale.
 
 If no high-risk design options were returned, write `design-decisions.md` with the autonomous design choices and rationale.
 
@@ -289,17 +145,17 @@ Finalize classification through the deterministic control-plane entrypoint:
 "$DYNOS" ctl run-start-classification .dynos/task-{id}
 ```
 
-`run-start-classification` validates the classification payload, applies fast-track + `tdd_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects.
+`run-start-classification` validates the classification payload, applies fast-track + `tdd_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects. The output includes `planning_path`. If `risk_floor_applied` is true, print `planner_risk_level` and `risk_floor_signals` once so the user can see why risk was raised.
 
 **If the output contains `"tdd_required": true`:** Step 8 (TDD-First Gate) is **mandatory** for this task. Do not override this with your own risk assessment — `tdd_required` is set deterministically by the system for `high` and `critical` risk tasks. The state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` if Step 8 is skipped. Note this now and plan accordingly.
 
 ---
 
-## Step 2b — Fast-Track Gate (conditional)
+## Step 2b — Planning Path (deterministic)
 
-Fast-track is determined by `run-start-classification`. Do not recompute it in prompt logic or by hand.
+Read `planning_path` and `fast_track` from `run-start-classification`. `planning_path` chooses combined or staged planning; `fast_track` continues to control audit reduction only. Do not recompute either value.
 
-When fast-tracked (`fast_track: true`), apply these simplifications throughout the remaining steps:
+When `planning_path == "combined"`, combine spec and plan generation and review in Steps 5–6. When `fast_track: true`, apply the concise-spec guidance and audit reduction below:
 - **Spec (Step 3):** The planner should produce a concise spec. The `Implicit Requirements Surfaced` and `Risk Notes` sections can contain a single line each if no significant risks exist.
 - **Planning (Step 5):** The execution graph should contain a **single segment** (no multi-segment decomposition). A single executor handles the entire change.
 - **Audit (handled by audit skill):** When `fast_track: true` in the manifest, spawn only `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of streak or domain.
@@ -355,9 +211,7 @@ Rules:
 - The planner still owns the final design choice. Research findings inform the plan; they do not automatically authorize adopting any external library or pattern.
 - Do not mutate the gate artifact by hand to claim search happened or to inject candidates.
 
-Logging: append exactly one line to the execution log:
-
-`{timestamp} [GATE] external-solution — recommended: {true|false}`
+Logging: `run-external-solution-gate` appends its own `[GATE] external-solution — recommended: {true|false}` line; do not write one by hand.
 
 Proceed to Step 2d.
 
@@ -365,17 +219,16 @@ Proceed to Step 2d.
 
 ## Step 2d — Architectural Design Doc Gate (conditional)
 
-**Only runs when `classification.risk_level` is `high` or `critical`.** Read `.dynos/task-{id}/classification.json`. If `risk_level` is `low` or `medium`, append `{timestamp} [SKIP] arch-design — risk_level={risk_level}` to the execution log and proceed to Step 3.
+**Only runs when `classification.risk_level` is `high` or `critical`.** Read `.dynos/task-{id}/classification.json`. If `risk_level` is `low` or `medium`, record the skip and proceed to Step 3:
+
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag SKIP --message "arch-design — risk_level={risk_level}"
+```
+
+All execution-log lines in this skill go through `log-append`. Never append to `execution-log.md` directly: once a role is stamped for a subagent, the orchestrator resolves as that role and the direct write is denied.
 
 For high/critical tasks, spawn the planner with the **Architectural Design Doc** phase to produce `.dynos/task-{id}/design-doc.md` — a §1–§13 design document that walks the higher-level architectural questions before spec normalization. §10 Open Questions is the human handoff.
 
-**Stamp role BEFORE the spawn (MANDATORY):** write the per-phase injected-prompt sidecar and capture the digest:
-
-```bash
-ARCH_DESIGN_DIGEST=$(printf '%s' "$ARCH_DESIGN_PROMPT" | "$DYNOS" hook router planner-inject-prompt --task-id {id} --phase arch-design)
-```
-
-Without this stamp the planner subagent resolves to `execute-inline` and its write to `design-doc.md` is denied by `write_policy`.
 
 Spawn the planner subagent (`dynos-work:planning`) with instruction:
 
@@ -384,19 +237,16 @@ Spawn the planner subagent (`dynos-work:planning`) with instruction:
 After the spawn returns, write the receipt:
 
 ```bash
-"$DYNOS" ctl planner-receipt .dynos/task-{id} arch-design \
-  --tokens-used {TOTAL_TOKENS} \
-  --model {MODEL_USED} \
-  --agent-name planning \
-  --injected-prompt-sha256 "${ARCH_DESIGN_DIGEST}"
+"$DYNOS" ctl planner-receipt .dynos/task-{id} arch-design
 ```
 
-Read `.dynos/task-{id}/design-doc.md` and locate the `## 10. Open questions` section. If it contains only the literal `None — design fully resolved.`, no human input is needed; log `{timestamp} [GATE] arch-design — no open questions` and proceed to Step 3.
+Read `.dynos/task-{id}/design-doc.md` and locate the `## 10. Open questions` section. If it contains only the literal `None — design fully resolved.`, no human input is needed. Otherwise, parse each open question and present it to the user via **AskUserQuestion**. Append the user's resolutions back to `design-doc.md` immediately under the `## 10. Open questions` section as a `### Resolutions` sub-section, one line per resolved question: `Q{n}: {chosen-option} — {one-line rationale}`.
 
-Otherwise, parse each open question and present it to the user via **AskUserQuestion**. Append the user's resolutions back to `design-doc.md` immediately under the `## 10. Open questions` section as a `### Resolutions` sub-section, one line per resolved question: `Q{n}: {chosen-option} — {one-line rationale}`.
+Logging (one line either way; message is `no open questions` or `open-questions: {n} (resolved)`):
 
-Logging: append exactly one line to the execution log:
-`{timestamp} [GATE] arch-design — open-questions: {n} (resolved)`
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag GATE --message "arch-design — {no open questions | open-questions: {n} (resolved)}"
+```
 
 Proceed to Step 3.
 
@@ -408,17 +258,9 @@ Proceed to Step 3.
 
 ## Step 3 — Spec Normalization
 
-**Fast-track combined spawn:** If `manifest.json` has `"fast_track": true`, skip the spawn and the spec validation. Spec is produced in Step 5 by the combined Spec + Plan planner spawn. **Do NOT advance the manifest stage here** — leave it at `SPEC_NORMALIZATION`. Walking the stage forward before `spec.md` exists breaks the artifact invariant in `hooks/lib_validate.py` (`_SPEC_REQUIRED_AFTER` requires `spec.md` once stage is `SPEC_REVIEW` or beyond), and any `/dynos-work:status` or `/dynos-work:resume` invocation in the window between Step 3 and Step 5 completing would observe `stage=PLANNING` with no spec on disk. The stage walk happens in Step 5 after `spec.md` is written. Log: `{timestamp} [SKIP] spec-normalization-spawn — fast_track combined planner (stage walk deferred to Step 5)`. Skip the rest of this step and proceed to Step 4.
+**Combined path:** If `planning_path == "combined"`, skip the spec-only planner spawn and validation here. Step 5 creates both artifacts and performs the stage walk after checking that `spec.md` exists. Do NOT advance the manifest stage here.
 
-**Normal path:** **Stamp role BEFORE the spawn (MANDATORY):**
-
-```bash
-"$DYNOS" ctl stamp-role .dynos/task-{id} --role "planning"
-```
-
-Without this stamp the planner falls to `execute-inline` and the `spec.md` write is denied by `write_policy.decide_write` (the spec.md guard at `hooks/write_policy.py:290-296` denies executor roles outright). This is the failure mode reported in the SPEC_NORMALIZATION block incident.
-
-Spawn the Planner subagent with instruction:
+**Normal path:** Set the phase with `"$DYNOS" ctl set-planner-phase .dynos/task-{id} spec`, then spawn the Planner subagent with instruction:
 
 ```text
 Phase: Spec Normalization.
@@ -429,7 +271,7 @@ Write spec.md.
 See docs/spec-writing-rules.md for known spec-writing anti-patterns.
 ```
 
-If the spec still contains vague adjectives, missing states, or unstated boundary behavior after normalization, send it back again.
+If deterministic validation fails, follow **On validation failure** with phase `spec`. Judgment feedback gets at most one Repair pass.
 
 After `spec.md` is written, run deterministic spec validation:
 1. The file must contain the headings `Task Summary`, `User Context`, `Acceptance Criteria`, `Implicit Requirements Surfaced`, `Out of Scope`, `Assumptions`, and `Risk Notes`.
@@ -437,7 +279,7 @@ After `spec.md` is written, run deterministic spec validation:
 3. Every acceptance criterion must be concrete and independently testable.
 4. Any assumption that affects behavior must be labeled `needs confirmation` or `safe assumption`.
 
-If any rule fails, send the Planner back to fix `spec.md` before presenting it.
+If any rule fails, follow **On validation failure** with phase `spec` and the structured errors.
 
 Finalize spec readiness through the deterministic control-plane entrypoint:
 
@@ -453,7 +295,7 @@ Finalize spec readiness through the deterministic control-plane entrypoint:
 
 <!-- scheduler-owned: SPEC_REVIEW -> PLANNING -->
 
-**Fast-track skip:** If `manifest.json` has `"fast_track": true`, skip this step. Spec is reviewed together with the plan in Step 6 (combined approval gate). Log: `{timestamp} [SKIP] spec-review — fast_track combined gate`.
+**Combined path skip:** If `planning_path == "combined"`, skip this step and review both artifacts in Step 6. Log: `{timestamp} [SKIP] spec-review — combined planning path`.
 
 **Auto-approve path (precedes the human path):** If `manifest.json` has `"auto_approve_gates": true`, do NOT present `spec.md` to the user. Run the auto-approved variant of the approve-stage ctl command instead. This is the only sanctioned bypass — it still hashes the live `spec.md`, writes a `human-approval-SPEC_REVIEW` receipt with `approver_type="residual-auto"`, and advances SPEC_REVIEW → PLANNING through the same atomic gate that the human path uses. The receipt is forensically distinguishable from a human approval (the `approver_type` field), so the audit chain remains intact.
 
@@ -469,7 +311,7 @@ In the auto path, the "if changes requested" and "if rejected" branches of the h
 **Normal path:** Present `spec.md` to the user and ask for approval.
 
 - If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, the scheduler then observes the receipt write and advances the task to PLANNING asynchronously. Do NOT write a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
-- If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, write a new `receipt_spec_validated`, and present the updated spec again. Do NOT call `approve-stage` until the user re-approves the regenerated spec.
+- If changes are requested: append the feedback, use one Repair pass on `spec.md`, rerun deterministic validation, and present the updated spec. Do NOT call `approve-stage` until the user approves the live spec.
 - If rejected outright: run `"$DYNOS" ctl transition .dynos/task-{id} FAILED`, append `[FAILED] Spec rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 When approved:
@@ -497,29 +339,21 @@ Choose planning mode through ctl:
 ```
 
 Use the JSON output as authoritative:
-- `planning_mode == "fast_track_combined"`: use the fast-track combined flow
+- `planning_mode == "combined"`: use the combined flow (including when the fast-track audit flag is false)
 - `planning_mode == "hierarchical"`: use hierarchical planning
 - `planning_mode == "standard"`: use standard planning
 
-Do NOT re-derive fast-track, risk-based escalation, or acceptance-criteria thresholds in prompt logic.
-
-**Stamp role BEFORE every planner spawn in this step (MANDATORY — applies to all three flows below):**
-
-```bash
-"$DYNOS" ctl stamp-role .dynos/task-{id} --role "planning"
-```
-
-For hierarchical flow, stamp once before the Master Planner spawn AND again before each Worker Planner spawn (each spawn reads the file fresh at its first tool call — successive stamps with the same role are idempotent and overwrite cleanly). Without these stamps the planner falls to `execute-inline` and `plan.md` / `execution-graph.json` writes are denied by `write_policy`.
+Do NOT re-derive fast-track, risk-based escalation, or acceptance-criteria thresholds in prompt logic. Set the read-policy phase once before planning by running `"$DYNOS" ctl set-planner-phase .dynos/task-{id} combined` when `planning_path == combined`, otherwise use `plan`.
 
 Hierarchical flow:
 1. Spawn Master Planner using the default planning model for this repo.
 2. Spawn Worker Planners in parallel for non-overlapping subsystems.
 3. Merge outputs into final `plan.md` and an execution-graph payload, then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path).
 
-Fast-track combined flow (when `fast_track: true`):
+Combined flow (when `planning_path == "combined"`):
 1. **Stage precondition:** the manifest is still at `SPEC_NORMALIZATION` (Step 3 deferred the walk). Do NOT advance yet.
-2. Spawn Planner (Opus) ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and an execution-graph payload returned in its final message; then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path). This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
-3. After the spawn returns AND `validate_task_artifacts` passes (see below), walk the stage forward through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING` (each transition is legal per `ALLOWED_STAGE_TRANSITIONS` in `hooks/lib_core.py`). Only advance once the artifacts that justify each stage exist on disk. Log each transition. Then continue with the post-validation flow below (which advances to `PLAN_REVIEW`).
+2. Spawn Planner ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and an execution-graph payload returned in its final message; then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path). This replaces the separate spec and plan spawns.
+3. Run `validate_task_artifacts --no-gap`, then `"$DYNOS" ctl run-combined-stage-walk .dynos/task-{id}`. It verifies spec, plan, and graph exist before the stage walk, validates strictly, writes the plan-validated receipt, and advances to PLAN_REVIEW.
 
 Standard flow:
 1. Spawn Planner (Opus) with instruction to generate `plan.md` and an execution-graph payload, then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path).
@@ -527,7 +361,7 @@ Standard flow:
 After generation, run deterministic artifact validation before any human review. If available in this repo, run:
 
 ```text
-"$DYNOS" hook validate_task_artifacts .dynos/task-{id} --no-gap
+"$DYNOS" hook validate_task_artifacts .dynos/task-{id} --no-gap --json
 ```
 
 The command is the source of truth for artifact validation. Use the rules below to explain and repair failures:
@@ -549,18 +383,18 @@ For `execution-graph.json`:
 7. Every `criteria_id` must map to a real acceptance criterion in `spec.md`.
 8. Every acceptance criterion in `spec.md` must be covered by at least one segment.
 
-If any validation fails, respawn planning and fix the artifacts before continuing.
+If any validation fails, follow **On validation failure** with the matching phase and structured JSON errors.
 
-**Receipt: plan-validated (MANDATORY).** Once `validate_task_artifacts` passes, write the plan-validated receipt. Without this receipt the eventual transition to `EXECUTION` (in the execute skill) will be blocked by the state machine:
+**Receipt: plan-validated (MANDATORY).** On the combined path, `run-combined-stage-walk` writes this receipt. On the staged path, once `validate_task_artifacts` passes, write the receipt. Without this receipt the eventual transition to `EXECUTION` (in the execute skill) will be blocked by the state machine:
 
 ```bash
 "$DYNOS" ctl plan-validated-receipt .dynos/task-{id}
 ```
 
-Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
+Record completion (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
 
-```text
-{timestamp} [DONE] planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "planning — final plan.md and execution-graph.json written (mode: {combined|hierarchical|standard})"
 ```
 
 Transition the stage by running:
@@ -573,7 +407,7 @@ Transition the stage by running:
 
 ## Step 6 — Plan Review
 
-This gate always runs. For fast-track tasks it acts as the combined Spec + Plan approval (since Step 4 was skipped) — present BOTH `spec.md` AND `plan.md` together.
+This gate always runs. On the combined path, present BOTH `spec.md` AND `plan.md` together and use `approve-stage ... PLAN_REVIEW --combined` to write both approvals in one transition.
 
 **Auto-approve path (precedes the human path):** If `manifest.json` has `"auto_approve_gates": true`, do NOT present `plan.md` (or the combined `spec.md` + `plan.md`) to the user. Use the `--auto-approved` variant of approve-stage instead. Two cases:
 
@@ -583,14 +417,13 @@ This gate always runs. For fast-track tasks it acts as the combined Spec + Plan 
   "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
   ```
 
-- Fast-track combined gate (Step 4 was skipped; the manifest is at SPEC_REVIEW after Step 5's stage walk and needs both receipts in order):
+- Combined gate:
 
   ```text
-  "$DYNOS" ctl approve-stage .dynos/task-{id} SPEC_REVIEW --auto-approved
-  "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
+  "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW --combined --auto-approved
   ```
 
-  The state machine requires the SPEC_REVIEW receipt before the PLAN_REVIEW receipt — this ordering is unchanged by the auto-approval feature. Both calls must return exit 0; if either returns exit 1, log the stderr message and fall through to the human-approval path for that specific gate.
+  The combined command hashes both artifacts and writes both approval receipts atomically.
 
 Either auto path:
 
@@ -602,15 +435,8 @@ In the auto path, "if changes requested" and "if rejected outright" branches bel
 Present the artifact(s) to the user and ask for approval.
 
 - If approved (normal path): run `"$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
-- If approved (fast-track combined gate): the manifest is currently at SPEC_REVIEW (Step 5 walked it through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING → PLAN_REVIEW`). Run `approve-stage` twice in order — first for the spec, then for the plan:
-
-  ```text
-  "$DYNOS" ctl approve-stage .dynos/task-{id} SPEC_REVIEW
-  "$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW
-  ```
-
-  Each call hashes the live artifact, writes the matching receipt, and advances one stage. Both must succeed; if either returns exit 1, address the reported cause before retrying.
-- If changes are requested: append the feedback, respawn planning (combined Spec + Plan phase for fast-track, otherwise standard planning), re-run deterministic artifact validation, and present the updated artifact(s) again. Do NOT call `approve-stage` until the user re-approves the regenerated artifact(s) — the gate compares the receipt hash to the live file at transition time, so an approval against an out-of-date hash will be refused with `hash mismatch`.
+- If approved (combined path): run `"$DYNOS" ctl approve-stage .dynos/task-{id} PLAN_REVIEW --combined`. This hashes both live artifacts, writes both approval receipts, and advances to PLAN_AUDIT.
+- If changes are requested: append the feedback and use one Repair pass for the named artifact(s), then re-run deterministic validation and present the updated artifact(s). Do NOT call `approve-stage` until the user re-approves the updated artifact(s) — the gate compares the receipt hash to the live file at transition time.
 - If rejected outright: run `"$DYNOS" ctl transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 ---
@@ -631,14 +457,6 @@ The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/c
 
 2. **LLM plan auditor (conditional):** Only spawn `spec-completion-auditor` when `risk_level` is `high` or `critical`. For low/medium risk, the deterministic checks (`validate_task_artifacts` for criteria coverage + gap analysis for code/plan alignment) are authoritative — skip the LLM spawn. Log: `{timestamp} [SKIP] plan-audit-llm — risk_level={risk}`.
 
-   **Stamp role BEFORE the spawn (MANDATORY — only when the conditional fires):**
-
-   ```bash
-   "$DYNOS" ctl stamp-role .dynos/task-{id} --role "audit-spec-completion"
-   ```
-
-   Without this stamp the auditor falls to `execute-inline` and its `audit-reports/spec-completion.json` write is denied by `write_policy.decide_write` (which restricts `audit-reports/` to `audit-*` roles). Forgery defense: `receipt_audit_done` cross-checks the orchestrator-claimed spawn against `spawn-log.jsonl`, so stamping without a real Agent spawn produces an unforgeable mismatch at receipt time.
-
    Additionally, surface any segment where `len(segment.files_expected) >= 10` (computed budget ≥ 35, the `TOOL_BUDGET_ADVISORY` threshold from `hooks/lib_tool_budget.py`) as a non-blocking advisory finding `near-budget-ceiling`. The advisory is informational and does NOT block plan approval; it warns the operator that the segment is approaching the 11-file overflow ceiling and may want decomposition.
 
 3. If gap analysis finds gaps, or (when invoked) the auditor finds gaps, route back to planning, repair, and rerun deterministic artifact validation.
@@ -653,14 +471,6 @@ This gate is **mandatory** when `manifest.classification.tdd_required` is `true`
 When `tdd_required` is `false`: tests are written by `testing-executor` after production code, in the execute skill (Step 4 of execute), where the implementation context is already known. This avoids ~1.5–2M tokens of pre-code context loading per task.
 
 When `tdd_required` is `true`:
-
-1. **Stamp role BEFORE the spawn (MANDATORY):**
-
-   ```bash
-   "$DYNOS" ctl stamp-role .dynos/task-{id} --role "testing-executor"
-   ```
-
-   Without this stamp the testing-executor falls to `execute-inline`. Repo-file writes still work because `write_policy` permits both `execute-inline` and `*-executor` for repo artifacts, but the role file is what every other dynos-work skill in this codebase stamps before an executor spawn — keeping the convention here ensures the spawn-log entry's claimed role matches the runtime role and that downstream receipts identify the spawn correctly.
 
    Spawn `testing-executor` with instruction:
 
@@ -728,11 +538,7 @@ Transition the stage by running:
 "$DYNOS" ctl transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
-Append to the execution log:
-
-```text
-{timestamp} [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT
-```
+(`transition_task` auto-appends the `[STAGE] → PRE_EXECUTION_SNAPSHOT` line; do not write an `[ADVANCE]` line by hand.)
 
 Print:
 

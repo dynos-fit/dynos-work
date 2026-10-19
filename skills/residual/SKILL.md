@@ -242,10 +242,10 @@ Fall-through behavior:
   `run-next` flow — the residual must still run; it just runs with a
   human in the loop.
 
-Recommended logging:
+Recommended logging (through ctl; never append to `execution-log.md` directly):
 
 ```bash
-{timestamp} [GATE] set-auto-approve-gates residual={row.id} task={new_id} result={ok|refused: <reason>}
+"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl log-append .dynos/{new_id} --tag GATE --message "set-auto-approve-gates residual={row.id} task={new_id} result={ok|refused: <reason>}"
 ```
 
 The auto-approval pathway is an opportunistic acceleration of

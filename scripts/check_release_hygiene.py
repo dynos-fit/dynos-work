@@ -85,6 +85,27 @@ def _release_relevant_changes(paths: set[str]) -> set[str]:
     }
 
 
+def start_skill_budget_warning(*, base_ref: str | None) -> str | None:
+    """Warn when start prose adds a deterministic command without its pin."""
+    if not base_ref:
+        return None
+    try:
+        diff = subprocess.check_output(
+            ["git", "diff", "--unified=0", f"{base_ref}...HEAD", "--", "skills/start/SKILL.md"],
+            cwd=ROOT, text=True, stderr=subprocess.DEVNULL,
+        )
+        changed = _changed_paths(base_ref)
+    except Exception:
+        return None
+    adds_command = any(
+        line.startswith("+") and not line.startswith("+++") and '"$DYNOS"' in line
+        for line in diff.splitlines()
+    )
+    if adds_command and "tests/test_start_skill_budget.py" not in changed:
+        return "start-skill-budget: added a fenced \"$DYNOS\" command without updating tests/test_start_skill_budget.py"
+    return None
+
+
 def check_release_hygiene(*, base_ref: str | None) -> list[str]:
     errors: list[str] = []
     versions = {path.as_posix(): _version_for(path) for path in VERSION_PATHS}
@@ -119,6 +140,9 @@ def main() -> int:
     parser.add_argument("--base-ref", default=None)
     args = parser.parse_args()
     errors = check_release_hygiene(base_ref=args.base_ref)
+    warning = start_skill_budget_warning(base_ref=args.base_ref)
+    if warning:
+        print(f"release-hygiene: warning: {warning}", file=sys.stderr)
     if errors:
         for error in errors:
             print(f"release-hygiene: {error}", file=sys.stderr)

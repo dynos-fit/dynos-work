@@ -419,8 +419,37 @@ def build_analysis_prompt(task_dir: Path) -> dict:
     repair_count = int(retro.get("repair_cycle_count", 0))
     quality = retro.get("quality_score", 1.0)
 
+    # Start-phase regression signal: compare planning latency and planner
+    # spawns with the five most recently completed task retrospectives.
+    timeline = retro.get("planning_timeline") if isinstance(retro.get("planning_timeline"), dict) else {}
+    historical = []
+    for candidate in sorted((root / ".dynos").glob("task-*/task-retrospective.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if candidate.parent == task_dir:
+            continue
+        row = _read_artifact(candidate) or {}
+        if isinstance(row.get("planning_timeline"), dict):
+            historical.append(row["planning_timeline"])
+        if len(historical) == 5:
+            break
+    timeline_candidates = []
+    if len(historical) == 5:
+        import statistics
+        for key, value in (
+            ("planner_spawns", len(timeline.get("planner_spawns", [])) if isinstance(timeline.get("planner_spawns"), list) else None),
+            ("pre_execution_seconds", timeline.get("pre_execution_seconds")),
+        ):
+            prior = []
+            for row in historical:
+                metric = row.get(key)
+                if key == "planner_spawns" and isinstance(row.get("planner_spawns"), list):
+                    metric = len(row["planner_spawns"])
+                if isinstance(metric, (int, float)) and metric >= 0:
+                    prior.append(float(metric))
+            if value is not None and len(prior) == 5 and float(value) > 1.5 * statistics.median(prior):
+                timeline_candidates.append({"metric": key, "value": value, "trailing_median": statistics.median(prior)})
+
     # Skip analysis if task was clean — nothing to learn from
-    has_findings = bool(findings) or repair_count > 0 or (quality is not None and float(quality) < 0.8)
+    has_findings = bool(findings) or repair_count > 0 or bool(timeline_candidates) or (quality is not None and float(quality) < 0.8)
     if not has_findings:
         return {"prompt": "", "has_findings": False, "task_id": task_id}
 
@@ -447,6 +476,12 @@ def build_analysis_prompt(task_dir: Path) -> dict:
         f"Spec Reviews: {retro.get('spec_review_iterations', 0)}"
     )
     sections.append("")
+
+    if timeline_candidates:
+        sections.append("## Start-Phase Prevention Rule Candidates (more than 1.5× trailing median of last 5 tasks)")
+        for candidate in timeline_candidates:
+            sections.append(f"- {candidate['metric']}={candidate['value']}; trailing median={candidate['trailing_median']:.1f}; propose a prevention rule addressing this regression.")
+        sections.append("")
 
     if findings:
         sections.append(f"## Audit Findings ({len(findings)} total)")

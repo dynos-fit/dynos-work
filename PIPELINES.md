@@ -67,13 +67,14 @@ The core workflow. Turns a user request into audited, verified code.
 ```
 START
   step 0   metadata + task directory creation
-  step 1   discovery intake (user answers questions)
+  step 1   assemble discovery context (no user round)
   step 2   discovery + design + classification
-  step 2b  fast-track eligibility gate
-  step 3   spec normalization
-  step 4   spec review ← HUMAN APPROVAL
-  step 5   plan generation
-  step 6   plan review ← HUMAN APPROVAL
+  step 2b  deterministic planning-path choice (fast_track remains audit-only)
+  combined (low/medium, ≤2 domains):
+           one Spec + Plan spawn → validation + stage walk → one joint review
+  staged (all other tasks):
+           step 3 spec normalization → step 4 spec review
+           step 5 plan generation → step 6 plan review
   step 7   plan audit (spec coverage check)
   step 8   TDD-first test generation ← HUMAN APPROVAL
   step 9   ready for execute
@@ -171,7 +172,11 @@ Every PR that adds a new mandatory blocking gate, auditor, receipt, or retroacti
 
 Reviewers should reject PRs that add a mandatory step without one of the three. The rule exists because individually-justified hardening commits stack into a serial pipeline that grows monotonically — claude-md-auditor (third mandatory blocking auditor, 2026-04-30) was the canonical example, and the haiku→sonnet→opus cascade combined with pre-loaded diff context (CG-013) made the cumulative cost super-linear in diff size.
 
-The companion measurement KPI is `pipeline_budget` in every retrospective (computed by `lib_validate.compute_pipeline_budget`). The learn pipeline can use it to spot regressions across consecutive tasks.
+The companion measurement KPIs are `pipeline_budget` and `planning_timeline` in every retrospective. `planning_timeline` separates planner model time, approval waits, orchestrator time, and idle gaps; `ctl timeline <task_dir> [--json]` displays the task data.
+
+#### Start phase
+
+Any new mandatory step, spawn, receipt, or human gate before `PRE_EXECUTION_SNAPSHOT` must retire one of equivalent scope, be conditioned on `risk_level ∈ {high, critical}` or `planning_path == "staged"`, or ship with a `planning_timeline` delta from at least three tasks.
 
 ---
 

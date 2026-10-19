@@ -37,12 +37,12 @@ from receipts.core import (
     _receipts_dir,
     _atomic_write_text,
     _resolve_min_version,
-    _record_tokens,
 )
 from receipts.stage import (
     receipt_search_conducted,
     receipt_spec_validated,
     receipt_plan_validated,
+    receipt_validation_override,
     receipt_executor_routing,
     receipt_executor_done,
     receipt_audit_routing,
@@ -87,6 +87,7 @@ __all__ = [
     "receipt_search_conducted",
     "receipt_spec_validated",
     "receipt_plan_validated",
+    "receipt_validation_override",
     "receipt_executor_routing",
     "receipt_executor_done",
     "receipt_audit_routing",

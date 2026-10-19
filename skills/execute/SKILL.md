@@ -188,13 +188,7 @@ If the injected prompt is weak, strengthen the base prompt before spawning. Do n
 
 If `inject-prompt` fails or is unavailable, stop and fix the deterministic routing path. Do NOT manually read `agent_path` or hand-build the learned-agent prompt.
 
-**Role granting (MANDATORY — BEFORE every Agent tool spawn):** Grant the executor role via the deterministic ctl wrapper immediately before spawning each executor subagent. The wrapper enforces the role allowlist; the grant is single-use and is consumed by the spawned subagent's first tool call (the orchestrator's own session is pinned at SessionStart and can never consume a grant — that closes the role-leak behind the 2026-04-30 audit-chain forgery incident; the audit-* forgery defense itself is the spawn-log cross-check at receipt time). Direct writes to `active-segment-role`, `role-grants.json`, or `role-bindings.json` are denied by `write_policy.py` and surface a wrapper hint.
-
-```bash
-"$DYNOS" ctl stamp-role .dynos/task-{id} --role "{executor-role}"
-```
-
-Where `{executor-role}` is the exact role string from the executor plan (e.g. `backend-executor`, `ui-executor`, `integration-executor`). The write MUST complete (exit 0) before the Agent tool invocation that spawns the subagent — this is a sequential constraint, not a timing one. Exit 1 means the wrapper refused; the stderr names the cause (audit-* refusal, role outside allowlist, missing task dir).
+The Agent spawn hook stamps `active-segment-role` from the agent type.
 
 **Model selection:** Pass the `model` field from the executor plan as the model parameter when spawning the agent. If `model` is null, use default (omit the model parameter).
 
@@ -211,7 +205,7 @@ Before issuing each parallel next_batch executor batch (this includes the first 
 Parse the JSON output. The command emits a single-line JSON object with keys `status`, `count`, `threshold`, `exempt_count`, and `task_class`. If `status` is `'paused'` or `'already_paused'`:
 
 1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the executor count, the threshold, the `task_class`, and instruct the operator to run `"$DYNOS" ctl spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why spawns were wasted.
-2. Append a line beginning with `[BUDGET-PAUSE]` to `execution-log.md` that records the timestamp, count, and threshold.
+2. Record the pause: `"$DYNOS" ctl log-append .dynos/task-{id} --tag BUDGET-PAUSE --message "count={count} threshold={threshold}"` (never append to `execution-log.md` directly; the stamped segment role is denied that write).
 3. Exit non-zero.
 
 Do not proceed with spawning executors. The pause is intentional — the policy is calibrated from this project's retrospective history, and the wasted-spawn count has crossed the learned threshold.
@@ -262,60 +256,11 @@ This command deterministically:
 "$DYNOS" ctl clear-role .dynos/task-{id}
 ```
 
-After each batch (or cached resolution) completes, record events and verify:
+Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
 
-- **Token capture (executor spawn):** automatic. The `SubagentStop` hook
-  (wired in `hooks.json`) parses the subagent's transcript and writes the
-  spawn record to the active task's `token-usage.json` via
-  `hooks/lib_tokens_hook.py`. Do NOT also emit a manual `--type spawn`
-  `lib_tokens.py record` call here — it would double-count the tokens.
-  (The `--type deterministic` records below are NOT covered by SubagentStop
-  and remain the orchestrator's responsibility.)
-- **Token capture (deterministic checks):** After file ownership and evidence verification:
-  ```bash
-  "$DYNOS" hook lib_tokens record \
-    --task-dir .dynos/task-{id} \
-    --agent "ctl-check-ownership" \
-    --model "none" \
-    --input-tokens 0 \
-    --output-tokens 0 \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type deterministic \
-    --segment "{segment-id}" \
-    --detail "Verified file ownership and evidence — {pass|fail}"
-  ```
-- Also record the **router decision** before each batch:
-  ```bash
-  "$DYNOS" hook lib_tokens record \
-    --task-dir .dynos/task-{id} \
-    --agent "router-executor-plan" \
-    --model "none" \
-    --input-tokens 0 \
-    --output-tokens 0 \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type deterministic \
-    --detail "Router: {executor}={model} route={route_mode}"
-  ```
 - Use `run-execution-segment-done` as the authoritative completion gate.
 - Append to log: `{timestamp} [DONE] {segment-id} — complete`.
 - Re-run `run-execution-batch-plan` to get the next authoritative batch.
-
-**For inline fast-track execution** (no subagent spawn), record with `--type inline`:
-```bash
-"$DYNOS" hook lib_tokens record \
-  --task-dir .dynos/task-{id} \
-  --agent "inline-executor" \
-  --model "none" \
-  --input-tokens 0 \
-  --output-tokens 0 \
-  --phase execution \
-  --stage "EXECUTION" \
-  --type inline \
-  --segment "seg-1" \
-  --detail "Fast-track inline execution (no subagent spawn)"
-```
 
 **Test execution** (Step 4): Record test runner events with `--phase execution --stage TEST_EXECUTION`.
 
@@ -336,7 +281,7 @@ Parse the JSON `status`:
   - "Write `evidence/{seg-id}.md` before you run low on turns."
 
   After each continuation executor returns, run `run-execution-segment-done` for that segment (the same authoritative completion gate the normal batch loop uses — it writes the receipt and verifies ownership + evidence; a segment is not "complete" until that receipt exists). Then **re-run `next-continuation` and repeat.** There is no spawn-count cap in this loop — keep going as long as segments make progress. Do NOT run `check-spawn-budget` for continuation spawns; the spawn-budget backstop is for audit thrash, not for finishing execution.
-- **`stalled`** (exit code 3) — every remaining incomplete segment moved nothing across two consecutive continuations; `stalled_segments` names them. This is the ONLY automatic halt. Write `escalation.md` with `stalled_segments` and their `incomplete_reasons`, append a `[CONTINUATION-STALLED]` line to `execution-log.md`, and stop: the orchestrator cannot make progress and a human must intervene. Do NOT keep re-spawning.
+- **`stalled`** (exit code 3) — every remaining incomplete segment moved nothing across two consecutive continuations; `stalled_segments` names them. This is the ONLY automatic halt. Write `escalation.md` with `stalled_segments` and their `incomplete_reasons`, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CONTINUATION-STALLED --message "{stalled_segments}"`, and stop: the orchestrator cannot make progress and a human must intervene. Do NOT keep re-spawning.
 
 Only once `next-continuation` reports `complete` do you advance the stage:
 
@@ -373,9 +318,9 @@ This command checks every non-cached segment's evidence file exists and is non-e
 
 If the command reports `"status": "blocked"`, address each listed failure before proceeding.
 
-Append to log:
-```
-{timestamp} [DONE] execute — all segments verified by ctl (segments_verified={N})
+Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "execute — all segments verified by ctl (segments_verified={N})"
 ```
 
 ### Handoff — Write handoff record

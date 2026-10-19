@@ -38,6 +38,7 @@ import json
 import os
 import sys
 import time
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -281,6 +282,29 @@ def main(argv: list[str]) -> int:
         return 1
 
     log_path = task_dir / "spawn-log.jsonl"
+    if phase == "pre":
+        from lib_core import role_for_subagent_type, stamp_role
+        subagent_type = str(entry.get("subagent_type", ""))
+        role = role_for_subagent_type(subagent_type)
+        if role is None:
+            entry["stamped_role"] = None
+            try:
+                from lib_log import log_event
+                log_event(task_dir.parent.parent, "spawn_role_unmapped", task=task_dir.name, subagent_type=subagent_type)
+            except Exception:
+                pass
+        else:
+            try:
+                stamp_role(task_dir, role)
+                # Keep the one-shot actor grant path used by pinned sessions.
+                ctl = Path(__file__).with_name("ctl.py")
+                grant = subprocess.run([sys.executable, str(ctl), "grant-role", str(task_dir), "--role", role], capture_output=True, text=True)
+                if grant.returncode:
+                    raise RuntimeError(grant.stderr.strip() or "grant-role failed")
+                entry["stamped_role"] = role
+            except Exception as exc:
+                print(f"agent-spawn-log: role stamp failed: {exc}", file=sys.stderr)
+                return 1
     try:
         _append_jsonl(log_path, entry)
     except OSError as exc:

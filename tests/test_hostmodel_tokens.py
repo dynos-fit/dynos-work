@@ -229,6 +229,6 @@ class TestEntryPathHostResolution:
             + "\n"
         )
         result = lib_tokens_hook._parse_transcript(transcript, host=host)
-        assert result.get("model") == "host_unsupported", (
-            f"expected host_unsupported sentinel under persisted codex host, got {result!r}"
+        assert result.get("model") == "gpt-5-codex", (
+            f"expected transcript model to round-trip under persisted codex host, got {result!r}"
         )

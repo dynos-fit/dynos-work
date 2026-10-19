@@ -22,8 +22,8 @@ SESSION_ID=$(echo "$PAYLOAD" | python3 -c "import json,sys; d=json.load(sys.stdi
 [ ! -f "$TRANSCRIPT_PATH" ] && exit 0
 
 # Find the active task in .dynos/
-HOOKS_DIR="${CWD}/hooks"
-[ ! -d "$HOOKS_DIR" ] && exit 0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOOKS_DIR="$SCRIPT_DIR"
 
 # Run the token parser
 PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/lib_tokens_hook.py" \

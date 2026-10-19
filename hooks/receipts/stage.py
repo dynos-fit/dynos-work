@@ -26,7 +26,6 @@ from lib_validate import require_nonblank_str
 from .core import (
     INJECTED_AUDITOR_PROMPTS_DIR,
     INJECTED_PROMPTS_DIR,
-    _record_tokens,
     hash_file,
     read_receipt,
     validate_receipt_model_field,
@@ -214,9 +213,34 @@ def receipt_plan_validated(
     # Deferred import: validate_task_artifacts lives in lib_validate,
     # which itself imports read_receipt from this module. Importing at
     # call time keeps the module-load graph acyclic.
-    from lib_validate import validate_task_artifacts  # noqa: PLC0415
+    from lib_validate import validate_task_artifacts_structured  # noqa: PLC0415
 
-    errors = validate_task_artifacts(task_dir, run_gap=run_gap)
+    structured = validate_task_artifacts_structured(task_dir, run_gap=run_gap)
+    errors = [item["message"] for item in structured]
+    if errors:
+        manifest = {}
+        try:
+            manifest = json.loads((task_dir / "manifest.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        classification = manifest.get("classification", {}) if isinstance(manifest, dict) else {}
+        risk = classification.get("risk_level", "medium") if isinstance(classification, dict) else "medium"
+        try:
+            policy = json.loads((_persistent_project_dir(task_dir.parent.parent) / "policy.json").read_text(encoding="utf-8"))
+        except Exception:
+            policy = {}
+        allow_override = policy.get("allow_validation_override", risk in {"low", "medium"}) if isinstance(policy, dict) else risk in {"low", "medium"}
+        if allow_override:
+            remaining = []
+            for error in structured:
+                receipt = read_receipt(task_dir, f"validation-override-{error['artifact']}")
+                artifact_path = task_dir / error["artifact"]
+                if (receipt is not None
+                        and error["rule"] in receipt.get("rule_ids", [])
+                        and receipt.get("artifact_sha256") == _hash_artifact(artifact_path)):
+                    continue
+                remaining.append(error["message"])
+            errors = remaining
     computed_passed = not errors
 
     # Honour the test override only when the env knob is explicitly set.
@@ -268,6 +292,34 @@ def receipt_plan_validated(
         criteria_coverage=criteria_coverage,
         validation_passed=validation_passed,
         artifact_hashes=artifact_hashes,
+    )
+
+
+def receipt_validation_override(task_dir: Path, artifact: str, justification: str) -> Path:
+    """Record a policy-allowed, hash-bound override for current validation rules."""
+    from lib_validate import validate_task_artifacts_structured
+    from lib_validate import require_nonblank
+    if artifact not in {"spec.md", "plan.md", "execution-graph.json", "manifest.json"}:
+        raise ValueError(f"unsupported validation artifact: {artifact}")
+    require_nonblank(justification, field_name="justification")
+    errors = [e for e in validate_task_artifacts_structured(task_dir) if e["artifact"] == artifact]
+    if not errors:
+        raise ValueError(f"no current validation errors for {artifact}")
+    manifest = json.loads((task_dir / "manifest.json").read_text(encoding="utf-8"))
+    classification = manifest.get("classification", {})
+    risk = classification.get("risk_level", "medium") if isinstance(classification, dict) else "medium"
+    try:
+        policy = json.loads((_persistent_project_dir(task_dir.parent.parent) / "policy.json").read_text(encoding="utf-8"))
+    except Exception:
+        policy = {}
+    allowed = policy.get("allow_validation_override", risk in {"low", "medium"}) if isinstance(policy, dict) else risk in {"low", "medium"}
+    if not allowed:
+        raise ValueError(f"validation override disabled by policy for risk_level={risk}")
+    artifact_path = task_dir / artifact
+    return write_receipt(
+        task_dir, f"validation-override-{artifact}", artifact=artifact,
+        rule_ids=sorted({e["rule"] for e in errors}),
+        artifact_sha256=_hash_artifact(artifact_path), justification=justification.strip(),
     )
 
 
@@ -429,10 +481,6 @@ def receipt_executor_done(
             f"executor-{segment_id}: injected_prompt_sha256 mismatch "
             f"(sidecar={on_disk!r}, payload={injected_prompt_sha256!r})"
         )
-
-    # Record tokens deterministically
-    if tokens_used and tokens_used > 0:
-        _record_tokens(task_dir, f"{executor_type}-{segment_id}", model_used or "default", tokens_used)
 
     # Self-compute spawn identity fields (anti-forgery: writer-derived, not caller-supplied).
     host, tier, resolved_model = _compute_spawn_host_fields(task_dir, model_used)
@@ -1275,8 +1323,6 @@ def receipt_audit_done(
     else:
         envelope_sha256 = None
     _emit_content_pairing_event(task_dir, auditor_name, report_path)
-    if tokens_used and tokens_used > 0:
-        _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
     finding_count, blocking_count, report_sha256 = _build_audit_receipt_payload(
         task_dir, auditor_name, report_path, finding_count, blocking_count,
     )

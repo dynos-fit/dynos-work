@@ -30,6 +30,8 @@ from write_policy import WriteAttempt, _get_capability_key, require_write_allowe
 # mutated at runtime (tests that want to simulate an extra event-name add
 # to a local copy, not this module's constant).
 DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
+    "planner_spawn_evidence_degraded",
+    "spawn_role_unmapped",
     "gate_refused",
     "receipt_refused",
     "finding_contradiction",
@@ -54,7 +56,6 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     "router_model_ceiling_clamp",
     "router_route_decision",
     "plan_audit_skipped_by_risk",
-    "planner_spawn_zero_tokens",
     "planner_inject_prompt_sidecar_written",
     "injected_prompt_sidecar_written",
     "injected_auditor_prompt_sidecar_written",

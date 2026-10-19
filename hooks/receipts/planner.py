@@ -9,21 +9,17 @@ from ``hooks/lib_receipts.py`` during the receipts package split — see
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
-from lib_log import log_event
 from lib_validate import require_nonblank_str
 
 from .core import (
-    INJECTED_PLANNER_PROMPTS_DIR,
-    _record_tokens,
+    read_receipt,
     hash_file,
     write_receipt,
 )
-
-
-_INJECTED_PROMPT_SHA256_MISSING = object()
 
 
 def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
@@ -32,50 +28,17 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     tokens_used: int,
     model_used: str | None = None,
     agent_name: str | None = None,
-    injected_prompt_sha256: str = _INJECTED_PROMPT_SHA256_MISSING,  # type: ignore[assignment]
+    injected_prompt_sha256: str | None = None,
 ) -> Path:
-    """Write receipt proving a planner subagent completed. Also records tokens.
+    """Write a planner receipt bound to the latest hook-observed spawn.
 
-    SEC-004 hardening: ``injected_prompt_sha256`` is REQUIRED at the call
-    site. Omitting the kwarg entirely raises ``TypeError`` (the sentinel
-    default is a deliberate forced-kwarg pattern so a forgotten sidecar
-    assertion cannot silently ship). Passing ``injected_prompt_sha256=None``
-    explicitly is ALSO rejected — ``None`` is no longer a legal value and
-    raises ``ValueError`` with a message containing the substring
-    ``legacy None path removed``. The only valid value is a non-empty
-    sha256 hex digest captured from
-    ``hooks/router.py planner-inject-prompt --task-id <id> --phase <phase>``.
-
-    The writer asserts that the per-phase planner injected-prompt sidecar
-    at ``task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR /
-    f"{phase}.sha256"`` exists AND its contents (after stripping trailing
-    whitespace) match the supplied digest. On missing file or mismatch
-    this function raises ``ValueError`` naming the phase. The mismatch
-    message contains the literal substring ``hash mismatch`` so
-    downstream tests can pin it.
-
-    The sidecar path is
-    ``task_dir/receipts/_injected-planner-prompts/{phase}.sha256`` — both
-    writer and reader import the directory name from
-    ``INJECTED_PLANNER_PROMPTS_DIR`` so the schema is defined in exactly
-    one place. The sidecar itself is written by the
-    ``planner-inject-prompt`` CLI subcommand in ``hooks/router.py``.
+    ``injected_prompt_sha256`` is accepted for compatibility but ignored;
+    the PreToolUse Agent hook's prompt/result hashes are authoritative.
+    Token counts remain in the receipt for older consumers; token ledger
+    events are recorded only by SubagentStop.
     """
-    if injected_prompt_sha256 is _INJECTED_PROMPT_SHA256_MISSING:
-        raise TypeError(
-            "receipt_planner_spawn: injected_prompt_sha256 is required. "
-            "Pass a non-empty sha256 hex digest obtained from "
-            "`hooks/router.py planner-inject-prompt --task-id <id> "
-            "--phase <phase>`. The None (no-sidecar) path has been removed."
-        )
-    if injected_prompt_sha256 is None:
-        raise ValueError(
-            "injected_prompt_sha256 must be a non-empty sha256 hex string; "
-            "legacy None path removed"
-        )
-    # v4 AC 13: tokens_used MUST be a non-negative int. zero is accepted
-    # (signals a free / cached planner invocation) but emits a telemetry
-    # event so the anomaly surfaces in retrospectives.
+    # tokens_used remains a compatibility payload field. Zero no longer
+    # signals an anomaly because hook-based attribution may be unavailable.
     if not isinstance(tokens_used, int) or isinstance(tokens_used, bool) or tokens_used < 0:
         raise ValueError(
             f"receipt_planner_spawn: tokens_used must be non-negative int "
@@ -83,48 +46,49 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
         )
     step_name = f"planner-{phase}"
 
-    # Sidecar assertion — unconditional now. Every caller must first run
-    # `hooks/router.py planner-inject-prompt` and pass the captured digest.
-    require_nonblank_str(
-        injected_prompt_sha256,
-        field_name="receipt_planner_spawn: injected_prompt_sha256",
-    )
-    sidecar_file = (
-        task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR
-        / f"{phase}.sha256"
-    )
-    if not sidecar_file.exists():
-        raise ValueError(
-            f"receipt_planner_spawn: planner sidecar missing for phase "
-            f"{phase!r} at {sidecar_file}. Run `hooks/router.py "
-            f"planner-inject-prompt --task-id <id> --phase {phase}` first."
-        )
-    try:
-        on_disk = sidecar_file.read_text().strip()
-    except OSError as e:
-        raise ValueError(
-            f"receipt_planner_spawn: planner sidecar unreadable for "
-            f"phase {phase!r} at {sidecar_file}: {e}"
-        ) from e
-    if on_disk != injected_prompt_sha256:
-        raise ValueError(
-            f"receipt_planner_spawn: hash mismatch for phase {phase!r} "
-            f"— sidecar={on_disk!r}, payload={injected_prompt_sha256!r}."
-        )
-
-    if tokens_used > 0:
-        _record_tokens(task_dir, f"planner-{phase}", model_used or "default", tokens_used)
+    spawn_log = task_dir / "spawn-log.jsonl"
+    spawn_evidence: dict[str, Any] = {"spawn_evidence": "degraded"}
+    if spawn_log.is_file():
+        previous = ""
+        for receipt_path in (task_dir / "receipts").glob("planner-*.json"):
+            receipt = read_receipt(task_dir, receipt_path.stem)
+            if isinstance(receipt, dict):
+                previous = max(previous, str(receipt.get("written_at") or receipt.get("ts") or ""))
+        rows = []
+        for line in spawn_log.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            rows.append(row)
+        candidates = []
+        for row in rows:
+            stamp = str(row.get("timestamp", ""))
+            if (row.get("phase") == "post"
+                    and str(row.get("subagent_type", "")) in {"dynos-work:planning", "planning"}
+                    and stamp > previous):
+                candidates.append(row)
+        if not candidates:
+            raise ValueError(f"receipt_planner_spawn: no planner spawn recorded since {previous or 'task creation'}")
+        spawn = candidates[-1]
+        start_entry = next((row for row in reversed(rows)
+                            if row.get("phase") == "pre"
+                            and row.get("prompt_sha256") == spawn.get("prompt_sha256")), {})
+        spawn_evidence = {
+            "spawn_evidence": "hook",
+            "spawn_prompt_sha256": spawn.get("prompt_sha256"),
+            "spawn_result_sha256": spawn.get("result_sha256"),
+            "spawn_started_at": start_entry.get("timestamp"),
+            "spawn_finished_at": spawn.get("timestamp"),
+        }
     else:
-        # Zero-token planner spawn is a diagnostic signal: emit an event
-        # so retrospectives can flag suspected cache-hits, handler
-        # stubs, or upstream attribution drift without failing the write.
-        root = task_dir.parent.parent
-        log_event(
-            root,
-            "planner_spawn_zero_tokens",
-            task=task_dir.name,
-            phase=phase,
-        )
+        try:
+            from lib_log import log_event
+            log_event(task_dir.parent.parent, "planner_spawn_evidence_degraded",
+                      task=task_dir.name, phase=phase)
+        except Exception:
+            pass
+    # Token usage is recorded by SubagentStop; token count remains in receipt.
     return write_receipt(
         task_dir,
         step_name,
@@ -132,7 +96,7 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
         tokens_used=tokens_used,
         model_used=model_used,
         agent_name=agent_name,
-        injected_prompt_sha256=injected_prompt_sha256,
+        **spawn_evidence,
     )
 
 
@@ -193,8 +157,6 @@ def receipt_plan_audit(
     plan_sha256 = _hash_or_missing("plan.md")
     graph_sha256 = _hash_or_missing("execution-graph.json")
 
-    if tokens_used > 0:
-        _record_tokens(task_dir, "plan-audit-check", model_used or "default", tokens_used)
     return write_receipt(
         task_dir,
         "plan-audit-check",
@@ -227,8 +189,6 @@ def receipt_tdd_tests(
         raise ValueError("tokens_used must be a non-negative int")
     require_nonblank_str(model_used, field_name="model_used")
 
-    if tokens_used > 0:
-        _record_tokens(task_dir, "tdd-tests", model_used, tokens_used)
 
     return write_receipt(
         task_dir,

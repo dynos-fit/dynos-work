@@ -36,12 +36,13 @@ def test_happy_path(tmp_path: Path):
     assert payload["valid"] is True
 
 
-def test_record_tokens_NOT_invoked(tmp_path: Path):
-    """Calibration is deterministic; no token recording should occur."""
+def test_receipt_does_not_record_tokens(tmp_path: Path):
     td = _task_dir(tmp_path)
-    with mock.patch.object(lib_receipts, "_record_tokens") as rt:
-        receipt_calibration_applied(td, 1, 1, "a" * 64, "b" * 64)
-    assert not rt.called
+    usage = td / "token-usage.json"
+    before = {"events": [], "total": 0}
+    usage.write_text(json.dumps(before))
+    receipt_calibration_applied(td, 1, 1, "a" * 64, "b" * 64)
+    assert json.loads(usage.read_text()) == before
 
 
 def test_rejects_negative_counts(tmp_path: Path):

@@ -734,6 +734,17 @@ guarantees are: capability-keyed `require_write_allowed` inside ctl,
 receipts + the task receipt chain, and the hook-owned `spawn-log.jsonl`
 cross-check at audit-receipt time.
 
+### Planner spawn receipt evidence (SEC-004)
+
+Planner receipts bind to the latest planner `post` entry observed by the
+PreToolUse Agent hook. They record the hook-observed prompt and result hashes
+and spawn timestamps. The orchestrator no longer proves which prompt it sent
+by hashing a separate prompt sidecar; the hook's spawn log is the evidence
+for the prompt the Agent tool actually received. When the host does not
+provide a spawn log, the receipt is explicitly marked `spawn_evidence:
+"degraded"` and emits a diagnostic event. The receipt chain and artifact
+hash binding remain in force.
+
 ### Permissions-ON operation
 
 All skill-prescribed deterministic steps run through one funnel:

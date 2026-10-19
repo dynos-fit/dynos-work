@@ -101,48 +101,7 @@ Spawn the determined auditors simultaneously, passing for each auditor the model
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
-**Token & event capture (applies to all events in Steps 3-5):** After each subagent spawn AND each deterministic check, record the event:
-
-**For LLM subagent spawns** (auditors, repair executors):
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-  --task-dir .dynos/task-{id} \
-  --agent "{agent_name}" \
-  --model "{model_name}" \
-  --input-tokens {input_tokens} \
-  --output-tokens {output_tokens} \
-  --phase audit \
-  --stage "AUDITING" \
-  --type spawn \
-  --detail "{what the agent did}"
-```
-
-**For deterministic steps** (router decisions, retrospective computation, repair-log validation):
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-  --task-dir .dynos/task-{id} \
-  --agent "{tool_name}" \
-  --model "none" \
-  --input-tokens 0 \
-  --output-tokens 0 \
-  --phase audit \
-  --stage "AUDITING" \
-  --type deterministic \
-  --detail "{result summary}"
-```
-
-**For repair executor spawns**, use `--phase repair` and include `--segment {segment-id}` if the repair targets a specific segment.
-
-Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.json` with a chronological event log plus aggregated totals. The retrospective's token fields are populated from this file.
-
-**Specific events to record in this skill:**
-- Step 3: dynorouter audit-plan (type=deterministic, detail="Router decided: spawn X, skip Y")
-- Step 3: Each auditor spawn (type=spawn, phase=audit)
-- Step 4: repair-log build (type=deterministic, phase=repair)
-- Step 4: Each repair executor spawn (type=spawn, phase=repair, include --segment)
-- Step 4: ctl check-ownership after repair (type=deterministic, phase=repair)
-- Step 4: Re-audit spawns (type=spawn, phase=audit, detail="Re-audit after repair cycle N")
-- Step 5: compute_reward / validate_retrospective_scores (type=deterministic, phase=audit, detail="Computed retrospective scores")
+Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
 
 **Audit repair gate (deterministic):**
 

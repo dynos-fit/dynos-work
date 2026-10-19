@@ -137,63 +137,16 @@ After each batch (or cached resolution) completes, record events and verify:
 
 - **Token capture (executor spawn):** After each executor returns:
   ```bash
-  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-    --task-dir .dynos/task-{id} \
-    --agent "{executor_name}-{segment-id}" \
-    --model "{model_name}" \
-    --input-tokens {input_tokens} \
-    --output-tokens {output_tokens} \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type spawn \
-    --segment "{segment-id}" \
-    --detail "{what the executor implemented}"
-  ```
 - **Token capture (deterministic checks):** After file ownership and evidence verification:
   ```bash
-  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-    --task-dir .dynos/task-{id} \
-    --agent "ctl-check-ownership" \
-    --model "none" \
-    --input-tokens 0 \
-    --output-tokens 0 \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type deterministic \
-    --segment "{segment-id}" \
-    --detail "Verified file ownership and evidence — {pass|fail}"
-  ```
 - Also record the **router decision** before each batch:
   ```bash
-  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-    --task-dir .dynos/task-{id} \
-    --agent "router-executor-plan" \
-    --model "none" \
-    --input-tokens 0 \
-    --output-tokens 0 \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type deterministic \
-    --detail "Router: {executor}={model} route={route_mode}"
-  ```
 - Use `run-execution-segment-done` as the authoritative completion gate.
 - Append to log: `{timestamp} [DONE] {segment-id} — complete`.
 - Re-run `run-execution-batch-plan` to get the next authoritative batch.
 
 **For inline fast-track execution** (no subagent spawn), record with `--type inline`:
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
-  --task-dir .dynos/task-{id} \
-  --agent "inline-executor" \
-  --model "none" \
-  --input-tokens 0 \
-  --output-tokens 0 \
-  --phase execution \
-  --stage "EXECUTION" \
-  --type inline \
-  --segment "seg-1" \
-  --detail "Fast-track inline execution (no subagent spawn)"
-```
 
 **Test execution** (Step 4): Record test runner events with `--phase execution --stage TEST_EXECUTION`.
 

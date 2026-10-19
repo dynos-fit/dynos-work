@@ -169,6 +169,24 @@ def test_subagent_type_audit_prefix_matches_auditor_suffix(tmp_path: Path):
     assert out.exists()
 
 
+def test_hook_stamped_auditor_role_cannot_be_claimed_as_another_auditor(tmp_path: Path):
+    td = _task_dir(tmp_path)
+    digest = "a" * 64
+    _write_sidecar(td, "spec-completion-auditor", "haiku", digest)
+    _write_spawn_log(td, [{
+        "phase":"post", "tool":"Agent", "subagent_type":"security-auditor",
+        "stamped_role":"audit-security", "result_sha256":"r" * 64,
+        "stop_reason":"end_turn", "timestamp":_ts(),
+    }])
+    report = _write_zero_report(td, "spec-completion-auditor")
+    with pytest.raises(ValueError, match="spawn-log"):
+        receipt_audit_done(
+            td, "spec-completion-auditor", "haiku", 0, 0, str(report), 100,
+            route_mode="replace", agent_path="learned/x.md",
+            injected_agent_sha256=digest, final_envelope=_envelope_for(report),
+        )
+
+
 def test_missing_spawn_log_file_proceeds_gracefully(tmp_path: Path, monkeypatch):
     """Old deployments and test fixtures without spawn-log.jsonl must still
     write receipts — the strict check kicks in only when the file exists.

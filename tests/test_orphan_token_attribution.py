@@ -86,7 +86,7 @@ class TestOrphanTokenCapture:
         assert rec["input_tokens"] == 12345
         assert rec["output_tokens"] == 678
         assert rec["agent_id"] == "test-agent-123"
-        assert rec["model"] == "opus"
+        assert rec["model"] == "claude-opus-4"
         assert rec["transcript_path"] == str(transcript)
         assert "no fresh active task" in rec["reason"]
 
