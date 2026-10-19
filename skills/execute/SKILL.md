@@ -205,7 +205,7 @@ Before issuing each parallel next_batch executor batch (this includes the first 
 Parse the JSON output. The command emits a single-line JSON object with keys `status`, `count`, `threshold`, `exempt_count`, and `task_class`. If `status` is `'paused'` or `'already_paused'`:
 
 1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the executor count, the threshold, the `task_class`, and instruct the operator to run `"$DYNOS" ctl spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why spawns were wasted.
-2. Append a line beginning with `[BUDGET-PAUSE]` to `execution-log.md` that records the timestamp, count, and threshold.
+2. Record the pause: `"$DYNOS" ctl log-append .dynos/task-{id} --tag BUDGET-PAUSE --message "count={count} threshold={threshold}"` (never append to `execution-log.md` directly; the stamped segment role is denied that write).
 3. Exit non-zero.
 
 Do not proceed with spawning executors. The pause is intentional — the policy is calibrated from this project's retrospective history, and the wasted-spawn count has crossed the learned threshold.
@@ -281,7 +281,7 @@ Parse the JSON `status`:
   - "Write `evidence/{seg-id}.md` before you run low on turns."
 
   After each continuation executor returns, run `run-execution-segment-done` for that segment (the same authoritative completion gate the normal batch loop uses — it writes the receipt and verifies ownership + evidence; a segment is not "complete" until that receipt exists). Then **re-run `next-continuation` and repeat.** There is no spawn-count cap in this loop — keep going as long as segments make progress. Do NOT run `check-spawn-budget` for continuation spawns; the spawn-budget backstop is for audit thrash, not for finishing execution.
-- **`stalled`** (exit code 3) — every remaining incomplete segment moved nothing across two consecutive continuations; `stalled_segments` names them. This is the ONLY automatic halt. Write `escalation.md` with `stalled_segments` and their `incomplete_reasons`, append a `[CONTINUATION-STALLED]` line to `execution-log.md`, and stop: the orchestrator cannot make progress and a human must intervene. Do NOT keep re-spawning.
+- **`stalled`** (exit code 3) — every remaining incomplete segment moved nothing across two consecutive continuations; `stalled_segments` names them. This is the ONLY automatic halt. Write `escalation.md` with `stalled_segments` and their `incomplete_reasons`, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CONTINUATION-STALLED --message "{stalled_segments}"`, and stop: the orchestrator cannot make progress and a human must intervene. Do NOT keep re-spawning.
 
 Only once `next-continuation` reports `complete` do you advance the stage:
 
@@ -318,9 +318,9 @@ This command checks every non-cached segment's evidence file exists and is non-e
 
 If the command reports `"status": "blocked"`, address each listed failure before proceeding.
 
-Append to log:
-```
-{timestamp} [DONE] execute — all segments verified by ctl (segments_verified={N})
+Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "execute — all segments verified by ctl (segments_verified={N})"
 ```
 
 ### Handoff — Write handoff record

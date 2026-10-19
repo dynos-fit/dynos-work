@@ -1,4 +1,4 @@
-"""Observed baseline after PR-01…11: combined 15 commands / 2 spawns / 2 rounds; staged medium 18 / 3 / 3; high/critical has at most 5 spawns / 4 rounds. Command ceilings include a margin of two."""
+"""Observed baseline after PR-01…11 plus the log-append fix: combined 18 commands / 2 spawns / 2 rounds; staged medium 21 / 3 / 3; high/critical has at most 5 spawns / 4 rounds. The three extra commands are `ctl log-append` lines that replaced hand-written execution-log appends (which the stamped role could not perform). Command ceilings include a margin of two."""
 from __future__ import annotations
 
 import re
@@ -7,8 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 # Intentional ceiling changes require updating this contract and documenting
 # the newly observed counts in the module docstring.
-COMBINED = {"commands": 17, "spawns": 2, "rounds": 2}
-STAGED_MEDIUM = {"commands": 20, "spawns": 3, "rounds": 3}
+COMBINED = {"commands": 20, "spawns": 2, "rounds": 2}
+STAGED_MEDIUM = {"commands": 23, "spawns": 3, "rounds": 3}
 HIGH_CRITICAL = {"spawns": 7, "rounds": 5}
 
 

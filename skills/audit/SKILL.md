@@ -182,7 +182,7 @@ Before issuing each parallel auditor batch (this includes the first batch AND ev
 Parse the JSON output. The command emits a single-line JSON object with keys `status`, `count`, `threshold`, `exempt_count`, and `task_class`. If `status` is `'paused'` or `'already_paused'`:
 
 1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the non-converging-repair `count`, the threshold, the `task_class`, and instruct the operator to run `"$DYNOS" ctl spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why repairs are not converging.
-2. Append a line beginning with `[BUDGET-PAUSE]` to `execution-log.md` that records the timestamp, count, and threshold.
+2. Record the pause: `"$DYNOS" ctl log-append .dynos/task-{id} --tag BUDGET-PAUSE --message "count={count} threshold={threshold}"` (never append to `execution-log.md` directly; the stamped auditor role is denied that write).
 3. Exit non-zero.
 
 Do not proceed with spawning auditors. The pause is intentional — the policy is calibrated from this project's retrospective history, and the wasted-spawn count has crossed the learned threshold.
@@ -274,9 +274,9 @@ For each batch, spawn executor agents as assigned in `repair-log.json`:
 
 Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
 
-After all batches complete, append to log:
-```
-{timestamp} [DONE] repair-execution-{phase} — all fixes applied
+After all batches complete, record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "repair-execution-{phase} — all fixes applied"
 ```
 
 **Phase 1 re-audit (domain-aware, incremental scope):** Build the re-audit plan through ctl:
@@ -338,9 +338,9 @@ The written retrospective is complete. Do NOT reopen it to patch `model_used_by_
 
 **agent_source cross-check:** Retrospective claims of `agent_source[role] = "learned:X"` are cross-checked by `memory/policy_engine.py::_extract_quads` against `.dynos/events.jsonl`. Claims without a matching `learned_agent_applied` event (same `task_id`, same `agent_name`, same `segment_id` — or `segment_id` matching `role.removeprefix("audit-")` for auditor roles) are reclassified to `"generic"` and an `agent_source_reclassified` event is emitted. Auditors must continue to populate `agent_source` honestly — the cross-check is verification, not a substitute for honest reporting. Retrospectives are still accepted when unmatched; only the EMA attribution is downgraded, and the `agent_source_reclassified` events are the audit trail a reviewer can use to spot systemic drift.
 
-Append to log:
-```
-{timestamp} [DONE] reflect — task-retrospective.json written
+Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "reflect — task-retrospective.json written"
 ```
 
 **Deterministic Postmortem (Step 5a):** Generate the deterministic postmortem report before the LLM analysis so the LLM has access to anomaly detection, recurring patterns, and similar task comparisons.
@@ -355,9 +355,9 @@ Append to log:
 - When the deterministic engine determines there is literally nothing to learn, it short-circuits the postmortem write and instead emits `receipt_postmortem_skipped(task_dir, reason, retrospective_sha256, subsumed_by)` with `reason` from the enum `{"clean-task", "no-findings"}` and `subsumed_by` as a required list argument. The decision is deterministic: (a) `reason="clean-task"`, `subsumed_by=[]` when ≥2 auditors ran AND every auditor reported `findings: []`; (b) `reason="no-findings"`, `subsumed_by=[]` when exactly 1 auditor ran AND it reported `findings: []`; (c) in every other case — any auditor reporting ≥1 finding — the engine does NOT skip; it runs the LLM postmortem and writes `receipt_postmortem_generated` instead. There is no skip path for high-quality repairs: any task with findings must run the full LLM postmortem. The `task-retrospective.json` is hashed at receipt-emission time.
 - A receipt-write failure is logged as `postmortem_receipt_failed` / `postmortem_skip_receipt_failed` and does NOT corrupt the postmortem files themselves; the script returns its normal result so the audit pipeline keeps moving.
 
-This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the persistent project directory. Append to log:
-```
-{timestamp} [DONE] postmortem — anomalies={N}, recurring_patterns={N}
+This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the persistent project directory. Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "postmortem — anomalies={N}, recurring_patterns={N}"
 ```
 
 **LLM Postmortem Analysis (Step 5b):** After the deterministic postmortem, run LLM-powered failure analysis. This step is skipped for clean tasks (no findings, no repairs, quality >= 0.8).
@@ -382,14 +382,14 @@ This writes `postmortem-analysis.json` to the task dir and merges new prevention
 - When the sanitized analysis yields zero usable rules, it emits `receipt_postmortem_analysis` internally, passing `analysis_path` and `rules_path` as keyword file-path arguments; hashes are derived from the on-disk files — no caller-supplied hashes are accepted. The receipt records `rules_added=0` and the current on-disk hash of `prevention-rules.json` (or 64 zeros when the file does not exist).
 - When the merge appends rules, the same receipt is emitted AFTER the fcntl lock is released so the recorded hash captures the on-disk state visible to other readers. Do not call `receipt_postmortem_analysis` directly from this skill — it is emitted internally by `postmortem_analysis.py apply`.
 
-Append to log:
-```
-{timestamp} [DONE] postmortem-analysis — {N} prevention rules added
+Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "postmortem-analysis — {N} prevention rules added"
 ```
 
-If `has_findings` is false, skip this step and append:
-```
-{timestamp} [SKIP] postmortem-analysis — clean task, nothing to analyze
+If `has_findings` is false, skip this step and record the skip:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag SKIP --message "postmortem-analysis — clean task, nothing to analyze"
 ```
 
 **Post-completion processing:** Improve, policy engine, dashboard, and registry refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.

@@ -19,6 +19,7 @@ from pathlib import Path
 _GIT: str | None = shutil.which("git")
 
 from lib_core import (
+    append_execution_log,
     VALID_CLASSIFICATION_TYPES,
     VALID_DOMAINS,
     VALID_RISK_LEVELS,
@@ -2244,6 +2245,52 @@ def cmd_set_planner_phase(args: argparse.Namespace) -> int:
     return 0
 
 
+_LOG_APPEND_TAGS: frozenset[str] = frozenset({
+    "GATE", "SKIP", "DECISION", "DONE", "ADVANCE", "ROUTE", "SPAWN", "HUMAN",
+    "FAILED", "NOTE", "BUDGET-PAUSE", "CONTINUATION-STALLED",
+})
+_LOG_APPEND_MAX_MESSAGE = 500
+
+
+def cmd_log_append(args: argparse.Namespace) -> int:
+    """Append one tagged line to execution-log.md through the ctl write path.
+
+    This is the sanctioned way for skills to record ``[GATE]``/``[SKIP]``/
+    ``[DONE]`` lines. Direct appends from the orchestrator fail whenever a
+    subagent role is stamped (the orchestrator adopts that role on hosts
+    that share one session id), so every skill routes through here.
+    ``[STAGE]`` is reserved for ``transition_task`` and refused.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    tag = str(args.tag or "").strip().upper()
+    message = str(args.message or "")
+    if tag == "STAGE":
+        print("log-append: [STAGE] lines are written by transition_task only", file=sys.stderr)
+        return 1
+    if tag not in _LOG_APPEND_TAGS:
+        print(
+            f"log-append: unknown tag {tag!r}; allowed: {', '.join(sorted(_LOG_APPEND_TAGS))}",
+            file=sys.stderr,
+        )
+        return 1
+    if not message.strip():
+        print("log-append: --message must be non-empty", file=sys.stderr)
+        return 1
+    if "\n" in message or "\r" in message:
+        print("log-append: --message must be a single line", file=sys.stderr)
+        return 1
+    if len(message) > _LOG_APPEND_MAX_MESSAGE:
+        print(f"log-append: --message exceeds {_LOG_APPEND_MAX_MESSAGE} characters", file=sys.stderr)
+        return 1
+    if not (task_dir / "manifest.json").is_file():
+        print(f"log-append: not a task directory (no manifest.json): {task_dir}", file=sys.stderr)
+        return 1
+    line = f"[{tag}] {message.strip()}"
+    append_execution_log(task_dir, line)
+    print(json.dumps({"status": "log_appended", "task_dir": str(task_dir), "line": line}))
+    return 0
+
+
 def cmd_planner_retry(args: argparse.Namespace) -> int:
     phases={"discovery","spec","plan","combined","arch-design"}
     phase=str(args.phase).strip()
@@ -3475,6 +3522,12 @@ def cmd_run_external_solution_gate(args: argparse.Namespace) -> int:
         gate = _compute_external_solution_gate(task_dir)
         gate_path = task_dir / "external-solution-gate.json"
         _write_ctl_json(task_dir, gate_path, gate)
+        # The gate owns its own log line so the orchestrator never has to
+        # append to execution-log.md by hand (denied once a role is stamped).
+        append_execution_log(
+            task_dir,
+            f"[GATE] external-solution — recommended: {str(bool(gate.get('search_recommended'))).lower()}",
+        )
         print(json.dumps({
             "status": "external_solution_gate_ready",
             "task_dir": str(task_dir),
@@ -7703,6 +7756,15 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     planner_retry_parser.add_argument("task_dir")
     planner_retry_parser.add_argument("--phase",required=True)
     planner_retry_parser.set_defaults(func=cmd_planner_retry)
+
+    log_append_parser = subparsers.add_parser(
+        "log-append",
+        help="Append one tagged line to execution-log.md (the only sanctioned agent path)",
+    )
+    log_append_parser.add_argument("task_dir")
+    log_append_parser.add_argument("--tag", required=True, help="GATE|SKIP|DECISION|DONE|ADVANCE|ROUTE|SPAWN|HUMAN|FAILED|NOTE|BUDGET-PAUSE|CONTINUATION-STALLED")
+    log_append_parser.add_argument("--message", required=True)
+    log_append_parser.set_defaults(func=cmd_log_append)
 
     stamp_role_parser = subparsers.add_parser(
         "stamp-role",

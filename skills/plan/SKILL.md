@@ -73,9 +73,9 @@ Wait for completion. Finalize planning through the deterministic control-plane e
 
 `run-planning` owns full deterministic artifact validation, writes the `plan-validated` receipt, and advances `PLANNING -> PLAN_REVIEW` when the artifacts are sound. If it exits non-zero, the JSON payload tells you exactly why replanning is required.
 
-Append to log (the ctl command above may already advance to `PLAN_REVIEW`; only emit the `[DONE]` line):
-```
-{timestamp} [DONE] planning — plan.md written
+Record completion (the ctl command above may already advance to `PLAN_REVIEW`; only the `[DONE]` line is yours, and it goes through `log-append` — never append to `execution-log.md` directly):
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "planning — plan.md written"
 ```
 
 ### Step 3 — Human review (PLAN_REVIEW)
@@ -131,10 +131,7 @@ Transition the stage by running:
 "$DYNOS" ctl transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
-Append to log:
-```
-{timestamp} [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT
-```
+(`transition_task` auto-appends the `[STAGE] → PRE_EXECUTION_SNAPSHOT` line; do not write an `[ADVANCE]` line by hand.)
 
 Print:
 ```

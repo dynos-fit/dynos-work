@@ -211,9 +211,7 @@ Rules:
 - The planner still owns the final design choice. Research findings inform the plan; they do not automatically authorize adopting any external library or pattern.
 - Do not mutate the gate artifact by hand to claim search happened or to inject candidates.
 
-Logging: append exactly one line to the execution log:
-
-`{timestamp} [GATE] external-solution — recommended: {true|false}`
+Logging: `run-external-solution-gate` appends its own `[GATE] external-solution — recommended: {true|false}` line; do not write one by hand.
 
 Proceed to Step 2d.
 
@@ -221,7 +219,13 @@ Proceed to Step 2d.
 
 ## Step 2d — Architectural Design Doc Gate (conditional)
 
-**Only runs when `classification.risk_level` is `high` or `critical`.** Read `.dynos/task-{id}/classification.json`. If `risk_level` is `low` or `medium`, append `{timestamp} [SKIP] arch-design — risk_level={risk_level}` to the execution log and proceed to Step 3.
+**Only runs when `classification.risk_level` is `high` or `critical`.** Read `.dynos/task-{id}/classification.json`. If `risk_level` is `low` or `medium`, record the skip and proceed to Step 3:
+
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag SKIP --message "arch-design — risk_level={risk_level}"
+```
+
+All execution-log lines in this skill go through `log-append`. Never append to `execution-log.md` directly: once a role is stamped for a subagent, the orchestrator resolves as that role and the direct write is denied.
 
 For high/critical tasks, spawn the planner with the **Architectural Design Doc** phase to produce `.dynos/task-{id}/design-doc.md` — a §1–§13 design document that walks the higher-level architectural questions before spec normalization. §10 Open Questions is the human handoff.
 
@@ -236,12 +240,13 @@ After the spawn returns, write the receipt:
 "$DYNOS" ctl planner-receipt .dynos/task-{id} arch-design
 ```
 
-Read `.dynos/task-{id}/design-doc.md` and locate the `## 10. Open questions` section. If it contains only the literal `None — design fully resolved.`, no human input is needed; log `{timestamp} [GATE] arch-design — no open questions` and proceed to Step 3.
+Read `.dynos/task-{id}/design-doc.md` and locate the `## 10. Open questions` section. If it contains only the literal `None — design fully resolved.`, no human input is needed. Otherwise, parse each open question and present it to the user via **AskUserQuestion**. Append the user's resolutions back to `design-doc.md` immediately under the `## 10. Open questions` section as a `### Resolutions` sub-section, one line per resolved question: `Q{n}: {chosen-option} — {one-line rationale}`.
 
-Otherwise, parse each open question and present it to the user via **AskUserQuestion**. Append the user's resolutions back to `design-doc.md` immediately under the `## 10. Open questions` section as a `### Resolutions` sub-section, one line per resolved question: `Q{n}: {chosen-option} — {one-line rationale}`.
+Logging (one line either way; message is `no open questions` or `open-questions: {n} (resolved)`):
 
-Logging: append exactly one line to the execution log:
-`{timestamp} [GATE] arch-design — open-questions: {n} (resolved)`
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag GATE --message "arch-design — {no open questions | open-questions: {n} (resolved)}"
+```
 
 Proceed to Step 3.
 
@@ -386,10 +391,10 @@ If any validation fails, follow **On validation failure** with the matching phas
 "$DYNOS" ctl plan-validated-receipt .dynos/task-{id}
 ```
 
-Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
+Record completion (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
 
-```text
-{timestamp} [DONE] planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "planning — final plan.md and execution-graph.json written (mode: {combined|hierarchical|standard})"
 ```
 
 Transition the stage by running:
@@ -533,11 +538,7 @@ Transition the stage by running:
 "$DYNOS" ctl transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
-Append to the execution log:
-
-```text
-{timestamp} [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT
-```
+(`transition_task` auto-appends the `[STAGE] → PRE_EXECUTION_SNAPSHOT` line; do not write an `[ADVANCE]` line by hand.)
 
 Print:
 

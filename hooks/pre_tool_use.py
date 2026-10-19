@@ -452,6 +452,38 @@ def _resolve_path(raw: str, cwd: Path) -> Path:
     return p.resolve()
 
 
+def _extract_read_target(
+    tool_name: str, tool_input: object, cwd: Path
+) -> tuple[Path | None, str | None, str | None]:
+    """Return ``(target, raw_pattern, error)`` for a Read/Grep/Glob call.
+
+    Shared by the planning and audit read-policy branches so both resolve
+    the tool target identically. ``error`` is a message for exit code 1
+    (malformed tool_input), never a policy decision.
+    """
+    if not isinstance(tool_input, dict):
+        return None, None, f"{tool_name} tool_input is not a dict"
+    if tool_name == "Read":
+        raw_path = tool_input.get("file_path") or tool_input.get("path") or ""
+        if not raw_path:
+            return None, None, "Read has no file_path in tool_input"
+        return _resolve_path(raw_path, cwd), None, None
+    if tool_name == "Grep":
+        # CRITICAL: Grep target is `path` (search root), NOT `pattern` (regex).
+        raw_path = tool_input.get("path", "")
+        if not raw_path:
+            # No explicit search root: fall back to cwd. This still allows
+            # decide_read to apply the diff/task_dir allowlist on cwd.
+            raw_path = str(cwd)
+        return _resolve_path(raw_path, cwd), None, None
+    pattern = tool_input.get("pattern", "")
+    if not pattern:
+        return None, None, "Glob has no pattern in tool_input"
+    # Best-effort: resolve pattern as a path so prefix checks see an
+    # absolute string. The original pattern is preserved in raw_pattern.
+    return _resolve_path(pattern, cwd), pattern, None
+
+
 def _format_denial(role: str, path: Path | str, decision) -> str:
     """Self-explaining denial text (P0-f in docs/permissions-on-design.md).
 
@@ -974,6 +1006,35 @@ def main() -> int:
             )
             return 2
 
+        # Planning role: per-phase repository read quota (read_policy
+        # ``_handle_planner_read``). No stage guard and no audit-plan — the
+        # planner runs before any audit plan exists. Without this branch the
+        # non-audit early return below made the planner quota unreachable
+        # from the hook, so it was enforced in unit tests only.
+        if role == "planning":
+            if task_dir is None:
+                return 0
+            target, raw_pattern, err = _extract_read_target(tool_name, tool_input, cwd)
+            if err:
+                print(f"pre-tool-use: {err}", file=sys.stderr)
+                return 1
+            attempt = ReadAttempt_RP(
+                role=role,
+                task_dir=task_dir,
+                target=target,
+                tool_name=tool_name,
+                raw_pattern=raw_pattern,
+            )
+            decision = decide_read(attempt, audit_plan=None)
+            try:
+                _emit_read_policy_event(attempt, decision)
+            except Exception:
+                pass
+            if not decision.allowed:
+                print(f"read-policy: {decision.reason}", file=sys.stderr)
+                return 2
+            return 0
+
         # AC 16: non-audit roles bypass read-policy enforcement entirely.
         if not role.startswith("audit-"):
             return 0
@@ -1047,34 +1108,10 @@ def main() -> int:
                     pass
 
         # AC 3: extract target per tool. tool_input must be a dict.
-        if not isinstance(tool_input, dict):
-            print(f"pre-tool-use: {tool_name} tool_input is not a dict", file=sys.stderr)
+        target, raw_pattern, err = _extract_read_target(tool_name, tool_input, cwd)
+        if err:
+            print(f"pre-tool-use: {err}", file=sys.stderr)
             return 1
-
-        raw_pattern: str | None = None
-        if tool_name == "Read":
-            raw_path = tool_input.get("file_path") or tool_input.get("path") or ""
-            if not raw_path:
-                print("pre-tool-use: Read has no file_path in tool_input", file=sys.stderr)
-                return 1
-            target = _resolve_path(raw_path, cwd)
-        elif tool_name == "Grep":
-            # CRITICAL: Grep target is `path` (search root), NOT `pattern` (regex).
-            raw_path = tool_input.get("path", "")
-            if not raw_path:
-                # No explicit search root: fall back to cwd. This still allows
-                # decide_read to apply the diff/task_dir allowlist on cwd.
-                raw_path = str(cwd)
-            target = _resolve_path(raw_path, cwd)
-        else:  # Glob
-            pattern = tool_input.get("pattern", "")
-            if not pattern:
-                print("pre-tool-use: Glob has no pattern in tool_input", file=sys.stderr)
-                return 1
-            raw_pattern = pattern
-            # Best-effort: resolve pattern as a path so prefix checks see
-            # an absolute string. The original pattern is preserved in raw_pattern.
-            target = _resolve_path(pattern, cwd)
 
         attempt = ReadAttempt_RP(
             role=role,

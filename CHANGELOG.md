@@ -13,6 +13,10 @@ and this project adheres to **Semantic Versioning**.
 - Start planning now supports a one-review combined path, one-pass discovery, subsystem-based hierarchy, bounded artifact repair, and per-phase read quotas. Planner receipts bind to hook-observed spawns; token attribution is recorded once by SubagentStop. Risk floors and external research triggers are narrower, and planning timelines now separate model, approval, orchestrator, and idle time.
 - Release automation now inserts version entries after populated Unreleased notes.
 
+### Fixed
+- The planner read quota is now enforced at runtime. `pre_tool_use` returned early for every non-audit role before consulting `read_policy`, so the new `planning` branch was reachable only from unit tests; the hook now routes planner `Read`/`Grep`/`Glob` calls through `decide_read` with the per-phase allowance.
+- Added `ctl log-append` as the only sanctioned way for skills to write `[GATE]`/`[SKIP]`/`[DONE]`/`[BUDGET-PAUSE]` lines to `execution-log.md`. Automatic role stamping made the orchestrator resolve as the stamped subagent role after the first planner spawn, and that role is denied direct writes to the log, so every hand-written append in the start, execute, and audit skills would have failed. `run-external-solution-gate` now writes its own `[GATE]` line, and the redundant manual `[ADVANCE]` line in Step 9 is gone (`transition_task` already records the stage change).
+
 ---
 
 ## [7.5.23] - 2026-10-19

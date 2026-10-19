@@ -150,9 +150,7 @@ If `search_recommended` is `true`, you may perform bounded external research to 
 
 If `search_recommended` is `false`, proceed directly to Step 3.
 
-Append exactly one line to the execution log:
-
-`{timestamp} [GATE] external-solution — recommended: {true|false}`
+`run-external-solution-gate` appends its own `[GATE] external-solution — recommended: {true|false}` line to the execution log; do not write one by hand. Every other execution-log line in this skill goes through `python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag <TAG> --message "<text>"` — never append to `execution-log.md` directly.
 
 ---
 
@@ -255,10 +253,10 @@ For `execution-graph.json`:
 
 If any validation fails, respawn planning and fix the artifacts before continuing.
 
-Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
+Record completion (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):
 
-```text
-{timestamp} [DONE] planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag DONE --message "planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})"
 ```
 
 Transition the stage by running:
@@ -349,11 +347,7 @@ Transition the stage by running:
 python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
-Append to the execution log:
-
-```text
-{timestamp} [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT
-```
+(`transition_task` auto-appends the `[STAGE] → PRE_EXECUTION_SNAPSHOT` line; do not write an `[ADVANCE]` line by hand.)
 
 Print:
 
