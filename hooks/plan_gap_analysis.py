@@ -663,12 +663,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Plan gap analysis — verify plan claims against codebase")
     parser.add_argument("--root", required=True, help="Project root directory")
     parser.add_argument("--task-dir", required=True, help="Task directory (.dynos/task-{id})")
+    parser.add_argument("--json", action="store_true", help="Include structured validation errors")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
     task_dir = Path(args.task_dir).resolve()
 
     report = run_gap_analysis(root, task_dir)
+    if args.json:
+        report["errors"] = [
+            {
+                "artifact": "plan.md",
+                "rule": "plan_gap_" + re.sub(r"[^a-z0-9]+", "_", error.lower()).strip("_")[:48],
+                "message": error,
+                "location": None,
+            }
+            for error in findings_from_report(report)
+        ]
+        report["ok"] = not report["errors"]
     json.dump(report, sys.stdout, indent=2)
     sys.stdout.write("\n")
 

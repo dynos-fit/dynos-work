@@ -100,47 +100,26 @@ def _trajectory_adjustments(similar: list[dict]) -> list[str]:
 def _resolve_planning_mode(
     risk_level: str,
     ac_count: int = 0,
+    subsystems: list | None = None,
+    policy: dict | None = None,
 ) -> dict:
-    """Determine standard vs. hierarchical planning.
-
-    Hierarchical if risk_level in (high, critical) or ac_count > 10.
-    """
-    hierarchical = risk_level in ("high", "critical") or ac_count > 10
-    mode = "hierarchical" if hierarchical else "standard"
-    reasons = []
-    if risk_level in ("high", "critical"):
-        reasons.append(f"risk_level={risk_level}")
-    if ac_count > 10:
-        reasons.append(f"ac_count={ac_count}")
-    if not reasons:
-        reasons.append("default standard planning")
-    return {
-        "mode": mode,
-        "reason": "; ".join(reasons),
-    }
+    """Choose hierarchy from independent subsystems; criteria count is telemetry only."""
+    from lib_validate import compute_planning_mode
+    mode = compute_planning_mode(risk_level, subsystems or [], policy or {})
+    independent = sum(1 for row in (subsystems or []) if isinstance(row, dict) and row.get("independent") is True)
+    return {"mode":mode, "reason":f"independent_subsystems={independent}; risk_level={risk_level}",
+            "ac_count":ac_count}
 
 
-# ---------------------------------------------------------------------------
-# Policy packet generation
-# ---------------------------------------------------------------------------
-
+# Roles represented in the planning policy packet.
 _KEY_ROLES = [
-    "planner",
-    "spec-writer",
-    "backend-executor",
-    "ui-executor",
-    "infra-executor",
-    "security-executor",
-    "data-executor",
-    "observability-executor",
-    "release-executor",
-    "security-auditor",
-    "code-quality-auditor",
-    "spec-completion-auditor",
-    "architecture-auditor",
-    "threat-model-auditor",
-    "test-strategy-auditor",
+    "planner", "spec-writer", "backend-executor", "ui-executor",
+    "infra-executor", "security-executor", "data-executor",
+    "observability-executor", "release-executor", "security-auditor",
+    "code-quality-auditor", "spec-completion-auditor",
+    "architecture-auditor", "threat-model-auditor", "test-strategy-auditor",
 ]
+
 
 def _build_policy_packet(root: Path, task_id: str) -> dict:
     """Build the complete policy packet for a task."""
@@ -344,6 +323,7 @@ def cmd_start_plan(args: argparse.Namespace) -> int:
 
 def cmd_planning_mode(args: argparse.Namespace) -> int:
     """Determine standard vs. hierarchical planning mode."""
+    root = Path(args.root).resolve()
     risk_level = str(args.risk_level).strip()
     ac_count = int(args.ac_count) if args.ac_count else 0
 
@@ -351,7 +331,18 @@ def cmd_planning_mode(args: argparse.Namespace) -> int:
         print(json.dumps({"error": "risk-level is required"}))
         return 1
 
-    result = _resolve_planning_mode(risk_level, ac_count)
+    try:
+        subsystems = json.loads(args.subsystems_json) if args.subsystems_json else []
+    except json.JSONDecodeError:
+        print(json.dumps({"error":"subsystems-json must be valid JSON"}))
+        return 1
+    try:
+        policy_path = _persistent_project_dir(root) / "policy.json"
+        loaded = load_json(policy_path)
+        policy = loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        policy = {}
+    result = _resolve_planning_mode(risk_level, ac_count, subsystems, policy)
     print(json.dumps(result, indent=2))
     return 0
 
@@ -405,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--task-type", default="feature", dest="task_type")
     pm.add_argument("--risk-level", required=True, dest="risk_level")
     pm.add_argument("--ac-count", default="0", dest="ac_count")
+    pm.add_argument("--subsystems-json", default="[]", dest="subsystems_json")
     pm.set_defaults(func=cmd_planning_mode)
 
     # task-policy

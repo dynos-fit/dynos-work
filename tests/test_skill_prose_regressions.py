@@ -55,3 +55,10 @@ def test_at_least_one_skill_uses_approve_stage():
             found_any = True
             break
     assert found_any, "no skill references `approve-stage` — replacement missing"
+
+
+def test_token_records_are_hook_owned():
+    for skill in ("start", "execute", "audit"):
+        text = (SKILLS / skill / "SKILL.md").read_text()
+        assert "lib_tokens record" not in text
+        assert "Token usage is recorded automatically by the SubagentStop hook" in text

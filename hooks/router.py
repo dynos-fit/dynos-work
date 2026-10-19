@@ -183,6 +183,7 @@ DEFAULT_EPSILON = 0.1  # 10% exploration rate
 # planner_prompt_oversize event when stdin exceeds this threshold; the
 # sidecar is still written and the command still exits 0.
 _MAX_INJECTED_PROMPT_BYTES: int = 100_000
+_MAX_PLANNER_PROMPT_BYTES: int = 60_000
 
 
 def _default_model_for_role(role: str, host: str) -> str | None:
@@ -2443,6 +2444,10 @@ def cmd_planner_inject_prompt(args: argparse.Namespace) -> int:
             json.dumps({"error": f"stdin read failed: {exc}"}),
             file=_sys.stderr,
         )
+        return 1
+
+    if len(stdin_bytes) > _MAX_PLANNER_PROMPT_BYTES:
+        print(f"planner prompt is {len(stdin_bytes)} bytes; maximum is {_MAX_PLANNER_PROMPT_BYTES}", file=_sys.stderr)
         return 1
 
     root = Path(args.root).resolve()

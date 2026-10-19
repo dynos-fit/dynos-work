@@ -41,6 +41,7 @@ from lib_receipts import (
     receipt_human_approval,
     receipt_plan_audit,
     receipt_plan_validated,
+    receipt_validation_override,
     receipt_planner_spawn,
     receipt_search_conducted,
     receipt_spawn_budget_paused,
@@ -164,35 +165,10 @@ def _root_for_task_dir(task_dir: Path) -> Path:
 
 
 _EXTERNAL_TRIGGER_TERMS: tuple[str, ...] = (
-    "sdk",
-    "oauth",
-    "sso",
-    "webhook",
-    "stripe",
-    "docker",
-    "terraform",
-    "github actions",
-    "gitlab ci",
-    "retry",
-    "queue",
-    "cache",
-    "pagination",
-    "rate limit",
-    "rate limiting",
-    "metrics",
-    "tracing",
-    "protocol",
-    "migration",
-    "migrate",
-    "setup",
-    "configure",
-    "integration",
-    "event bus",
-    "eventbus",
-    "cloud",
-    "aws",
-    "gcp",
-    "azure",
+    "sdk", "oauth", "sso", "webhook", "stripe", "docker", "terraform",
+    "github actions", "gitlab ci", "aws", "gcp", "azure", "kubernetes",
+    "helm", "grpc", "graphql", "openapi", "saml", "oidc", "twilio",
+    "sendgrid", "okta", "auth0",
 )
 
 _LOCAL_BUG_TERMS: tuple[str, ...] = (
@@ -240,10 +216,20 @@ def _compute_external_solution_gate(task_dir: Path) -> dict:
     domains = [str(d) for d in domains if str(d).strip()]
 
     raw_input = _task_raw_input(task_dir, manifest)
-    trigger_matches = _match_terms(raw_input, _EXTERNAL_TRIGGER_TERMS)
+    trigger_terms = list(_EXTERNAL_TRIGGER_TERMS)
+    try:
+        from lib_core import _persistent_project_dir
+        policy = load_json(_persistent_project_dir(_root_for_task_dir(task_dir)) / "policy.json")
+        extra = policy.get("external_search_terms_extra", []) if isinstance(policy, dict) else []
+        if isinstance(extra, list):
+            trigger_terms.extend(str(term).strip().lower() for term in extra[:50] if isinstance(term, str) and term.strip())
+    except Exception:
+        pass
+    trigger_matches = _match_terms(raw_input, tuple(trigger_terms))
     local_bug_matches = _match_terms(raw_input, _LOCAL_BUG_TERMS)
     file_scoped = _looks_like_local_file_scoped_task(raw_input)
-    migration_like = task_type in {"migration", "full-stack"} or "migration" in domains or "infra" in domains
+    vendor_version = re.search(r"\b(postgres|mysql|mongo|redis|django|rails|react|next\.js|spring|node)\s*\d", raw_input, re.I)
+    migration_like = (task_type == "migration" or "migration" in domains) and (vendor_version is not None or bool(trigger_matches))
 
     search_recommended = False
     reasons: list[str] = []
@@ -564,12 +550,10 @@ _RISK_LEVEL_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical
 
 # Hardcoded keyword list — no external config, no ReDoS risk (anchored word-boundary
 # alternation over a fixed set of short literals; all branches are O(n) in input length).
-_RISK_KEYWORD_PATTERN: re.Pattern[str] = re.compile(
-    r"\b(auth|migration|payment|drop|irreversible|hmac|signing|encryption)\b",
-    re.IGNORECASE,
-)
-
-_HIGH_RISK_DOMAINS: frozenset[str] = frozenset({"security", "db", "migration"})
+_KEYWORD_HIGH = re.compile(r"\b(payment|drop (?:table|column)|irreversible|data loss)\b", re.I)
+_KEYWORD_MEDIUM = re.compile(r"\b(auth(?:entication|orization|z)|oauth|session token|secret|hmac|signing|encrypt(?:ion|ed)?|schema migration|data migration)\b", re.I)
+_FLOOR_HIGH_DOMAINS = frozenset({"migration"})
+_FLOOR_MEDIUM_DOMAINS = frozenset({"db", "security"})
 
 
 def _files_expected_from_graph(task_dir: Path) -> list[str] | None:
@@ -626,9 +610,10 @@ def _compute_risk_floor(
             fe = []
         files_expected = [str(f).strip() for f in fe if isinstance(f, str) and str(f).strip()]
 
-    high_risk_domain_hits = [d for d in domains if d in _HIGH_RISK_DOMAINS]
+    high_risk_domain_hits = [d for d in domains if d in _FLOOR_HIGH_DOMAINS]
+    medium_domain_hits = [d for d in domains if d in _FLOOR_MEDIUM_DOMAINS]
     file_domain_floor: str | None = None
-    if len(files_expected) >= 10 or len(domains) >= 3 or high_risk_domain_hits:
+    if len(files_expected) >= 10 or high_risk_domain_hits:
         file_domain_floor = "high"
         triggering_signals.append("file_domain")
         raw_matches["file_domain"] = {
@@ -654,13 +639,28 @@ def _compute_risk_floor(
         except Exception:
             spec_text = ""
     combined_text = raw_input_text + "\n" + spec_text
-    keyword_matches = _RISK_KEYWORD_PATTERN.findall(combined_text)
-    if keyword_matches:
+    high_keyword_matches = _KEYWORD_HIGH.findall(combined_text)
+    medium_keyword_matches = _KEYWORD_MEDIUM.findall(combined_text)
+    keyword_matches = high_keyword_matches or medium_keyword_matches
+    if high_keyword_matches:
+        keyword_floor = "high"
+    elif medium_keyword_matches:
         keyword_floor = "medium"
+    if keyword_matches:
         triggering_signals.append("keyword_scan")
         raw_matches["keyword_scan"] = {
             "matched_keywords": sorted(set(k.lower() for k in keyword_matches)),
         }
+
+    if medium_domain_hits:
+        domain_floor = "high" if "security" in medium_domain_hits and medium_keyword_matches else "medium"
+        file_domain_floor = max((file_domain_floor, domain_floor), key=lambda lvl: _RISK_LEVEL_ORDER.get(lvl or "low", 0))
+        triggering_signals.append("security_db_domain")
+        raw_matches["security_db_domain"] = {"domains": medium_domain_hits}
+    if len(domains) >= 3:
+        file_domain_floor = max((file_domain_floor, "medium"), key=lambda lvl: _RISK_LEVEL_ORDER.get(lvl or "low", 0))
+        triggering_signals.append("domain_count")
+        raw_matches["domain_count"] = {"domains_count": len(domains)}
 
     # --- Signal (c): token count on spec.md ---
     token_count_floor: str | None = None
@@ -708,6 +708,29 @@ def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
         out["notes"] = notes.strip()
     if "tdd_required" in payload:
         out["tdd_required"] = bool(payload.get("tdd_required"))
+    if "subsystems" in payload:
+        raw_subsystems = payload.get("subsystems")
+        if not isinstance(raw_subsystems, list):
+            raise ValueError("classification.subsystems must be an array")
+        normalized = []
+        owners = {}
+        warnings = []
+        for index, item in enumerate(raw_subsystems):
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip() or not isinstance(item.get("paths"), list) or not isinstance(item.get("independent"), bool):
+                warnings.append(f"subsystems[{index}] malformed and dropped")
+                continue
+            paths = [str(path).strip() for path in item["paths"] if isinstance(path, str) and path.strip()]
+            if len(paths) != len(item["paths"]):
+                warnings.append(f"subsystems[{index}] contains malformed paths")
+            overlap = [path for path in paths if path in owners]
+            if overlap:
+                raise ValueError(f"classification.subsystems paths overlap: {overlap}")
+            for path in paths:
+                owners[path] = index
+            normalized.append({"name":item["name"].strip(), "paths":paths, "independent":item["independent"]})
+        out["subsystems"] = normalized
+        if warnings:
+            out["subsystems_warnings"] = warnings
 
     # Compute observed_floor and override upward if needed (AC8/AC9).
     planner_risk = out["risk_level"]
@@ -716,51 +739,33 @@ def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
     )
     planner_order = _RISK_LEVEL_ORDER.get(planner_risk, 0)
     floor_order = _RISK_LEVEL_ORDER.get(observed_floor, 0)
-    if floor_order > planner_order:
+    risk_floor_applied = floor_order > planner_order
+    if risk_floor_applied:
         out["risk_level"] = observed_floor
-        # Emit exactly one event per call when an upgrade happens.
         try:
-            from lib_log import log_event  # noqa: PLC0415
-            task_id = task_dir.name
-            root = _root_for_task_dir(task_dir)
+            from lib_log import log_event
             manifest = _load_manifest(task_dir)
-            log_event(
-                root,
-                "risk_level_upgrade_blocked",
-                task=task_id,
-                task_id=manifest.get("task_id", task_id),
-                planner_risk=planner_risk,
-                observed_floor=observed_floor,
-                triggering_signals=triggering_signals,
-                raw_matches=raw_matches,
-            )
+            log_event(_root_for_task_dir(task_dir), "risk_level_upgrade_blocked",
+                      task=task_dir.name, task_id=manifest.get("task_id", task_dir.name),
+                      planner_risk=planner_risk, observed_floor=observed_floor,
+                      triggering_signals=triggering_signals, raw_matches=raw_matches)
         except Exception:
             pass
     else:
-        # task-20260508-009: keyword matched but did not trigger an upgrade.
-        # Emit observability event so near-misses remain visible. Mutually
-        # exclusive with risk_level_upgrade_blocked above (if/else gate).
-        keyword_matches_from_floor = raw_matches.get("keyword_scan", {}).get(
-            "matched_keywords", []
-        )
+        keyword_matches_from_floor = raw_matches.get("keyword_scan", {}).get("matched_keywords", [])
         if keyword_matches_from_floor:
             try:
-                from lib_log import log_event  # noqa: PLC0415
-                task_id = task_dir.name
-                root = _root_for_task_dir(task_dir)
+                from lib_log import log_event
                 manifest = _load_manifest(task_dir)
-                log_event(
-                    root,
-                    "risk_keyword_match_observed",
-                    task=task_id,
-                    task_id=manifest.get("task_id", task_id),
-                    planner_risk=planner_risk,
-                    observed_floor=observed_floor,
-                    matched_keywords=keyword_matches_from_floor,
-                )
+                log_event(_root_for_task_dir(task_dir), "risk_keyword_match_observed",
+                          task=task_dir.name, task_id=manifest.get("task_id", task_dir.name),
+                          planner_risk=planner_risk, observed_floor=observed_floor,
+                          matched_keywords=keyword_matches_from_floor)
             except Exception:
                 pass
-
+    out["risk_floor_applied"] = risk_floor_applied
+    out["risk_floor_signals"] = triggering_signals
+    out["planner_risk_level"] = planner_risk
     return out
 
 
@@ -955,6 +960,34 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
     issue the transition.
     """
     task_dir = Path(args.task_dir).resolve()
+    if getattr(args, "combined", False):
+        manifest = _load_manifest(task_dir)
+        if manifest.get("planning_path") != "combined" or manifest.get("stage") != "PLAN_REVIEW":
+            print("--combined requires planning_path=combined at PLAN_REVIEW", file=sys.stderr)
+            return 1
+        spec_path, plan_path = task_dir / "spec.md", task_dir / "plan.md"
+        if not spec_path.is_file() or not plan_path.is_file():
+            print("--combined requires both spec.md and plan.md", file=sys.stderr)
+            return 1
+        auto = bool(getattr(args, "auto_approved", False))
+        if auto and manifest.get("auto_approve_gates") is not True:
+            print("auto_approve_gates is not true", file=sys.stderr)
+            return 1
+        from lib_receipts import receipt_human_approval, receipt_auto_approval
+        try:
+            for stage, artifact in (("SPEC_REVIEW", spec_path), ("PLAN_REVIEW", plan_path)):
+                digest = hash_file(artifact)
+                if auto:
+                    receipt_auto_approval(task_dir, stage, digest)
+                else:
+                    receipt_human_approval(task_dir, stage, digest, approver="human")
+            if _load_manifest(task_dir).get("stage") != "PLAN_AUDIT":
+                transition_task(task_dir, "PLAN_AUDIT")
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(json.dumps({"status":"approved", "combined":True, "stage":"PLAN_AUDIT"}))
+        return 0
     auto_approved = bool(getattr(args, "auto_approved", False))
     if auto_approved:
         # Gate the auto path on manifest.auto_approve_gates being explicitly
@@ -2184,6 +2217,60 @@ def cmd_next_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_timeline(args: argparse.Namespace) -> int:
+    from lib_validate import compute_planning_timeline
+    data = compute_planning_timeline(Path(args.task_dir).resolve())
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    print(f"Pre-execution: {data['pre_execution_seconds'] if data['pre_execution_seconds'] is not None else 'n/a'} s")
+    for label in ("model_seconds", "approval_seconds", "orchestrator_seconds", "idle_seconds"):
+        print(f"{label.replace('_', ' ').title():<22} {data[label]:>8} s")
+    print(f"Planner spawns: {len(data['planner_spawns'])} (respawns {data['planner_respawns']})")
+    print(f"{'PHASE':<32} {'SECONDS':>8}  {'START':<20}  END")
+    for spawn in data["planner_spawns"]:
+        print(f"{spawn['phase_guess']:<32} {spawn['seconds']:>8}  {spawn['start'][:19]:<20}  {spawn['end'][:19]}")
+    return 0
+
+
+def cmd_set_planner_phase(args: argparse.Namespace) -> int:
+    from lib_tool_budget import PLANNER_PHASE_READ_ALLOWANCE
+    phase=str(args.phase).strip()
+    if phase not in PLANNER_PHASE_READ_ALLOWANCE:
+        print(f"invalid planner phase: {phase}",file=sys.stderr); return 1
+    from lib_core import set_planner_phase
+    set_planner_phase(Path(args.task_dir).resolve(),phase)
+    print(json.dumps({"status":"planner_phase_set","phase":phase,"read_allowance":PLANNER_PHASE_READ_ALLOWANCE[phase]}))
+    return 0
+
+
+def cmd_planner_retry(args: argparse.Namespace) -> int:
+    phases={"discovery","spec","plan","combined","arch-design"}
+    phase=str(args.phase).strip()
+    if phase not in phases:
+        print(json.dumps({"error":f"invalid planner phase: {phase}"}),file=sys.stderr); return 1
+    task_dir=Path(args.task_dir).resolve()
+    manifest=_load_manifest(task_dir)
+    counts=manifest.get("retry_counts")
+    if not isinstance(counts,dict): counts={}
+    attempt=int(counts.get(phase,0))+1
+    counts[phase]=attempt
+    manifest["retry_counts"]=counts
+    _write_ctl_json(task_dir,task_dir/"manifest.json",manifest)
+    policy={}
+    try:
+        from lib_core import _persistent_project_dir
+        loaded=load_json(_persistent_project_dir(_root_for_task_dir(task_dir))/"policy.json")
+        policy=loaded if isinstance(loaded,dict) else {}
+    except Exception: pass
+    maximum=policy.get("planner_max_repairs",2)
+    try: maximum=max(0,int(maximum))
+    except (TypeError,ValueError): maximum=2
+    allowed=attempt<=maximum
+    print(json.dumps({"phase":phase,"attempt":attempt,"allowed":allowed,"max":maximum}))
+    return 0
+
+
 def cmd_active_task(args: argparse.Namespace) -> int:
     tasks = find_active_tasks(Path(args.root).resolve())
     if not tasks:
@@ -2437,7 +2524,8 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
 
     role_file = task_dir / "active-segment-role"
     try:
-        role_file.write_text(role, encoding="utf-8")
+        from lib_core import stamp_role
+        stamp_role(task_dir, role)
     except OSError as exc:
         print(f"stamp-role: failed to write {role_file}: {exc}", file=sys.stderr)
         return 1
@@ -2568,7 +2656,6 @@ def cmd_planner_receipt(args: argparse.Namespace) -> int:
             tokens_used=args.tokens_used,
             model_used=args.model,
             agent_name=args.agent_name,
-            injected_prompt_sha256=args.injected_prompt_sha256,
         )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
@@ -2585,6 +2672,17 @@ def cmd_plan_validated_receipt(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(str(out))
+    return 0
+
+
+def cmd_validation_override_receipt(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        path = receipt_validation_override(task_dir, args.artifact, args.justification)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(str(path))
     return 0
 
 
@@ -3075,12 +3173,13 @@ def _compute_execution_batch_payload(
 def cmd_run_planning(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
-        errors = validate_task_artifacts(task_dir, strict=True, run_gap=True)
-        if errors:
+        from lib_validate import validate_task_artifacts_structured
+        structured_errors = validate_task_artifacts_structured(task_dir, strict=True, run_gap=True)
+        if structured_errors:
             print(json.dumps({
                 "status": "replan_required",
                 "task_dir": str(task_dir),
-                "errors": errors,
+                "errors": structured_errors,
             }, indent=2))
             return 1
 
@@ -3356,6 +3455,10 @@ def cmd_run_start_classification(args: argparse.Namespace) -> int:
             "status": "spec_normalization_ready",
             "task_dir": str(task_dir),
             "fast_track": bool(fast_track),
+            "planning_path": str(manifest.get("planning_path", "staged")),
+            "risk_floor_applied": bool((classification or {}).get("risk_floor_applied", False)) if isinstance(classification, dict) else False,
+            "risk_floor_signals": (classification or {}).get("risk_floor_signals", []) if isinstance(classification, dict) else [],
+            "planner_risk_level": (classification or {}).get("planner_risk_level") if isinstance(classification, dict) else None,
             "tdd_required": tdd_required,
             "transitioned_to": transitioned_to,
             "next_action": "spec_normalization",
@@ -3579,7 +3682,7 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     _try_extend_chain_for_artifact(task_dir, out_path)
-    print(json.dumps({"status": "classification_written", "path": str(out_path)}, indent=2))
+    print(json.dumps({"status": "classification_written", "path": str(out_path), "warnings": payload.get("subsystems_warnings", [])}, indent=2))
     return 0
 
 
@@ -3959,6 +4062,13 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
         return blocked
     try:
         manifest = _load_manifest(task_dir)
+        if manifest.get("planning_path") == "combined":
+            print(json.dumps({
+                "status": "planning_mode_ready", "task_dir": str(task_dir),
+                "planning_mode": "combined", "planning_mode_alias": "fast_track_combined",
+                "reason": "planning_path=combined",
+            }, indent=2))
+            return 0
         if bool(manifest.get("fast_track", False)):
             print(json.dumps({
                 "status": "skipped",
@@ -4051,13 +4161,15 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
                         }, indent=2), file=sys.stderr)
                         return 1
 
-        errors = validate_task_artifacts(task_dir, strict=False, run_gap=False)
-        errors = [e for e in errors if not e.startswith("plan ") and "execution-graph" not in e]
+        from lib_validate import validate_task_artifacts_structured
+        structured_errors = validate_task_artifacts_structured(task_dir, strict=False, run_gap=False)
+        structured_errors = [e for e in structured_errors if not e["message"].startswith("plan ") and "execution-graph" not in e["message"]]
+        errors = [e["message"] for e in structured_errors]
         if errors:
             print(json.dumps({
                 "status": "respec_required",
                 "task_dir": str(task_dir),
-                "errors": errors,
+                "errors": structured_errors,
             }, indent=2))
             return 1
 
@@ -4081,7 +4193,7 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
             print(json.dumps({
                 "status": "respec_required",
                 "task_dir": str(task_dir),
-                "errors": [f.get("message", str(f)) for f in unacked_findings],
+                "errors": [{"artifact":"spec.md", "rule":str(f.get("rule_id", "spec_lint")), "message":f.get("message", str(f)), "location":f.get("location")} for f in unacked_findings],
             }, indent=2))
             return 1
 
@@ -4115,6 +4227,13 @@ def cmd_run_planning_mode(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
         manifest = _load_manifest(task_dir)
+        if manifest.get("planning_path") == "combined":
+            print(json.dumps({
+                "status": "planning_mode_ready", "task_dir": str(task_dir),
+                "planning_mode": "combined", "planning_mode_alias": "fast_track_combined",
+                "reason": "planning_path=combined",
+            }, indent=2))
+            return 0
         if bool(manifest.get("fast_track", False)):
             print(json.dumps({
                 "status": "planning_mode_ready",
@@ -4130,14 +4249,18 @@ def cmd_run_planning_mode(args: argparse.Namespace) -> int:
 
         spec_text = (task_dir / "spec.md").read_text(encoding="utf-8")
         criteria_count = len(parse_acceptance_criteria(spec_text))
-        planning_mode = "hierarchical" if risk_level in {"high", "critical"} or criteria_count > 10 else "standard"
-        reasons: list[str] = []
-        if risk_level in {"high", "critical"}:
-            reasons.append(f"risk_level={risk_level}")
-        if criteria_count > 10:
-            reasons.append(f"criteria_count={criteria_count}")
-        if not reasons:
-            reasons.append(f"criteria_count={criteria_count}")
+        from lib_validate import compute_planning_mode
+        from lib_core import _persistent_project_dir
+        policy = {}
+        try:
+            loaded_policy = load_json(_persistent_project_dir(_root_for_task_dir(task_dir)) / "policy.json")
+            policy = loaded_policy if isinstance(loaded_policy, dict) else {}
+        except Exception:
+            pass
+        subsystems = classification.get("subsystems", []) if isinstance(classification, dict) else []
+        planning_mode = compute_planning_mode(str(risk_level), subsystems, policy)
+        independent_count = sum(1 for row in subsystems if isinstance(row, dict) and row.get("independent") is True) if isinstance(subsystems, list) else 0
+        reasons = [f"independent_subsystems={independent_count}", f"risk_level={risk_level}"]
 
         print(json.dumps({
             "status": "planning_mode_ready",
@@ -4151,6 +4274,37 @@ def cmd_run_planning_mode(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def cmd_run_combined_stage_walk(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    required = ("spec.md", "plan.md", "execution-graph.json")
+    missing = [name for name in required if not (task_dir / name).is_file()]
+    if missing:
+        print(json.dumps({"status":"blocked", "errors":[f"missing {name}" for name in missing]}))
+        return 1
+    from lib_validate import validate_task_artifacts_structured
+    errors = validate_task_artifacts_structured(task_dir, strict=True, run_gap=False)
+    if errors:
+        print(json.dumps({"status":"blocked", "errors":errors}, indent=2))
+        return 1
+    manifest = _load_manifest(task_dir)
+    if manifest.get("planning_path") != "combined":
+        print(json.dumps({"status":"blocked", "errors":["planning_path is not combined"]}))
+        return 1
+    try:
+        for stage in ("SPEC_REVIEW", "PLANNING", "PLAN_REVIEW"):
+            current = _load_manifest(task_dir).get("stage")
+            if current != stage:
+                transition_task(task_dir, stage)
+        from lib_receipts import receipt_plan_validated
+        receipt = receipt_plan_validated(task_dir, run_gap=False)
+    except Exception as exc:
+        print(json.dumps({"status":"blocked", "errors":[str(exc)]}, indent=2))
+        return 1
+    print(json.dumps({"status":"combined_plan_review_ready", "stage":"PLAN_REVIEW",
+                      "receipt_path":str(receipt)}, indent=2))
+    return 0
 
 
 def cmd_run_audit_setup(args: argparse.Namespace) -> int:
@@ -6950,6 +7104,7 @@ def register_task_lifecycle_parsers(subparsers: argparse._SubParsersAction) -> N
             "Refused with exit 1 unless manifest.auto_approve_gates is true."
         ),
     )
+    approve_stage_parser.add_argument("--combined", action="store_true", default=False)
     approve_stage_parser.set_defaults(func=cmd_approve_stage)
 
     set_auto_approve_gates_parser = subparsers.add_parser(
@@ -7114,6 +7269,12 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
     run_planning_mode_parser.add_argument("task_dir")
     run_planning_mode_parser.set_defaults(func=cmd_run_planning_mode)
 
+    combined_walk_parser = subparsers.add_parser(
+        "run-combined-stage-walk", help="Validate combined spec/plan and advance to PLAN_REVIEW"
+    )
+    combined_walk_parser.add_argument("task_dir")
+    combined_walk_parser.set_defaults(func=cmd_run_combined_stage_walk)
+
     run_planning_parser = subparsers.add_parser(
         "run-planning",
         help="Validate planning artifacts, write receipt, and advance to PLAN_REVIEW when ready",
@@ -7158,12 +7319,21 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
     plan_validated_receipt_parser.set_defaults(run_gap=True)
     plan_validated_receipt_parser.set_defaults(func=cmd_plan_validated_receipt)
 
+    validation_override_parser = subparsers.add_parser(
+        "validation-override-receipt",
+        help="Write a justified, policy-checked override for current artifact validation rules",
+    )
+    validation_override_parser.add_argument("task_dir")
+    validation_override_parser.add_argument("--artifact", required=True)
+    validation_override_parser.add_argument("--justification", required=True)
+    validation_override_parser.set_defaults(func=cmd_validation_override_receipt)
+
     plan_audit_receipt_parser = subparsers.add_parser(
         "plan-audit-receipt",
         help="Write the plan-audit spawn receipt deterministically",
     )
     plan_audit_receipt_parser.add_argument("task_dir")
-    plan_audit_receipt_parser.add_argument("--tokens-used", type=int, required=True)
+    plan_audit_receipt_parser.add_argument("--tokens-used", type=int, default=0)
     plan_audit_receipt_parser.add_argument("--model", default=None)
     plan_audit_receipt_parser.set_defaults(func=cmd_plan_audit_receipt)
 
@@ -7173,10 +7343,9 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     planner_receipt_parser.add_argument("task_dir")
     planner_receipt_parser.add_argument("phase", choices=("discovery", "arch-design", "spec", "plan"))
-    planner_receipt_parser.add_argument("--tokens-used", type=int, required=True)
+    planner_receipt_parser.add_argument("--tokens-used", type=int, default=0)
     planner_receipt_parser.add_argument("--model", default=None)
     planner_receipt_parser.add_argument("--agent-name", default=None)
-    planner_receipt_parser.add_argument("--injected-prompt-sha256", required=True)
     planner_receipt_parser.set_defaults(func=cmd_planner_receipt)
 
 
@@ -7213,7 +7382,7 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     run_execution_segment_done_parser.add_argument("--agent-name", default=None)
     run_execution_segment_done_parser.add_argument("--executor-type", default=None)
     run_execution_segment_done_parser.add_argument("--evidence-path", default=None)
-    run_execution_segment_done_parser.add_argument("--tokens-used", type=int, default=None)
+    run_execution_segment_done_parser.add_argument("--tokens-used", type=int, default=0)
     run_execution_segment_done_parser.add_argument(
         "--files",
         nargs="*",
@@ -7520,6 +7689,21 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register meta/utility subcommands: stamp-role, run-audit-reflect, run-audit-finish,
     repair-plan, repair-update, compute-reward, validate-contract, validate-receipts,
     validate-chain, list-pending, approve, stats-dora, stats-usage, bus, calibration, config."""
+    timeline_parser = subparsers.add_parser("timeline", help="Show planning-phase latency buckets")
+    timeline_parser.add_argument("task_dir")
+    timeline_parser.add_argument("--json", action="store_true")
+    timeline_parser.set_defaults(func=cmd_timeline)
+
+    planner_phase_parser=subparsers.add_parser("set-planner-phase",help="Set planner phase for read-quota enforcement")
+    planner_phase_parser.add_argument("task_dir")
+    planner_phase_parser.add_argument("phase")
+    planner_phase_parser.set_defaults(func=cmd_set_planner_phase)
+
+    planner_retry_parser=subparsers.add_parser("planner-retry",help="Consume one bounded planner repair attempt")
+    planner_retry_parser.add_argument("task_dir")
+    planner_retry_parser.add_argument("--phase",required=True)
+    planner_retry_parser.set_defaults(func=cmd_planner_retry)
+
     stamp_role_parser = subparsers.add_parser(
         "stamp-role",
         help="Stamp the legacy active-segment-role file AND append a role grant (allowlist enforced)",

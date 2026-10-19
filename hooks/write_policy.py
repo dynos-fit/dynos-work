@@ -87,6 +87,9 @@ _CONTROL_PLANE_EXACT = frozenset({
     "token-usage.json",
     "events.jsonl",
     "spawn-log.jsonl",
+    "stage-transitions.jsonl",
+    "planner-read-quota.json",
+    "planner-read-allowlist.json",
     "audit-grep-quota.json",
     "role-grants.json",
     "role-bindings.json",
@@ -105,6 +108,7 @@ _WRAPPER_REQUIRED = {
     # stamp-role wrapper enforces a role allowlist; the real forgery defense
     # for audit-* claims is the spawn-log cross-check at receipt time.
     "active-segment-role": "python3 hooks/ctl.py stamp-role <task_dir> --role <role>",
+    "active-planner-phase": "python3 hooks/ctl.py set-planner-phase <task_dir> <phase>",
     # role-grants.json is the per-actor grant ledger (D3). Same elevation
     # primitive as active-segment-role: only the ctl wrapper may append
     # grants, and the wrapper enforces the role allowlist.

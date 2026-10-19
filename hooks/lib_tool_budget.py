@@ -40,6 +40,12 @@ TOOL_BUDGET_CEILING: int = 40
 # Tool-Use Budget block presents the budget as an estimate, not a cutoff.
 TOOL_BUDGET_ADVISORY: int = 35
 
+PLANNER_PHASE_READ_ALLOWANCE: dict[str, int] = {
+    "discovery": 8, "arch-design": 30, "spec": 10,
+    "plan": 12, "combined": 15, "repair": 6,
+}
+PLANNER_WRITE_TURNS: int = 6
+
 # Static per-model floor (minimum budget) keyed by model family name.
 # An unknown model falls back to 15 (the haiku floor) — see compute_segment_budget.  # noqa: model-literal
 STATIC_CAPS_BY_MODEL: dict[str, int] = {"haiku": 15, "sonnet": 20, "opus": 25}  # noqa: model-literal

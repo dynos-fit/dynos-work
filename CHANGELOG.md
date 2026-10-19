@@ -9,6 +9,9 @@ and this project adheres to **Semantic Versioning**.
 
 ## [Unreleased]
 
+### Changed
+- Start planning now supports a one-review combined path, one-pass discovery, subsystem-based hierarchy, bounded artifact repair, and per-phase read quotas. Planner receipts bind to hook-observed spawns; token attribution is recorded once by SubagentStop. Risk floors and external research triggers are narrower, and planning timelines now separate model, approval, orchestrator, and idle time.
+
 ---
 
 ## [7.5.22] - 2026-10-18

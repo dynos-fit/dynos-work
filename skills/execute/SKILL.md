@@ -188,13 +188,7 @@ If the injected prompt is weak, strengthen the base prompt before spawning. Do n
 
 If `inject-prompt` fails or is unavailable, stop and fix the deterministic routing path. Do NOT manually read `agent_path` or hand-build the learned-agent prompt.
 
-**Role granting (MANDATORY — BEFORE every Agent tool spawn):** Grant the executor role via the deterministic ctl wrapper immediately before spawning each executor subagent. The wrapper enforces the role allowlist; the grant is single-use and is consumed by the spawned subagent's first tool call (the orchestrator's own session is pinned at SessionStart and can never consume a grant — that closes the role-leak behind the 2026-04-30 audit-chain forgery incident; the audit-* forgery defense itself is the spawn-log cross-check at receipt time). Direct writes to `active-segment-role`, `role-grants.json`, or `role-bindings.json` are denied by `write_policy.py` and surface a wrapper hint.
-
-```bash
-"$DYNOS" ctl stamp-role .dynos/task-{id} --role "{executor-role}"
-```
-
-Where `{executor-role}` is the exact role string from the executor plan (e.g. `backend-executor`, `ui-executor`, `integration-executor`). The write MUST complete (exit 0) before the Agent tool invocation that spawns the subagent — this is a sequential constraint, not a timing one. Exit 1 means the wrapper refused; the stderr names the cause (audit-* refusal, role outside allowlist, missing task dir).
+The Agent spawn hook stamps `active-segment-role` from the agent type.
 
 **Model selection:** Pass the `model` field from the executor plan as the model parameter when spawning the agent. If `model` is null, use default (omit the model parameter).
 
@@ -262,60 +256,11 @@ This command deterministically:
 "$DYNOS" ctl clear-role .dynos/task-{id}
 ```
 
-After each batch (or cached resolution) completes, record events and verify:
+Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
 
-- **Token capture (executor spawn):** automatic. The `SubagentStop` hook
-  (wired in `hooks.json`) parses the subagent's transcript and writes the
-  spawn record to the active task's `token-usage.json` via
-  `hooks/lib_tokens_hook.py`. Do NOT also emit a manual `--type spawn`
-  `lib_tokens.py record` call here — it would double-count the tokens.
-  (The `--type deterministic` records below are NOT covered by SubagentStop
-  and remain the orchestrator's responsibility.)
-- **Token capture (deterministic checks):** After file ownership and evidence verification:
-  ```bash
-  "$DYNOS" hook lib_tokens record \
-    --task-dir .dynos/task-{id} \
-    --agent "ctl-check-ownership" \
-    --model "none" \
-    --input-tokens 0 \
-    --output-tokens 0 \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type deterministic \
-    --segment "{segment-id}" \
-    --detail "Verified file ownership and evidence — {pass|fail}"
-  ```
-- Also record the **router decision** before each batch:
-  ```bash
-  "$DYNOS" hook lib_tokens record \
-    --task-dir .dynos/task-{id} \
-    --agent "router-executor-plan" \
-    --model "none" \
-    --input-tokens 0 \
-    --output-tokens 0 \
-    --phase execution \
-    --stage "EXECUTION" \
-    --type deterministic \
-    --detail "Router: {executor}={model} route={route_mode}"
-  ```
 - Use `run-execution-segment-done` as the authoritative completion gate.
 - Append to log: `{timestamp} [DONE] {segment-id} — complete`.
 - Re-run `run-execution-batch-plan` to get the next authoritative batch.
-
-**For inline fast-track execution** (no subagent spawn), record with `--type inline`:
-```bash
-"$DYNOS" hook lib_tokens record \
-  --task-dir .dynos/task-{id} \
-  --agent "inline-executor" \
-  --model "none" \
-  --input-tokens 0 \
-  --output-tokens 0 \
-  --phase execution \
-  --stage "EXECUTION" \
-  --type inline \
-  --segment "seg-1" \
-  --detail "Fast-track inline execution (no subagent spawn)"
-```
 
 **Test execution** (Step 4): Record test runner events with `--phase execution --stage TEST_EXECUTION`.
 

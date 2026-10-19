@@ -117,3 +117,11 @@ class TestFindActiveTask:
 
         from lib_tokens_hook import _find_active_task
         assert _find_active_task(tmp_path) == fresh
+
+
+def test_model_names_are_preserved_and_missing_names_are_unknown():
+    from lib_tokens import _resolve_model
+    for model in ("fable", "sonnet", "opus", "arbitrary-provider-model"):
+        assert _resolve_model(model) == model
+    for model in ("", None, "none", "n/a"):
+        assert _resolve_model(model) == "unknown"

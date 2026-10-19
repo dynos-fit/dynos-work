@@ -88,3 +88,15 @@ def test_check_release_hygiene_accepts_consistent_release(
     monkeypatch.setattr(check_release_hygiene, "ROOT", tmp_path)
 
     assert check_release_hygiene.check_release_hygiene(base_ref=None) == []
+
+
+def test_start_skill_added_command_warns_without_budget_test(monkeypatch) -> None:
+    monkeypatch.setattr(check_release_hygiene, "ROOT", Path.cwd())
+    monkeypatch.setattr(check_release_hygiene, "_changed_paths", lambda _base: {"skills/start/SKILL.md"})
+    monkeypatch.setattr(
+        check_release_hygiene.subprocess,
+        "check_output",
+        lambda *_a, **_k: '+  "$DYNOS" ctl timeline .dynos/task-X\n',
+    )
+    warning = check_release_hygiene.start_skill_budget_warning(base_ref="origin/main")
+    assert warning and "tests/test_start_skill_budget.py" in warning

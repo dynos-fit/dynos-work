@@ -17,6 +17,8 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import sys
+import json
+import re
 from pathlib import Path
 
 from lib_validate import validate_task_artifacts
@@ -32,12 +34,16 @@ def main() -> int:
     args = sys.argv[1:]
     run_gap = True
     use_receipt = False
+    as_json = False
     if "--no-gap" in args:
         run_gap = False
         args = [a for a in args if a != "--no-gap"]
     if "--use-receipt" in args:
         use_receipt = True
         args = [a for a in args if a != "--use-receipt"]
+    if "--json" in args:
+        as_json = True
+        args = [a for a in args if a != "--json"]
     if len(args) != 1:
         print(__doc__.strip())
         return 2
@@ -56,7 +62,14 @@ def main() -> int:
             print(f"Artifact validation skipped (plan-validated receipt fresh) for {task_dir}")
             return 0
 
-    errors = validate_task_artifacts(task_dir, strict=True, run_gap=run_gap)
+    if as_json:
+        from lib_validate import validate_task_artifacts_structured
+        structured_errors = validate_task_artifacts_structured(task_dir, strict=True, run_gap=run_gap)
+    else:
+        structured_errors = None
+    errors = ([item["message"] for item in structured_errors]
+              if structured_errors is not None
+              else validate_task_artifacts(task_dir, strict=True, run_gap=run_gap))
 
     # Auto-emit deterministic validation event to per-task token ledger
     try:
@@ -78,6 +91,10 @@ def main() -> int:
         )
     except Exception:
         pass  # Never let event recording break validation
+
+    if as_json:
+        print(json.dumps({"ok":not errors,"errors":structured_errors},indent=2))
+        return 1 if errors else 0
 
     if errors:
         print("Artifact validation failed:")

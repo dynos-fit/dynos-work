@@ -60,6 +60,41 @@ VALID_DOMAINS: set[str] = {
 }
 VALID_RISK_LEVELS: set[str] = {"low", "medium", "high", "critical"}
 
+SUBAGENT_ROLE_MAP = {"dynos-work:planning": "planning", "planning": "planning",
+                    "dynos-work:repair-coordinator": "repair-coordinator",
+                    "repair-coordinator": "repair-coordinator",
+                    "dynos-work:investigator": "investigator", "investigator": "investigator"}
+
+
+def role_for_subagent_type(subagent_type: str) -> str | None:
+    """Map a known Agent type to its write-policy role."""
+    name = (subagent_type or "").removeprefix("dynos-work:")
+    if name in {"planning", "repair-coordinator", "investigator"}:
+        return name
+    if name.endswith("-executor"):
+        return name if name in VALID_EXECUTORS else None
+    if name.endswith("-auditor"):
+        role = "audit-" + name.removesuffix("-auditor")
+        agents_dir = Path(__file__).resolve().parent.parent / "agents"
+        return role if (agents_dir / f"{name}.md").is_file() else None
+    if name.startswith("audit-"):
+        return name
+    return None
+
+
+def stamp_role(task_dir: Path, role: str) -> Path:
+    """Write the role file from the trusted ctl or Agent-spawn-hook path."""
+    path = Path(task_dir) / "active-segment-role"
+    path.write_text(role, encoding="utf-8")
+    return path
+
+
+def set_planner_phase(task_dir: Path, phase: str) -> Path:
+    """Set the hook-owned planner read-quota phase through ctl."""
+    path=Path(task_dir)/"active-planner-phase"
+    path.write_text(phase,encoding="utf-8")
+    return path
+
 COMPOSITE_WEIGHTS: tuple[float, float, float] = (0.6, 0.25, 0.15)
 
 STAGE_ORDER: list[str] = [
@@ -995,7 +1030,8 @@ def _compute_bypassed_gates_for_force(
     errs: list[str] = []
 
     # ---- AC 3: SPEC_REVIEW -> PLANNING
-    if current_stage == "SPEC_REVIEW" and next_stage == "PLANNING":
+    if (current_stage == "SPEC_REVIEW" and next_stage == "PLANNING"
+            and manifest.get("planning_path") != "combined"):
         err = _human_approval_err(task_dir, current_stage, next_stage, "SPEC_REVIEW", task_dir / "spec.md")
         if err:
             errs.append(err)
@@ -1019,6 +1055,7 @@ def _compute_bypassed_gates_for_force(
         current_stage == "SPEC_NORMALIZATION"
         and next_stage == "SPEC_REVIEW"
         and not fast_track_flag
+        and manifest.get("planning_path") != "combined"
     ):
         if read_receipt(task_dir, "planner-spec") is None:
             errs.append(
@@ -1683,7 +1720,8 @@ def _replay_gates_for_transition(
     # ---- AC 3: SPEC_REVIEW -> PLANNING requires either
     # human-approval-SPEC_REVIEW or auto-approval-SPEC_REVIEW whose
     # artifact_sha256 matches sha256(spec.md).
-    if current_stage == "SPEC_REVIEW" and next_stage == "PLANNING":
+    if (current_stage == "SPEC_REVIEW" and next_stage == "PLANNING"
+            and manifest.get("planning_path") != "combined"):
         _check_any_approval("SPEC_REVIEW", task_dir / "spec.md")
 
     # ---- AC 4: PLAN_REVIEW -> PLAN_AUDIT requires either
@@ -1711,6 +1749,7 @@ def _replay_gates_for_transition(
         current_stage == "SPEC_NORMALIZATION"
         and next_stage == "SPEC_REVIEW"
         and not _fast_track_flag
+        and manifest.get("planning_path") != "combined"
     ):
         if read_receipt(task_dir, "planner-spec") is None:
             gate_errors.append(
@@ -2414,6 +2453,16 @@ def transition_task(
         )
 
     _flush_and_record_transition(task_dir, manifest, next_stage)
+    try:
+        transition_path = task_dir / "stage-transitions.jsonl"
+        require_write_allowed(WriteAttempt(
+            role="system", task_dir=task_dir, path=transition_path,
+            operation="modify" if transition_path.exists() else "create", source="system",
+        ), capability_key=_get_capability_key("system"))
+        with transition_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"from": current_stage, "to": next_stage, "at": now_iso()}) + "\n")
+    except Exception:
+        pass  # timing telemetry must never block a valid transition
     _fire_done_pipeline(task_dir, next_stage)
 
     return current_stage, manifest

@@ -284,3 +284,42 @@ def test_orchestrator_cannot_write_spawn_log_directly(tmp_path: Path):
         f"got rc={proc.returncode} stderr={proc.stderr}"
     )
     assert "write-policy:" in proc.stderr
+
+
+def test_pre_phase_stamps_role_from_agent_type(tmp_path: Path):
+    project_root, task_dir = _make_task_dir(tmp_path)
+    payload = {"tool_name":"Agent", "tool_input":{
+        "subagent_type":"dynos-work:planning", "description":"plan", "prompt":"write spec"
+    }, "cwd":str(project_root)}
+    proc=_invoke(payload, phase="pre", cwd=project_root)
+    assert proc.returncode == 0, proc.stderr
+    assert (task_dir/"active-segment-role").read_text() == "planning"
+    row=json.loads((task_dir/"spawn-log.jsonl").read_text().splitlines()[0])
+    assert row["stamped_role"] == "planning"
+
+
+@pytest.mark.parametrize(("agent_type", "expected_role"), [
+    ("dynos-work:planning", "planning"),
+    ("dynos-work:backend-executor", "backend-executor"),
+    ("dynos-work:security-auditor", "audit-security"),
+    ("dynos-work:repair-coordinator", "repair-coordinator"),
+    ("dynos-work:investigator", "investigator"),
+])
+def test_pre_phase_maps_each_supported_agent_role(tmp_path: Path, agent_type: str, expected_role: str):
+    project_root, task_dir = _make_task_dir(tmp_path)
+    payload={"tool_name":"Agent", "tool_input":{"subagent_type":agent_type, "prompt":"work"}, "cwd":str(project_root)}
+    proc=_invoke(payload, phase="pre", cwd=project_root)
+    assert proc.returncode == 0, proc.stderr
+    assert (task_dir/"active-segment-role").read_text() == expected_role
+
+
+def test_unmapped_agent_type_does_not_touch_role_and_logs_event(tmp_path: Path):
+    project_root, task_dir = _make_task_dir(tmp_path)
+    role=task_dir/"active-segment-role"; role.write_text("backend-executor")
+    payload={"tool_name":"Agent", "tool_input":{"subagent_type":"mystery", "prompt":"x"}, "cwd":str(project_root)}
+    proc=_invoke(payload, phase="pre", cwd=project_root)
+    assert proc.returncode == 0, proc.stderr
+    assert role.read_text() == "backend-executor"
+    row=json.loads((task_dir/"spawn-log.jsonl").read_text().splitlines()[0])
+    assert row["stamped_role"] is None
+    assert "spawn_role_unmapped" in (task_dir/"events.jsonl").read_text()

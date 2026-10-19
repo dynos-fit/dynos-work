@@ -125,7 +125,7 @@ def test_keyword_scan_upgrades_low_to_medium(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
         raw_input="Short raw input.",
-        spec="We must add an auth flow for the new endpoint.",
+        spec="We must add an oauth flow for the new endpoint.",
     )
     payload = {
         "type": "feature",
@@ -136,7 +136,7 @@ def test_keyword_scan_upgrades_low_to_medium(tmp_path: Path) -> None:
     out = ctl._normalize_classification_payload(task_dir, payload)
 
     assert out["risk_level"] == "medium", (
-        f"keyword 'auth' in spec must upgrade low -> medium (keyword-only "
+        f"keyword 'oauth' in spec must upgrade low -> medium (keyword-only "
         f"floor is medium after task-20260508-009); got "
         f"risk_level={out.get('risk_level')!r}"
     )
@@ -289,8 +289,8 @@ def test_multiple_signals_emit_single_event(tmp_path: Path) -> None:
 def test_idempotent_payload_but_one_event_per_call(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
-        raw_input="Must wire an auth flow for user data.",
-        spec="Please add an auth flow on the next request.",
+        raw_input="Must wire an oauth flow for user data.",
+        spec="Please add an oauth flow on the next request.",
     )
     payload_1 = {"type": "feature", "domains": ["backend"], "risk_level": "low"}
     # Deep-copy via json so the implementation can't silently mutate ours.
@@ -324,8 +324,8 @@ def test_idempotent_payload_but_one_event_per_call(tmp_path: Path) -> None:
 def test_planner_cannot_launder_risk_by_reasserting_low(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
-        raw_input="Will wire an auth flow for the user.",
-        spec="Add auth handling on the new request path.",
+        raw_input="Will wire an oauth flow for the user.",
+        spec="Add oauth handling on the new request path.",
     )
 
     # First call upgrades from low to medium (keyword-only floor is medium
@@ -334,7 +334,7 @@ def test_planner_cannot_launder_risk_by_reasserting_low(tmp_path: Path) -> None:
         task_dir, {"type": "feature", "domains": ["backend"], "risk_level": "low"}
     )
     assert out_1["risk_level"] == "medium", (
-        f"keyword 'auth' must upgrade low -> medium on first call; got "
+        f"keyword 'oauth' must upgrade low -> medium on first call; got "
         f"risk_level={out_1.get('risk_level')!r}"
     )
 
@@ -358,7 +358,7 @@ def test_keyword_match_observed_event_emitted_no_upgrade(tmp_path: Path) -> None
     task_dir = _build_task_dir(
         tmp_path,
         raw_input="Short raw input.",
-        spec="We need to add an auth flow on the next request.",
+        spec="We need to add an oauth flow on the next request.",
         files_expected=["src/one.py"],
     )
     payload = {
@@ -387,9 +387,9 @@ def test_keyword_match_observed_event_emitted_no_upgrade(tmp_path: Path) -> None
         f"when keyword matches without an upgrade; got {len(observed)}"
     )
     payload_evt = observed[0]
-    assert payload_evt.get("matched_keywords") == ["auth"], (
+    assert payload_evt.get("matched_keywords") == ["oauth"], (
         f"matched_keywords must be the sorted/deduped/lowercased list "
-        f"['auth']; got {payload_evt.get('matched_keywords')!r}"
+        f"['oauth']; got {payload_evt.get('matched_keywords')!r}"
     )
     assert payload_evt.get("planner_risk") == "medium", (
         f"planner_risk in event payload must be 'medium'; got "
@@ -407,7 +407,7 @@ def test_keyword_match_and_upgrade_no_observed_event(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
         raw_input="Short raw input.",
-        spec="We need to add an auth flow on the next request.",
+        spec="We need to add an oauth flow on the next request.",
         files_expected=["src/one.py"],
     )
     payload = {
@@ -420,7 +420,7 @@ def test_keyword_match_and_upgrade_no_observed_event(tmp_path: Path) -> None:
 
     # Planner=low, keyword floor=medium; upgrade fires.
     assert out["risk_level"] == "medium", (
-        f"keyword 'auth' must upgrade low -> medium; got "
+        f"keyword 'oauth' must upgrade low -> medium; got "
         f"risk_level={out.get('risk_level')!r}"
     )
 
@@ -435,3 +435,21 @@ def test_keyword_match_and_upgrade_no_observed_event(tmp_path: Path) -> None:
         f"risk_keyword_match_observed must NOT fire when an upgrade fires "
         f"(mutually exclusive); got {observed!r}"
     )
+
+
+def test_calibrated_risk_floor_matrix(tmp_path: Path):
+    td=_build_task_dir(tmp_path, raw_input="the author wants CRUD", files_expected=[])
+    assert ctl._compute_risk_floor(td,["backend","db"],{})[0]=="medium"
+    (td/"raw-input.md").write_text("the author wants to migrate tests")
+    assert ctl._compute_risk_floor(td,["backend"],{})[0]=="low"
+    (td/"raw-input.md").write_text("perform a schema migration")
+    assert ctl._compute_risk_floor(td,["backend"],{})[0]=="medium"
+    (td/"raw-input.md").write_text("add oauth")
+    assert ctl._compute_risk_floor(td,["security"],{})[0]=="high"
+    (td/"raw-input.md").write_text("ordinary work")
+    assert ctl._compute_risk_floor(td,["ui","backend","testing"],{})[0]=="medium"
+    files=[f"src/{i}.py" for i in range(10)]
+    graph=json.loads((td/"execution-graph.json").read_text())
+    graph["segments"][0]["files_expected"]=files
+    (td/"execution-graph.json").write_text(json.dumps(graph))
+    assert ctl._compute_risk_floor(td,["backend"],{})[0]=="high"
