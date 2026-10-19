@@ -30,7 +30,10 @@ def test_bump_release_updates_all_manifests_and_changelog(
     _write_json(claude_plugin, {"version": "1.2.3"})
     _write_json(claude_marketplace, {"plugins": [{"version": "1.2.3"}]})
     _write_json(codex_plugin, {"version": "1.2.3"})
-    changelog.write_text("# Changelog\n\n## [Unreleased]\n\n---\n\n")
+    changelog.write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Changed\n- Existing unreleased change.\n\n---\n\n"
+        "## [1.2.3] - 2026-01-01\n"
+    )
 
     monkeypatch.setattr(bump_version, "ROOT", tmp_path)
     monkeypatch.setattr(bump_version, "PACKAGE_JSON", package_json)
@@ -56,7 +59,10 @@ def test_bump_release_updates_all_manifests_and_changelog(
     assert json.loads(claude_plugin.read_text())["version"] == "1.2.4"
     assert json.loads(codex_plugin.read_text())["version"] == "1.2.4"
     assert json.loads(claude_marketplace.read_text())["plugins"][0]["version"] == "1.2.4"
-    assert "## [1.2.4]" in changelog.read_text()
+    changelog_text = changelog.read_text()
+    assert "## [1.2.4]" in changelog_text
+    assert changelog_text.index("Existing unreleased change") < changelog_text.index("## [1.2.4]")
+    assert changelog_text.index("## [1.2.4]") < changelog_text.index("## [1.2.3]")
 
 
 def test_check_release_hygiene_reports_mismatched_versions(

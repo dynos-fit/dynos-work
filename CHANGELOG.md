@@ -11,6 +11,16 @@ and this project adheres to **Semantic Versioning**.
 
 ### Changed
 - Start planning now supports a one-review combined path, one-pass discovery, subsystem-based hierarchy, bounded artifact repair, and per-phase read quotas. Planner receipts bind to hook-observed spawns; token attribution is recorded once by SubagentStop. Risk floors and external research triggers are narrower, and planning timelines now separate model, approval, orchestrator, and idle time.
+- Release automation now inserts version entries after populated Unreleased notes.
+
+---
+
+## [7.5.23] - 2026-10-19
+### Changed
+- feat: reduce pre-execution planning latency
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.23`.
 
 ---
 
