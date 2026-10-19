@@ -236,6 +236,63 @@ def _append_jsonl(path: Path, entry: dict[str, Any]) -> None:
         fh.write(line)
 
 
+# A planner `pre` row older than this cannot belong to a live spawn; ignoring
+# it keeps one crashed spawn (pre without post) from pinning the planning
+# stamp for the rest of the task.
+_PLANNER_INFLIGHT_WINDOW_SECONDS = 2 * 60 * 60
+
+
+def _other_planner_spawns_in_flight(log_path: Path, current: dict[str, Any]) -> int:
+    """Count planner spawns still running besides the one posting now.
+
+    Pairs planning ``pre`` rows with ``post`` rows by ``prompt_sha256`` (a
+    multiset, so identical prompts pair one-to-one) and counts recent ``pre``
+    rows left unmatched. The current post is not yet in the log, so it is
+    consumed here explicitly. Any read or parse problem returns 0, which
+    preserves the single-planner behaviour of clearing on return.
+    """
+    import datetime as _dt
+    from collections import Counter
+    from lib_core import role_for_subagent_type
+
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    now = _dt.datetime.now(_dt.timezone.utc)
+    pres: list[str] = []
+    posts: Counter[str] = Counter()
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("tool") != "Agent":
+            continue
+        if role_for_subagent_type(str(row.get("subagent_type", ""))) != "planning":
+            continue
+        digest = str(row.get("prompt_sha256", ""))
+        if row.get("phase") == "post":
+            posts[digest] += 1
+        elif row.get("phase") == "pre":
+            try:
+                ts = _dt.datetime.fromisoformat(str(row.get("timestamp", "")).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_dt.timezone.utc)
+            if (now - ts).total_seconds() <= _PLANNER_INFLIGHT_WINDOW_SECONDS:
+                pres.append(digest)
+    posts[str(current.get("prompt_sha256", ""))] += 1
+    outstanding = 0
+    for digest in pres:
+        if posts[digest] > 0:
+            posts[digest] -= 1
+        else:
+            outstanding += 1
+    return outstanding
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] not in _VALID_PHASES:
         print(
@@ -305,6 +362,29 @@ def main(argv: list[str]) -> int:
             except Exception as exc:
                 print(f"agent-spawn-log: role stamp failed: {exc}", file=sys.stderr)
                 return 1
+    if phase == "post":
+        # The planning stamp lives exactly as long as the planner spawn:
+        # once the planner returns, drop the stamp and expire its grant so
+        # the orchestrator stops adopting the planner's restricted role.
+        from lib_core import clear_stamped_role, role_for_subagent_type
+        if role_for_subagent_type(str(entry.get("subagent_type", ""))) == "planning":
+            # Hierarchical planning runs worker planners in parallel and they
+            # share one stamp: only the last one to return may clear it.
+            in_flight = _other_planner_spawns_in_flight(log_path, entry)
+            if in_flight:
+                entry["planning_clear_deferred"] = in_flight
+            try:
+                if not in_flight and clear_stamped_role(task_dir, "planning"):
+                    ctl = Path(__file__).with_name("ctl.py")
+                    cleared = subprocess.run(
+                        [sys.executable, str(ctl), "clear-role", str(task_dir)],
+                        capture_output=True, text=True,
+                    )
+                    if cleared.returncode:
+                        raise RuntimeError(cleared.stderr.strip() or "clear-role failed")
+                    entry["cleared_role"] = "planning"
+            except Exception as exc:
+                print(f"agent-spawn-log: role clear failed: {exc}", file=sys.stderr)
     try:
         _append_jsonl(log_path, entry)
     except OSError as exc:

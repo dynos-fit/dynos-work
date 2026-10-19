@@ -232,6 +232,18 @@ def _find_task_dir_from_tool_target(tool_name: str, tool_input: object, cwd: Pat
                 raw_paths.extend(_extract_bash_destinations(command))
 
     for raw in raw_paths:
+        # An unresolved shell variable is never resolved as a whole, but its
+        # literal prefix (everything before the first `$`, cut back to the
+        # last `/`) can still name the task, e.g.
+        # `.dynos/task-X/audit-reports/$NAME.json`. Infer from that prefix
+        # so main() has the task context it needs to log the
+        # unresolved_shell_variable denial; with no literal directory the
+        # token names nothing and is skipped.
+        if tool_name == "Bash" and "$" in raw:
+            prefix = raw.split("$", 1)[0]
+            if "/" not in prefix:
+                continue
+            raw = prefix.rsplit("/", 1)[0] or "/"
         try:
             target = _resolve_path(raw, cwd)
         except Exception:
@@ -390,22 +402,335 @@ def _is_candidate_dest(token: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Same-command literal shell assignments (D2).
+#
+# Auditors write `S=.dynos/task-x/audit-reports/a.json; cat > "$S"`. Without
+# substitution the hook resolved the literal token `$S` against cwd and
+# denied with "path escapes task boundary", which the auditor could not act
+# on. We now substitute ONLY assignments whose effect is statically certain
+# from the command text itself; everything else keeps its `$` and is denied
+# fail-closed by main() (reason unresolved_shell_variable). os.environ is
+# never consulted: the hook cannot know the shell's runtime environment.
+#
+# An assignment is "counted" only when it is an unconditional, top-level,
+# assignment-only statement (optionally `export`-prefixed). A name is
+# "poisoned" (never substituted) if it is touched anywhere in the command in
+# any other way — prefix assignment (`S=x cmd`), `+=`, inside a subshell,
+# block, function body or `&&`/`||` branch, `read S`, `for S in`, `unset S`,
+# `${S:=x}`, a mention inside a quoted string (trap/eval bodies), etc. The
+# poison is global (not position-scoped) so a function body or trap that
+# rewrites the name after the last counted assignment cannot slip through.
+# ---------------------------------------------------------------------------
+
+_ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+_VAR_REF_RE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
+)
+# Statement separator tokens that may PRECEDE a counted assignment. A
+# synthetic ";" is inserted between logical lines.
+_ASSIGN_STATEMENT_START = frozenset({";"})
+# Tokens that may FOLLOW an assignment-only statement. `|` and `&` run the
+# assignment in a subshell, so they are excluded.
+_ASSIGN_STATEMENT_END = frozenset({";", "&&", "||"})
+_BLOCK_OPEN_WORDS = frozenset({"if", "while", "until", "for", "select", "case", "{"})
+_BLOCK_CLOSE_WORDS = frozenset({"fi", "done", "esac", "}"})
+# Builtins that can rewrite variables in ways the token stream cannot see.
+# Any builtin that sets a variable whose NAME it may compute at runtime
+# (declare/typeset/local/readonly with ANSI-C or quoted names, printf -v,
+# read, mapfile/readarray, let, getopts, nameref) can retarget a substituted
+# name after the hook checked it, so its presence disables substitution for
+# the whole command. `builtin`/`command` wrap any of these.
+_SUBSTITUTION_DISABLING_WORDS = frozenset({
+    "eval", "source", ".", "alias",
+    "declare", "typeset", "local", "readonly",
+    "read", "mapfile", "readarray", "let", "getopts",
+    "builtin", "command", "set", "shopt", "unset",
+})
+# Shell syntax that builds names or values the token text cannot show:
+# ANSI-C quoting ($'..'), locale quoting ($".."), indirect expansion (${!x}).
+_SUBSTITUTION_DISABLING_SYNTAX = ("$'", '$"', "${!")
+# Characters that make a substituted value differ from the literal the hook
+# would check: word splitting (whitespace), pathname expansion (glob chars),
+# tilde expansion, command substitution (backtick), quoting residue.
+_UNSAFE_VALUE_CHARS = frozenset(" \t\r\n*?[~`\\'\"")
+_PUNCT_ONLY_RE = re.compile(r"^[();<>|&]+$")
+
+
+def _split_logical_lines(command: str) -> list[str]:
+    """Split on unquoted newlines; join backslash-newline continuations.
+
+    Quote-aware (single, double, backslash) and comment-aware so a quote
+    character inside a `# comment` does not swallow following lines.
+    """
+    lines: list[str] = []
+    buf: list[str] = []
+    in_single = in_double = in_comment = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if in_comment:
+            if ch == "\n":
+                in_comment = False
+                lines.append("".join(buf))
+                buf = []
+            i += 1
+            continue
+        if in_single:
+            buf.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            if command[i + 1] == "\n":
+                i += 2  # line continuation
+                continue
+            buf.append(ch)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if in_double:
+            buf.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "#" and (not buf or buf[-1] in " \t;&|()"):
+            in_comment = True
+            i += 1
+            continue
+        elif ch == "\n":
+            lines.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    lines.append("".join(buf))
+    return lines
+
+
+def _tokenize_bash_statements(stripped: str) -> list[str] | None:
+    """Tokenize line by line, joining logical lines with a synthetic ';'.
+
+    Returns None when any logical line cannot be tokenized (the caller then
+    keeps the whole-command token stream, where newline-separated
+    assignments look like prefix assignments and are poisoned — fail-closed).
+    """
+    tokens: list[str] = []
+    for line in _split_logical_lines(stripped):
+        line_tokens = _tokenize_bash(line)
+        if line_tokens is None:
+            return None
+        if not line_tokens:
+            continue
+        if tokens and tokens[-1] != ";":
+            tokens.append(";")
+        tokens.extend(line_tokens)
+    return tokens
+
+
+def _has_literal_dollar(text: str) -> bool:
+    """True if a `$` is literal to the shell (single-quoted or backslash-escaped)."""
+    in_single = in_double = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_single:
+            if ch == "$":
+                return True
+            if ch == "'":
+                in_single = False
+        elif ch == "\\":
+            if i + 1 < n and text[i + 1] == "$":
+                return True
+            i += 2
+            continue
+        elif ch == '"':
+            in_double = not in_double
+        elif ch == "'" and not in_double:
+            in_single = True
+        i += 1
+    return False
+
+
+def _substitution_disabled(stripped: str, tokens: list[str]) -> bool:
+    """True when the command contains constructs that defeat static analysis."""
+    # `\$` and '...$...' are literal dollars in the shell but posix shlex
+    # strips the quoting, so a substituted token would not match the file
+    # the shell actually writes. IFS changes alter word splitting.
+    if "IFS" in stripped or _has_literal_dollar(stripped):
+        return True
+    if any(marker in stripped for marker in _SUBSTITUTION_DISABLING_SYNTAX):
+        return True
+    paren = 0
+    block = 0
+    for idx, tok in enumerate(tokens):
+        if tok in _SUBSTITUTION_DISABLING_WORDS:
+            return True
+        nxt = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+        # `printf -v NAME` writes a variable; `export -n`/`-f` and friends
+        # change attributes rather than assigning a literal.
+        if tok == "printf" and "-v" in tokens[idx + 1:]:
+            return True
+        if tok == "export" and nxt.startswith("-"):
+            return True
+        if _PUNCT_ONLY_RE.match(tok):
+            for ch in tok:
+                if ch == "(":
+                    paren += 1
+                elif ch == ")":
+                    paren -= 1
+        elif tok in _BLOCK_OPEN_WORDS:
+            block += 1
+        elif tok in _BLOCK_CLOSE_WORDS:
+            block -= 1
+        if paren < 0 or block < 0:
+            return True
+    return paren != 0 or block != 0
+
+
+def _collect_counted_assignments(tokens: list[str]) -> dict[int, tuple[str, str]]:
+    """Map token index -> (name, raw value) for counted assignments only."""
+    counted: dict[int, tuple[str, str]] = {}
+    paren = 0
+    block = 0
+    n = len(tokens)
+    i = 0
+    while i < n:
+        tok = tokens[i]
+        at_start = i == 0 or tokens[i - 1] in _ASSIGN_STATEMENT_START
+        if at_start and paren == 0 and block == 0:
+            j = i
+            if tok == "export":
+                j += 1
+            k = j
+            while k < n and _ASSIGNMENT_RE.match(tokens[k]):
+                k += 1
+            ends_cleanly = k == n or tokens[k] in _ASSIGN_STATEMENT_END
+            if k > j and ends_cleanly:
+                for idx in range(j, k):
+                    m = _ASSIGNMENT_RE.match(tokens[idx])
+                    assert m is not None
+                    counted[idx] = (m.group(1), m.group(2))
+                i = k
+                continue
+        if _PUNCT_ONLY_RE.match(tok):
+            for ch in tok:
+                if ch == "(":
+                    paren += 1
+                elif ch == ")":
+                    paren -= 1
+        elif tok in _BLOCK_OPEN_WORDS:
+            block += 1
+        elif tok in _BLOCK_CLOSE_WORDS:
+            block -= 1
+        i += 1
+    return counted
+
+
+def _mentions_name(text: str, name: str) -> bool:
+    """True if `name` appears in `text` other than as a plain `$name`/`${name}` read."""
+    esc = re.escape(name)
+    if re.search(r"(?<![A-Za-z0-9_$])(?<!\$\{)" + esc + r"(?![A-Za-z0-9_])", text):
+        return True  # bare word: read S, for S in, unset S, S+=x, trap bodies
+    if re.search(r"\$\{" + esc + r"(?!\})", text):
+        return True  # ${S:=x}, ${S=x}, ${S/a/b} ...
+    return re.search(r"\$\{[#!]" + esc + r"(?![A-Za-z0-9_])", text) is not None
+
+
+def _substitute_refs(text: str, env: dict[str, "str | None"]) -> str:
+    """Single-pass substitution of $NAME / ${NAME}; replacements are not rescanned."""
+
+    def _repl(m: "re.Match[str]") -> str:
+        name = m.group(1) or m.group(2)
+        value = env.get(name)
+        if value is None:
+            return m.group(0)
+        return value
+
+    return _VAR_REF_RE.sub(_repl, text)
+
+
+def _build_assignment_resolver(stripped: str, tokens: list[str]):
+    """Return f(token, index) -> substituted token, or None when disabled."""
+    if "$" not in stripped or _substitution_disabled(stripped, tokens):
+        return None
+    counted = _collect_counted_assignments(tokens)
+    if not counted:
+        return None
+    names = {name for name, _ in counted.values()}
+    poisoned: set[str] = set()
+    for idx, tok in enumerate(tokens):
+        text = counted[idx][1] if idx in counted else tok
+        for name in names:
+            if name not in poisoned and _mentions_name(text, name):
+                poisoned.add(name)
+
+    # Timeline of (index, name, resolved value | None). Values are
+    # substituted exactly once from the env in effect at the assignment.
+    timeline: list[tuple[int, str, "str | None"]] = []
+    env: dict[str, "str | None"] = {}
+    for idx in sorted(counted):
+        name, raw_value = counted[idx]
+        if name in poisoned:
+            continue
+        value = _substitute_refs(raw_value, env)
+        if not value or any(c in _UNSAFE_VALUE_CHARS for c in value):
+            resolved: "str | None" = None  # leave $NAME in place -> denied
+        else:
+            resolved = value
+        env[name] = resolved
+        timeline.append((idx, name, resolved))
+
+    def _resolve(token: str, index: int) -> str:
+        if "$" not in token:
+            return token
+        local: dict[str, "str | None"] = {}
+        for idx, name, value in timeline:
+            if idx >= index:
+                break
+            local[name] = value  # last assignment before the destination wins
+        return _substitute_refs(token, local)
+
+    return _resolve
+
+
 def _extract_bash_destinations(command: str) -> list[str]:
     """Return write destination paths detected in a Bash command string.
 
     Token-based: quoted strings are single tokens (never operators), heredoc
     bodies are stripped before tokenization. Falls back to the legacy regex
     scan when the command cannot be tokenized.
+
+    Same-command literal assignments (`S=path; cat > "$S"`, optionally
+    `export`-prefixed) are substituted into destinations; see the D2 block
+    above for exactly which assignments count. A destination that still
+    contains `$` is returned as-is and denied by main(). os.environ is never
+    consulted.
     """
     stripped = _strip_heredocs(command)
     tokens = _tokenize_bash(stripped)
     if tokens is None:
         return _extract_bash_destinations_legacy(command)
+    statement_tokens = _tokenize_bash_statements(stripped)
+    if statement_tokens is not None:
+        tokens = statement_tokens
+    resolver = _build_assignment_resolver(stripped, tokens)
 
     destinations: list[str] = []
     seen: set[str] = set()
 
-    def _add(dest: str) -> None:
+    def _add(dest: str, index: int) -> None:
+        if resolver is not None:
+            dest = resolver(dest, index)
         if _is_candidate_dest(dest) and dest not in seen:
             seen.add(dest)
             destinations.append(dest)
@@ -420,7 +745,7 @@ def _extract_bash_destinations(command: str) -> list[str]:
         op = tok.strip().strip("`")
         if op in _REDIRECT_TOKENS:
             if i + 1 < n:
-                _add(tokens[i + 1].strip("`"))
+                _add(tokens[i + 1].strip("`"), i + 1)
                 i += 2
                 continue
         # Write verb: collect its argv tail up to the next separator. The
@@ -430,26 +755,26 @@ def _extract_bash_destinations(command: str) -> list[str]:
         verb = os.path.basename(op)
         if verb in _WRITE_VERB_DEST:
             mode = _WRITE_VERB_DEST[verb]
-            args: list[str] = []
+            args: list[tuple[str, int]] = []
             j = i + 1
             while j < n and tokens[j] not in _COMMAND_SEPARATOR_TOKENS:
                 t = tokens[j].strip("`")
                 if t in _REDIRECT_TOKENS:
                     break
                 if t != "--" and not t.startswith("-"):
-                    args.append(t)
+                    args.append((t, j))
                 j += 1
             if mode == "all":
-                for a in args:
-                    _add(a)
+                for a, ai in args:
+                    _add(a, ai)
             elif args:
                 # "last" verbs need >= 2 operands to have a distinct
                 # destination (`mv src dst`); a single operand is a source.
                 if verb in {"mv", "cp", "rsync", "install"}:
                     if len(args) >= 2:
-                        _add(args[-1])
+                        _add(*args[-1])
                 else:
-                    _add(args[-1])
+                    _add(*args[-1])
             i = j
             continue
         i += 1
@@ -879,6 +1204,49 @@ def main() -> int:
                 return 2
 
         destinations = _extract_bash_destinations(command)
+
+        # D2 fail-closed: a destination that still contains `$` after
+        # same-command literal substitution (unassigned/poisoned variable,
+        # `$(...)`, or the legacy-regex fallback) cannot be verified — the
+        # hook never expands from os.environ. Deny BEFORE _resolve_path so
+        # the token is never misjudged as "path escapes task boundary".
+        for raw_dest in destinations:
+            # Scoped to task context, like the role and planner checks above:
+            # outside a dynos task the hook has no boundary to protect and a
+            # literal path is allowed anyway, so `$HOME`/`$TMPDIR`/`$(mktemp)`
+            # destinations keep the pre-D2 pass-through behaviour.
+            if "$" not in raw_dest or task_dir is None:
+                continue
+            from write_policy import CANONICAL_AUDIT_REPORT_PATH
+            try:
+                if log_event is not None:
+                    log_event(
+                        task_dir.parent.parent,
+                        "pre_tool_use_bash_check",
+                        task=task_dir.name,
+                        command=command[:120],
+                        destination=raw_dest,
+                        role=role,
+                        allowed=False,
+                        reason="unresolved_shell_variable",
+                    )
+            except Exception:
+                pass
+            print(
+                f"write-policy: DENIED — unresolved_shell_variable: Bash write "
+                f"destination {raw_dest!r} still contains '$' after "
+                f"substituting same-command literal assignments; the hook "
+                f"never expands variables from the environment, so it cannot "
+                f"verify where this write lands [dynos-work guardrail, not a "
+                f"Claude Code permission; changing permission settings will "
+                f"not affect this] role={role}. Write to a literal path "
+                f"(or assign it literally in the same command, e.g. "
+                f"S=<path>; cat > \"$S\"). Auditors write reports to "
+                f"{CANONICAL_AUDIT_REPORT_PATH}. "
+                f"See docs/write-boundary-spec.md." + degraded_hint,
+                file=sys.stderr,
+            )
+            return 2
 
         # Substring-scan defense for control-plane filenames against deletion
         # primitives that bypass _extract_bash_destinations. Only scans when

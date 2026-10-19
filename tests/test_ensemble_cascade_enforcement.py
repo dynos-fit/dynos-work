@@ -262,26 +262,26 @@ def _spawn_log(td: Path, name: str = AUDITOR) -> None:
     (td / "spawn-log.jsonl").write_text("\n".join(lines) + "\n")
 
 
-def _report(td: Path, model: str, findings: int = 0) -> Path:
+def _report(td: Path, model: str, findings: int = 0, blocking: int = 0) -> Path:
     path = td / "audit-reports" / f"{AUDITOR}-{model}.json"
     path.write_text(json.dumps({
         "auditor_name": AUDITOR,
         "status": "complete",
         "verdict": "pass" if findings == 0 else "fail",
-        "findings": [{"id": f"X-{i}", "blocking": False} for i in range(findings)],
-        "blocking_count": 0,
+        "findings": [{"id": f"X-{i}", "blocking": i < blocking} for i in range(findings)],
+        "blocking_count": blocking,
     }))
     return path
 
 
-def _write_shard_receipt(td: Path, model: str, findings: int = 0) -> Path:
+def _write_shard_receipt(td: Path, model: str, findings: int = 0, blocking: int = 0) -> Path:
     return receipt_audit_done(
         td,
         auditor_name=AUDITOR,
         model_used=model,
         finding_count=findings,
-        blocking_count=0,
-        report_path=str(_report(td, model, findings)),
+        blocking_count=blocking,
+        report_path=str(_report(td, model, findings, blocking)),
         route_mode="generic",
         agent_path=None,
         injected_agent_sha256=None,
@@ -317,7 +317,7 @@ def test_receipt_accepts_cascade_in_order_and_refuses_after_complete(tmp_path):
     with pytest.raises(ValueError, match="already complete"):
         _write_shard_receipt(td, DEEP)
     # A re-audit may always restart at the fast tier.
-    _write_shard_receipt(td, FAST, findings=1)
+    _write_shard_receipt(td, FAST, findings=1, blocking=1)
     assert lib_ensemble.ensemble_next(td, AUDITOR)["model"] == DEEP
 
 
@@ -436,3 +436,103 @@ def test_ctl_run_audit_summary_proceeds_when_cascade_complete(tmp_path):
     res = _ctl("run-audit-summary", str(td))
     assert res.returncode == 0, res.stdout + res.stderr
     assert json.loads(res.stdout)["status"] == "audit_summary_ready"
+
+
+# ---------------------------------------------------------------------------
+# Blocking-count escalation rule (_needs_escalation) and gap wording
+# ---------------------------------------------------------------------------
+
+def _full(model: str, **kw) -> dict:
+    return {"model_used": model, **kw}
+
+
+def test_cascade_non_blocking_findings_complete():
+    receipts = {FAST: _full(FAST, finding_count=0, blocking_count=0),
+                BALANCED: _full(BALANCED, finding_count=3, blocking_count=0), DEEP: None}
+    r = lib_ensemble.evaluate_cascade(AUDITOR, _entry(), receipts)
+    assert r["status"] == "complete" and r["verdict"] == "pass" and r["gaps"] == []
+
+
+def test_cascade_blocking_findings_escalate():
+    receipts = {FAST: _full(FAST, finding_count=0, blocking_count=0),
+                BALANCED: _full(BALANCED, finding_count=3, blocking_count=1), DEEP: None}
+    r = lib_ensemble.evaluate_cascade(AUDITOR, _entry(), receipts)
+    assert r["status"] == "spawn" and r["model"] == DEEP
+    assert r["reason"] == "escalate_on_findings" and r["triggered_by"] == BALANCED
+
+
+def test_cascade_missing_blocking_count_falls_back():
+    receipts = {FAST: _full(FAST, finding_count=0),
+                BALANCED: _full(BALANCED, finding_count=2), DEEP: None}
+    r = lib_ensemble.evaluate_cascade(AUDITOR, _entry(), receipts)
+    assert r["status"] == "spawn" and r["model"] == DEEP
+    bad = {FAST: _full(FAST, finding_count=0),
+           BALANCED: _full(BALANCED, finding_count=0, blocking_count="x"), DEEP: None}
+    r = lib_ensemble.evaluate_cascade(AUDITOR, _entry(), bad)
+    assert r["status"] == "complete" and r["verdict"] == "pass"
+    assert lib_ensemble._needs_escalation({}) is True  # fail-closed
+
+
+def test_cascade_gap_names_expected_shard_receipt(tmp_path):
+    suffix = "expected receipt: receipts/audit-{a}-{m}.json (shard_step_name {a}-{m})"
+    r = lib_ensemble.evaluate_cascade(AUDITOR, _entry(), _receipts())
+    assert r["gaps"][-1].endswith(suffix.format(a=AUDITOR, m=r["model"]))
+    receipts = {FAST: _full(FAST, finding_count=1, blocking_count=1), BALANCED: None, DEEP: None}
+    r = lib_ensemble.evaluate_cascade(AUDITOR, _entry(), receipts)
+    assert r["reason"] == "escalate_on_findings"
+    assert "(blocking findings)" in r["gaps"][-1]
+    assert r["gaps"][-1].endswith(suffix.format(a=AUDITOR, m=r["model"]))
+    # DONE gate and ctl ensemble-next carry the identical string / step name.
+    td = _setup_task(tmp_path)
+    _shard(td, FAST, findings=1)
+    nxt = lib_ensemble.ensemble_next(td, AUDITOR)
+    gaps = require_receipts_for_done(td)
+    expected = suffix.format(a=AUDITOR, m=nxt["model"])
+    assert any(g.endswith(expected) for g in gaps)
+    assert nxt["shard_step_name"] == f"{AUDITOR}-{nxt['model']}"
+
+
+# ---------------------------------------------------------------------------
+# Audit repair (cycle 1): strict blocking_count, no-escalation-model path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "blocking, findings, expected",
+    [
+        (0, 3, False),        # real int 0: non-blocking findings do not escalate
+        (2, 3, True),         # real int > 0 escalates
+        (True, 0, False),     # bool is not trusted: falls back to finding_count 0
+        (False, 2, True),     # bool is not trusted: falls back to finding_count 2
+        ("0", 2, True),       # string is not trusted, even when int()-coercible
+        (0.0, 2, True),       # float is not trusted
+        (-1, 2, True),        # negative is not a count
+        (None, 0, False),     # absent value: finding_count 0
+    ],
+)
+def test_needs_escalation_trusts_only_real_non_negative_ints(blocking, findings, expected):
+    shard = {"finding_count": findings, "blocking_count": blocking}
+    assert lib_ensemble._needs_escalation(shard) is expected
+
+
+def test_needs_escalation_missing_counts_fails_closed():
+    assert lib_ensemble._needs_escalation({}) is True
+
+
+def test_evaluate_blocking_without_escalation_model_is_invalid():
+    # TS-1: a voting tier with a blocking finding and no escalation model
+    # configured cannot be satisfied; the cascade reports invalid, not pass.
+    entry = _entry(escalation="")
+    receipts = {FAST: {"model_used": FAST, "finding_count": 1, "blocking_count": 1},
+                BALANCED: None, "": None}
+    r = lib_ensemble.evaluate_cascade(AUDITOR, entry, receipts)
+    assert r["status"] == lib_ensemble.STATUS_INVALID
+    assert r["model"] is None
+    assert any("no escalation model is configured" in g for g in r["gaps"])
+
+
+def test_evaluate_non_blocking_without_escalation_model_continues_voting():
+    entry = _entry(escalation="")
+    receipts = {FAST: {"model_used": FAST, "finding_count": 2, "blocking_count": 0},
+                BALANCED: None, "": None}
+    r = lib_ensemble.evaluate_cascade(AUDITOR, entry, receipts)
+    assert r["status"] == "spawn" and r["model"] == BALANCED

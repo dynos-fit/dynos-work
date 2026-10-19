@@ -31,7 +31,15 @@ Maintain a `## Progress Ledger` section in your artifact with three subsections:
 
 ## Output
 
-Write a canonical audit report to `.dynos/task-{id}/audit-reports/release-{timestamp}.json`.
+Write a canonical audit report to `.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json`.
+
+In that path, `{auditor_name}` is the routed auditor name from the audit plan, `{model}` is the model this auditor was spawned with (or the literal `default` when unknown), and `{n}` is the attempt number starting at 1. Substitute literal values; do not use shell variables. Write the report via a Bash heredoc with a literal path, e.g.:
+
+```bash
+cat > ".dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json" <<'JSON'
+{ ... full report JSON ... }
+JSON
+```
 
 Use category `release`. Blocking findings include missing release hygiene for package/plugin changes, irreversible rollout paths, or migration ordering that can corrupt production state.
 

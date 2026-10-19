@@ -32,7 +32,15 @@ Maintain a `## Progress Ledger` section in your artifact with three subsections:
 
 ## Output
 
-Write a canonical audit report to `.dynos/task-{id}/audit-reports/privacy-{timestamp}.json`.
+Write a canonical audit report to `.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json`.
+
+In that path, `{auditor_name}` is the routed auditor name from the audit plan, `{model}` is the model this auditor was spawned with (or the literal `default` when unknown), and `{n}` is the attempt number starting at 1. Substitute literal values; do not use shell variables. Write the report via a Bash heredoc with a literal path, e.g.:
+
+```bash
+cat > ".dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json" <<'JSON'
+{ ... full report JSON ... }
+JSON
+```
 
 Use category `privacy`. Blocking findings include PII exposure, missing deletion/export behavior for newly stored user data, or sensitive data sent to unapproved sinks.
 

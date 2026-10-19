@@ -283,11 +283,11 @@ class TestEnsembleDisabledUnderNullMapping:
             "feature",
             ["backend"],
             fast_track=False,
-            risk_level="high",  # Use high risk to trigger ensemble in normal flow
+            risk_level="high",  # default ensemble auditors are ensemble=true here
         )
 
         # Verify all spawn auditor entries have ensemble=False when host is codex.
-        # Under normal conditions (high risk), ensemble would be True, but the
+        # Default ensemble auditors would be ensemble=True, but the
         # host_null_mapping check overrides it to False.
         spawn_entries = [
             a for a in plan.get("auditors", [])
