@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -106,3 +108,105 @@ def test_start_skill_added_command_warns_without_budget_test(monkeypatch) -> Non
     )
     warning = check_release_hygiene.start_skill_budget_warning(base_ref="origin/main")
     assert warning and "tests/test_start_skill_budget.py" in warning
+
+
+@pytest.mark.parametrize(
+    ("version", "bump", "expected"),
+    [
+        ("7.5.24", "patch", "7.5.25"),
+        ("7.5.24", "minor", "7.6.0"),
+        ("7.5.24", "major", "8.0.0"),
+        ("7.5.24", "none", "7.5.24"),
+    ],
+)
+def test_bumped(version: str, bump: str, expected: str) -> None:
+    assert bump_version._bumped(version, bump) == expected
+
+
+def test_bumped_rejects_unknown_type() -> None:
+    with pytest.raises(ValueError, match="unknown bump type"):
+        bump_version._bumped("7.5.24", "huge")
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("feat: pre-execution latency round two", "minor"),
+        ("feat(start): combined path by default", "minor"),
+        ("fix: honor planned greenfield schema rows", "patch"),
+        ("docs: file Unreleased changelog notes under 7.5.23 and 7.5.24", "patch"),
+        ("chore: update release metadata", "patch"),
+        ("ci: derive the release bump from the PR title prefix", "patch"),
+        ("refactor(hooks): split lib_core", "patch"),
+        ("feat!: drop staged planning path", "major"),
+        ("fix(api)!: rename receipt fields", "major"),
+        ("feat: new receipt layout BREAKING CHANGE", "major"),
+        ("  feat: leading whitespace is fine", "minor"),
+    ],
+)
+def test_bump_from_title(title: str, expected: str) -> None:
+    assert bump_version.bump_from_title(title) == expected
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Re-chain artifacts after amendment",
+        "Feat: capitalized type",
+        "feat:no space after colon",
+        "feature: unknown type",
+        "feat",
+        "",
+    ],
+)
+def test_bump_from_title_rejects_unprefixed_titles(title: str) -> None:
+    with pytest.raises(ValueError, match="no conventional-commit prefix"):
+        bump_version.bump_from_title(title)
+
+
+def test_bump_release_auto_uses_title(tmp_path: Path, monkeypatch) -> None:
+    package_json = tmp_path / "package.json"
+    changelog = tmp_path / "CHANGELOG.md"
+    _write_json(package_json, {"version": "7.5.24"})
+    changelog.write_text("# Changelog\n\n## [Unreleased]\n\n---\n\n## [7.5.24] - 2026-10-19\n")
+    monkeypatch.setattr(bump_version, "ROOT", tmp_path)
+    monkeypatch.setattr(bump_version, "PACKAGE_JSON", package_json)
+    monkeypatch.setattr(bump_version, "CHANGELOG", changelog)
+    monkeypatch.setattr(bump_version, "VERSION_FILES", (package_json,))
+
+    assert bump_version.bump_release(
+        bump="auto", base_ref=None, set_version=None, message="feat: something new"
+    ) == "7.6.0"
+    assert bump_version.bump_release(
+        bump="auto", base_ref=None, set_version=None, message="fix: something broken"
+    ) == "7.6.1"
+
+
+@pytest.mark.parametrize(
+    ("bump", "message", "expected"),
+    [
+        ("auto", "feat: thing", "minor"),
+        ("auto", "fix: thing", "patch"),
+        ("patch", "feat: label wins", "patch"),
+        ("none", "feat: label wins", "none"),
+    ],
+)
+def test_resolve_bump(bump: str, message: str, expected: str) -> None:
+    assert bump_version.resolve_bump(bump, message) == expected
+
+
+def test_print_bump_writes_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
+    package_json = tmp_path / "package.json"
+    _write_json(package_json, {"version": "7.5.24"})
+    monkeypatch.setattr(bump_version, "PACKAGE_JSON", package_json)
+    monkeypatch.setattr(bump_version, "VERSION_FILES", (package_json,))
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "--print-bump", "--message", "feat: thing"])
+    assert bump_version.main() == 0
+    assert capsys.readouterr().out.strip() == "minor"
+    assert json.loads(package_json.read_text())["version"] == "7.5.24"
+
+
+def test_print_bump_unprefixed_title_fails(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "--print-bump", "--message", "no prefix"])
+    assert bump_version.main() == 1
+    assert "no conventional-commit prefix" in capsys.readouterr().err
