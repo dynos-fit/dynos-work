@@ -9,6 +9,9 @@ and this project adheres to **Semantic Versioning**.
 
 ## [Unreleased]
 
+---
+
+## [7.5.24] - 2026-10-19
 ### Changed
 - Pre-execution latency, round two (measured on 22 real tasks: median 143 minutes from task creation to ready-to-execute, 20 of 22 classified high/critical, 0 on the combined path).
   - **Path selection.** `combined` (one Spec + Plan spawn, one joint review) is now the default. `staged` is reserved for migrations, critical risk, and high risk touching `db`/`security`. `testing` and `docs` never count toward risk floors or path selection, and file count is no longer a risk-floor signal (`_compute_risk_floor` keeps it as telemetry only). The planner's classification rule "more than 10 files = high" is gone.
@@ -19,18 +22,6 @@ and this project adheres to **Semantic Versioning**.
   - **Amendment window.** `ctl amend-artifact` refuses a second post-approval amendment of the same artifact (`policy.max_amendments_per_artifact` raises it) and emits `amendment_window_exhausted`.
   - **Visibility.** New `ctl task-churn <task_dir>` counts planner spawns, approval receipts, amendments, gate refusals, write-policy denials, and planner validator attempts, with warnings; `/dynos-work:status` prints it. `run-planning-mode` persists `planning_mode` on the manifest.
   - **Timeline.** The SubagentStop hook now appends a `stop` row to `spawn-log.jsonl` with the transcript's first/last timestamps and measured `seconds`. `compute_planning_timeline` prefers those rows; pre/post pairs that are within a second (the Agent tool returns as soon as the spawn starts) are reported as `unmeasured` instead of contributing zero, and `ctl timeline` exits 1 with named errors when `stage-transitions.jsonl` or spawn durations are missing. Receipt log lines print `tokens=hook-recorded` instead of `tokens=0`.
-- Start planning now supports a one-review combined path, one-pass discovery, subsystem-based hierarchy, bounded artifact repair, and per-phase read quotas. Planner receipts bind to hook-observed spawns; token attribution is recorded once by SubagentStop. Risk floors and external research triggers are narrower, and planning timelines now separate model, approval, orchestrator, and idle time.
-- Release automation now inserts version entries after populated Unreleased notes.
-
-### Fixed
-- The planner read quota is now enforced at runtime. `pre_tool_use` returned early for every non-audit role before consulting `read_policy`, so the new `planning` branch was reachable only from unit tests; the hook now routes planner `Read`/`Grep`/`Glob` calls through `decide_read` with the per-phase allowance.
-- Added `ctl log-append` as the only sanctioned way for skills to write `[GATE]`/`[SKIP]`/`[DONE]`/`[BUDGET-PAUSE]` lines to `execution-log.md`. Automatic role stamping made the orchestrator resolve as the stamped subagent role after the first planner spawn, and that role is denied direct writes to the log, so every hand-written append in the start, execute, and audit skills would have failed. `run-external-solution-gate` now writes its own `[GATE]` line, and the redundant manual `[ADVANCE]` line in Step 9 is gone (`transition_task` already records the stage change).
-
----
-
-## [7.5.24] - 2026-10-19
-### Changed
-- feat: pre-execution latency round two
 
 ### Plugin / Distribution
 - Bump package and plugin metadata to `7.5.24`.
@@ -39,7 +30,12 @@ and this project adheres to **Semantic Versioning**.
 
 ## [7.5.23] - 2026-10-19
 ### Changed
-- feat: reduce pre-execution planning latency
+- Start planning now supports a one-review combined path, one-pass discovery, subsystem-based hierarchy, bounded artifact repair, and per-phase read quotas. Planner receipts bind to hook-observed spawns; token attribution is recorded once by SubagentStop. Risk floors and external research triggers are narrower, and planning timelines now separate model, approval, orchestrator, and idle time.
+- Release automation now inserts version entries after populated Unreleased notes.
+
+### Fixed
+- The planner read quota is now enforced at runtime. `pre_tool_use` returned early for every non-audit role before consulting `read_policy`, so the new `planning` branch was reachable only from unit tests; the hook now routes planner `Read`/`Grep`/`Glob` calls through `decide_read` with the per-phase allowance.
+- Added `ctl log-append` as the only sanctioned way for skills to write `[GATE]`/`[SKIP]`/`[DONE]`/`[BUDGET-PAUSE]` lines to `execution-log.md`. Automatic role stamping made the orchestrator resolve as the stamped subagent role after the first planner spawn, and that role is denied direct writes to the log, so every hand-written append in the start, execute, and audit skills would have failed. `run-external-solution-gate` now writes its own `[GATE]` line, and the redundant manual `[ADVANCE]` line in Step 9 is gone (`transition_task` already records the stage change).
 
 ### Plugin / Distribution
 - Bump package and plugin metadata to `7.5.23`.
