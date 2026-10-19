@@ -28,6 +28,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.24] - 2026-10-19
+### Changed
+- feat: pre-execution latency round two
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.24`.
+
+---
+
 ## [7.5.23] - 2026-10-19
 ### Changed
 - feat: reduce pre-execution planning latency
