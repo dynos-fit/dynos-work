@@ -2,7 +2,7 @@ name: Release Hygiene
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, edited, synchronize, reopened, labeled, unlabeled, ready_for_review]
 
 permissions:
   contents: write
@@ -33,7 +33,10 @@ jobs:
           script: |
             const labels = context.payload.pull_request.labels.map(label => label.name);
             const ordered = ["release:major", "release:minor", "release:patch", "release:none"];
-            const selected = ordered.find(label => labels.includes(label)) || "release:patch";
+            // No release:* label: scripts/bump_version.py derives the bump from
+            // the PR title's conventional-commit prefix (feat: minor, fix:/docs:/chore:
+            // patch, "!" major) and fails the job when the title has none.
+            const selected = ordered.find(label => labels.includes(label)) || "release:auto";
             core.setOutput("type", selected.replace("release:", ""));
 
       - name: Bump release metadata

@@ -66,6 +66,41 @@ def _parse_version(version: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in parts)  # type: ignore[return-value]
 
 
+# Conventional-commit prefixes and the release bump each one implies.
+# A "!" after the type or scope (feat!: / fix(api)!:) or the words
+# "BREAKING CHANGE" anywhere in the title mean a major bump.
+TITLE_BUMPS = {
+    "feat": "minor",
+    "fix": "patch",
+    "perf": "patch",
+    "refactor": "patch",
+    "docs": "patch",
+    "chore": "patch",
+    "test": "patch",
+    "tests": "patch",
+    "ci": "patch",
+    "build": "patch",
+    "style": "patch",
+    "revert": "patch",
+}
+_TITLE_RE = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?(?P<bang>!)?:\s+\S")
+
+
+def bump_from_title(title: str) -> str:
+    """Map a conventional-commit PR title to a bump type."""
+    match = _TITLE_RE.match(title.strip())
+    if match is None or match.group("type") not in TITLE_BUMPS:
+        allowed = ", ".join(f"{name}:" for name in TITLE_BUMPS)
+        raise ValueError(
+            f"PR title {title!r} has no conventional-commit prefix; "
+            f"start it with one of {allowed} (feat: = minor, others = patch, "
+            "add ! for a breaking change) or add a release:* label"
+        )
+    if match.group("bang") or "BREAKING CHANGE" in title:
+        return "major"
+    return TITLE_BUMPS[match.group("type")]
+
+
 def _bumped(version: str, bump: str) -> str:
     major, minor, patch = _parse_version(version)
     if bump == "major":
@@ -119,6 +154,8 @@ def _insert_changelog_entry(version: str, message: str) -> None:
 
 
 def bump_release(*, bump: str, base_ref: str | None, set_version: str | None, message: str) -> str:
+    if bump == "auto":
+        bump = bump_from_title(message)
     base = _base_version(base_ref)
     version = set_version or _bumped(base, bump)
     for path in VERSION_FILES:
@@ -129,13 +166,18 @@ def bump_release(*, bump: str, base_ref: str | None, set_version: str | None, me
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bump", choices=("patch", "minor", "major", "none"), default="patch")
+    parser.add_argument(
+        "--bump",
+        choices=("auto", "patch", "minor", "major", "none"),
+        default="auto",
+        help="Release bump; 'auto' derives it from the conventional-commit prefix of --message",
+    )
     parser.add_argument("--base-ref", default=None, help="Git ref to derive the previous version from")
     parser.add_argument("--set-version", default=None, help="Set an exact version instead of deriving one")
     parser.add_argument(
         "--message",
         default="Automated release metadata update.",
-        help="One-line changelog bullet for the generated release entry",
+        help="PR title: the changelog bullet for the generated entry and, with --bump auto, the bump source",
     )
     args = parser.parse_args()
     try:
