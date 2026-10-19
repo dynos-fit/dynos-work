@@ -1,10 +1,15 @@
-"""Tests for PR #11 — conditional plan sections (API Contracts + Data Model).
+"""Tests for conditional plan sections (API Contracts + Data Model).
+
+The sections are required only when the execution graph's ``files_expected``
+actually touch an API surface (routes, controllers, handlers, endpoints) or a
+persisted schema (migrations, models, schema). Domain membership alone no
+longer forces either table: it produced ``N/A`` boilerplate in every
+backend/ui/db plan without strengthening the gap analysis.
 
 Validates:
-  - conditional_plan_headings returns correct headings per domain set
-  - validate_task_artifacts enforces conditional headings when domains require them
-  - Backwards compatibility: old plans without conditional sections pass when domains don't require them
-  - Planner template includes the conditional sections with correct guidance
+  - conditional_plan_headings returns headings per planned file set
+  - validate_task_artifacts enforces conditional headings when the graph requires them
+  - Backwards compatibility: plans without conditional sections pass when nothing requires them
 """
 from __future__ import annotations
 
@@ -86,10 +91,20 @@ def _make_task_dir(
     extra_plan: str = "",
     include_plan: bool = True,
     source_files: dict[str, str] | None = None,
+    graph_files: list[str] | None = None,
 ) -> Path:
     """Create a minimal task directory with manifest, spec, plan, and graph."""
     task_dir = tmp_path / ".dynos" / "task-test"
     task_dir.mkdir(parents=True)
+    if graph_files is not None:
+        (task_dir / "execution-graph.json").write_text(json.dumps({
+            "task_id": "task-test",
+            "segments": [{
+                "id": "seg-1", "executor": "backend-executor", "description": "d",
+                "files_expected": list(graph_files), "depends_on": [],
+                "parallelizable": True, "criteria_ids": [1],
+            }],
+        }))
     if source_files:
         for path, content in source_files.items():
             fpath = tmp_path / path
@@ -144,29 +159,30 @@ def _make_task_dir(
 # ---------------------------------------------------------------------------
 
 class TestConditionalPlanHeadings:
-    def test_backend_requires_api_contracts(self):
-        assert "API Contracts" in conditional_plan_headings(["backend"])
+    def test_route_file_requires_api_contracts(self):
+        assert "API Contracts" in conditional_plan_headings(["backend"], files=["src/routes/users.js"])
 
-    def test_ui_requires_api_contracts(self):
-        assert "API Contracts" in conditional_plan_headings(["ui"])
+    def test_controller_file_requires_api_contracts(self):
+        assert "API Contracts" in conditional_plan_headings(["ui"], files=["app/controllers/orders.rb"])
 
-    def test_security_requires_api_contracts(self):
-        assert "API Contracts" in conditional_plan_headings(["security"])
+    def test_api_basename_requires_api_contracts(self):
+        assert "API Contracts" in conditional_plan_headings([], files=["server/api.py"])
 
-    def test_db_requires_data_model(self):
-        assert "Data Model" in conditional_plan_headings(["db"])
+    def test_migration_file_requires_data_model(self):
+        assert "Data Model" in conditional_plan_headings(["db"], files=["migrations/001_add_users.sql"])
+
+    def test_model_file_requires_data_model(self):
+        assert "Data Model" in conditional_plan_headings([], files=["src/models/user.py"])
+
+    def test_domains_alone_require_nothing(self):
+        assert conditional_plan_headings(["backend", "ui", "security", "db"]) == []
+        assert conditional_plan_headings(["backend"], files=["src/utils/format.py"]) == []
 
     def test_ml_requires_neither(self):
-        result = conditional_plan_headings(["ml"])
-        assert result == []
+        assert conditional_plan_headings(["ml"], files=["ml/train.py"]) == []
 
-    def test_backend_and_db_requires_both(self):
-        result = conditional_plan_headings(["backend", "db"])
-        assert "API Contracts" in result
-        assert "Data Model" in result
-
-    def test_full_stack_backend_db(self):
-        result = conditional_plan_headings(["ui", "backend", "db"])
+    def test_routes_and_migrations_require_both(self):
+        result = conditional_plan_headings(["backend", "db"], files=["src/routes.js", "db/migrations/2.sql"])
         assert "API Contracts" in result
         assert "Data Model" in result
 
@@ -174,12 +190,16 @@ class TestConditionalPlanHeadings:
         assert conditional_plan_headings([]) == []
 
     def test_accepts_set_input(self):
-        result = conditional_plan_headings({"backend", "db"})
+        result = conditional_plan_headings({"backend", "db"}, files={"src/routes.js", "src/models.py"})
         assert "API Contracts" in result
         assert "Data Model" in result
 
+    def test_architecture_decisions_only_for_critical(self):
+        assert "Architecture Decisions" in conditional_plan_headings([], "critical")
+        assert "Architecture Decisions" not in conditional_plan_headings([], "high")
+
     def test_does_not_duplicate_base_headings(self):
-        result = conditional_plan_headings(["backend", "db"])
+        result = conditional_plan_headings(["backend", "db"], "critical", files=["src/routes.js", "src/models.py"])
         for heading in result:
             assert heading not in REQUIRED_PLAN_HEADINGS
 
@@ -189,39 +209,53 @@ class TestConditionalPlanHeadings:
 # ---------------------------------------------------------------------------
 
 class TestValidateConditionalHeadings:
-    def test_backend_missing_api_contracts_fails(self, tmp_path: Path):
-        task_dir = _make_task_dir(tmp_path, domains=["backend"])
+    def test_route_file_missing_api_contracts_fails(self, tmp_path: Path):
+        task_dir = _make_task_dir(tmp_path, domains=["backend"], graph_files=["src/routes.js"])
         errors = validate_task_artifacts(task_dir)
         assert any("API Contracts" in e for e in errors)
 
-    def test_backend_with_api_contracts_passes(self, tmp_path: Path):
+    def test_backend_domain_without_api_files_needs_no_section(self, tmp_path: Path):
+        task_dir = _make_task_dir(tmp_path, domains=["backend"], graph_files=["src/utils/format.py"])
+        errors = validate_task_artifacts(task_dir)
+        assert not any("API Contracts" in e for e in errors)
+
+    def test_route_file_with_api_contracts_passes(self, tmp_path: Path):
         task_dir = _make_task_dir(
             tmp_path, domains=["backend"], extra_plan=_api_contracts_section(),
             source_files={"src/routes.js": "app.get('/api/test', handler);"},
+            graph_files=["src/routes.js"],
         )
         errors = validate_task_artifacts(task_dir)
         assert not any("API Contracts" in e for e in errors)
 
-    def test_db_missing_data_model_fails(self, tmp_path: Path):
-        task_dir = _make_task_dir(tmp_path, domains=["db"])
+    def test_migration_file_missing_data_model_fails(self, tmp_path: Path):
+        task_dir = _make_task_dir(tmp_path, domains=["db"], graph_files=["migrations/001.sql"])
         errors = validate_task_artifacts(task_dir)
         assert any("Data Model" in e for e in errors)
 
-    def test_db_with_data_model_passes(self, tmp_path: Path):
+    def test_db_domain_without_schema_files_needs_no_section(self, tmp_path: Path):
+        task_dir = _make_task_dir(tmp_path, domains=["db"], graph_files=["scripts/report.py"])
+        errors = validate_task_artifacts(task_dir)
+        assert not any("Data Model" in e for e in errors)
+
+    def test_migration_file_with_data_model_passes(self, tmp_path: Path):
         task_dir = _make_task_dir(
             tmp_path, domains=["db"], extra_plan=_data_model_section(),
             source_files={"migrations/001.sql": "CREATE TABLE tests (id INT PRIMARY KEY);"},
+            graph_files=["migrations/001.sql"],
         )
         errors = validate_task_artifacts(task_dir)
         assert not any("Data Model" in e for e in errors)
 
-    def test_backend_db_needs_both(self, tmp_path: Path):
-        task_dir = _make_task_dir(tmp_path, domains=["backend", "db"])
+    def test_routes_and_migrations_need_both(self, tmp_path: Path):
+        task_dir = _make_task_dir(
+            tmp_path, domains=["backend", "db"], graph_files=["src/routes.js", "migrations/001.sql"],
+        )
         errors = validate_task_artifacts(task_dir)
         assert any("API Contracts" in e for e in errors)
         assert any("Data Model" in e for e in errors)
 
-    def test_backend_db_with_both_passes(self, tmp_path: Path):
+    def test_routes_and_migrations_with_both_passes(self, tmp_path: Path):
         task_dir = _make_task_dir(
             tmp_path,
             domains=["backend", "db"],
@@ -230,20 +264,16 @@ class TestValidateConditionalHeadings:
                 "src/routes.js": "app.get('/api/test', handler);",
                 "migrations/001.sql": "CREATE TABLE tests (id INT PRIMARY KEY);",
             },
+            graph_files=["src/routes.js", "migrations/001.sql"],
         )
         errors = validate_task_artifacts(task_dir)
         assert not any("API Contracts" in e for e in errors)
         assert not any("Data Model" in e for e in errors)
 
-    def test_ui_requires_api_contracts(self, tmp_path: Path):
-        task_dir = _make_task_dir(tmp_path, domains=["ui"])
+    def test_no_graph_requires_no_conditional_sections(self, tmp_path: Path):
+        task_dir = _make_task_dir(tmp_path, domains=["ui", "security"])
         errors = validate_task_artifacts(task_dir)
-        assert any("API Contracts" in e for e in errors)
-
-    def test_security_requires_api_contracts(self, tmp_path: Path):
-        task_dir = _make_task_dir(tmp_path, domains=["security"])
-        errors = validate_task_artifacts(task_dir)
-        assert any("API Contracts" in e for e in errors)
+        assert not any("API Contracts" in e for e in errors)
 
     def test_component_subsection_without_exact_files_fails(self, tmp_path: Path):
         task_dir = _make_task_dir(tmp_path, domains=["backend"], extra_plan=_api_contracts_section())
@@ -350,10 +380,11 @@ class TestPlannerTemplate:
         assert "## Data Model" in planner_text
 
     def test_api_contracts_conditional_note(self, planner_text: str):
-        assert "domains include backend, ui, or security" in planner_text
+        assert "Required only when a planned file is an API surface" in planner_text
+        assert "do not write an `N/A` table" in planner_text
 
     def test_data_model_conditional_note(self, planner_text: str):
-        assert "domains include db" in planner_text
+        assert "Required only when a planned file is a migration, model, or schema module" in planner_text
 
     def test_api_contracts_before_data_flow(self, planner_text: str):
         api_pos = planner_text.index("## API Contracts")

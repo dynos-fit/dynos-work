@@ -30,6 +30,9 @@ from write_policy import WriteAttempt, _get_capability_key, require_write_allowe
 # mutated at runtime (tests that want to simulate an extra event-name add
 # to a local copy, not this module's constant).
 DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
+    # Round-2 latency guardrails: counted by `ctl task-churn`, no handler.
+    "planner_bash_denied",
+    "amendment_window_exhausted",
     "planner_spawn_evidence_degraded",
     "spawn_role_unmapped",
     "gate_refused",

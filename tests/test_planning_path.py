@@ -13,10 +13,16 @@ from lib_validate import compute_planning_path
 def test_planning_path_matrix():
     def m(risk, domains, kind="feature"):
         return {"classification":{"risk_level":risk,"domains":domains,"type":kind}}
+    # Combined is the default; staged is reserved for cases where a human
+    # should approve the spec before any plan exists.
     assert compute_planning_path(m("low",["backend"]))=="combined"
     assert compute_planning_path(m("medium",["backend","db"]))=="combined"
-    assert compute_planning_path(m("high",["backend"]))=="staged"
-    assert compute_planning_path(m("medium",["a","b","c"]))=="staged"
+    assert compute_planning_path(m("high",["backend"]))=="combined"
+    assert compute_planning_path(m("medium",["a","b","c"]))=="combined"
+    assert compute_planning_path(m("high",["backend","ml","infra","testing","docs"]))=="combined"
+    assert compute_planning_path(m("high",["backend","db"]))=="staged"
+    assert compute_planning_path(m("high",["security","testing"]))=="staged"
+    assert compute_planning_path(m("critical",["ui"]))=="staged"
     assert compute_planning_path(m("low",["migration"],"migration"))=="staged"
 
 

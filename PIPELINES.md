@@ -70,14 +70,26 @@ START
   step 1   assemble discovery context (no user round)
   step 2   discovery + design + classification
   step 2b  deterministic planning-path choice (fast_track remains audit-only)
-  combined (low/medium, ≤2 domains):
+  step 2d  architectural design doc — only when manifest.arch_design_required
+           (default: critical risk; policy.arch_design_min_risk widens it)
+  combined (default: everything except migrations, critical risk, and
+            high risk touching db/security):
            one Spec + Plan spawn → validation + stage walk → one joint review
-  staged (all other tasks):
+  staged (migrations, critical, high+db/security):
            step 3 spec normalization → step 4 spec review
            step 5 plan generation → step 6 plan review
-  step 7   plan audit (spec coverage check)
-  step 8   TDD-first test generation ← HUMAN APPROVAL
+  step 7   plan audit — deterministic (gap analysis, signature, intermediate
+           state); writes plan-audit-check itself. LLM auditor only when
+           policy.plan_audit_llm opts in.
+  step 8   TDD-first test generation ← HUMAN APPROVAL — only when
+           classification.tdd_required is true (opt-in; default false,
+           policy.tdd_default_risk_levels restores it per risk level)
   step 9   ready for execute
+
+  Artifact ceilings enforced by validate_task_artifacts: 20 acceptance
+  criteria, 2,500 spec words, 4,000 plan words (policy keys
+  max_acceptance_criteria / max_spec_words / max_plan_words). `testing` and
+  `docs` domains never count toward risk floors or path selection.
 
 EXECUTE (/dynos-work:execute)
   step 0   contract validation

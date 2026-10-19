@@ -39,14 +39,13 @@ Spawn the planner in **Repair** phase with the structured `--json` errors, note 
 
 JSON payloads (classification, execution-graph, repair-log) are piped to the ctl wrapper over stdin with `--from -` and a heredoc — NEVER staged at `/tmp` or any raw filesystem path (the write policy denies those, by design). Temp files, when genuinely needed, belong in `.dynos/task-{id}/_scratch/`.
 
-## Ruthlessness Standard
+## Scope Standard
 
-- Do not let ambiguity leak downstream.
-- Do not allow vague specs, soft assumptions, or unbounded scope to survive a phase gate.
-- Missing validation, error handling, auth, loading, empty, retry, and rollback requirements are spec defects.
-- For judgment feedback, allow at most one Repair pass before showing the artifact again.
-- Prefer a blocked gate over a rotten artifact.
-- If the work can fail in an obvious way, encode that failure mode before execution starts.
+- Do not let ambiguity leak downstream; resolve it or name it.
+- Vague criteria and unbounded scope do not survive a phase gate — but neither does bloat. The validator enforces ceilings of 20 acceptance criteria, 2,500 spec words, and 4,000 plan words. A task that needs more is two tasks.
+- Missing validation, error handling, auth, loading, empty, retry, and rollback behaviour belongs inside the criteria it affects, not as one extra criterion per state.
+- For judgment feedback, allow at most one Repair pass before showing the artifact again. Each post-approval amendment is counted; the default window is one per artifact.
+- Prefer a blocked gate over a rotten artifact, and a short artifact a human can actually read over a long one they rubber-stamp.
 
 ---
 
@@ -145,15 +144,15 @@ Finalize classification through the deterministic control-plane entrypoint:
 "$DYNOS" ctl run-start-classification .dynos/task-{id}
 ```
 
-`run-start-classification` validates the classification payload, applies fast-track + `tdd_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects. The output includes `planning_path`. If `risk_floor_applied` is true, print `planner_risk_level` and `risk_floor_signals` once so the user can see why risk was raised.
+`run-start-classification` validates the classification payload, applies fast-track, `tdd_required`, `planning_path`, and `arch_design_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects. If `risk_floor_applied` is true, print `planner_risk_level` and `risk_floor_signals` once so the user can see why risk was raised. Print `planning_path`, `tdd_required`, and `arch_design_required` once so the user can see which gates this task will run.
 
-**If the output contains `"tdd_required": true`:** Step 8 (TDD-First Gate) is **mandatory** for this task. Do not override this with your own risk assessment — `tdd_required` is set deterministically by the system for `high` and `critical` risk tasks. The state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` if Step 8 is skipped. Note this now and plan accordingly.
+**If the output contains `"tdd_required": true`:** Step 8 (TDD-First Gate) is **mandatory** for this task. The flag is opt-in — it is true only when the user asked for tests before code or the project policy (`tdd_default_risk_levels`) lists this risk level — so do not set it from your own risk assessment. The state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` if Step 8 is skipped while the flag is true. When it is `false`, Step 8 does not run and `testing-executor` writes tests during execute.
 
 ---
 
 ## Step 2b — Planning Path (deterministic)
 
-Read `planning_path` and `fast_track` from `run-start-classification`. `planning_path` chooses combined or staged planning; `fast_track` continues to control audit reduction only. Do not recompute either value.
+Read `planning_path` and `fast_track` from `run-start-classification`. `planning_path` chooses combined or staged planning; `fast_track` continues to control audit reduction only. Do not recompute either value. Combined is the default; staged applies only to migrations, critical-risk tasks, and high-risk tasks touching `db` or `security`. The `testing` and `docs` domains never influence the choice.
 
 When `planning_path == "combined"`, combine spec and plan generation and review in Steps 5–6. When `fast_track: true`, apply the concise-spec guidance and audit reduction below:
 - **Spec (Step 3):** The planner should produce a concise spec. The `Implicit Requirements Surfaced` and `Risk Notes` sections can contain a single line each if no significant risks exist.
@@ -219,15 +218,15 @@ Proceed to Step 2d.
 
 ## Step 2d — Architectural Design Doc Gate (conditional)
 
-**Only runs when `classification.risk_level` is `high` or `critical`.** Read `.dynos/task-{id}/classification.json`. If `risk_level` is `low` or `medium`, record the skip and proceed to Step 3:
+**Only runs when `arch_design_required` is true** in the `run-start-classification` output (also persisted on `manifest.json`). The default is critical risk only; projects widen it through `policy.arch_design_min_risk` (`high` or `always`). For every other task, record the skip and proceed to Step 3:
 
 ```bash
-"$DYNOS" ctl log-append .dynos/task-{id} --tag SKIP --message "arch-design — risk_level={risk_level}"
+"$DYNOS" ctl log-append .dynos/task-{id} --tag SKIP --message "arch-design — arch_design_required=false risk_level={risk_level}"
 ```
 
 All execution-log lines in this skill go through `log-append`. Never append to `execution-log.md` directly: once a role is stamped for a subagent, the orchestrator resolves as that role and the direct write is denied.
 
-For high/critical tasks, spawn the planner with the **Architectural Design Doc** phase to produce `.dynos/task-{id}/design-doc.md` — a §1–§13 design document that walks the higher-level architectural questions before spec normalization. §10 Open Questions is the human handoff.
+When `arch_design_required` is true, spawn the planner with the **Architectural Design Doc** phase to produce `.dynos/task-{id}/design-doc.md` — a §1–§13 design document that walks the higher-level architectural questions before spec normalization. §10 Open Questions is the human handoff.
 
 
 Spawn the planner subagent (`dynos-work:planning`) with instruction:
@@ -266,8 +265,8 @@ Proceed to Step 3.
 Phase: Spec Normalization.
 Read raw-input.md, discovery-notes.md, and design-decisions.md.
 Also read the actual implementation files referenced in the task (e.g., the files that will be modified). Verify runtime semantics directly from the code — do not assume template engines, escaping conventions, or generation mechanisms without reading the relevant functions. Include specific function signatures, data flow paths, and module boundaries in the spec.
-Write a spec that leaves executors zero room to hand-wave. Name the exact behavior, exact boundaries, exact failure modes, and exact evidence needed to prove completion.
-Write spec.md.
+Name the exact behavior, boundaries, failure modes, and the evidence that proves each criterion. Write the minimum falsifiable set: the validator rejects more than 20 acceptance criteria or 2,500 words, and a human must be able to review it in one sitting. Fold loading/empty/error/retry behaviour into the criteria it affects instead of adding one criterion per state.
+Write spec.md once, then edit sparingly. Do not run validators; the orchestrator validates after you return.
 See docs/spec-writing-rules.md for known spec-writing anti-patterns.
 ```
 
@@ -352,7 +351,7 @@ Hierarchical flow:
 
 Combined flow (when `planning_path == "combined"`):
 1. **Stage precondition:** the manifest is still at `SPEC_NORMALIZATION` (Step 3 deferred the walk). Do NOT advance yet.
-2. Spawn Planner ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and an execution-graph payload returned in its final message; then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path). This replaces the separate spec and plan spawns.
+2. Spawn Planner ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and an execution-graph payload returned in its final message; then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path). This replaces the separate spec and plan spawns. Tell the planner the ceilings (20 criteria, 2,500 spec words, 4,000 plan words) and that it writes each artifact once and does not run validators.
 3. Run `validate_task_artifacts --no-gap`, then `"$DYNOS" ctl run-combined-stage-walk .dynos/task-{id}`. It verifies spec, plan, and graph exist before the stage walk, validates strictly, writes the plan-validated receipt, and advances to PLAN_REVIEW.
 
 Standard flow:
@@ -447,26 +446,25 @@ Present the artifact(s) to the user and ask for approval.
 
 ## Step 7 — Plan Audit
 
-The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/critical-risk tasks (the deterministic check covers low/medium because validate_task_artifacts already enforces criteria coverage). This avoids 1.5–3M tokens per task on auditor work that duplicates the deterministic checks.
+The plan audit is deterministic at every risk level. `validate_task_artifacts` already proves criteria coverage; `run-plan-audit` adds gap analysis (API Contracts / Data Model claims against real code), the signature check, and the intermediate-state check, then writes the hash-bound `plan-audit-check` receipt itself. The LLM `spec-completion-auditor` pass (~300k tokens and ~13 minutes per run, observed running twice per task) is opt-in through `policy.plan_audit_llm`.
 
-1. **Deterministic gap analysis (mandatory, always runs):**
+1. **Run the deterministic plan audit (mandatory, always runs, idempotent):**
    ```bash
-   "$DYNOS" hook plan_gap_analysis --root . --task-dir .dynos/task-{id}
+   "$DYNOS" ctl run-plan-audit .dynos/task-{id}
    ```
-   This verifies that claims in `## API Contracts` and `## Data Model` sections correspond to real code. If the plan claims an endpoint or existing table that the codebase doesn't have, the planner must either fix the table or explicitly mark the entry as to-be-created. In a Data Model table, put `to-be-created` in any cell of the new table's row. Gap analysis failures block — repair before continuing.
+   - `status == "passed"`: proceed. `receipt_cached: true` means a fresh receipt already covered these exact artifacts and nothing was redone. Do NOT spawn an auditor.
+   - `status == "replan_required"`: a claimed endpoint or table does not exist. The planner must fix the table or mark the row `to-be-created` (any cell of a Data Model row). Follow **On validation failure** with phase `plan`, then rerun this command.
+   - `status == "llm_audit_required"`: only when the project opted in. Spawn `spec-completion-auditor`, then finalize with `run-plan-audit --report-path ... --tokens-used ... --model ...`.
 
-2. **LLM plan auditor (conditional):** Only spawn `spec-completion-auditor` when `risk_level` is `high` or `critical`. For low/medium risk, the deterministic checks (`validate_task_artifacts` for criteria coverage + gap analysis for code/plan alignment) are authoritative — skip the LLM spawn. Log: `{timestamp} [SKIP] plan-audit-llm — risk_level={risk}`.
+2. Surface any segment where `len(segment.files_expected) >= 10` (computed budget ≥ 35, the `TOOL_BUDGET_ADVISORY` threshold from `hooks/lib_tool_budget.py`) as a non-blocking advisory finding `near-budget-ceiling`. It warns the operator that the segment is approaching the 11-file overflow ceiling and may want decomposition.
 
-   Additionally, surface any segment where `len(segment.files_expected) >= 10` (computed budget ≥ 35, the `TOOL_BUDGET_ADVISORY` threshold from `hooks/lib_tool_budget.py`) as a non-blocking advisory finding `near-budget-ceiling`. The advisory is informational and does NOT block plan approval; it warns the operator that the segment is approaching the 11-file overflow ceiling and may want decomposition.
-
-3. If gap analysis finds gaps, or (when invoked) the auditor finds gaps, route back to planning, repair, and rerun deterministic artifact validation.
-4. Create a git branch safety net: `dynos/task-{id}-snapshot`.
+3. Create a git branch safety net: `dynos/task-{id}-snapshot`.
 
 ---
 
 ## Step 8 — TDD-First Gate
 
-This gate is **mandatory** when `manifest.classification.tdd_required` is `true` (auto-derived by the system for `high` and `critical` risk tasks; also set for explicit opt-in). **Do not skip this step based on your own risk judgment.** The `run-start-classification` output surfaces `tdd_required`; if it is `true`, this step is required and the state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` without it.
+This gate is **mandatory** when `manifest.classification.tdd_required` is `true`. The flag is opt-in: the planner sets it only when the user explicitly asked for tests before code, and the project policy may default it per risk level (`tdd_default_risk_levels`). **Do not set or skip it based on your own risk judgment.** The `run-start-classification` output surfaces `tdd_required`; if it is `true`, this step is required and the state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` without it.
 
 When `tdd_required` is `false`: tests are written by `testing-executor` after production code, in the execute skill (Step 4 of execute), where the implementation context is already known. This avoids ~1.5–2M tokens of pre-code context loading per task.
 

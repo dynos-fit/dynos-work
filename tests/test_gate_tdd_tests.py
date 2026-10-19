@@ -78,12 +78,31 @@ def test_tdd_required_absent_low_risk_gate_inert(tmp_path: Path):
     assert manifest["classification"]["tdd_required"] is False
 
 
-def test_tdd_required_absent_high_risk_backfilled_true(tmp_path: Path):
-    """Task-007 AC 12: tdd_required absent + risk=high → apply_fast_track
-    backfills tdd_required=True → gate now enforces the tdd-tests receipt.
-    Without a receipt, the transition must refuse."""
+def test_tdd_required_absent_high_risk_backfilled_false(tmp_path: Path):
+    """TDD is opt-in: tdd_required absent + risk=high → apply_fast_track
+    backfills tdd_required=False → the tdd-tests receipt is not required and
+    the transition proceeds."""
     td = _setup(tmp_path, tdd_required=None, risk_level="high")
-    with pytest.raises(ValueError, match="tdd-tests"):
+    transition_task(td, "EXECUTION")
+    manifest = json.loads((td / "manifest.json").read_text())
+    assert manifest["stage"] == "EXECUTION"
+    assert manifest["classification"]["tdd_required"] is False
+
+
+def test_tdd_required_true_receipt_without_evidence_refuses(tmp_path: Path):
+    """tdd_required=True + receipt present + evidence file missing → refuse."""
+    td = _setup(tmp_path, tdd_required=True)
+    evidence_path = _write_evidence(td)
+    evidence_hash = hash_file(evidence_path)
+    receipt_tdd_tests(
+        td,
+        test_file_paths=["tests/test_foo.py"],
+        tests_evidence_sha256=evidence_hash,
+        tokens_used=100,
+        model_used="sonnet",
+    )
+    evidence_path.unlink()
+    with pytest.raises(ValueError, match="receipt tdd-tests present at"):
         transition_task(td, "EXECUTION")
 
 

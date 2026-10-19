@@ -18,7 +18,8 @@ Show the current state of the active dynos-work task.
 1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED). If available in this repo, use `"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl active-task`.
 2. If no active task, report "No active dynos-work task found. Start one with /dynos-work:start"
 3. Read: manifest.json, spec.md, execution-graph.json, latest audit-reports, repair-log.json, test-results.json, execution-log.md
-4. Print a human-readable status report
+4. Run `"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl task-churn .dynos/task-{id}` and copy its counts and warnings into the Churn block. These are the loops operators could not see: re-approvals after post-approval edits, gate refusals, write-policy denials, planner attempts to run validators.
+5. Print a human-readable status report
 
 ## Output format
 
@@ -53,6 +54,11 @@ Execution Progress:
   Completed: [seg-001-db, seg-002-backend]
 
 Acceptance Criteria: [N]/[total] covered
+
+Churn (from ctl task-churn):
+  Planner spawns: [N]   Approval receipts: [N]   Amendments: [N]
+  Gate refusals: [N]    Write denials: [N]       Planner validator attempts: [N]
+  Warnings: [each warning line, or "none"]
 
 Latest Audit Results:
   spec-completion: PASS | FAIL | not yet run

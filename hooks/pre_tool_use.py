@@ -46,6 +46,18 @@ except Exception:  # pragma: no cover - defensive import fallback
 # Allowlist of valid executor role names that may appear in active-segment-role.
 # Privileged internal roles (ctl, receipt-writer, eventbus, scheduler, system)
 # are intentionally excluded to prevent role-file injection attacks.
+# Commands the planning role may not run: artifact validators, gap analysis,
+# plan audit, and every stage/approval mutation. ``write-execution-graph``
+# and ``write-classification`` stay allowed — the planner persists those
+# payloads through them.
+_PLANNER_BLOCKED_BASH = re.compile(
+    r"validate_task_artifacts|plan_gap_analysis|plan_signature_check|"
+    r"plan_intermediate_state_check|spec_lint|"
+    r"\bctl\s+(?:run-(?!external-solution-gate)[a-z-]+|transition|approve-stage|"
+    r"plan-validated-receipt|plan-audit-receipt|planner-receipt|set-planner-phase|"
+    r"amend-artifact|tdd-receipt)\b"
+)
+
 _EXECUTOR_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "backend-executor", "ui-executor", "testing-executor", "integration-executor",
     "ml-executor", "db-executor", "refactor-executor", "docs-executor",
@@ -835,6 +847,33 @@ def main() -> int:
                     f"permission]. Stamp a valid role via "
                     f"`ctl.py stamp-role <task_dir> --role <role>`; valid roles: "
                     f"{', '.join(sorted(_EXECUTOR_ROLE_ALLOWLIST))}",
+                    file=sys.stderr,
+                )
+                return 2
+
+        # Planning role: validation and stage control belong to the
+        # orchestrator. One observed plan phase spent ~27 minutes running
+        # its own validator dry-runs and merge scripts in _scratch before
+        # returning; every such call is a wasted model turn, and the
+        # orchestrator re-runs the same checks anyway.
+        if role == "planning" and task_dir is not None:
+            blocked = _PLANNER_BLOCKED_BASH.search(command)
+            if blocked:
+                try:
+                    if log_event is not None:
+                        log_event(
+                            task_dir.parent.parent,
+                            "planner_bash_denied",
+                            task=task_dir.name,
+                            command=command[:120],
+                            matched=blocked.group(0),
+                        )
+                except Exception:
+                    pass
+                print(
+                    "write-policy: the planner does not run validators, gap analysis, "
+                    "or stage commands — return the artifacts and the orchestrator "
+                    f"validates them (matched {blocked.group(0)!r}) [dynos-work guardrail]",
                     file=sys.stderr,
                 )
                 return 2

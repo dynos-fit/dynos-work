@@ -4,8 +4,8 @@ Covers ``_normalize_classification_payload`` in ``hooks/ctl.py``:
 
   (a) planner ``low`` + spec text "delete user account" → upgraded to
       ``high`` with triggering signal ``keyword_scan``.
-  (b) planner ``low`` + 12 ``files_expected`` → upgraded to ``high`` with
-      triggering signal ``file_domain``.
+  (b) planner ``low`` + 12 ``files_expected`` → NOT upgraded: file count
+      measures breadth, not blast radius, and is telemetry only.
   (c) planner ``medium`` + no triggering signals → left at ``medium``.
   (d) planner ``high`` + no triggering signals → left at ``high`` (no
       downgrade).
@@ -154,7 +154,7 @@ def test_keyword_scan_upgrades_low_to_medium(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # (b) planner low + 12 files_expected → high, signal=file_domain
 # ---------------------------------------------------------------------------
-def test_file_domain_heuristic_upgrades_with_many_files(tmp_path: Path) -> None:
+def test_file_count_alone_does_not_upgrade_risk(tmp_path: Path) -> None:
     files = [f"src/mod_{i}.py" for i in range(12)]
     task_dir = _build_task_dir(
         tmp_path,
@@ -164,25 +164,34 @@ def test_file_domain_heuristic_upgrades_with_many_files(tmp_path: Path) -> None:
     )
     payload = {
         "type": "feature",
-        "domains": ["backend"],
+        "domains": ["backend", "testing", "docs"],
         "risk_level": "low",
-        # Also expose via payload in case the implementation reads payload
-        # before falling back to execution-graph.json.
         "files_expected": files,
     }
 
     out = ctl._normalize_classification_payload(task_dir, payload)
 
-    assert out["risk_level"] == "high", (
-        f"12 files_expected must upgrade low → high via file_domain; got "
-        f"risk_level={out.get('risk_level')!r}"
+    assert out["risk_level"] == "low", (
+        f"12 files_expected plus testing/docs domains must not upgrade risk; got "
+        f"risk_level={out.get('risk_level')!r} signals={out.get('risk_floor_signals')!r}"
     )
+    assert out["risk_floor_applied"] is False
+    assert _upgrade_events(task_dir) == []
+
+
+def test_migration_domain_still_upgrades_to_high(tmp_path: Path) -> None:
+    task_dir = _build_task_dir(
+        tmp_path,
+        raw_input="Neutral raw input.",
+        spec="No triggering keywords here whatsoever.",
+        files_expected=["src/a.py"],
+    )
+    payload = {"type": "feature", "domains": ["migration"], "risk_level": "low"}
+    out = ctl._normalize_classification_payload(task_dir, payload)
+    assert out["risk_level"] == "high"
     events = _upgrade_events(task_dir)
     assert len(events) == 1
-    assert "file_domain" in events[0].get("triggering_signals", []), (
-        f"expected 'file_domain' in triggering_signals; got "
-        f"{events[0].get('triggering_signals')!r}"
-    )
+    assert "file_domain" in events[0].get("triggering_signals", [])
 
 
 # ---------------------------------------------------------------------------
@@ -252,21 +261,22 @@ def test_multiple_signals_emit_single_event(tmp_path: Path) -> None:
     task_dir = _build_task_dir(
         tmp_path,
         raw_input="Touches many modules across the backend.",
-        spec="We will refactor the schema across many modules.",
+        spec="We will run a schema migration and handle payment records.",
         files_expected=files,
     )
     payload = {
         "type": "feature",
-        "domains": ["backend"],
+        "domains": ["backend", "db", "security"],
         "risk_level": "low",
         "files_expected": files,
     }
 
     out = ctl._normalize_classification_payload(task_dir, payload)
 
-    # file_domain alone is sufficient to push risk_level to high.
+    # keyword_scan (payment) pushes to high; security_db_domain and
+    # domain_count fire as well. Exactly one event records all of them.
     assert out["risk_level"] == "high", (
-        f"file_domain (12 files) must upgrade low -> high; got "
+        f"payment keyword must upgrade low -> high; got "
         f"risk_level={out.get('risk_level')!r}"
     )
 
@@ -276,10 +286,8 @@ def test_multiple_signals_emit_single_event(tmp_path: Path) -> None:
         f"normalization call regardless of how many signals fire; got {len(events)}"
     )
     signals = events[0].get("triggering_signals", [])
-    # file_domain dominates with high; keyword_scan is intentionally absent
-    # because no remaining-set keyword appears in the spec.
-    assert "file_domain" in signals, (
-        f"expected 'file_domain' in triggering_signals; got {signals!r}"
+    assert "keyword_scan" in signals and "security_db_domain" in signals and "domain_count" in signals, (
+        f"expected keyword_scan, security_db_domain, domain_count in triggering_signals; got {signals!r}"
     )
 
 
@@ -447,9 +455,13 @@ def test_calibrated_risk_floor_matrix(tmp_path: Path):
     (td/"raw-input.md").write_text("add oauth")
     assert ctl._compute_risk_floor(td,["security"],{})[0]=="high"
     (td/"raw-input.md").write_text("ordinary work")
-    assert ctl._compute_risk_floor(td,["ui","backend","testing"],{})[0]=="medium"
+    # testing/docs do not count toward the three-domain floor.
+    assert ctl._compute_risk_floor(td,["ui","backend","testing"],{})[0]=="low"
+    assert ctl._compute_risk_floor(td,["ui","backend","testing","docs"],{})[0]=="low"
+    assert ctl._compute_risk_floor(td,["ui","backend","infra"],{})[0]=="medium"
+    # File count is telemetry only; it never raises the floor.
     files=[f"src/{i}.py" for i in range(10)]
     graph=json.loads((td/"execution-graph.json").read_text())
     graph["segments"][0]["files_expected"]=files
     (td/"execution-graph.json").write_text(json.dumps(graph))
-    assert ctl._compute_risk_floor(td,["backend"],{})[0]=="high"
+    assert ctl._compute_risk_floor(td,["backend"],{})[0]=="low"

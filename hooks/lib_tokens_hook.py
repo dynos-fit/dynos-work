@@ -174,6 +174,8 @@ def _parse_transcript(transcript_path: Path, host: str = "claude") -> dict:
     total_output = 0
     model = "unknown"
     agent_id = ""
+    first_ts = ""
+    last_ts = ""
 
     with open(transcript_path) as f:
         for line in f:
@@ -199,6 +201,17 @@ def _parse_transcript(transcript_path: Path, host: str = "claude") -> dict:
                 # Extract agent ID from top-level agentId field (JSONL hook format).
                 if not agent_id and entry.get("agentId"):
                     agent_id = entry["agentId"]
+
+                # Wall-clock span of the spawn: first and last entry timestamps.
+                # PreToolUse/PostToolUse for the Agent tool fire within the
+                # same second (the tool returns as soon as the spawn starts),
+                # so the transcript is the only source of real duration.
+                stamp = entry.get("timestamp")
+                if isinstance(stamp, str) and stamp:
+                    if not first_ts or stamp < first_ts:
+                        first_ts = stamp
+                    if stamp > last_ts:
+                        last_ts = stamp
 
                 # Try to extract model and usage from the "message" sub-object
                 # (JSONL hook format) or directly from the entry itself
@@ -230,7 +243,67 @@ def _parse_transcript(transcript_path: Path, host: str = "claude") -> dict:
         "output_tokens": total_output,
         "model": model,
         "agent_id": agent_id,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
     }
+
+
+def _iso_to_epoch(stamp: str) -> float | None:
+    from datetime import datetime, timezone
+    try:
+        text = stamp.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def record_spawn_stop(
+    task_dir: Path,
+    *,
+    agent_type: str,
+    agent_desc: str,
+    session_id: str,
+    result: dict,
+) -> dict | None:
+    """Append a ``stop`` row to ``spawn-log.jsonl`` with the measured duration.
+
+    The row carries ``started_at``/``ended_at`` from the transcript and
+    ``seconds`` between them. ``compute_planning_timeline`` prefers these
+    rows over the pre/post pair, which measures tool-call latency (0–1 s),
+    not how long the subagent actually ran. Returns the row, or ``None``
+    when the transcript had no timestamps.
+    """
+    first_ts = str(result.get("first_ts") or "")
+    last_ts = str(result.get("last_ts") or "")
+    begin = _iso_to_epoch(first_ts) if first_ts else None
+    end = _iso_to_epoch(last_ts) if last_ts else None
+    if begin is None or end is None:
+        return None
+    row = {
+        "phase": "stop",
+        "tool": "Agent",
+        "subagent_type": agent_type,
+        "description": (agent_desc or "")[:200],
+        "started_at": first_ts,
+        "ended_at": last_ts,
+        "seconds": max(0, int(end - begin)),
+        "agent_id": result.get("agent_id") or "",
+        "model": result.get("model") or "unknown",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "session_id": session_id or "",
+    }
+    try:
+        path = task_dir / "spawn-log.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        return None
+    return row
 
 
 def _resolve_active_host(root: Path) -> str:
@@ -397,6 +470,18 @@ def main() -> int:
         segment=segment,
         detail=args.agent_desc[:200] if args.agent_desc else None,
     )
+
+    # Record the measured spawn duration alongside the hook's pre/post rows.
+    try:
+        record_spawn_stop(
+            task_dir,
+            agent_type=args.agent_type,
+            agent_desc=args.agent_desc,
+            session_id=args.session_id,
+            result=result,
+        )
+    except Exception as exc:  # never let telemetry block the hook
+        print(f"[warn] spawn stop row not recorded: {exc}", file=sys.stderr)
 
     return 0
 
