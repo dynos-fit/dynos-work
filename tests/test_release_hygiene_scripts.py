@@ -180,3 +180,33 @@ def test_bump_release_auto_uses_title(tmp_path: Path, monkeypatch) -> None:
     assert bump_version.bump_release(
         bump="auto", base_ref=None, set_version=None, message="fix: something broken"
     ) == "7.6.1"
+
+
+@pytest.mark.parametrize(
+    ("bump", "message", "expected"),
+    [
+        ("auto", "feat: thing", "minor"),
+        ("auto", "fix: thing", "patch"),
+        ("patch", "feat: label wins", "patch"),
+        ("none", "feat: label wins", "none"),
+    ],
+)
+def test_resolve_bump(bump: str, message: str, expected: str) -> None:
+    assert bump_version.resolve_bump(bump, message) == expected
+
+
+def test_print_bump_writes_nothing(tmp_path: Path, monkeypatch, capsys) -> None:
+    package_json = tmp_path / "package.json"
+    _write_json(package_json, {"version": "7.5.24"})
+    monkeypatch.setattr(bump_version, "PACKAGE_JSON", package_json)
+    monkeypatch.setattr(bump_version, "VERSION_FILES", (package_json,))
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "--print-bump", "--message", "feat: thing"])
+    assert bump_version.main() == 0
+    assert capsys.readouterr().out.strip() == "minor"
+    assert json.loads(package_json.read_text())["version"] == "7.5.24"
+
+
+def test_print_bump_unprefixed_title_fails(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["bump_version.py", "--print-bump", "--message", "no prefix"])
+    assert bump_version.main() == 1
+    assert "no conventional-commit prefix" in capsys.readouterr().err

@@ -153,9 +153,13 @@ def _insert_changelog_entry(version: str, message: str) -> None:
     )
 
 
+def resolve_bump(bump: str, message: str) -> str:
+    """Resolve 'auto' to the bump the PR title implies; pass other types through."""
+    return bump_from_title(message) if bump == "auto" else bump
+
+
 def bump_release(*, bump: str, base_ref: str | None, set_version: str | None, message: str) -> str:
-    if bump == "auto":
-        bump = bump_from_title(message)
+    bump = resolve_bump(bump, message)
     base = _base_version(base_ref)
     version = set_version or _bumped(base, bump)
     for path in VERSION_FILES:
@@ -179,7 +183,19 @@ def main() -> int:
         default="Automated release metadata update.",
         help="PR title: the changelog bullet for the generated entry and, with --bump auto, the bump source",
     )
+    parser.add_argument(
+        "--print-bump",
+        action="store_true",
+        help="Print the resolved bump type (major/minor/patch/none) and exit without writing anything",
+    )
     args = parser.parse_args()
+    if args.print_bump:
+        try:
+            print(resolve_bump(args.bump, args.message))
+        except ValueError as exc:
+            print(f"bump-version: {exc}", file=sys.stderr)
+            return 1
+        return 0
     try:
         version = bump_release(
             bump=args.bump,

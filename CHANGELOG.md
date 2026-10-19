@@ -13,7 +13,7 @@ and this project adheres to **Semantic Versioning**.
 
 ## [7.5.25] - 2026-10-19
 ### Changed
-- Release hygiene derives the version bump from the PR title's conventional-commit prefix instead of defaulting to patch: `feat:` is minor, `fix:` / `docs:` / `chore:` / `refactor:` / `perf:` / `test:` / `ci:` / `build:` / `style:` / `revert:` are patch, and `feat!:` or `BREAKING CHANGE` is major. `release:*` labels still override. A title without a recognized prefix fails the job, and editing the title re-runs it. `scripts/bump_version.py --bump auto` is the new default.
+- Release hygiene derives the version bump from the PR title's conventional-commit prefix instead of defaulting to patch: `feat:` is minor, `fix:` / `docs:` / `chore:` / `refactor:` / `perf:` / `test:` / `ci:` / `build:` / `style:` / `revert:` are patch, and `feat!:` or `BREAKING CHANGE` is major. `release:*` labels still override. A title without a recognized prefix fails the job, and editing the title re-runs it. `scripts/bump_version.py --bump auto` is the new default, and `--print-bump` prints the resolved bump without writing. CI stamps the resolved `release:*` label on every PR (creating it when missing) so the bump is visible on the PR; `CLAUDE.md` asks authors to pass the label at `gh pr create`.
 
 ---
 

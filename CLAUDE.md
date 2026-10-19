@@ -12,6 +12,7 @@ Every PR that changes dynos-work ships as exactly one release. **The version num
 
 - reads the current version from the PR's **base ref** (not from your branch),
 - derives the bump from the PR title's conventional-commit prefix: `feat:` is a minor bump, `fix:` / `perf:` / `refactor:` / `docs:` / `chore:` / `test:` / `ci:` / `build:` / `style:` / `revert:` are patch bumps, and a `!` after the type (`feat!:`, `fix(api)!:`) or the words `BREAKING CHANGE` make it major. A `release:major` / `release:minor` / `release:patch` / `release:none` label overrides the title. A title with no recognized prefix fails the job until it is retitled (retitling re-runs it),
+- stamps the resolved `release:*` label on the PR (creating the label if the repo lacks it) so the bump is visible on the PR; after that, changing the label changes the bump,
 - writes the result to all four manifests (`package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`),
 - adds a stub `CHANGELOG.md` section only if no entry for that version exists,
 - and pushes a `chore: update release metadata` commit to your branch.
@@ -21,6 +22,7 @@ It is idempotent: re-running produces the same version, so a PR gets one version
 ### What you do
 
 - **Prefix the PR title.** `feat: …` for new behavior, `fix: …` for bug fixes, `docs:` / `chore:` / `refactor:` / `test:` / `ci:` for everything else, `feat!:` for breaking changes. The prefix decides the version, so pick it for what the change means to a plugin user, not for its size.
+- **Pass the release label at creation.** Open PRs with `gh pr create --label release:<patch|minor|major|none>` matching the title's prefix. CI stamps the label anyway when it is missing, but passing it up front makes the first run deterministic and the bump visible before CI finishes.
 - **Write the `CHANGELOG.md` entry.** CI's stub is a fallback, not a substitute — it only records the PR title. Describe the behavior change, fix, or maintenance work concretely.
 - **Leave the four manifest version fields alone.** Hand-editing them is overwritten by CI, and the bot's push to your branch will reject your next `git push` until you rebase.
 - **One entry per PR, not per change.** If a PR bundles several logical changes, they still ship under one version. Writing an entry per change produces orphan entries for versions no manifest ever carried.
