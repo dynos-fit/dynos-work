@@ -327,6 +327,10 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
                 fmt_data["n_auditors"] = len(payload["auditors"])
             if "handlers_run" in payload:
                 fmt_data["n_handlers"] = len(payload["handlers_run"])
+            # Token counts are recorded by the SubagentStop hook, not by the
+            # receipt writer; a literal ``tokens=0`` reads as a broken ledger.
+            if fmt_data.get("tokens_used") in (0, None) and "tokens_used" in template:
+                fmt_data["tokens_used"] = "hook-recorded"
             msg = template.format(**{k: v for k, v in fmt_data.items() if isinstance(v, (str, int, float, bool, list))})
             append_execution_log(task_dir, msg)
         except (KeyError, TypeError):

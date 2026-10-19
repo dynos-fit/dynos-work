@@ -113,9 +113,9 @@ Run the deterministic plan-audit controller first:
 
 Interpret the JSON result:
 
-- `status == "replan_required"`: deterministic gap analysis found errors. Follow **On validation failure** before any LLM audit.
-- `status == "passed"` with `mode == "deterministic_only"`: low/medium-risk task. No LLM plan-audit is needed.
-- `status == "llm_audit_required"`: high/critical-risk task. Spawn `spec-completion-auditor`, then finalize with:
+- `status == "replan_required"`: deterministic gap analysis found errors. Follow **On validation failure**.
+- `status == "passed"` with `mode == "deterministic_only"`: the deterministic audit is authoritative at every risk level. The command wrote the hash-bound `plan-audit-check` receipt itself (`receipt_cached: true` means a fresh receipt already existed and nothing was redone). Do NOT spawn an auditor.
+- `status == "llm_audit_required"`: only appears when the project opted in through `policy.plan_audit_llm`. Spawn `spec-completion-auditor`, then finalize with:
 
   ```text
   "$DYNOS" ctl run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}

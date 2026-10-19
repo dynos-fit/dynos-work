@@ -188,28 +188,148 @@ REQUIRED_PLAN_HEADINGS: list[str] = [
     "Open Questions",
 ]
 
-# Domain sets that trigger conditional plan sections.
-_API_CONTRACT_DOMAINS: set[str] = {"backend", "ui", "security"}
-_DATA_MODEL_DOMAINS: set[str] = {"db"}
+# Domains that describe supporting work rather than a risk surface. They
+# never count toward risk floors, planning-path selection, or conditional
+# plan sections: nearly every task touches tests and docs, and counting
+# them pushed 20 of 22 observed tasks onto the staged high-risk path.
+NON_RISK_DOMAINS: frozenset[str] = frozenset({"testing", "docs"})
+
+# Path fragments that mark an execution-graph file as an API surface or a
+# persisted schema. Conditional plan sections are required only when the
+# plan actually touches one of these, not merely because a domain is listed.
+_API_SURFACE_MARKERS: tuple[str, ...] = (
+    "/routes/", "/route/", "/routers/", "/router/", "/api/", "/apis/",
+    "/controllers/", "/controller/", "/endpoints/", "/endpoint/",
+    "/handlers/", "/views/", "/graphql/", "/rpc/", "/grpc/",
+)
+_API_SURFACE_BASENAMES: tuple[str, ...] = (
+    "routes.", "router.", "urls.", "api.", "endpoints.", "controller.",
+    "controllers.", "handlers.", "views.", "server.", "app.",
+)
+_DATA_SURFACE_MARKERS: tuple[str, ...] = (
+    "/migrations/", "/migration/", "/models/", "/model/", "/schema/",
+    "/schemas/", "/db/", "/database/", "/prisma/", "/alembic/", "/entities/",
+)
+_DATA_SURFACE_BASENAMES: tuple[str, ...] = (
+    "schema.", "models.", "model.", "migration.", "migrations.",
+)
 
 
 _HIGH_RISK_LEVELS: set[str] = {"high", "critical"}
 
+# Artifact size ceilings. Observed specs ran 20–150 acceptance criteria and
+# plans up to 48k words from requests of a few hundred words; a single
+# planner spawn spent 58 minutes writing one 94-criterion spec that a human
+# then approved in three minutes. Above these ceilings the task is too big
+# for one approval round and must be split. Policy keys of the same name
+# (``max_acceptance_criteria``, ``max_spec_words``, ``max_plan_words``)
+# override the defaults per project.
+MAX_ACCEPTANCE_CRITERIA: int = 20
+MAX_SPEC_WORDS: int = 2500
+MAX_PLAN_WORDS: int = 4000
 
-def conditional_plan_headings(domains: Iterable[str], risk_level: str = "medium") -> list[str]:
-    """Return additional required plan headings based on classification.
 
-    - ``API Contracts`` is required when domains include backend, ui, or security.
-    - ``Data Model`` is required when domains include db.
-    - ``Architecture Decisions`` is required when risk_level is high or critical.
+def artifact_ceilings(policy: dict | None = None) -> dict[str, int]:
+    """Resolve the three artifact ceilings, honouring positive policy overrides."""
+    policy = policy if isinstance(policy, dict) else {}
+    out = {
+        "max_acceptance_criteria": MAX_ACCEPTANCE_CRITERIA,
+        "max_spec_words": MAX_SPEC_WORDS,
+        "max_plan_words": MAX_PLAN_WORDS,
+    }
+    for key in out:
+        value = policy.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value > 0:
+            out[key] = value
+    return out
+
+
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+def risk_bearing_domains(domains: object) -> list[str]:
+    """Return the classification domains that carry risk, in order.
+
+    Drops ``NON_RISK_DOMAINS`` and anything that is not a non-empty string.
+    """
+    if not isinstance(domains, (list, tuple, set, frozenset)):
+        return []
+    out: list[str] = []
+    for item in domains:
+        if isinstance(item, str) and item.strip() and item not in NON_RISK_DOMAINS and item not in out:
+            out.append(item)
+    return out
+
+
+def _touches_surface(files: Iterable[str], markers: tuple[str, ...], basenames: tuple[str, ...]) -> bool:
+    for raw in files:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = "/" + raw.strip().replace("\\", "/").lstrip("./").lower()
+        if any(marker in path for marker in markers):
+            return True
+        base = path.rsplit("/", 1)[-1]
+        if any(base.startswith(prefix) for prefix in basenames):
+            return True
+    return False
+
+
+def plan_touches_api_surface(files: Iterable[str]) -> bool:
+    """True when any planned file looks like a route/controller/API module."""
+    return _touches_surface(files, _API_SURFACE_MARKERS, _API_SURFACE_BASENAMES)
+
+
+def plan_touches_data_surface(files: Iterable[str]) -> bool:
+    """True when any planned file looks like a migration/model/schema module."""
+    return _touches_surface(files, _DATA_SURFACE_MARKERS, _DATA_SURFACE_BASENAMES)
+
+
+def graph_files_expected(task_dir: Path | None) -> list[str]:
+    """Flatten ``files_expected`` across every segment of execution-graph.json."""
+    if task_dir is None:
+        return []
+    try:
+        graph = load_json(Path(task_dir) / "execution-graph.json")
+    except Exception:
+        return []
+    files: list[str] = []
+    for seg in graph.get("segments", []) if isinstance(graph, dict) else []:
+        if not isinstance(seg, dict):
+            continue
+        for item in seg.get("files_expected", []) or []:
+            if isinstance(item, str):
+                files.append(item)
+    return files
+
+
+def conditional_plan_headings(
+    domains: Iterable[str],
+    risk_level: str = "medium",
+    files: Iterable[str] | None = None,
+) -> list[str]:
+    """Return additional required plan headings for this task.
+
+    - ``API Contracts`` is required only when a planned file (``files``,
+      normally the execution graph's ``files_expected``) looks like an API
+      surface: routes, controllers, handlers, endpoints.
+    - ``Data Model`` is required only when a planned file looks like a
+      migration, model, or schema module.
+    - ``Architecture Decisions`` is required when risk_level is critical.
+
+    ``domains`` is accepted for compatibility and no longer forces either
+    table: domain membership produced ``N/A`` boilerplate sections in every
+    backend/ui/db plan without making the gap analysis any stronger.
     """
     extra: list[str] = []
-    domain_set = set(domains) if not isinstance(domains, set) else domains
-    if domain_set & _API_CONTRACT_DOMAINS:
+    planned = list(files) if files is not None else []
+    if plan_touches_api_surface(planned):
         extra.append("API Contracts")
-    if domain_set & _DATA_MODEL_DOMAINS:
+    if plan_touches_data_surface(planned):
         extra.append("Data Model")
-    if risk_level in _HIGH_RISK_LEVELS:
+    if risk_level == "critical":
         extra.append("Architecture Decisions")
     return extra
 
@@ -609,12 +729,86 @@ def compute_planning_path(manifest: dict, task_dir: Path | None = None) -> str:
     classification = manifest.get("classification")
     if not isinstance(classification, dict):
         return "staged"
-    domains = classification.get("domains", [])
-    if (classification.get("risk_level") in {"low", "medium"}
-            and isinstance(domains, list) and 1 <= len(domains) <= 2
-            and classification.get("type") != "migration"):
-        return "combined"
-    return "staged"
+    return planning_path_for(
+        str(classification.get("risk_level") or ""),
+        classification.get("domains", []),
+        str(classification.get("type") or ""),
+    )
+
+
+# Domains that, together with high risk, still earn a separate spec review
+# before planning: persisted schema and trust-boundary changes.
+_STAGED_HIGH_RISK_DOMAINS: frozenset[str] = frozenset({"db", "security"})
+
+
+def planning_path_for(risk_level: str, domains: object, task_type: str) -> str:
+    """Pure planning-path rule.
+
+    ``combined`` (one Spec + Plan spawn, one joint review) is the default.
+    ``staged`` is reserved for the cases where a human should approve the
+    spec before any plan exists: migrations, critical risk, and high risk
+    that touches persisted schema or a trust boundary. Domain count and
+    the ``testing``/``docs`` domains no longer influence the choice —
+    observed tasks carried 3–9 domains and 0 of 22 reached the combined
+    path under the old ``risk in {low, medium} and len(domains) <= 2`` rule.
+    """
+    if task_type == "migration":
+        return "staged"
+    if risk_level == "critical":
+        return "staged"
+    if not isinstance(domains, list) or not domains:
+        # Malformed classification: keep the separate spec review.
+        return "staged"
+    bearing = set(risk_bearing_domains(domains))
+    if risk_level == "high" and bearing & _STAGED_HIGH_RISK_DOMAINS:
+        return "staged"
+    return "combined"
+
+
+def tdd_required_default(risk_level: str, policy: dict | None = None) -> bool:
+    """Default for ``classification.tdd_required`` when the planner left it unset.
+
+    Opt-in: ``False`` unless the project policy lists the risk level under
+    ``tdd_default_risk_levels`` (for example ``["critical"]``). The old
+    rule derived ``True`` for every high/critical task, which added a
+    testing-executor spawn and a fourth approval gate before execution on
+    20 of 22 observed tasks; tests are still written by ``testing-executor``
+    during execute when the flag is false.
+    """
+    policy = policy if isinstance(policy, dict) else {}
+    levels = policy.get("tdd_default_risk_levels", [])
+    if not isinstance(levels, list):
+        return False
+    return risk_level in {str(level) for level in levels}
+
+
+def arch_design_required(risk_level: str, policy: dict | None = None) -> bool:
+    """Whether the Architectural Design Doc planner phase runs for this task.
+
+    Default: only ``critical``. ``policy.arch_design_min_risk`` may be
+    ``"never"``, ``"critical"`` (default), ``"high"``, or ``"always"``.
+    """
+    policy = policy if isinstance(policy, dict) else {}
+    setting = str(policy.get("arch_design_min_risk", "critical") or "critical").lower()
+    if setting == "never":
+        return False
+    if setting == "always":
+        return True
+    order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    threshold = order.get(setting, 3)
+    return order.get(risk_level, 0) >= threshold
+
+
+def load_project_policy(task_dir: Path | None) -> dict:
+    """Best-effort read of the persistent project ``policy.json``."""
+    if task_dir is None:
+        return {}
+    try:
+        from lib_core import _persistent_project_dir
+        loaded = load_json(_persistent_project_dir(Path(task_dir).parent.parent) / "policy.json")
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
 
 
 def compute_planning_mode(risk_level: str, subsystems: object, policy: dict | None = None) -> str:
@@ -640,27 +834,31 @@ def apply_planning_flags(task_dir: Path) -> bool:
     fast-track-eligible when its ``classification.risk_level`` is ``"low"`` AND
     its ``classification.domains`` list contains exactly one element.
 
-    Side-effect — TDD auto-derivation (AC 12):
+    Side-effect — TDD default (AC 12, revised):
       When ``manifest.classification.tdd_required`` is absent (key not present
-      in the dict), derive it as ``risk_level in {"high", "critical"}`` and
-      persist it alongside ``fast_track`` in the same atomic write. Explicit
-      values (``True`` or ``False``) are preserved and never overwritten.
+      in the dict), derive it with ``tdd_required_default`` (opt-in through
+      ``policy.tdd_default_risk_levels``; ``False`` otherwise) and persist it
+      alongside ``fast_track`` in the same atomic write. Explicit values
+      (``True`` or ``False``) are preserved and never overwritten.
+
+    Side-effect — ``arch_design_required`` is persisted on the manifest so
+    the start skill reads one flag instead of re-deriving it from risk.
 
     Returns the same boolean that was written to the manifest: ``True`` if
     fast-track-eligible, ``False`` otherwise.
     """
     manifest_path = task_dir / "manifest.json"
     manifest = load_json(manifest_path)
+    policy = load_project_policy(task_dir)
     fast = compute_fast_track(manifest)
     manifest["fast_track"] = fast
     manifest["planning_path"] = compute_planning_path(manifest, task_dir)
 
-    # AC 12: auto-derive tdd_required only when the key is absent from
-    # classification. Any explicit True/False value set upstream is preserved.
     classification = manifest.get("classification")
+    risk_level = str(classification.get("risk_level") or "") if isinstance(classification, dict) else ""
     if isinstance(classification, dict) and "tdd_required" not in classification:
-        risk_level = classification.get("risk_level")
-        classification["tdd_required"] = risk_level in _HIGH_RISK_LEVELS
+        classification["tdd_required"] = tdd_required_default(risk_level, policy)
+    manifest["arch_design_required"] = arch_design_required(risk_level, policy)
 
     write_ctl_json(task_dir, manifest_path, manifest)
     return fast
@@ -733,12 +931,26 @@ def validate_task_artifacts(
             errors.append(f"spec missing heading: {heading}")
 
     criteria_numbers = parse_acceptance_criteria(spec_text)
+    ceilings = artifact_ceilings(load_project_policy(task_dir))
     if not criteria_numbers:
         errors.append("spec has no acceptance criteria")
     else:
         expected = list(range(1, len(criteria_numbers) + 1))
         if criteria_numbers != expected:
             errors.append(f"acceptance criteria numbering must be contiguous from 1: got {criteria_numbers}")
+        if len(criteria_numbers) > ceilings["max_acceptance_criteria"]:
+            errors.append(
+                f"spec.md has {len(criteria_numbers)} acceptance criteria; ceiling is "
+                f"{ceilings['max_acceptance_criteria']} — split the task or raise "
+                "policy max_acceptance_criteria"
+            )
+    spec_words = _word_count(spec_text)
+    if spec_words > ceilings["max_spec_words"]:
+        errors.append(
+            f"spec.md is {spec_words} words; ceiling is {ceilings['max_spec_words']} — "
+            "cut restated context and keep only falsifiable requirements, or raise "
+            "policy max_spec_words"
+        )
 
     # AC 15: if a spec-validated receipt exists, its recorded spec_sha256 must
     # match the current sha256(spec.md). Hash-drift is a validation error.
@@ -765,13 +977,21 @@ def validate_task_artifacts(
         classification = manifest.get("classification") or {}
         domains = classification.get("domains", [])
         risk_level = classification.get("risk_level", "medium")
-        all_required = REQUIRED_PLAN_HEADINGS + conditional_plan_headings(domains, risk_level)
+        all_required = REQUIRED_PLAN_HEADINGS + conditional_plan_headings(
+            domains, risk_level, files=graph_files_expected(task_dir)
+        )
         # Hoisted out of the inner loop — collect_headings is a regex scan
         # over plan_text and was being re-executed on every required heading.
         plan_headings = collect_headings(plan_text)
         for heading in all_required:
             if heading not in plan_headings:
                 errors.append(f"plan missing heading: {heading}")
+        plan_words = _word_count(plan_text)
+        if plan_words > ceilings["max_plan_words"]:
+            errors.append(
+                f"plan.md is {plan_words} words; ceiling is {ceilings['max_plan_words']} — "
+                "drop N/A tables and restated spec content, or raise policy max_plan_words"
+            )
         # Section-level exemption (D7-4): every backtick path listed under a
         # "Files to be created" heading (any level) is exempt everywhere, in
         # addition to the per-line "to-be-created" marker.
@@ -1203,46 +1423,116 @@ def _timeline_time(value: object):
 
 
 def compute_planning_timeline(task_dir: Path) -> dict:
-    """Compute pre-execution time buckets from hook and ctl telemetry."""
-    from datetime import timezone
+    """Compute pre-execution time buckets from hook and ctl telemetry.
+
+    Spawn durations come from ``stop`` rows in ``spawn-log.jsonl`` (written
+    by the SubagentStop hook from transcript timestamps). The older
+    ``pre``/``post`` pair measures only the Agent tool call, which returns
+    within a second of the spawn starting; such pairs are reported with
+    ``seconds: None`` and ``source: "unmeasured"`` and counted in
+    ``unmeasured_spawns`` instead of silently contributing zero. ``errors``
+    names missing inputs so a caller never mistakes a degraded result for a
+    fast task.
+    """
     td = Path(task_dir)
-    empty = {
+    out: dict = {
         "pre_execution_seconds": None, "planner_spawns": [], "model_seconds": 0,
         "approval_waits": [], "approval_seconds": 0, "idle_gaps": [],
         "idle_seconds": 0, "orchestrator_seconds": 0, "planner_respawns": 0,
-        "human_rounds": 0,
+        "human_rounds": 0, "unmeasured_spawns": 0, "errors": [],
     }
+    errors: list[str] = out["errors"]
+    start = None
     try:
         manifest = load_json(td / "manifest.json")
         start = _timeline_time(manifest.get("created_at")) if isinstance(manifest, dict) else None
     except Exception:
-        start = None
+        errors.append("manifest.json missing or unreadable")
+    if start is None and not errors:
+        errors.append("manifest.created_at missing")
     transitions = []
-    for line in (td / "stage-transitions.jsonl").read_text().splitlines() if (td / "stage-transitions.jsonl").exists() else []:
-        try:
-            item = json.loads(line); stamp = _timeline_time(item.get("at"))
-            if stamp: transitions.append((stamp, item))
-        except Exception: pass
+    transitions_path = td / "stage-transitions.jsonl"
+    if transitions_path.exists():
+        for line in transitions_path.read_text().splitlines():
+            try:
+                item = json.loads(line); stamp = _timeline_time(item.get("at"))
+                if stamp: transitions.append((stamp, item))
+            except Exception: pass
+    else:
+        errors.append("stage-transitions.jsonl missing; pre-execution window unknown")
     pre_end = next((stamp for stamp, item in transitions if item.get("to") == "PRE_EXECUTION_SNAPSHOT"), None)
+    if transitions_path.exists() and pre_end is None:
+        errors.append("no PRE_EXECUTION_SNAPSHOT transition recorded; task has not finished planning")
     if start and pre_end:
-        empty["pre_execution_seconds"] = max(0, int((pre_end-start).total_seconds()))
+        out["pre_execution_seconds"] = max(0, int((pre_end-start).total_seconds()))
+    tracked = ("planning", "spec-completion-auditor", "testing-executor")
+    rows: list[dict] = []
+    spawn_log = td / "spawn-log.jsonl"
+    if spawn_log.exists():
+        for line in spawn_log.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict) and str(row.get("subagent_type", "")).endswith(tracked):
+                rows.append(row)
+    else:
+        errors.append("spawn-log.jsonl missing; no spawn durations")
+    spawns: list[dict] = []
+    # Preferred source: stop rows with measured durations.
+    stop_rows = [r for r in rows if r.get("phase") == "stop"]
+    consumed_pre: set[int] = set()
+    pre_rows = [(i, r) for i, r in enumerate(rows) if r.get("phase") == "pre"]
+    for row in stop_rows:
+        role = str(row.get("subagent_type", ""))
+        begin = _timeline_time(row.get("started_at")); finish = _timeline_time(row.get("ended_at"))
+        if not begin or not finish:
+            continue
+        if pre_end and begin > pre_end:
+            continue
+        seconds = row.get("seconds")
+        if not isinstance(seconds, int):
+            seconds = max(0, int((finish-begin).total_seconds()))
+        # Consume the nearest earlier pre row for the same role so the
+        # fallback pairing below does not double-count the spawn.
+        best = None
+        for i, pre in pre_rows:
+            if i in consumed_pre or str(pre.get("subagent_type", "")) != role:
+                continue
+            stamp = _timeline_time(pre.get("timestamp"))
+            if stamp and stamp <= finish and (best is None or stamp > best[1]):
+                best = (i, stamp)
+        if best is not None:
+            consumed_pre.add(best[0])
+        spawns.append({"phase_guess": role.split(":")[-1], "subagent_type": role,
+                       "start": begin.isoformat(), "end": finish.isoformat(),
+                       "seconds": seconds, "source": "transcript"})
+    # Fallback: pre/post pairs for spawns without a stop row.
     paired: dict[str, list] = {}
-    spawns = []
-    for line in (td / "spawn-log.jsonl").read_text().splitlines() if (td / "spawn-log.jsonl").exists() else []:
-        try:
-            row=json.loads(line); role=str(row.get("subagent_type", ""))
-            if not role.endswith(("planning", "spec-completion-auditor", "testing-executor")): continue
-            stamp=_timeline_time(row.get("timestamp"))
-            if not stamp or (pre_end and stamp > pre_end): continue
-            if row.get("phase")=="pre": paired.setdefault(role, []).append((stamp,row))
-            elif row.get("phase")=="post" and paired.get(role):
-                begin,_=paired[role].pop(0); seconds=max(0,int((stamp-begin).total_seconds()))
-                spawns.append({"phase_guess": role.split(":")[-1], "subagent_type":role,
-                    "start":begin.isoformat(),"end":stamp.isoformat(),"seconds":seconds})
-        except Exception: continue
+    for i, row in enumerate(rows):
+        role = str(row.get("subagent_type", ""))
+        stamp = _timeline_time(row.get("timestamp"))
+        if not stamp or (pre_end and stamp > pre_end):
+            continue
+        if row.get("phase") == "pre" and i not in consumed_pre:
+            paired.setdefault(role, []).append(stamp)
+        elif row.get("phase") == "post" and paired.get(role):
+            begin = paired[role].pop(0)
+            seconds = max(0, int((stamp-begin).total_seconds()))
+            measured = seconds > 1
+            spawns.append({"phase_guess": role.split(":")[-1], "subagent_type": role,
+                           "start": begin.isoformat(), "end": stamp.isoformat(),
+                           "seconds": seconds if measured else None,
+                           "source": "tool-return" if measured else "unmeasured"})
     spawns.sort(key=lambda row: row["start"])
-    empty["planner_spawns"]=spawns
-    empty["model_seconds"]=sum(row["seconds"] for row in spawns)
+    out["planner_spawns"] = spawns
+    out["unmeasured_spawns"] = sum(1 for row in spawns if row["seconds"] is None)
+    out["model_seconds"] = sum(row["seconds"] for row in spawns if isinstance(row["seconds"], int))
+    if out["unmeasured_spawns"]:
+        errors.append(
+            f"{out['unmeasured_spawns']} spawn(s) have no measured duration (pre/post rows only); "
+            "model_seconds is a lower bound"
+        )
     approval_rows=[]
     for receipt in (td/"receipts").glob("*-approval-*.json") if (td/"receipts").exists() else []:
         try:
@@ -1256,8 +1546,8 @@ def compute_planning_timeline(task_dir: Path) -> dict:
         seconds=max(0,int((approval-requested).total_seconds())) if requested and approval else 0
         waits.append({"stage":stage,"requested_at":requested.isoformat() if requested else None,
                       "granted_at":approval.isoformat() if approval else None,"seconds":seconds})
-    empty["approval_waits"]=waits
-    empty["approval_seconds"]=sum(w["seconds"] for w in waits)
+    out["approval_waits"]=waits
+    out["approval_seconds"]=sum(w["seconds"] for w in waits)
     receipts_at=[stamp for stamp,_ in approval_rows]
     points=sorted([stamp for stamp,_ in transitions]+receipts_at+[ _timeline_time(s[k]) for s in spawns for k in ("start","end") if _timeline_time(s[k])])
     if start: points=[start]+points
@@ -1267,18 +1557,18 @@ def compute_planning_timeline(task_dir: Path) -> dict:
     for left,right in zip(points,points[1:]):
         seconds=int((right-left).total_seconds())
         if seconds>1800: idle.append({"start":left.isoformat(),"end":right.isoformat(),"seconds":seconds})
-    empty["idle_gaps"]=idle; empty["idle_seconds"]=sum(x["seconds"] for x in idle)
-    if empty["pre_execution_seconds"] is not None:
-        empty["orchestrator_seconds"]=max(0,empty["pre_execution_seconds"]-empty["model_seconds"]-empty["approval_seconds"]-empty["idle_seconds"])
+    out["idle_gaps"]=idle; out["idle_seconds"]=sum(x["seconds"] for x in idle)
+    if out["pre_execution_seconds"] is not None:
+        out["orchestrator_seconds"]=max(0,out["pre_execution_seconds"]-out["model_seconds"]-out["approval_seconds"]-out["idle_seconds"])
     phase_count=len({row["phase_guess"] for row in spawns})
-    empty["planner_respawns"]=max(0,len(spawns)-phase_count)
+    out["planner_respawns"]=max(0,len(spawns)-phase_count)
     human_markers=0
     log=td/"execution-log.md"
     if log.exists():
         try: human_markers=sum(1 for line in log.read_text().splitlines() if "[HUMAN]" in line or "AskUserQuestion" in line)
         except OSError: pass
-    empty["human_rounds"]=len(approval_rows)+human_markers
-    return empty
+    out["human_rounds"]=len(approval_rows)+human_markers
+    return out
 
 
 def compute_pipeline_budget(task_dir: Path) -> dict:

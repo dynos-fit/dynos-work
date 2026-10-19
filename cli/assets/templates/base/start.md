@@ -285,15 +285,20 @@ Present `plan.md` to the user and ask for approval.
 
 **Normal path:**
 
-1. Spawn `spec-completion-auditor` to verify that `plan.md` and `execution-graph.json` cover all acceptance criteria in `spec.md`.
-2. If the auditor finds gaps, route back to planning, repair the gaps, and rerun both deterministic artifact validation and the plan audit.
+1. Run the deterministic plan audit. It performs gap analysis, signature and intermediate-state checks, and writes the hash-bound `plan-audit-check` receipt itself at every risk level:
+
+   ```text
+   "$DYNOS" ctl run-plan-audit .dynos/task-{id}
+   ```
+
+2. `status == "replan_required"` means route back to planning, repair, and rerun deterministic artifact validation. `status == "passed"` means proceed; do NOT spawn an auditor. `status == "llm_audit_required"` appears only when the project opted in through `policy.plan_audit_llm`; then spawn `spec-completion-auditor` and finalize with `run-plan-audit --report-path ...`.
 3. Create a git branch safety net: `dynos/task-{id}-snapshot`.
 
 ---
 
 ## Step 8 — TDD-First Gate
 
-This gate always runs. There is no skip path.
+This gate runs only when `manifest.classification.tdd_required` is `true`. The flag is opt-in (user request or `policy.tdd_default_risk_levels`); when it is `false`, skip to Step 9 and `testing-executor` writes tests during execute.
 
 1. Spawn `testing-executor` with instruction:
 

@@ -611,10 +611,18 @@ def _compute_risk_floor(
             fe = []
         files_expected = [str(f).strip() for f in fe if isinstance(f, str) and str(f).strip()]
 
-    high_risk_domain_hits = [d for d in domains if d in _FLOOR_HIGH_DOMAINS]
-    medium_domain_hits = [d for d in domains if d in _FLOOR_MEDIUM_DOMAINS]
+    # Only risk-bearing domains participate in the floor. ``testing`` and
+    # ``docs`` appear on nearly every task and used to push the domain
+    # count past three, upgrading routine work to medium or high.
+    from lib_validate import risk_bearing_domains
+    bearing_domains = risk_bearing_domains(domains)
+    high_risk_domain_hits = [d for d in bearing_domains if d in _FLOOR_HIGH_DOMAINS]
+    medium_domain_hits = [d for d in bearing_domains if d in _FLOOR_MEDIUM_DOMAINS]
     file_domain_floor: str | None = None
-    if len(files_expected) >= 10 or high_risk_domain_hits:
+    # File count is deliberately NOT a floor signal: it measures breadth,
+    # not blast radius, and a 12-file feature with tests is not high risk.
+    # The count stays in raw_matches for telemetry.
+    if high_risk_domain_hits:
         file_domain_floor = "high"
         triggering_signals.append("file_domain")
         raw_matches["file_domain"] = {
@@ -658,10 +666,10 @@ def _compute_risk_floor(
         file_domain_floor = max((file_domain_floor, domain_floor), key=lambda lvl: _RISK_LEVEL_ORDER.get(lvl or "low", 0))
         triggering_signals.append("security_db_domain")
         raw_matches["security_db_domain"] = {"domains": medium_domain_hits}
-    if len(domains) >= 3:
+    if len(bearing_domains) >= 3:
         file_domain_floor = max((file_domain_floor, "medium"), key=lambda lvl: _RISK_LEVEL_ORDER.get(lvl or "low", 0))
         triggering_signals.append("domain_count")
-        raw_matches["domain_count"] = {"domains_count": len(domains)}
+        raw_matches["domain_count"] = {"domains_count": len(bearing_domains), "domains": list(bearing_domains)}
 
     # --- Signal (c): token count on spec.md ---
     token_count_floor: str | None = None
@@ -1088,6 +1096,38 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+
+    # Amendment window. Each post-approval amendment invalidates the gate
+    # hash, forcing re-validation and a fresh human approval; observed tasks
+    # carried up to 16 amendment receipts and 15 approval receipts before
+    # execution. Default: one amendment per artifact. Raise with policy
+    # ``max_amendments_per_artifact`` when a project genuinely needs more.
+    prior_amendments = canonical_data.get("amendments", []) if isinstance(canonical_data, dict) else []
+    prior_count = len(prior_amendments) if isinstance(prior_amendments, list) else 0
+    try:
+        from lib_validate import load_project_policy
+        _limit_raw = load_project_policy(task_dir).get("max_amendments_per_artifact", 1)
+        amend_limit = int(_limit_raw) if isinstance(_limit_raw, int) and not isinstance(_limit_raw, bool) and _limit_raw > 0 else 1
+    except Exception:
+        amend_limit = 1
+    if prior_count >= amend_limit:
+        try:
+            from lib_log import log_event
+            log_event(
+                task_dir.parent.parent, "amendment_window_exhausted",
+                task=task_dir.name, artifact=artifact_name,
+                prior_amendments=prior_count, limit=amend_limit,
+            )
+        except Exception:
+            pass
+        print(
+            f"amend-artifact: amendment window exhausted for {artifact_name} "
+            f"({prior_count}/{amend_limit} used). Repeated post-approval edits are the "
+            "churn this gate exists to stop: fold the change into a new task, or raise "
+            "policy max_amendments_per_artifact for this project.",
+            file=sys.stderr,
+        )
+        return 1
 
     amended_at = now_iso()
 
@@ -2218,20 +2258,126 @@ def cmd_next_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def compute_task_churn(task_dir: Path) -> dict:
+    """Count the pre-execution churn signals operators could not see.
+
+    Reads receipts and events.jsonl (never the model transcripts). The
+    ``warnings`` list names anything above the expected baseline: more than
+    three approval receipts, any amendment, any gate refusal, more than ten
+    write-policy denials, or any planner bash denial.
+    """
+    receipts = task_dir / "receipts"
+    amend = sorted(p.name for p in receipts.glob("amend-*.json")) if receipts.is_dir() else []
+    approvals = sorted(p.name for p in receipts.glob("*-approval-*.json")) if receipts.is_dir() else []
+    counts = {
+        "amendments": len(amend),
+        "approval_receipts": 0,
+        "gate_refused": 0,
+        "write_policy_denied": 0,
+        "planner_bash_denied": 0,
+        "read_policy_denied": 0,
+        "stage_transitions": 0,
+        "planner_spawns": 0,
+    }
+    denied_by_role: dict[str, int] = {}
+    events_path = task_dir / "events.jsonl"
+    if events_path.is_file():
+        for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            name = event.get("event")
+            if name == "receipt_written" and "approval" in str(event.get("step", "")):
+                counts["approval_receipts"] += 1
+            elif name == "gate_refused":
+                counts["gate_refused"] += 1
+            elif name == "write_policy_denied":
+                counts["write_policy_denied"] += 1
+                role = str(event.get("role") or "unknown")
+                denied_by_role[role] = denied_by_role.get(role, 0) + 1
+            elif name == "planner_bash_denied":
+                counts["planner_bash_denied"] += 1
+            elif name == "read_policy_denied" or (name == "pre_tool_use_read_policy" and event.get("allowed") is False):
+                counts["read_policy_denied"] += 1
+            elif name == "stage_transition":
+                counts["stage_transitions"] += 1
+    spawn_log = task_dir / "spawn-log.jsonl"
+    if spawn_log.is_file():
+        for line in spawn_log.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and row.get("phase") == "pre" and str(row.get("subagent_type", "")).endswith("planning"):
+                counts["planner_spawns"] += 1
+    warnings: list[str] = []
+    if counts["amendments"]:
+        warnings.append(f"{counts['amendments']} post-approval amendment(s): {', '.join(amend)}")
+    if counts["approval_receipts"] > 3:
+        warnings.append(f"{counts['approval_receipts']} approval receipts (3 expected): re-approval loop")
+    if counts["gate_refused"]:
+        warnings.append(f"{counts['gate_refused']} gate refusal(s): orchestrator retried an illegal transition")
+    if counts["write_policy_denied"] > 10:
+        warnings.append(f"{counts['write_policy_denied']} write-policy denials (by role: {denied_by_role})")
+    if counts["planner_bash_denied"]:
+        warnings.append(f"{counts['planner_bash_denied']} planner attempt(s) to run validators or stage commands")
+    if counts["planner_spawns"] > 4:
+        warnings.append(f"{counts['planner_spawns']} planner spawns (combined path needs 2, staged 3)")
+    return {
+        "task_dir": str(task_dir),
+        "counts": counts,
+        "write_denied_by_role": denied_by_role,
+        "amendment_receipts": amend,
+        "approval_receipt_files": approvals,
+        "warnings": warnings,
+    }
+
+
+def cmd_task_churn(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    if not (task_dir / "manifest.json").is_file():
+        print(f"task-churn: not a task directory (no manifest.json): {task_dir}", file=sys.stderr)
+        return 1
+    data = compute_task_churn(task_dir)
+    if getattr(args, "json", False):
+        print(json.dumps(data, indent=2))
+        return 0
+    counts = data["counts"]
+    print(f"Churn: {task_dir.name}")
+    for key in ("planner_spawns", "approval_receipts", "amendments", "gate_refused", "write_policy_denied", "planner_bash_denied", "read_policy_denied"):
+        print(f"  {key:<22} {counts[key]}")
+    if data["warnings"]:
+        print("Warnings:")
+        for item in data["warnings"]:
+            print(f"  - {item}")
+    else:
+        print("Warnings: none")
+    return 0
+
+
 def cmd_timeline(args: argparse.Namespace) -> int:
     from lib_validate import compute_planning_timeline
     data = compute_planning_timeline(Path(args.task_dir).resolve())
+    errors = data.get("errors") or []
     if args.json:
         print(json.dumps(data, indent=2))
-        return 0
+        return 1 if errors else 0
+    if errors:
+        for item in errors:
+            print(f"timeline: {item}", file=sys.stderr)
     print(f"Pre-execution: {data['pre_execution_seconds'] if data['pre_execution_seconds'] is not None else 'n/a'} s")
     for label in ("model_seconds", "approval_seconds", "orchestrator_seconds", "idle_seconds"):
         print(f"{label.replace('_', ' ').title():<22} {data[label]:>8} s")
-    print(f"Planner spawns: {len(data['planner_spawns'])} (respawns {data['planner_respawns']})")
-    print(f"{'PHASE':<32} {'SECONDS':>8}  {'START':<20}  END")
+    unmeasured = data.get("unmeasured_spawns", 0)
+    print(f"Planner spawns: {len(data['planner_spawns'])} (respawns {data['planner_respawns']}, unmeasured {unmeasured})")
+    print(f"{'PHASE':<32} {'SECONDS':>8}  {'START':<20}  {'END':<20}  SOURCE")
     for spawn in data["planner_spawns"]:
-        print(f"{spawn['phase_guess']:<32} {spawn['seconds']:>8}  {spawn['start'][:19]:<20}  {spawn['end'][:19]}")
-    return 0
+        seconds = spawn["seconds"] if spawn["seconds"] is not None else "n/a"
+        print(f"{spawn['phase_guess']:<32} {str(seconds):>8}  {spawn['start'][:19]:<20}  {spawn['end'][:19]:<20}  {spawn.get('source', '')}")
+    return 1 if errors else 0
 
 
 def cmd_set_planner_phase(args: argparse.Namespace) -> int:
@@ -3250,6 +3396,24 @@ def cmd_run_planning(args: argparse.Namespace) -> int:
         return 1
 
 
+def _plan_audit_llm_opt_in(task_dir: Path, risk: str) -> bool:
+    """Whether the project opted into the LLM spec-completion plan audit.
+
+    ``policy.plan_audit_llm`` may be ``false`` (default), ``true`` (every
+    task), or a list of risk levels such as ``["critical"]``.
+    """
+    try:
+        from lib_validate import load_project_policy
+        setting = load_project_policy(task_dir).get("plan_audit_llm", False)
+    except Exception:
+        return False
+    if setting is True:
+        return True
+    if isinstance(setting, list):
+        return str(risk) in {str(level) for level in setting}
+    return False
+
+
 def cmd_run_plan_audit(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -3338,35 +3502,43 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
                 return 1
 
         risk = _risk_level_for_task(task_dir)
-        if risk not in {"high", "critical"}:
-            # Auto-advance to TDD_REVIEW when tdd_required=true. This fires
-            # deterministically — the executor cannot skip it by reading prose.
+        llm_opt_in = _plan_audit_llm_opt_in(task_dir, risk)
+        if not llm_opt_in or not args.report_path:
+            # Deterministic plan audit is authoritative at every risk level:
+            # validate_task_artifacts already proves criteria coverage, and
+            # gap analysis + signature + intermediate-state checks ran above.
+            # The LLM spec-completion pass (~300k tokens, ~13 min per run,
+            # observed twice per task) is opt-in via policy.plan_audit_llm.
+            # Write the hash-bound plan-audit-check receipt here so the
+            # PLAN_AUDIT exit gate is satisfied for high/critical tasks too.
+            from lib_receipts import plan_audit_matches, receipt_plan_audit
             manifest = _load_manifest(task_dir)
+            cached = plan_audit_matches(task_dir) is True
+            receipt_path = None
+            if not cached:
+                receipt_path = receipt_plan_audit(task_dir, tokens_used=0, model_used="deterministic")
             transitioned_to = None
             if get_tdd_required(manifest) and manifest.get("stage") == "PLAN_AUDIT":
                 _, updated = transition_task(task_dir, "TDD_REVIEW")
                 transitioned_to = updated.get("stage")
-            print(json.dumps({
+            payload = {
                 "status": "passed",
                 "task_dir": str(task_dir),
                 "mode": "deterministic_only",
                 "risk_level": risk,
                 "llm_audit_required": False,
+                "llm_audit_opt_in": bool(llm_opt_in),
+                "receipt_cached": cached,
+                "receipt_path": str(receipt_path) if receipt_path else None,
                 "tdd_required": get_tdd_required(manifest),
                 "transitioned_to": transitioned_to,
                 "gap_report": gap_report,
-            }, indent=2))
-            return 0
-
-        if not args.report_path:
-            print(json.dumps({
-                "status": "llm_audit_required",
-                "task_dir": str(task_dir),
-                "mode": "llm_required",
-                "risk_level": risk,
-                "llm_audit_required": True,
-                "gap_report": gap_report,
-            }, indent=2))
+            }
+            if llm_opt_in and not args.report_path:
+                payload["status"] = "llm_audit_required"
+                payload["mode"] = "llm_required"
+                payload["llm_audit_required"] = True
+            print(json.dumps(payload, indent=2))
             return 0
 
         report_path = Path(args.report_path).resolve()
@@ -3507,6 +3679,7 @@ def cmd_run_start_classification(args: argparse.Namespace) -> int:
             "risk_floor_signals": (classification or {}).get("risk_floor_signals", []) if isinstance(classification, dict) else [],
             "planner_risk_level": (classification or {}).get("planner_risk_level") if isinstance(classification, dict) else None,
             "tdd_required": tdd_required,
+            "arch_design_required": bool(manifest.get("arch_design_required", False)) if isinstance(manifest, dict) else False,
             "transitioned_to": transitioned_to,
             "next_action": "spec_normalization",
         }, indent=2))
@@ -4276,11 +4449,28 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
         return 1
 
 
+def _persist_planning_mode(task_dir: Path, mode: str) -> None:
+    """Record the chosen planning mode on the manifest.
+
+    Retrospectives and the timeline could not tell whether hierarchical
+    planning ran because the decision was only ever printed.
+    """
+    try:
+        manifest_path = task_dir / "manifest.json"
+        manifest = _load_manifest(task_dir)
+        if manifest.get("planning_mode") != mode:
+            manifest["planning_mode"] = mode
+            _write_ctl_json(task_dir, manifest_path, manifest)
+    except Exception as exc:
+        print(f"[warn] could not persist planning_mode: {exc}", file=sys.stderr)
+
+
 def cmd_run_planning_mode(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
         manifest = _load_manifest(task_dir)
         if manifest.get("planning_path") == "combined":
+            _persist_planning_mode(task_dir, "combined")
             print(json.dumps({
                 "status": "planning_mode_ready", "task_dir": str(task_dir),
                 "planning_mode": "combined", "planning_mode_alias": "fast_track_combined",
@@ -4288,6 +4478,7 @@ def cmd_run_planning_mode(args: argparse.Namespace) -> int:
             }, indent=2))
             return 0
         if bool(manifest.get("fast_track", False)):
+            _persist_planning_mode(task_dir, "fast_track_combined")
             print(json.dumps({
                 "status": "planning_mode_ready",
                 "task_dir": str(task_dir),
@@ -4312,6 +4503,7 @@ def cmd_run_planning_mode(args: argparse.Namespace) -> int:
             pass
         subsystems = classification.get("subsystems", []) if isinstance(classification, dict) else []
         planning_mode = compute_planning_mode(str(risk_level), subsystems, policy)
+        _persist_planning_mode(task_dir, planning_mode)
         independent_count = sum(1 for row in subsystems if isinstance(row, dict) and row.get("independent") is True) if isinstance(subsystems, list) else 0
         reasons = [f"independent_subsystems={independent_count}", f"risk_level={risk_level}"]
 
@@ -7746,6 +7938,11 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     timeline_parser.add_argument("task_dir")
     timeline_parser.add_argument("--json", action="store_true")
     timeline_parser.set_defaults(func=cmd_timeline)
+
+    churn_parser = subparsers.add_parser("task-churn", help="Count amendments, re-approvals, refusals, and denials for a task")
+    churn_parser.add_argument("task_dir")
+    churn_parser.add_argument("--json", action="store_true")
+    churn_parser.set_defaults(func=cmd_task_churn)
 
     planner_phase_parser=subparsers.add_parser("set-planner-phase",help="Set planner phase for read-quota enforcement")
     planner_phase_parser.add_argument("task_dir")

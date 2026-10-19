@@ -800,6 +800,9 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         )
     if attempt.role == "planning":
         if rel_posix in {"discovery-notes.md", "design-decisions.md", "design-doc.md", "spec.md", "plan.md"}:
+            capped = _planner_rewrite_cap(attempt, rel_posix)
+            if capped is not None:
+                return capped
             return WriteDecision(True, f"{rel_posix} is planner-owned judgment output", "direct")
         return WriteDecision(False, "planning role may only write planning artifacts", "deny")
     if attempt.role == "repair-coordinator":
@@ -809,6 +812,66 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
     if attempt.role in {"scheduler", "eventbus", "system", "receipt-writer"}:
         return WriteDecision(True, f"{attempt.role} write allowed", "direct")
     return WriteDecision(False, f"no write policy matched for role={attempt.role}", "deny")
+
+
+_PLANNER_WRITE_COUNT_FILE = "planner-write-count.json"
+
+
+def _planner_rewrite_cap(attempt: WriteAttempt, rel_posix: str) -> "WriteDecision | None":
+    """Enforce ``PLANNER_WRITE_TURNS`` per artifact per planner phase.
+
+    One observed plan phase rewrote ``plan.md`` twelve times. Each rewrite
+    of a multi-thousand-word artifact is a slow model turn, so the cap is a
+    hard deny with a reason that tells the planner to stop editing and
+    return: validation runs in the orchestrator, and a failing artifact gets
+    its own ``repair`` phase with a fresh allowance. Counts are keyed by the
+    active planner phase (``active-planner-phase``) so a repair spawn starts
+    at zero. Returns ``None`` when the write is within the cap.
+    """
+    task_dir = attempt.task_dir
+    if task_dir is None:
+        return None
+    try:
+        from lib_tool_budget import PLANNER_WRITE_TURNS
+    except Exception:
+        return None
+    phase_path = task_dir / "active-planner-phase"
+    try:
+        phase = phase_path.read_text(encoding="utf-8").strip() if phase_path.is_file() else "plan"
+    except OSError:
+        phase = "plan"
+    count_path = task_dir / _PLANNER_WRITE_COUNT_FILE
+    data: dict = {}
+    try:
+        if count_path.is_file():
+            loaded = json.loads(count_path.read_text(encoding="utf-8"))
+            data = loaded if isinstance(loaded, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if data.get("phase") != phase:
+        data = {"phase": phase, "counts": {}}
+    counts = data.get("counts")
+    if not isinstance(counts, dict):
+        counts = {}
+        data["counts"] = counts
+    used = int(counts.get(rel_posix, 0) or 0)
+    if used >= PLANNER_WRITE_TURNS:
+        return WriteDecision(
+            False,
+            f"planner rewrite cap reached for {rel_posix} ({used}/{PLANNER_WRITE_TURNS} "
+            f"writes in phase {phase}); stop editing and return — the orchestrator "
+            "validates the artifact and a repair phase gets a fresh allowance "
+            "[dynos-work guardrail]",
+            "deny",
+        )
+    counts[rel_posix] = used + 1
+    try:
+        tmp = count_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, count_path)
+    except OSError:
+        pass
+    return None
 
 
 def _emit_policy_event(attempt: WriteAttempt, decision: WriteDecision) -> None:
