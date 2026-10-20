@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.28] - 2026-10-20
+### Fixed
+- A failing test run no longer strands the task in `REPAIR_PLANNING`. Execute used to move a test failure from `TEST_EXECUTION` to `REPAIR_PLANNING`. The only ways out of that stage are `REPAIR_EXECUTION`, which needs a repair log whose batches cite audit-report findings (none exist before the audit runs), and `FAILED`. So `write-repair-log` refused with `repair log must contain at least one batch`, `run-audit-setup` refused the stage, and the task could only be failed or forced. Now:
+  - The new `ctl run-tests <task_dir> --command ... [--command ...]` runs the test suites itself, uses their exit codes as the verdict, writes the control-plane file `test-results.json` (with output tails), and advances `TEST_EXECUTION → CHECKPOINT_AUDIT` whether the tests passed or failed.
+  - When the recorded run failed, `router.py audit-inject-prompt` adds a `## Known Failing Tests` block to the `spec-completion-auditor` prompt, so the failure comes back as a blocking finding and goes through the normal repair loop.
+  - The DONE gate refuses while `test-results.json` does not say `passed`. The audit skill re-runs `ctl run-tests` after repair batches.
+  - The `TEST_EXECUTION → REPAIR_PLANNING` edge is removed from `ALLOWED_STAGE_TRANSITIONS`.
+- New, untracked files are now part of the audit scope. `run-audit-setup`, `run-audit-reaudit-plan` and `router.py audit-plan --diff-base` built `diff_files` from `git diff --name-only <snapshot>` alone, which leaves out untracked files. A task whose work was all new files got `diff_files: []` unless someone ran `git add -N` first. The new shared helper `lib_core.git_changed_files` adds `git ls-files --others --exclude-standard` (skipping untracked `.dynos/` state), and the sharding line count now includes the lines in untracked files.
+
 ## [7.5.27] - 2026-10-20
 ### Fixed
 - Background planners no longer lose the `planning` role before they run. When Claude Code spawns a subagent in the background, the Agent tool's PostToolUse fires as soon as the subagent launches, with an empty result. `hooks/agent_spawn_log.py` treated that as the planner returning, so it ran `ctl clear-role`. That expired the planning grants within a fraction of a second, and the planner's `spec.md`/`plan.md` writes were denied as `role=orchestrator`. A post row with no result content (or an `async_launched` status) is now recorded as `async_launch` with its `agent_id` and leaves the stamp alone. The SubagentStop hook (`hooks/lib_tokens_hook.py`) now releases the stamp after it writes the planner's `stop` row. Launches are paired with stop rows by `agent_id` and fall back to any spare planning stop row. Foreground planners still clear on post, and parallel worker planners still clear only after the last one has finished.

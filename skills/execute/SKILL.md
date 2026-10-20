@@ -297,14 +297,18 @@ Read `plan.md` Test Strategy. Run the specified tests. Use incremental testing i
 
 If an approved TDD suite exists, run those tests first as the blocking contract suite. If they pass, run any broader regression suite required by `plan.md`.
 
-If tests pass:
-- Append to log: `{timestamp} [DONE] tests — passed`
-- Continue to Audit
+Run the final, authoritative test pass through ctl. Pass every suite the Test Strategy requires — including the repo-wide run, not only the per-directory ones — as repeated `--command` flags:
 
-If tests fail:
-- Append to log: `{timestamp} [FAIL] tests — failed. Repairs required.`
-- Update `manifest.json` stage to `REPAIR_PLANNING` (legal per `ALLOWED_STAGE_TRANSITIONS["TEST_EXECUTION"]`; the older single `REPAIR` stage no longer exists)
-- Hand off to `/dynos-work:audit` — its Step 4 owns the two-phase repair loop. There is no standalone `repair` skill.
+```bash
+"$DYNOS" ctl run-tests .dynos/task-{id} --command "{suite 1}" --command "{suite 2}"
+```
+
+ctl runs each command from the repo root, takes the exit codes as the verdict, writes `test-results.json`, logs the `[DONE]`/`[FAIL] tests` line, and advances `TEST_EXECUTION → CHECKPOINT_AUDIT` **whether the tests passed or failed**. For a long suite, run it with `run_in_background` instead of letting the Bash call time out. Use the JSON output:
+
+- `status == "tests_passed"`: continue to Audit.
+- `status == "tests_failed"`: continue to Audit anyway. The failure is now a known defect: the spec-completion auditor gets the failing output in its prompt and reports it as a blocking finding, which reaches repair through `/dynos-work:audit` Step 4. The DONE gate refuses while `test-results.json` is not `passed`.
+
+Do NOT move a test failure to `REPAIR_PLANNING`. The repair log can only cite audit-report findings, so before any audit has run nothing can be planned there, and the only way out is `FAILED`.
 
 ### Step 5 — Verify completion
 

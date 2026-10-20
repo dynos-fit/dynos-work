@@ -147,7 +147,10 @@ ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
     "TDD_REVIEW": {"PRE_EXECUTION_SNAPSHOT", "FAILED"},
     "PRE_EXECUTION_SNAPSHOT": {"EXECUTION", "FAILED"},
     "EXECUTION": {"TEST_EXECUTION", "REPAIR_PLANNING", "FAILED"},
-    "TEST_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
+    # No REPAIR_PLANNING: a test failure has no audit finding to cite, so the
+    # repair log could not be built there. `ctl run-tests` routes failures
+    # to CHECKPOINT_AUDIT instead.
+    "TEST_EXECUTION": {"CHECKPOINT_AUDIT", "FAILED"},
     "CHECKPOINT_AUDIT": {"REPAIR_PLANNING", "DONE", "FAILED", "FINAL_AUDIT"},
     "REPAIR_PLANNING": {"REPAIR_EXECUTION", "FAILED"},
     "REPAIR_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
@@ -265,6 +268,43 @@ def write_ctl_json(task_dir: Path, path: Path, data: Any) -> None:
 def require(path: Path) -> str:
     """Read and return the text content of a file."""
     return path.read_text()
+
+
+def git_changed_files(root: Path, base: str) -> tuple[list[str], str | None]:
+    """Return (changed_files, error) for the working tree against ``base``.
+
+    ``git diff --name-only <base>`` alone misses untracked files, so a task
+    whose work is all new, not-yet-added files would present an empty audit
+    scope. Untracked files (``git ls-files --others --exclude-standard``) are
+    appended after the diff entries, deduplicated, in stable order. Untracked
+    ``.dynos/`` state is skipped for repos that do not gitignore it.
+
+    On any git failure returns ([], error-message); callers treat that as
+    "scope unavailable" rather than "nothing changed".
+    """
+    files: list[str] = []
+    seen: set[str] = set()
+    for cmd in (
+        [_GIT or "git", "diff", "--name-only", base],
+        [_GIT or "git", "ls-files", "--others", "--exclude-standard"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd, cwd=str(root), text=True, capture_output=True, check=False, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return [], f"{' '.join(cmd[1:3])} failed: {exc}"
+        if result.returncode != 0:
+            return [], (result.stderr or result.stdout or f"{' '.join(cmd[1:3])} failed with {result.returncode}").strip()
+        for line in result.stdout.splitlines():
+            path = line.strip()
+            if not path or path in seen:
+                continue
+            if cmd[1] == "ls-files" and (path == ".dynos" or path.startswith(".dynos/")):
+                continue
+            seen.add(path)
+            files.append(path)
+    return files, None
 
 
 # ---------------------------------------------------------------------------
@@ -1013,6 +1053,28 @@ def _rules_check_err(
     return None
 
 
+def _failing_test_results_err(task_dir: Path) -> str | None:
+    """DONE-gate message when the last ctl-recorded test run failed.
+
+    ``test-results.json`` is written only by ``ctl run-tests`` (control-plane
+    file). Absent means the task predates the command or never ran tests
+    through ctl; only a recorded failure blocks.
+    """
+    path = task_dir / "test-results.json"
+    if not path.exists():
+        return None
+    try:
+        status = load_json(path).get("status")
+    except (OSError, ValueError, AttributeError):
+        status = None
+    if status == "passed":
+        return None
+    return (
+        "test-results.json (last recorded test run did not pass — repair, "
+        "then re-run `ctl run-tests` until it records status=passed)"
+    )
+
+
 def _compute_bypassed_gates_for_force(
     *,
     task_dir: Path,
@@ -1207,6 +1269,9 @@ def _compute_bypassed_gates_for_force(
             errs.append("audit-reports/ (no audit reports found — audit was never run)")
         if read_receipt(task_dir, "retrospective") is None:
             errs.append("receipt: retrospective (reward was never computed via receipts)")
+        test_err = _failing_test_results_err(task_dir)
+        if test_err:
+            errs.append(test_err)
         if current_stage in {"CHECKPOINT_AUDIT", "FINAL_AUDIT"}:
             try:
                 done_gaps = require_receipts_for_done(task_dir)
@@ -1976,6 +2041,9 @@ def _replay_gates_for_transition(
             gate_errors.append("audit-reports/ (no audit reports found — audit was never run)")
         if read_receipt(task_dir, "retrospective") is None:
             gate_errors.append("receipt: retrospective (reward was never computed via receipts)")
+        test_err = _failing_test_results_err(task_dir)
+        if test_err:
+            gate_errors.append(test_err)
 
         # AC 10 + AC 19: receipt-based DONE gates (audit-routing + per-auditor
         # spawn receipts + postmortem trio). Refuses on FIRST gap with

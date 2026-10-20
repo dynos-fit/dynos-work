@@ -103,6 +103,7 @@ _CONTROL_PLANE_EXACT = frozenset({
     "role-bindings.json",
     "tool-call-counters.json",
     "continuation-state.json",
+    "test-results.json",
 })
 
 _WRAPPER_REQUIRED = {
