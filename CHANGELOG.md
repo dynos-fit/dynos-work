@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.28] - 2026-10-20
+### Changed
+- fix: keep the planning role until a background planner actually stops
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.28`.
+
+---
+
 ## [7.5.27] - 2026-10-20
 ### Fixed
 - Background planners no longer lose the `planning` role before they run. When Claude Code spawns a subagent in the background, the Agent tool's PostToolUse fires as soon as the subagent launches, with an empty result. `hooks/agent_spawn_log.py` treated that as the planner returning, so it ran `ctl clear-role`. That expired the planning grants within a fraction of a second, and the planner's `spec.md`/`plan.md` writes were denied as `role=orchestrator`. A post row with no result content (or an `async_launched` status) is now recorded as `async_launch` with its `agent_id` and leaves the stamp alone. The SubagentStop hook (`hooks/lib_tokens_hook.py`) now releases the stamp after it writes the planner's `stop` row. Launches are paired with stop rows by `agent_id` and fall back to any spare planning stop row. Foreground planners still clear on post, and parallel worker planners still clear only after the last one has finished.
