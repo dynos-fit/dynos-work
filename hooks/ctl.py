@@ -26,6 +26,7 @@ from lib_core import (
     allocate_task_id,
     find_active_tasks,
     get_tdd_required,
+    git_changed_files,
     load_json,
     next_command_for_stage,
     now_iso,
@@ -4603,37 +4604,40 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
         diff_files: list[str] = []
         diff_error = None
         if diff_base is not None:
-            import subprocess as _subprocess
-
-            result = _subprocess.run(
-                [_GIT or "git", "diff", "--name-only", diff_base],
-                cwd=root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if result.returncode == 0:
-                diff_files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            else:
-                diff_error = (result.stderr or result.stdout or f"git diff failed with {result.returncode}").strip()
+            # Includes untracked files: new work that was never `git add`ed is
+            # still part of the task's change and must be in audit scope.
+            diff_files, diff_error = git_changed_files(root, diff_base)
 
         # AC 8: Measure diff LOC (insertions + deletions) for sharding threshold.
         diff_loc = 0
         if diff_base is not None and diff_error is None:
-            import subprocess as _subprocess  # noqa: PLC0415 — already imported above
+            import subprocess as _subprocess  # noqa: PLC0415
             _stat_result = _subprocess.run(
-                [_GIT or "git", "diff", "--stat", diff_base],
+                [_GIT or "git", "diff", "--numstat", diff_base],
                 cwd=root,
                 text=True,
                 capture_output=True,
                 check=False,
             )
             if _stat_result.returncode == 0:
-                _ins_m = re.search(r"(\d+) insertion", _stat_result.stdout)
-                _del_m = re.search(r"(\d+) deletion", _stat_result.stdout)
-                diff_loc = (int(_ins_m.group(1)) if _ins_m else 0) + (
-                    int(_del_m.group(1)) if _del_m else 0
-                )
+                _tracked: set[str] = set()
+                for _row in _stat_result.stdout.splitlines():
+                    _parts = _row.split("\t", 2)
+                    if len(_parts) != 3:
+                        continue
+                    _tracked.add(_parts[2])
+                    # Binary files report "-" for both counts.
+                    diff_loc += sum(int(n) for n in _parts[:2] if n.isdigit())
+                # Untracked files are absent from git diff; count their lines
+                # as insertions so a diff of all-new files can still shard.
+                for _path in diff_files:
+                    if _path in _tracked:
+                        continue
+                    try:
+                        with open(root / _path, "rb") as _fh:
+                            diff_loc += sum(1 for _ in _fh)
+                    except OSError:
+                        continue
         should_shard = (
             len(diff_files) >= AUDIT_SHARD_FILE_THRESHOLD
             or diff_loc >= AUDIT_SHARD_LOC_THRESHOLD
@@ -5206,22 +5210,8 @@ def cmd_run_audit_reaudit_plan(args: argparse.Namespace) -> int:
         snapshot = manifest.get("snapshot")
         head_sha = snapshot.get("head_sha") if isinstance(snapshot, dict) else None
         diff_base = head_sha.strip() if isinstance(head_sha, str) and head_sha.strip() else "HEAD"
-        import subprocess as _subprocess
-
-        result = _subprocess.run(
-            [_GIT or "git", "diff", "--name-only", diff_base],
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        diff_files: list[str] = []
-        diff_error = None
-        if result.returncode == 0:
-            diff_files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            modified_files.update(diff_files)
-        else:
-            diff_error = (result.stderr or result.stdout or f"git diff failed with {result.returncode}").strip()
+        diff_files, diff_error = git_changed_files(root, diff_base)
+        modified_files.update(diff_files)
 
         auditors_to_spawn: list[str] = ["spec-completion-auditor", "security-auditor"]
         matched_auditors: set[str] = set()
@@ -5774,6 +5764,114 @@ def cmd_run_execution_finish(args: argparse.Namespace) -> int:
             "completed_segments": payload["completed_segments"],
             "cached_segments": payload["cached_segments"],
             "segments_verified": len(verified),
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+# Stages where run-tests may record a result: the initial test run, and the
+# re-runs that clear a recorded failure after repair.
+_RUN_TESTS_STAGES: frozenset[str] = frozenset({
+    "TEST_EXECUTION", "REPAIR_EXECUTION", "CHECKPOINT_AUDIT", "FINAL_AUDIT",
+})
+
+
+def cmd_run_tests(args: argparse.Namespace) -> int:
+    """Run the plan's test commands and record the outcome in test-results.json.
+
+    ctl runs the commands itself (exit codes are the verdict, not a model's
+    reading of the output). At TEST_EXECUTION the task always advances to
+    CHECKPOINT_AUDIT: a failure becomes a known defect the auditors report as
+    a blocking finding, so it flows through the normal audit repair loop.
+    TEST_EXECUTION -> REPAIR_PLANNING is a dead end for test failures — the
+    repair log can only cite audit-report findings, and none exist before the
+    audit runs. The DONE gate refuses while the recorded status is not
+    "passed", so the failure cannot be audited away without a passing re-run.
+    """
+    import subprocess as _subprocess
+    import time as _time
+
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        manifest = _load_manifest(task_dir)
+        stage = str(manifest.get("stage", ""))
+        if stage not in _RUN_TESTS_STAGES:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": f"unexpected stage for run-tests: {stage}",
+            }, indent=2))
+            return 1
+        commands = [c for c in (args.command or []) if c.strip()]
+        if not commands:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": "at least one --command is required",
+            }, indent=2))
+            return 1
+
+        root = _root_for_task_dir(task_dir)
+        timeout_s = int(args.timeout or 3600)
+        tail_bytes = 8192
+        records: list[dict] = []
+        for command in commands:
+            started = _time.monotonic()
+            try:
+                proc = _subprocess.run(
+                    ["bash", "-c", command],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s,
+                    check=False,
+                )
+                exit_code: int | None = proc.returncode
+                stdout_tail = proc.stdout[-tail_bytes:]
+                stderr_tail = proc.stderr[-tail_bytes:]
+                timed_out = False
+            except _subprocess.TimeoutExpired as exc:
+                exit_code = None
+                stdout_tail = (exc.stdout or "")[-tail_bytes:] if isinstance(exc.stdout, str) else ""
+                stderr_tail = (exc.stderr or "")[-tail_bytes:] if isinstance(exc.stderr, str) else ""
+                timed_out = True
+            records.append({
+                "command": command,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+                "duration_ms": int((_time.monotonic() - started) * 1000),
+                "stdout_tail": stdout_tail,
+                "stderr_tail": stderr_tail,
+                "passed": exit_code == 0,
+            })
+
+        passed = all(r["passed"] for r in records)
+        results_path = task_dir / "test-results.json"
+        _write_ctl_json(task_dir, results_path, {
+            "status": "passed" if passed else "failed",
+            "recorded_at": now_iso(),
+            "stage": stage,
+            "results": records,
+        })
+        failed_commands = [r["command"] for r in records if not r["passed"]]
+        append_execution_log(
+            task_dir,
+            "[DONE] tests — passed" if passed
+            else f"[FAIL] tests — failed: {', '.join(failed_commands)} "
+            "(known defect for audit; DONE blocked until run-tests passes)",
+        )
+
+        if stage == "TEST_EXECUTION":
+            _, manifest = transition_task(task_dir, "CHECKPOINT_AUDIT")
+        print(json.dumps({
+            "status": "tests_passed" if passed else "tests_failed",
+            "task_dir": str(task_dir),
+            "stage": manifest.get("stage"),
+            "results_path": str(results_path),
+            "failed_commands": failed_commands,
+            "next_command": "/dynos-work:audit" if stage == "TEST_EXECUTION" else None,
         }, indent=2))
         return 0
     except Exception as exc:
@@ -7658,6 +7756,18 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     next_continuation_parser.add_argument("task_dir")
     next_continuation_parser.set_defaults(func=cmd_next_continuation)
+
+    run_tests_parser = subparsers.add_parser(
+        "run-tests",
+        help="Run test commands, record test-results.json, and advance TEST_EXECUTION -> CHECKPOINT_AUDIT",
+    )
+    run_tests_parser.add_argument("task_dir")
+    run_tests_parser.add_argument(
+        "--command", action="append", required=True,
+        help="Test command run via bash from the repo root; repeat for several suites (all must pass)",
+    )
+    run_tests_parser.add_argument("--timeout", type=int, default=3600, help="Per-command timeout in seconds")
+    run_tests_parser.set_defaults(func=cmd_run_tests)
 
     run_verification_parser = subparsers.add_parser(
         "run-verification-evidence",

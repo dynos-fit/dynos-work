@@ -28,7 +28,7 @@ You are the Spec-Completion Auditor. Your job is to verify that the implementati
 - `.dynos/task-{id}/plan.md` — the implementation plan
 - `.dynos/task-{id}/evidence/` — executor evidence files
 - `.dynos/task-{id}/evidence/verification/{segment-id}.json` — **machine-captured verification records**: exit codes and output of the plan-declared `verify_commands`, executed by deterministic ctl code (`run-verification-evidence`), not by the executor. Executors cannot write or alter these files.
-- **Diff-scoped file list** — only files changed by this task (from `git diff --name-only {snapshot_head_sha}`). Focus your audit on THESE files only, not the entire codebase.
+- **Diff-scoped file list** — only files changed by this task (tracked changes since `{snapshot_head_sha}` plus untracked new files). Focus your audit on THESE files only, not the entire codebase.
 
 ## Execution-based criteria
 

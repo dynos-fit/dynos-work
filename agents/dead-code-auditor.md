@@ -23,7 +23,7 @@ You are the Dead Code Auditor. Your job is to ensure no dead, orphaned, or comme
 
 ## You receive
 
-- **Diff-scoped file list** — only files changed by this task (from `git diff --name-only {snapshot_head_sha}`). Focus your audit on THESE files only.
+- **Diff-scoped file list** — only files changed by this task (tracked changes since `{snapshot_head_sha}` plus untracked new files). Focus your audit on THESE files only.
 - `.dynos/task-{id}/spec.md`
 - `.dynos/task-{id}/evidence/`
 

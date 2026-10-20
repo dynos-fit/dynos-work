@@ -259,3 +259,25 @@ def test_sharding_constants_exist() -> None:
         f"AUDIT_SHARD_FILE_THRESHOLD and AUDIT_SHARD_LOC_THRESHOLD must exist in ctl.py "
         f"with defaults 30 and 8000. stderr: {result.stderr!r}, stdout: {result.stdout!r}"
     )
+
+
+def test_audit_setup_includes_untracked_files(tmp_path: Path) -> None:
+    """New files that were never `git add`ed are part of the task's change.
+
+    `git diff <base>` alone omits them, which left an all-new-files task with
+    diff_files == [] and nothing to audit. Untracked .dynos/ state stays out.
+    """
+    task_dir = _create_task_dir(tmp_path)
+    project = task_dir.parent.parent
+    (project / "src" / "brand_new.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+
+    result = _run_audit_setup(task_dir)
+    assert result.returncode == 0, result.stderr
+
+    plan = json.loads((task_dir / "audit-plan.json").read_text())
+    assert plan["diff_error"] is None
+    assert "src/brand_new.py" in plan["diff_files"]
+    assert {"hooks/file_a.py", "src/file_b.py"} <= set(plan["diff_files"])
+    assert not any(f.startswith(".dynos") for f in plan["diff_files"])
+    # 1 insertion + 1 deletion per modified file, plus 2 untracked lines.
+    assert plan["diff_loc"] == 6

@@ -1638,7 +1638,8 @@ def _resolve_diff_files(root: Path, args: argparse.Namespace) -> list[str] | Non
     """Resolve diff_files for the audit plan from CLI args.
 
     --diff-files takes precedence (explicit comma-separated list).
-    --diff-base SHA falls back to `git diff --name-only <SHA>`.
+    --diff-base SHA falls back to the files changed since <SHA>, untracked
+    files included.
     Returns None on both-absent or git-failure (fail-open).
     """
     explicit = getattr(args, "diff_files", "") or ""
@@ -1650,21 +1651,9 @@ def _resolve_diff_files(root: Path, args: argparse.Namespace) -> list[str] | Non
     if not base:
         return None
 
-    import subprocess
-    try:
-        proc = subprocess.run(
-            [_GIT or "git", "diff", "--name-only", base],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    from lib_core import git_changed_files  # noqa: PLC0415
+    files, error = git_changed_files(root, base)
+    return None if error else files
 
 
 def cmd_audit_plan(args: argparse.Namespace) -> int:
@@ -2167,6 +2156,43 @@ def _build_audit_budget_block(auditor_name: str, model: "str | None") -> str:
     )
 
 
+# The auditor that reports a ctl-recorded test failure as a finding. It is
+# skip-exempt and re-spawned on every re-audit, so the defect is surfaced on
+# each pass until a passing `ctl run-tests` clears it; one owner avoids the
+# same failure arriving as duplicate findings from several auditors.
+_TEST_FAILURE_AUDITOR = "spec-completion-auditor"
+
+
+def _build_failing_tests_block(task_dir: Path, auditor_name: str) -> str:
+    """Known-defect block for a failed test run recorded in test-results.json.
+
+    Empty unless this is the owning auditor and the last recorded run failed.
+    """
+    if auditor_name != _TEST_FAILURE_AUDITOR:
+        return ""
+    try:
+        results = load_json(task_dir / "test-results.json")
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(results, dict) or results.get("status") != "failed":
+        return ""
+    lines = [
+        "\n\n## Known Failing Tests (mandatory — injected)",
+        "`ctl run-tests` recorded a failing test run for this task. Report it as "
+        "a **blocking** finding (severity high, category `test-failure`), with "
+        "`file` set to the source or test file the output points at. Do not "
+        "judge whether the failure is in scope — a failing suite blocks DONE "
+        "regardless, and this finding is how it reaches repair.",
+    ]
+    for record in results.get("results", []) or []:
+        if not isinstance(record, dict) or record.get("passed"):
+            continue
+        outcome = "timed out" if record.get("timed_out") else f"exit {record.get('exit_code')}"
+        output = ((record.get("stdout_tail") or "") + (record.get("stderr_tail") or ""))[-3000:]
+        lines.append(f"\n### `{record.get('command')}` — {outcome}\n```\n{output.strip()}\n```")
+    return "\n".join(lines)
+
+
 def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     """Inject learned-auditor instructions into a base auditor prompt.
 
@@ -2272,6 +2298,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
         final_text.rstrip()
         + "\n\n"
         + _build_ruthless_audit_brief(root, task_dir, plan, auditor_name)
+        + _build_failing_tests_block(task_dir, auditor_name)
     )
 
     # Inject aggregate category-trend prevention rules (executor="auditor-only").

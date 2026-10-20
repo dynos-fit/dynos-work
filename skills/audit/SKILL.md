@@ -279,6 +279,14 @@ After all batches complete, record it:
 "$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "repair-execution-{phase} — all fixes applied"
 ```
 
+**Re-run failing tests:** If `.dynos/task-{id}/test-results.json` has `status: "failed"`, re-run the same commands (its `results[].command`) before the re-audit:
+
+```bash
+"$DYNOS" ctl run-tests .dynos/task-{id} --command "{command 1}" --command "{command 2}"
+```
+
+A pass clears the known-failing-tests block from the next spec-completion prompt, and the DONE gate's test check. A failure keeps both in place, so the re-audit reports the failure again and the retry cap governs it like any other finding.
+
 **Phase 1 re-audit (domain-aware, incremental scope):** Build the re-audit plan through ctl:
 
 ```bash
@@ -401,6 +409,8 @@ Finalize completion through ctl:
 ```
 
 This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic.
+
+If it refuses on `test-results.json`, the last recorded test run did not pass. Re-run `ctl run-tests` with the same commands. If they still fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate.
 
 Print verbatim the contents of `.dynos/task-{id}/completion.json::user_summary`.
 Do NOT paraphrase, reorder, or add commentary. The orchestrator's user-facing
