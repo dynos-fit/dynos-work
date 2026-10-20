@@ -1,7 +1,8 @@
 """Deterministic ensemble cascade evaluation.
 
 Single source of truth for the audit ensemble cascade
-(fast tier -> balanced tier on zero findings -> deep tier on any finding).
+(fast tier -> balanced tier when no blocking findings -> deep tier on any
+blocking finding; see ``_needs_escalation``).
 Every enforcement point reads the cascade state from this module so the
 orchestrator never has to interpret prose to decide which spawn comes next:
 
@@ -154,6 +155,23 @@ def _finding_count(receipt: dict) -> int:
         return -1
 
 
+def _needs_escalation(shard: dict) -> bool:
+    """Single escalation rule: blocking findings escalate to the deep tier.
+
+    Uses ``blocking_count`` when it is a non-negative ``int`` (not a bool,
+    string or float); otherwise falls back to ``_finding_count(shard) != 0``
+    (missing/non-coercible ``finding_count`` yields -1 -> True, fail-closed).
+    """
+    blocking = shard.get("blocking_count")
+    # Only a real non-negative int counts. ``receipt_audit_done`` always
+    # writes an int; a bool, string or float here means the shard was not
+    # written by it, so fall back to the stricter finding-count rule rather
+    # than trusting a coerced value (``int("0")``, ``int(0.9)``, ``True``).
+    if type(blocking) is int and blocking >= 0:
+        return blocking > 0
+    return _finding_count(shard) != 0
+
+
 # ---------------------------------------------------------------------------
 # Pure evaluation
 # ---------------------------------------------------------------------------
@@ -217,12 +235,16 @@ def evaluate_cascade(
             missing = [m for m in voting if receipts.get(m) is None]
             gaps.append(
                 f"auditor {auditor_name} ensemble missing voting-model receipt(s): "
-                f"{', '.join(missing)} (next cascade step: {model})"
+                f"{', '.join(missing)} (next cascade step: {model}); "
+                f"expected receipt: receipts/audit-{auditor_name}-{model}.json "
+                f"(shard_step_name {auditor_name}-{model})"
             )
         else:
             gaps.append(
                 f"auditor {auditor_name} ensemble voting-model receipts found issues "
-                f"(non-zero findings) and no escalation receipt for {model!r}"
+                f"(blocking findings) and no escalation receipt for {model!r}; "
+                f"expected receipt: receipts/audit-{auditor_name}-{model}.json "
+                f"(shard_step_name {auditor_name}-{model})"
             )
         return {
             **base,
@@ -244,7 +266,7 @@ def evaluate_cascade(
                     "the cascade must run the voting tiers first"
                 )
             return _spawn(model, index, REASON_CASCADE_STEP)
-        if _finding_count(shard) != 0:
+        if _needs_escalation(shard):
             if not escalation:
                 gaps.append(
                     f"auditor {auditor_name} voting-model receipt {model} found "

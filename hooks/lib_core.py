@@ -89,6 +89,22 @@ def stamp_role(task_dir: Path, role: str) -> Path:
     return path
 
 
+def clear_stamped_role(task_dir: Path, role: str) -> bool:
+    """Unlink the role file only if its stripped content equals ``role``.
+
+    Returns True when unlinked; False otherwise. Never raises on a missing
+    or unreadable file.
+    """
+    path = Path(task_dir) / "active-segment-role"
+    try:
+        if path.read_text(encoding="utf-8").strip() != role:
+            return False
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
 def set_planner_phase(task_dir: Path, phase: str) -> Path:
     """Set the hook-owned planner read-quota phase through ctl."""
     path=Path(task_dir)/"active-planner-phase"
@@ -687,7 +703,7 @@ def _check_ensemble_voting(
     definition of "the cascade ran". A cascade satisfies the gate only when
     every voting tier it reached has a shard receipt in cascade order:
     fast tier always; balanced tier when the fast tier was clean; deep tier
-    when any voting tier found something. An escalation receipt without the
+    when any voting tier found a blocking finding. An escalation receipt without the
     voting-tier receipts is a gap, not a pass.
     Returns the list of gap strings (possibly empty).
     """
@@ -778,10 +794,11 @@ def require_receipts_for_done(task_dir: Path) -> list[str]:
          ``voting_models``. A collapsed ``audit-{name}`` receipt is not
          accepted for ensemble accounting.
          Accept iff EITHER every voting-model receipt reports
-         ``finding_count == 0`` OR an escalation receipt exists whose
+         no blocking findings OR an escalation receipt exists whose
          ``model_used == escalation_model``. The cascade escalates to the
-         deep tier on ANY finding (blocking or not), so the gate binds on
-         ``finding_count``, not ``blocking_count``. Each found receipt's
+         deep tier on any blocking finding; the gate binds on
+         ``lib_ensemble._needs_escalation`` (``blocking_count``, falling
+         back to ``finding_count`` when absent), the single rule. Each found receipt's
          ``model_used`` MUST be in ``voting_models ∪ {escalation_model}``;
          otherwise a gap error.
       d) Either ``postmortem-generated`` OR ``postmortem-skipped`` MUST be

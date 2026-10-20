@@ -126,13 +126,13 @@ When you escalate, the resulting finding MUST have `blocking: true` and the find
 Write your report to:
 
 ```
-.dynos/task-{id}/audit-reports/claude-md-auditor-checkpoint-{timestamp}.json
+.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json
 ```
 
-Substitute the actual task ID for `{id}` and an ISO-8601-derived timestamp for `{timestamp}`. You MUST write the report via a Bash heredoc, e.g.:
+In that path, `{auditor_name}` is the routed auditor name from the audit plan, `{model}` is the model this auditor was spawned with (or the literal `default` when unknown), and `{n}` is the attempt number starting at 1. Substitute literal values; do not use shell variables. Write the report via a Bash heredoc with a literal path, e.g.:
 
 ```bash
-cat > ".dynos/task-{id}/audit-reports/claude-md-auditor-checkpoint-{timestamp}.json" <<'JSON'
+cat > ".dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json" <<'JSON'
 { ... full report JSON ... }
 JSON
 ```

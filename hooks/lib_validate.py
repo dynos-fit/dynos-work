@@ -494,6 +494,33 @@ _REPORT_FILENAME_RE: re.Pattern[str] = re.compile(
 )
 
 
+def _normalize_auditor_name(candidate: str, routed: set[str]) -> str | None:
+    """Map a report-derived auditor name onto a routed auditor name (D3).
+
+    A routed ``name`` matches when ``candidate`` equals it or starts with
+    ``name + "-"``, or equals / starts with ``short + "-"`` where
+    ``short = name.removesuffix("-auditor")``. When several routed names
+    match, the longest routed name wins (ties broken lexicographically for
+    determinism). Returns None when nothing matches, so normalization can
+    never introduce a name absent from ``routed``.
+    """
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    best: str | None = None
+    for name in sorted(routed):
+        if not isinstance(name, str) or not name:
+            continue
+        short = name.removesuffix("-auditor")
+        matched = (
+            candidate == name
+            or candidate.startswith(name + "-")
+            or (bool(short) and (candidate == short or candidate.startswith(short + "-")))
+        )
+        if matched and (best is None or len(name) > len(best)):
+            best = name
+    return best
+
+
 def select_eligible_reports(
     task_dir: Path,
     stage: str | None = None,
@@ -1790,6 +1817,13 @@ def compute_reward(task_dir: Path) -> dict:
             )
             if not isinstance(auditor, str) or not auditor:
                 auditor = report_path.stem
+
+            # D3: map legacy/timestamped/model-suffixed names onto the routed
+            # auditor name. Left untouched when the routing check is disabled.
+            if not _auditor_check_disabled and valid_auditor_names is not None:
+                _mapped = _normalize_auditor_name(auditor, valid_auditor_names)
+                if _mapped is not None:
+                    auditor = _mapped
 
             # AC 16: drop the report if its auditor was not in audit-routing.
             # (When _auditor_check_disabled is True, the routing receipt was

@@ -259,3 +259,63 @@ def test_ensemble_shard_receipt_rejects_audit_prefixed_name(tmp_path: Path) -> N
             shard_step_name=f"audit-{SHARD_STEP_HAIKU}",  # noqa: model-literal
             tier=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# Blocking rule: non-blocking findings need no escalation shard; blocking do
+# ---------------------------------------------------------------------------
+
+
+def _blocking_rule_task(tmp_path: Path, haiku_blocking: int, sonnet_blocking: int) -> tuple[Path, dict]:
+    import lib_ensemble
+    from lib_receipts import write_receipt
+
+    task_dir = _create_task_dir(tmp_path)
+    entry = {
+        "name": AUDITOR_NAME,
+        "action": "spawn",
+        "ensemble": True,
+        "ensemble_voting_models": [MODEL_HAIKU, MODEL_SONNET],  # noqa: model-literal
+        "ensemble_escalation_model": "opus",  # noqa: model-literal
+    }
+    (task_dir / "audit-plan.json").write_text(json.dumps({"auditors": [entry]}), encoding="utf-8")
+    for model, blocking in ((MODEL_HAIKU, haiku_blocking), (MODEL_SONNET, sonnet_blocking)):
+        write_receipt(
+            task_dir,
+            f"audit-{AUDITOR_NAME}-{model}",
+            auditor_name=AUDITOR_NAME,
+            model_used=model,
+            finding_count=blocking + 2,  # non-blocking findings always present
+            blocking_count=blocking,
+            report_path=None,
+            report_sha256=None,
+            tokens_used=100,
+            route_mode="generic",
+            agent_path=None,
+            injected_agent_sha256=None,
+        )
+    return task_dir, entry
+
+
+def test_shard_receipts_non_blocking_findings_need_no_escalation(tmp_path: Path) -> None:
+    import lib_ensemble
+
+    task_dir, entry = _blocking_rule_task(tmp_path, haiku_blocking=0, sonnet_blocking=0)
+    nxt = lib_ensemble.ensemble_next(task_dir, AUDITOR_NAME)
+    assert nxt["status"] == "complete" and nxt["verdict"] == "pass"
+    gaps = _check_ensemble_voting(
+        task_dir, {AUDITOR_NAME: entry}, {AUDITOR_NAME}
+    )
+    assert gaps == []
+
+
+def test_shard_receipts_blocking_findings_still_require_escalation(tmp_path: Path) -> None:
+    import lib_ensemble
+
+    task_dir, entry = _blocking_rule_task(tmp_path, haiku_blocking=1, sonnet_blocking=0)
+    nxt = lib_ensemble.ensemble_next(task_dir, AUDITOR_NAME)
+    assert nxt["status"] == "spawn" and nxt["model"] == "opus"  # noqa: model-literal
+    gaps = _check_ensemble_voting(
+        task_dir, {AUDITOR_NAME: entry}, {AUDITOR_NAME}
+    )
+    assert gaps and any("blocking findings" in g for g in gaps)

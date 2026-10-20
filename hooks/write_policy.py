@@ -21,6 +21,14 @@ WriteSource = Literal[
 ]
 WriteMode = Literal["direct", "wrapper", "deny"]
 
+# Canonical, literal location of an auditor's report. Surfaced verbatim in
+# denial text so an auditor whose write was rejected (bare relative path or
+# unresolved shell variable) learns the exact path to write instead of
+# retrying blind. Defined once here; pre_tool_use imports it.
+CANONICAL_AUDIT_REPORT_PATH = (
+    ".dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json"
+)
+
 # Maps each privileged role to the set of modules whose call chain may claim it.
 # ctl is included in receipt-writer because cmd_amend_artifact writes amendment
 # receipts directly without routing through lib_receipts.write_receipt.
@@ -758,6 +766,13 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         if attempt.role in {"scheduler", "eventbus", "system"}:
             return WriteDecision(True, "non-task system path allowed", "direct")
         if attempt.task_dir is not None:
+            if attempt.role.startswith("audit-"):
+                return WriteDecision(
+                    False,
+                    "path escapes task boundary; auditors write reports only to "
+                    f"the literal path {CANONICAL_AUDIT_REPORT_PATH}",
+                    "deny",
+                )
             return WriteDecision(False, "path escapes task boundary", "deny")
         return WriteDecision(False, "non-task path requires system-owned writer", "deny")
     # plan.md and spec.md are human-approved artifacts locked at PLAN_REVIEW.

@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
-from lib_validate import validate_manifest, validate_repair_log, validate_task_artifacts
+from lib_validate import _normalize_auditor_name, compute_reward, validate_manifest, validate_repair_log, validate_task_artifacts
 
 
 def _write_base_task(tmp_path: Path) -> Path:
@@ -287,3 +287,49 @@ def test_validate_repair_log_cross_checks_live_audit_reports(tmp_path: Path) -> 
     assert "batch-1: finding_id not found in live audit reports: missing-1" in errors
     assert "batch-1: auditor mismatch for sec-1: repair-log='code-quality-auditor' audit-report='security-auditor'" in errors
     assert "batch-1: severity mismatch for sec-1: repair-log='low' audit-report='high'" in errors
+
+
+def test_normalize_auditor_name_cases() -> None:
+    routed = {"security-auditor", "db-schema-auditor", "claude-md-auditor"}
+    assert _normalize_auditor_name("security-20261019T120000", routed) == "security-auditor"
+    assert _normalize_auditor_name("security-auditor-sonnet-attempt-1", routed) == "security-auditor"
+    assert _normalize_auditor_name("db-schema-haiku-attempt-2", routed) == "db-schema-auditor"
+    assert _normalize_auditor_name("claude-md-auditor-checkpoint-2026", routed) == "claude-md-auditor"
+    assert _normalize_auditor_name("security-auditor", routed) == "security-auditor"
+    assert _normalize_auditor_name("security", routed) == "security-auditor"
+    assert _normalize_auditor_name("performance-1", routed) is None
+    assert _normalize_auditor_name("securityx-1", routed) is None
+    assert _normalize_auditor_name("", routed) is None
+    # Longest routed name wins.
+    assert _normalize_auditor_name("db-schema-x", {"db-auditor", "db-schema-auditor"}) == "db-schema-auditor"
+
+
+def test_validate_counts_legacy_named_report_under_routed_auditor(tmp_path: Path) -> None:
+    from lib_receipts import receipt_audit_routing
+
+    td = tmp_path / "project" / ".dynos" / "task-20261019-LN"
+    td.mkdir(parents=True)
+    (td / "manifest.json").write_text(json.dumps({
+        "task_id": td.name,
+        "stage": "DONE",
+        "classification": {"risk_level": "medium", "domains": [], "type": "feature"},
+    }))
+    receipt_audit_routing(td, [{
+        "name": "security-auditor",
+        "action": "spawn",
+        "route_mode": "generic",
+        "agent_path": None,
+        "injected_agent_sha256": None,
+    }])
+    rd = td / "audit-reports"
+    rd.mkdir()
+    (rd / "security-20261019.json").write_text(json.dumps({"findings": [{"id": "F-1", "blocking": False}]}))
+    (rd / "performance-1.json").write_text(json.dumps({"findings": [{"id": "F-2", "blocking": True}]}))
+
+    result = compute_reward(td)
+    assert result["findings_by_auditor"].get("security-auditor") == 1
+    assert "security-20261019" not in result["findings_by_auditor"]
+    assert "performance-1" not in result["findings_by_auditor"]
+    events = [json.loads(l) for l in (td / "events.jsonl").read_text().splitlines() if l.strip()]
+    drops = [e for e in events if e.get("event") == "auditor_not_in_routing"]
+    assert [d["auditor"] for d in drops] == ["performance-1"]

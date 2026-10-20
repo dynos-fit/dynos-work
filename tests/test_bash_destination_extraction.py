@@ -117,6 +117,28 @@ def test_herestring_is_not_treated_as_heredoc() -> None:
     assert _extract_bash_destinations(command) == ["real.txt"]
 
 
+def test_unquoted_newline_separates_statements() -> None:
+    # D2: logical lines are statements; a write verb's argv stops at the
+    # newline instead of swallowing the next line's words.
+    command = "rm stale.lock\necho done > after.txt"
+    assert _extract_bash_destinations(command) == ["stale.lock", "after.txt"]
+
+
+def test_quoted_newline_and_continuation_are_not_separators() -> None:
+    assert _extract_bash_destinations('echo "a\nb" > out.txt') == ["out.txt"]
+    assert _extract_bash_destinations("cp src \\\n dst") == ["dst"]
+
+
+def test_comment_apostrophe_does_not_swallow_following_lines() -> None:
+    command = "echo hi # don't\necho x > real.txt"
+    assert _extract_bash_destinations(command) == ["real.txt"]
+
+
+def test_unresolved_variable_destination_returned_raw() -> None:
+    # D2: unresolved tokens are returned verbatim for main() to deny.
+    assert _extract_bash_destinations('cat > "$OUT"') == ["$OUT"]
+
+
 # ---------------------------------------------------------------------------
 # Denial message contract (D5-2): self-identifies as a plugin guardrail.
 # ---------------------------------------------------------------------------

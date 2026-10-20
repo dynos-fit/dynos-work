@@ -10,8 +10,8 @@ otherwise fires by default (router.py:992-994).
 This test suite drives the contract: claude-md-auditor must always
 emit ``ensemble: false`` in the audit plan, regardless of:
 
-  - risk_level (high/critical otherwise force ensemble=true)
-  - sampling roll (medium/low otherwise CRC32-sample)
+  - risk_level (no risk level forces ensemble for non-default auditors)
+  - sampling roll (every risk level otherwise CRC32-samples)
   - fast_track flag (already false-correct)
   - any future ensemble_auditors override that includes claude-md
 
@@ -105,3 +105,33 @@ def test_claude_md_no_ensemble_voting_models_when_excluded():
     assert e is not None
     assert "ensemble_voting_models" not in e
     assert "ensemble_escalation_model" not in e
+
+
+def _entries(plan: dict) -> dict:
+    return {e["name"]: e for e in plan.get("auditors", []) if e.get("action") == "spawn"}
+
+
+def test_high_risk_non_security_auditor_follows_sampling():
+    """At high/critical risk, non-default auditors use the CRC32 sample, never 'high_risk'."""
+    import zlib
+    from router import ENSEMBLE_SAMPLE_RATE, _DEFAULT_ENSEMBLE_AUDITORS, _DETERMINISTIC_FIRST_AUDITORS
+    for risk in ("high", "critical"):
+        plan = _build_plan(risk_level=risk)
+        checked = 0
+        for name, e in _entries(plan).items():
+            if name in _DEFAULT_ENSEMBLE_AUDITORS or name in _DETERMINISTIC_FIRST_AUDITORS:
+                continue
+            sampled = zlib.crc32(f"test-task|{name}".encode()) % 10000 < int(ENSEMBLE_SAMPLE_RATE * 10000)
+            assert e["ensemble"] is sampled, (risk, name, e)
+            checked += 1
+        assert checked, f"no sampled auditors in {risk} plan"
+        assert "high_risk" not in str(plan)
+
+
+def test_ensemble_auditor_set_ensemble_at_every_risk():
+    from router import _DEFAULT_ENSEMBLE_AUDITORS
+    for risk in ("low", "medium", "high", "critical"):
+        entries = _entries(_build_plan(risk_level=risk))
+        present = [n for n in _DEFAULT_ENSEMBLE_AUDITORS if n in entries]
+        for name in present:
+            assert entries[name]["ensemble"] is True, (risk, name)

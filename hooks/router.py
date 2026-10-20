@@ -1210,11 +1210,8 @@ def build_audit_plan(
         elif fast_track:
             entry["ensemble"] = False
             reason = "fast_track"
-        elif risk_level in {"high", "critical"}:
-            entry["ensemble"] = True
-            reason = "high_risk"
         else:
-            # Medium / low: probabilistic sampling keyed on task_id + auditor
+            # All risk levels: probabilistic sampling keyed on task_id + auditor
             seed_key = f"{task_id}|{auditor}".encode()
             sampled = zlib.crc32(seed_key) % 10000 < int(ENSEMBLE_SAMPLE_RATE * 10000)
             entry["ensemble"] = sampled

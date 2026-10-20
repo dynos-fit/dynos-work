@@ -7392,7 +7392,8 @@ def register_task_lifecycle_parsers(subparsers: argparse._SubParsersAction) -> N
         "ensemble-next",
         help=(
             "Print the next required spawn per ensemble auditor (fast -> balanced "
-            "on zero findings -> deep on any finding), computed from the audit plan "
+            "when no blocking findings -> deep on any blocking finding), computed "
+            "from the audit plan "
             "and the shard receipts on disk. Loop until \"complete\" is true."
         ),
     )

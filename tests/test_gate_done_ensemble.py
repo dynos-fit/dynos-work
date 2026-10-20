@@ -99,11 +99,10 @@ def test_ensemble_zero_blocking_consensus_passes(tmp_path: Path, monkeypatch):
 
 
 def test_ensemble_nonblocking_finding_no_escalation_refuses(tmp_path: Path, monkeypatch):
-    """Cascade binds on finding_count, not blocking_count.
+    """Cascade binds on blocking_count (finding_count only as fallback).
 
-    A voting model that finds a NON-blocking issue (finding_count>0, blocking=0)
-    must still escalate to opus. Running it at sonnet with both shards zero-
-    blocking used to pass (the closed seam) — now it must produce a gap.
+    A voting model that reports a BLOCKING finding must escalate to opus;
+    without an opus shard the DONE gate produces a gap.
     """
     _mock_empty_registry(monkeypatch)
     td = _setup_task(tmp_path)
@@ -117,17 +116,37 @@ def test_ensemble_nonblocking_finding_no_escalation_refuses(tmp_path: Path, monk
         "agent_path": None,
         "injected_agent_sha256": None,
     }])
-    # haiku reports a non-blocking finding; sonnet clean; no opus escalation.
+    # haiku reports a blocking finding; no opus escalation.
     _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku",
-                         blocking_count=0, finding_count=2)
-    _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet", blocking_count=0)
+                         blocking_count=1, finding_count=2)
     gaps = require_receipts_for_done(td)
-    assert any("sec" in g and "non-zero findings" in g for g in gaps), \
-        f"expected escalation gap for non-blocking haiku finding: {gaps}"
+    assert any("sec" in g and "blocking findings" in g for g in gaps), \
+        f"expected escalation gap for blocking haiku finding: {gaps}"
+
+
+def test_done_gate_accepts_non_blocking_findings_without_escalation(tmp_path: Path, monkeypatch):
+    """Non-blocking findings in a voting tier do not require the deep tier."""
+    _mock_empty_registry(monkeypatch)
+    td = _setup_task(tmp_path)
+    receipt_audit_routing(td, [{
+        "name": "sec",
+        "action": "spawn",
+        "ensemble": True,
+        "ensemble_voting_models": ["haiku", "sonnet"],
+        "ensemble_escalation_model": "opus",
+        "route_mode": "generic",
+        "agent_path": None,
+        "injected_agent_sha256": None,
+    }])
+    _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku", blocking_count=0)
+    _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet",
+                         blocking_count=0, finding_count=3)
+    gaps = require_receipts_for_done(td)
+    assert not any("sec" in g for g in gaps), f"unexpected ensemble gap(s): {gaps}"
 
 
 def test_ensemble_nonblocking_finding_with_opus_passes(tmp_path: Path, monkeypatch):
-    """Non-blocking haiku finding + opus escalation shard → accepted."""
+    """Blocking haiku finding + opus escalation shard → accepted."""
     _mock_empty_registry(monkeypatch)
     td = _setup_task(tmp_path)
     receipt_audit_routing(td, [{
@@ -141,7 +160,7 @@ def test_ensemble_nonblocking_finding_with_opus_passes(tmp_path: Path, monkeypat
         "injected_agent_sha256": None,
     }])
     _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku",
-                         blocking_count=0, finding_count=2)
+                         blocking_count=1, finding_count=2)
     _write_audit_receipt(td, "audit-sec-opus", model_used="opus",
                          blocking_count=0, finding_count=0)
     gaps = require_receipts_for_done(td)
