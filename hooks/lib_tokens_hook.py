@@ -483,6 +483,16 @@ def main() -> int:
     except Exception as exc:  # never let telemetry block the hook
         print(f"[warn] spawn stop row not recorded: {exc}", file=sys.stderr)
 
+    # A background planner's PostToolUse fires at launch, so the planning
+    # stamp is released here, once the planner has actually stopped.
+    try:
+        from lib_core import role_for_subagent_type
+        if role_for_subagent_type(args.agent_type) == "planning":
+            from agent_spawn_log import release_planning_stamp
+            release_planning_stamp(task_dir)
+    except Exception as exc:
+        print(f"[warn] planning stamp not released: {exc}", file=sys.stderr)
+
     return 0
 
 

@@ -180,3 +180,92 @@ def test_clear_failure_still_appends_row_and_exits_zero(tmp_path, monkeypatch, c
     assert (task_dir / "active-segment-role").read_text() == "planning"
     row = _rows(task_dir)[-1]
     assert row["phase"] == "post" and "cleared_role" not in row
+
+
+# ---------------------------------------------------------------------------
+# Background (async) planner spawns: post fires at launch, not at return
+# ---------------------------------------------------------------------------
+
+def _async_post(task_dir: Path, tmp_path: Path, prompt: str = "p", response=None):
+    payload = {
+        "tool_name": "Agent",
+        "session_id": SESSION,
+        "cwd": str(task_dir.parent.parent),
+        "tool_input": {"subagent_type": "dynos-work:planning", "prompt": prompt, "description": "d"},
+        "tool_response": response if response is not None else
+            {"status": "async_launched", "agentId": "agent-a", "description": "d"},
+    }
+    return subprocess.run(
+        [sys.executable, str(HOOKS / "agent_spawn_log.py"), "post"],
+        input=json.dumps(payload), capture_output=True, text=True,
+        env=_env(task_dir, tmp_path),
+    )
+
+
+def _subagent_stop(task_dir: Path, tmp_path: Path, agent_id: str = "agent-a"):
+    transcript = tmp_path / f"{agent_id}.jsonl"
+    transcript.write_text("".join(json.dumps(e) + "\n" for e in (
+        {"type": "assistant", "agentId": agent_id, "timestamp": "2026-10-20T01:38:06.420Z",
+         "message": {"model": "fable", "usage": {"input_tokens": 12, "output_tokens": 4}}},
+        {"type": "assistant", "agentId": agent_id, "timestamp": "2026-10-20T01:43:54.855Z",
+         "message": {"model": "fable", "usage": {"input_tokens": 3, "output_tokens": 1}}},
+    )))
+    payload = {"cwd": str(task_dir.parent.parent), "agent_transcript_path": str(transcript),
+               "agent_type": "dynos-work:planning", "session_id": ""}
+    return subprocess.run([str(HOOKS / "subagent-tokens")], input=json.dumps(payload),
+                          text=True, capture_output=True, env=_env(task_dir, tmp_path))
+
+
+def test_async_launch_post_keeps_stamp_until_subagent_stop(tmp_path):
+    # task-20261020-001: the Agent call returned "Async agent launched" in the
+    # same second as pre, the post cleared the stamp, and the still-running
+    # planner was write-denied as the orchestrator.
+    task_dir = _setup(tmp_path)
+    assert _spawn("pre", "dynos-work:planning", task_dir, tmp_path).returncode == 0
+    post = _async_post(task_dir, tmp_path)
+    assert post.returncode == 0, post.stderr
+    assert (task_dir / "active-segment-role").read_text().strip() == "planning"
+    row = _rows(task_dir)[-1]
+    assert row["async_launch"] is True and row["agent_id"] == "agent-a"
+    assert "cleared_role" not in row
+    # The planner is still running, so the stamp keeps denying validators.
+    assert _bash(task_dir, tmp_path).returncode == 2
+
+    stop = _subagent_stop(task_dir, tmp_path)
+    assert stop.returncode == 0, stop.stderr
+    assert _rows(task_dir)[-1]["phase"] == "stop"
+    assert not (task_dir / "active-segment-role").exists()
+
+
+def test_empty_response_post_is_treated_as_a_launch(tmp_path):
+    task_dir = _setup(tmp_path)
+    assert _spawn("pre", "planning", task_dir, tmp_path).returncode == 0
+    assert _async_post(task_dir, tmp_path, response={}).returncode == 0
+    assert (task_dir / "active-segment-role").read_text().strip() == "planning"
+    assert _rows(task_dir)[-1]["async_launch"] is True
+
+
+def test_parallel_async_planners_clear_after_the_last_stop(tmp_path):
+    import agent_spawn_log
+
+    task_dir = _setup(tmp_path)
+    for prompt, agent_id in (("worker-a", "agent-a"), ("worker-b", "agent-b")):
+        assert _spawn("pre", "planning", task_dir, tmp_path, prompt=prompt).returncode == 0
+        launch = {"status": "async_launched", "agentId": agent_id}
+        assert _async_post(task_dir, tmp_path, prompt=prompt, response=launch).returncode == 0
+    assert _subagent_stop(task_dir, tmp_path, "agent-a").returncode == 0
+    assert (task_dir / "active-segment-role").read_text().strip() == "planning"
+    assert agent_spawn_log._planner_spawns_in_flight(task_dir / "spawn-log.jsonl") == 1
+    assert _subagent_stop(task_dir, tmp_path, "agent-b").returncode == 0
+    assert not (task_dir / "active-segment-role").exists()
+
+
+def test_foreground_planner_stop_before_post_does_not_clear(tmp_path):
+    # SubagentStop for a foreground planner can land before its post row; the
+    # pre is still unmatched then, so the stop must leave the stamp alone.
+    task_dir = _setup(tmp_path)
+    assert _spawn("pre", "planning", task_dir, tmp_path).returncode == 0
+    assert _subagent_stop(task_dir, tmp_path).returncode == 0
+    assert (task_dir / "active-segment-role").read_text().strip() == "planning"
+    assert _spawn("post", "planning", task_dir, tmp_path).returncode == 0
+    assert not (task_dir / "active-segment-role").exists()
