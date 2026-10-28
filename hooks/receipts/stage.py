@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from lib_core import _persistent_project_dir
+from lib_core import _persistent_project_dir, finding_is_blocking
 import lib_ensemble as _lib_ensemble
 import lib_host as _lib_host
 import lib_models as _lib_models
@@ -890,8 +890,7 @@ def _validate_final_envelope(
             findings = []
         actual_finding_count = len(findings)
         actual_blocking_count = sum(
-            1 for f in findings
-            if isinstance(f, dict) and f.get("blocking") is True
+            1 for f in findings if finding_is_blocking(f)
         )
 
     if actual_finding_count is not None and env_findings_count != actual_finding_count:
@@ -975,8 +974,7 @@ def _build_audit_receipt_payload(
                 findings = []
             actual_finding_count = len(findings)
             actual_blocking_count = sum(
-                1 for f in findings
-                if isinstance(f, dict) and f.get("blocking") is True
+                1 for f in findings if finding_is_blocking(f)
             )
             if finding_count is None:
                 finding_count = actual_finding_count

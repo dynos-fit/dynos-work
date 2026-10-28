@@ -11,6 +11,11 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.31] - 2026-10-28
+### Fixed
+- Findings that say `"severity": "blocking"` without the boolean `blocking` flag now block. Release-auditor and spec-completion-auditor reports were seen omitting the flag. Every counter read `bool(finding.get("blocking"))`, so those findings were treated as non-blocking and the audit could pass over them. The new `lib_core.finding_is_blocking` is now the single rule for the audit receipt's `blocking_count`, the findings gate, the repair cycle plan, `collect_repair_findings`, `run-audit-summary`, the audit-summary validator and the DONE gate's open-finding check. An explicit boolean `blocking` decides. When it is missing, a `blocking` or `critical` severity counts as blocking (fail-closed). `normalize_repair_severity` maps `blocking`/`non-blocking` to `high`/`low`.
+- A finding whose `file` lists several paths (`".gitignore, infra/docker-compose.yml"`, `"client.ts:7; status.tsx:28"`) now gets one `files_to_modify` entry per path, with line suffixes stripped, instead of one path that names no file.
+
 ## [7.5.30] - 2026-10-28
 ### Fixed
 - **A plan repaired after approval is approved again.** `run-plan-audit` runs at `PLAN_AUDIT`, after the human approved `plan.md` at `PLAN_REVIEW`. On `replan_required` the skills had the planner repair `plan.md` in place, so `run-execute-setup` later refused with "plan.md was mutated after human approval". `run-plan-audit` now moves the task back to `PLANNING` itself (`transitioned_to`, `next_action: repair_plan_then_reapprove`). The start and plan skills route the repaired plan through validation, the `PLAN_REVIEW` transition and human review before the audit reruns.

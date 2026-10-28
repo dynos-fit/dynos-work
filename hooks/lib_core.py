@@ -522,6 +522,29 @@ def allocate_task_id(
     )
 
 
+# Severity spellings some auditors use in place of the boolean ``blocking``
+# flag (``"severity": "blocking"`` with no ``blocking`` key).
+_BLOCKING_SEVERITIES = frozenset({"blocking", "critical"})
+
+
+def finding_is_blocking(finding: object) -> bool:
+    """Whether an audit finding blocks completion.
+
+    An explicit boolean ``blocking`` decides. When the flag is missing or not
+    a bool, a ``blocking`` or ``critical`` severity counts as blocking, so a
+    report that drops the flag fails closed instead of passing silently.
+    Every counter (receipts, findings gate, repair plan, summary, DONE gate)
+    uses this one rule so their counts agree.
+    """
+    if not isinstance(finding, dict):
+        return False
+    blocking = finding.get("blocking")
+    if isinstance(blocking, bool):
+        return blocking
+    severity = finding.get("severity")
+    return isinstance(severity, str) and severity.strip().lower() in _BLOCKING_SEVERITIES
+
+
 def _persistent_project_dir(root: Path) -> Path:
     """Returns ~/.dynos/projects/{slug}/ for persistent project state.
 
@@ -1502,7 +1525,7 @@ def _write_pre_repair_blocking_snapshot(task_dir: Path) -> Path | None:
             for finding in findings:
                 if not isinstance(finding, dict):
                     continue
-                if finding.get("blocking") is not True:
+                if not finding_is_blocking(finding):
                     continue
                 fid = finding.get("id")
                 if isinstance(fid, str) and fid and fid not in seen:

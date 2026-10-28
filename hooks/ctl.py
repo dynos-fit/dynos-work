@@ -20,6 +20,7 @@ _GIT: str | None = shutil.which("git")
 
 from lib_core import (
     append_execution_log,
+    finding_is_blocking,
     VALID_CLASSIFICATION_TYPES,
     VALID_EXECUTORS,
     VALID_DOMAINS,
@@ -2940,7 +2941,7 @@ def _parse_audit_report(report_path: Path, root: Path | None = None) -> tuple[in
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        if bool(finding.get("blocking")):
+        if finding_is_blocking(finding):
             blocking += 1
 
     # Evidence gate: a report that claims "passed" (findings empty) must
@@ -4790,13 +4791,13 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
 
         collected = collect_repair_findings(task_dir)
         reports = collected["reports"]
-        blocking_findings = [f for f in collected["findings"] if bool(f.get("blocking"))]
+        blocking_findings = [f for f in collected["findings"] if finding_is_blocking(f)]
         critical_spec_findings = [f for f in blocking_findings if _is_critical_spec_finding(f)]
         findings_by_auditor: dict[str, dict[str, int]] = {}
         for finding in collected["findings"]:
             counts = findings_by_auditor.setdefault(finding["_auditor"], {"finding_count": 0, "blocking_count": 0})
             counts["finding_count"] += 1
-            counts["blocking_count"] += 1 if bool(finding.get("blocking")) else 0
+            counts["blocking_count"] += 1 if finding_is_blocking(finding) else 0
 
         next_action = "repair_phase_1" if blocking_findings else "reflect"
         status = "repair_required" if blocking_findings else "clear"
@@ -4832,7 +4833,7 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
 
         collected = collect_repair_findings(task_dir)
         reports = collected["reports"]
-        blocking_findings = [f for f in collected["findings"] if bool(f.get("blocking"))]
+        blocking_findings = [f for f in collected["findings"] if finding_is_blocking(f)]
         critical_spec_keys = {
             (f["_auditor"], f["id"]) for f in blocking_findings if _is_critical_spec_finding(f)
         }
@@ -5021,9 +5022,18 @@ def _repair_files_for_finding(
                 if isinstance(entry, str) and entry.strip():
                     cited.append(entry)
 
+    # Auditors list several files in one field (".gitignore, infra/x.yml" or
+    # "client.ts:7; status.tsx:28"); each is its own target, minus any line.
+    split_cited = [
+        re.sub(r":\d[\d\s-]*$", "", part.strip())
+        for raw in cited
+        for part in re.split(r"[,;]", raw)
+        if part.strip() and not re.fullmatch(r"[\d\s-]+", part.strip())
+    ]
+
     repo_files: list[str] = []
     pipeline_files: list[str] = []
-    for raw in _dedupe(cited):
+    for raw in _dedupe(split_cited):
         kind, rel = _classify_repair_path(raw, root, task_dir)
         if kind == "repo" and rel:
             repo_files.append(rel)
@@ -5419,7 +5429,7 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
                     if not isinstance(finding, dict):
                         continue
                     finding_count += 1
-                    if bool(finding.get("blocking")):
+                    if finding_is_blocking(finding):
                         blocking_count += 1
                     fid = str(finding.get("id", "") or "")
                     category = fid.split("-")[0] if "-" in fid else fid
@@ -6431,7 +6441,7 @@ def cmd_run_repair_q_update(args: argparse.Namespace) -> int:
         # Binding reports only: a superseded fast-tier or older-attempt copy of
         # a repaired finding must not count as "still blocking".
         for finding in collect_repair_findings(task_dir)["findings"]:
-            if bool(finding.get("blocking")):
+            if finding_is_blocking(finding):
                 post_repair_blocking[finding["id"]] = finding
 
         new_blocking_ids = sorted(set(post_repair_blocking) - repaired_finding_ids)
