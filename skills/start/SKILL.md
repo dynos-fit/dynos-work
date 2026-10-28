@@ -16,7 +16,12 @@ Every deterministic step below runs through the plugin CLI. Resolve it once at t
 ```bash
 PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
 if [ -z "$PLUGIN_ROOT" ]; then
-  echo "Set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT to the dynos-work plugin root." >&2
+  # Some sessions leave both unset. The plugin root is two levels above this
+  # skill's base directory (printed when the skill loads); substitute it here.
+  PLUGIN_ROOT="$(cd "{skill_base_dir}/../.." && pwd)"
+fi
+if [ ! -x "$PLUGIN_ROOT/bin/dynos" ]; then
+  echo "Cannot locate the dynos-work plugin root; set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT." >&2
   exit 2
 fi
 DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
@@ -370,7 +375,7 @@ For `plan.md`:
 2. When domains include backend, ui, or security: `API Contracts` section is required. When domains include db: `Data Model` section is required.
 3. Every component or module section must list exact files.
 4. `Reference Code` paths must exist in the repo unless explicitly marked as to-be-created.
-5. **Gap analysis (deterministic):** if the plan contains `API Contracts` or `Data Model` sections, their claims are verified against the codebase. Endpoints listed in the API Contracts table must correspond to actual route definitions. Tables listed in the Data Model table must correspond to actual model/schema/migration definitions. Claimed-but-not-found entries are validation errors — the planner must either fix the table or mark new entries as to-be-created. For a new Data Model row, include `to-be-created` in any cell of that row; this explicitly exempts it from the existing-code check until its execution segment creates it.
+5. **Gap analysis (deterministic):** if the plan contains `API Contracts` or `Data Model` sections, their claims are verified against the codebase. Endpoints listed in the API Contracts table must correspond to actual route definitions. Tables listed in the Data Model table must correspond to actual model/schema/migration definitions. Claimed-but-not-found entries are validation errors — the planner must either fix the table or mark new entries as to-be-created. For a new API Contracts or Data Model row, include `to-be-created` in any cell of that row; this explicitly exempts it from the existing-code check until its execution segment creates it.
 
 For `execution-graph.json`:
 1. It must parse as valid JSON.
@@ -453,7 +458,7 @@ The plan audit is deterministic at every risk level. `validate_task_artifacts` a
    "$DYNOS" ctl run-plan-audit .dynos/task-{id}
    ```
    - `status == "passed"`: proceed. `receipt_cached: true` means a fresh receipt already covered these exact artifacts and nothing was redone. Do NOT spawn an auditor.
-   - `status == "replan_required"`: a claimed endpoint or table does not exist. The planner must fix the table or mark the row `to-be-created` (any cell of a Data Model row). The human already approved this plan, so a repaired plan needs approving again: ctl has moved the task back to `PLANNING` (`transitioned_to`). Follow **On validation failure** with phase `plan`, then repeat the end of Step 5 (validation, `plan-validated-receipt`, transition to `PLAN_REVIEW`) and Step 6 for re-approval, and only then rerun this command. Never edit `plan.md` while the task is at `PLAN_AUDIT`: `run-execute-setup` refuses a plan changed after approval.
+   - `status == "replan_required"`: a claimed endpoint or table does not exist. The planner must fix the table or mark the row `to-be-created` (any cell of an API Contracts or Data Model row). The human already approved this plan, so a repaired plan needs approving again: ctl has moved the task back to `PLANNING` (`transitioned_to`). Follow **On validation failure** with phase `plan`, then repeat the end of Step 5 (validation, `plan-validated-receipt`, transition to `PLAN_REVIEW`) and Step 6 for re-approval, and only then rerun this command. Never edit `plan.md` while the task is at `PLAN_AUDIT`: `run-execute-setup` refuses a plan changed after approval.
    - `status == "llm_audit_required"`: only when the project opted in. Spawn `spec-completion-auditor`, then finalize with `run-plan-audit --report-path ... --tokens-used ... --model ...`.
 
 2. Surface any segment where `len(segment.files_expected) >= 10` (computed budget ≥ 35, the `TOOL_BUDGET_ADVISORY` threshold from `hooks/lib_tool_budget.py`) as a non-blocking advisory finding `near-budget-ceiling`. It warns the operator that the segment is approaching the 11-file overflow ceiling and may want decomposition.

@@ -14,7 +14,12 @@ Every deterministic step below runs through the plugin CLI. Resolve it once at t
 ```bash
 PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
 if [ -z "$PLUGIN_ROOT" ]; then
-  echo "Set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT to the dynos-work plugin root." >&2
+  # Some sessions leave both unset. The plugin root is two levels above this
+  # skill's base directory (printed when the skill loads); substitute it here.
+  PLUGIN_ROOT="$(cd "{skill_base_dir}/../.." && pwd)"
+fi
+if [ ! -x "$PLUGIN_ROOT/bin/dynos" ]; then
+  echo "Cannot locate the dynos-work plugin root; set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT." >&2
   exit 2
 fi
 DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
@@ -191,7 +196,7 @@ Do not proceed with spawning auditors. The pause is intentional — the policy i
 
 Spawn the determined auditors simultaneously, passing for each auditor the model returned by `ensemble-next` (never the plan `model` for an ensemble auditor) in the subagent spawn configuration. For alongside-mode auditors, this means two spawns for that role (generic + learned), both counted in {N}.
 
-Each auditor writes its own report to the absolute path `{repo_root}/.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json`. Put that exact string in the spawn prompt and reuse it verbatim as `--report-path`. Every auditor agent has a write capability sufficient for this: auditors with `Bash` use a heredoc; `spec-completion-auditor` has the `Write` tool scoped via `write_policy.py` to its own report path. The hook-stamped auditor role unlocks the `audit-reports/` write rule for these subagents.
+Each auditor writes its own report to the absolute path `{repo_root}/.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json`. Put that exact string in the spawn prompt and reuse it verbatim as `--report-path`. Also put the line `PLUGIN_HOOKS={absolute PLUGIN_ROOT}/hooks` in every auditor spawn prompt: auditors run plugin helpers (`lib_claude_md.py`, `compliance_check.py`, …) from that directory, and their shell does not inherit it. Every auditor agent has a write capability sufficient for this: auditors with `Bash` use a heredoc; `spec-completion-auditor` has the `Write` tool scoped via `write_policy.py` to its own report path. The hook-stamped auditor role unlocks the `audit-reports/` write rule for these subagents.
 
 **The orchestrator MUST NOT materialize audit-report files.** Direct `Write`/`Edit`/Bash redirection from the orchestrator (role=`execute-inline`) to `audit-reports/` is denied by `write_policy.decide_write` because the role is not `audit-*`. The orchestrator cannot self-elevate through direct writes to the wrapper-required role file. The only legitimate path for an audit-report file to land on disk is the auditor subagent's own write call. If the auditor returns text instead of writing the file, treat the audit as **failed for this auditor** and re-spawn — do NOT backfill from the auditor's text response. Backfilling is the exact mechanism behind the 2026-04-30 audit-chain forgery incident: 7 of 8 ensemble auditors were synthesized by the orchestrator after one truncation, and the receipt chain validated as clean because there was no harness-level cross-check. The Agent-tool spawn-log hook (`hooks/agent-spawn-log`) now provides that cross-check; the absence of a matching `agent_spawn_post` entry for an auditor whose report is on disk is a hard fail at receipt time (`receipt_audit_done`).
 
