@@ -21,6 +21,7 @@ _GIT: str | None = shutil.which("git")
 from lib_core import (
     append_execution_log,
     VALID_CLASSIFICATION_TYPES,
+    VALID_EXECUTORS,
     VALID_DOMAINS,
     VALID_RISK_LEVELS,
     allocate_task_id,
@@ -53,7 +54,7 @@ from lib_receipts import (
     receipt_executor_routing,
     write_receipt,
 )
-from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, select_eligible_reports, validate_task_artifacts
+from lib_validate import apply_fast_track, check_segment_ownership, collect_repair_findings, normalize_repair_severity, require_nonblank, select_eligible_reports, validate_task_artifacts
 from lib_models import TIER_DEEP, resolve_model_for_tier
 from lib_host import detect_host, host_emits_web_tool_telemetry, resolve_host
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
@@ -4726,42 +4727,28 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
         return 1
 
 
+def _is_critical_spec_finding(finding: dict) -> bool:
+    return (
+        finding.get("_auditor") == "spec-completion-auditor"
+        and str(finding.get("severity", "")).lower() == "critical"
+    )
+
+
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
         _decision = check_circuit_breakers(task_dir, "AUDITING")
         _dispatch_breaker_decision(task_dir, "AUDITING", _decision, task_id=task_dir.name)
 
-        reports: list[dict] = []
-        blocking_findings: list[dict] = []
-        critical_spec_findings: list[dict] = []
+        collected = collect_repair_findings(task_dir)
+        reports = collected["reports"]
+        blocking_findings = [f for f in collected["findings"] if bool(f.get("blocking"))]
+        critical_spec_findings = [f for f in blocking_findings if _is_critical_spec_finding(f)]
         findings_by_auditor: dict[str, dict[str, int]] = {}
-
-        for report_path, data in select_eligible_reports(task_dir, stage=None):
-            findings = data.get("findings", []) if isinstance(data, dict) else []
-            if not isinstance(findings, list):
-                findings = []
-            auditor_name = str(data.get("auditor_name") or data.get("auditor") or report_path.stem)
-            total = 0
-            blocking = 0
-            for finding in findings:
-                if not isinstance(finding, dict):
-                    continue
-                total += 1
-                if bool(finding.get("blocking")):
-                    blocking += 1
-                    entry = dict(finding)
-                    entry["_auditor"] = auditor_name
-                    blocking_findings.append(entry)
-                    if auditor_name == "spec-completion-auditor" and str(entry.get("severity", "")).lower() == "critical":
-                        critical_spec_findings.append(entry)
-            findings_by_auditor[auditor_name] = {"finding_count": total, "blocking_count": blocking}
-            reports.append({
-                "auditor_name": auditor_name,
-                "report_path": str(report_path),
-                "finding_count": total,
-                "blocking_count": blocking,
-            })
+        for finding in collected["findings"]:
+            counts = findings_by_auditor.setdefault(finding["_auditor"], {"finding_count": 0, "blocking_count": 0})
+            counts["finding_count"] += 1
+            counts["blocking_count"] += 1 if bool(finding.get("blocking")) else 0
 
         next_action = "repair_phase_1" if blocking_findings else "reflect"
         status = "repair_required" if blocking_findings else "clear"
@@ -4795,29 +4782,13 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
-        reports: list[dict] = []
-        blocking_findings: list[dict] = []
-        critical_spec_finding_ids: set[str] = set()
-        for report_path, data in select_eligible_reports(task_dir, stage=None):
-            findings = data.get("findings", []) if isinstance(data, dict) else []
-            if not isinstance(findings, list):
-                findings = []
-            auditor_name = str(data.get("auditor_name") or data.get("auditor") or report_path.stem)
-            reports.append({
-                "auditor_name": auditor_name,
-                "report_path": str(report_path),
-                "finding_count": len([f for f in findings if isinstance(f, dict)]),
-                "blocking_count": len([f for f in findings if isinstance(f, dict) and bool(f.get("blocking"))]),
-            })
-            for finding in findings:
-                if not isinstance(finding, dict) or not bool(finding.get("blocking")):
-                    continue
-                entry = dict(finding)
-                entry["_auditor"] = auditor_name
-                fid = str(entry.get("id", "") or "")
-                if auditor_name == "spec-completion-auditor" and str(entry.get("severity", "")).lower() == "critical" and fid:
-                    critical_spec_finding_ids.add(fid)
-                blocking_findings.append(entry)
+        collected = collect_repair_findings(task_dir)
+        reports = collected["reports"]
+        blocking_findings = [f for f in collected["findings"] if bool(f.get("blocking"))]
+        critical_spec_keys = {
+            (f["_auditor"], f["id"]) for f in blocking_findings if _is_critical_spec_finding(f)
+        }
+        critical_spec_finding_ids = {fid for _, fid in critical_spec_keys}
 
         if not blocking_findings:
             payload = {
@@ -4836,7 +4807,9 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
             return 0
 
         prior_cycle = 0
-        prior_retry_counts: dict[str, int] = {}
+        # Keyed by (auditor, finding_id); a task written without an auditor
+        # (older logs) is keyed by (None, finding_id) and matches any auditor.
+        prior_retry_counts: dict[tuple[str | None, str], int] = {}
         repair_log_path = task_dir / "repair-log.json"
         if repair_log_path.exists():
             repair_log = load_json(repair_log_path)
@@ -4858,7 +4831,9 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
                             retry_count = int(task.get("retry_count", 0) or 0)
                         except (TypeError, ValueError):
                             retry_count = 0
-                        prior_retry_counts[fid] = max(prior_retry_counts.get(fid, retry_count), retry_count)
+                        task_auditor = task.get("auditor")
+                        key = (task_auditor if isinstance(task_auditor, str) and task_auditor else None, fid)
+                        prior_retry_counts[key] = max(prior_retry_counts.get(key, retry_count), retry_count)
 
         next_cycle = max(1, prior_cycle + 1)
         if next_cycle == 1:
@@ -4871,9 +4846,9 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
         ordered_findings = sorted(
             blocking_findings,
             key=lambda finding: (
-                0 if str(finding.get("id", "") or "") in critical_spec_finding_ids else 1,
-                str(finding.get("_auditor", "")),
-                str(finding.get("id", "")),
+                0 if (finding["_auditor"], finding["id"]) in critical_spec_keys else 1,
+                str(finding["_auditor"]),
+                str(finding["id"]),
             ),
         )
 
@@ -4881,13 +4856,15 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
         model_overrides: dict[str, str] = {}
         for finding in ordered_findings:
             entry = dict(finding)
-            fid = str(entry.get("id", "") or "")
-            previous_retry = prior_retry_counts.get(fid)
+            fid = str(entry["id"])
+            previous_retry = prior_retry_counts.get((entry["_auditor"], fid))
+            if previous_retry is None:
+                previous_retry = prior_retry_counts.get((None, fid))
             retry_count = previous_retry + 1 if previous_retry is not None else 0
             entry["retry_count"] = retry_count
             entry["repair_cycle"] = next_cycle
             entry["phase"] = phase
-            entry["priority"] = "critical_spec" if fid in critical_spec_finding_ids else "normal"
+            entry["priority"] = "critical_spec" if (entry["_auditor"], fid) in critical_spec_keys else "normal"
             if retry_count >= 2:
                 # Escalation routes through the router's fail-closed helper
                 # (binding decision 5): under a host with no deep-tier model
@@ -4933,59 +4910,95 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
         return 1
 
 
+def _dedupe(paths: list[str]) -> list[str]:
+    seen: set[str] = set()
+    return [p for p in paths if not (p in seen or seen.add(p))]
+
+
+def _classify_repair_path(raw: str, root: Path, task_dir: Path) -> tuple[str, str | None]:
+    """Return ``("repo", rel)``, ``("pipeline", rel)`` or ``("outside", None)``.
+
+    Pipeline-owned paths are anything under ``.dynos/`` and task-dir
+    artifacts named relative to the task dir (``receipts/…``,
+    ``events.jsonl``). Executors may not write them (write_policy), so a
+    repair task that targets one can only fail.
+    """
+    text = raw.strip()
+    while text.startswith("./"):
+        text = text[2:]
+    path = Path(text)
+    if path.is_absolute():
+        try:
+            path = path.resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            return "outside", None
+    if ".." in path.parts or not path.parts:
+        return "outside", None
+    rel = path.as_posix()
+    if path.parts[0] == ".dynos":
+        return "pipeline", rel
+    if not (root / path).exists():
+        from write_policy import _is_cross_task_control_plane  # noqa: PLC0415
+        if (task_dir / path).exists() or _is_cross_task_control_plane(rel):
+            return "pipeline", rel
+    return "repo", rel
+
+
 def _repair_files_for_finding(
     task_dir: Path,
     finding: dict,
+    live: dict | None,
     assigned_executor: str | None,
-) -> list[str]:
-    paths: list[str] = []
-    direct = finding.get("file")
-    if isinstance(direct, str) and direct:
-        paths.append(direct)
-    evidence = finding.get("evidence")
-    if isinstance(evidence, dict):
-        evidence_file = evidence.get("file")
-        if isinstance(evidence_file, str) and evidence_file:
-            paths.append(evidence_file)
-    if paths:
-        deduped: list[str] = []
-        seen: set[str] = set()
-        for path in paths:
-            if path not in seen:
-                seen.add(path)
-                deduped.append(path)
-        return deduped
+) -> tuple[list[str], list[str]]:
+    """Return ``(files_to_modify, pipeline_files)`` for one finding.
 
-    graph_segments = _load_graph_segments(task_dir)
-    if assigned_executor:
-        executor_paths: list[str] = []
-        for segment in graph_segments:
-            if segment.get("executor") != assigned_executor:
-                continue
-            for path in segment.get("files_expected", []) or []:
-                if isinstance(path, str) and path:
-                    executor_paths.append(path)
-        if executor_paths:
-            deduped: list[str] = []
-            seen: set[str] = set()
-            for path in executor_paths:
-                if path not in seen:
-                    seen.add(path)
-                    deduped.append(path)
-            return deduped
+    Cited files come from the queued finding and its live audit entry: the
+    canonical ``location`` ("file:line"), the older ``file`` /
+    ``evidence.file`` forms, and the auditor's own ``repair_tasks``
+    ``affected_files``. Pipeline-owned paths are returned separately and
+    never become repair targets. Only a finding that cites no file at all
+    falls back to the execution graph.
+    """
+    from lib_validate import _finding_location_file  # noqa: PLC0415
 
-    fallback_paths: list[str] = []
-    for segment in graph_segments:
-        for path in segment.get("files_expected", []) or []:
-            if isinstance(path, str) and path:
-                fallback_paths.append(path)
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for path in fallback_paths:
-        if path not in seen:
-            seen.add(path)
-            deduped.append(path)
-    return deduped
+    root = _root_for_task_dir(task_dir)
+    cited: list[str] = []
+    for source in (finding, live or {}):
+        location_file = _finding_location_file(source)
+        if location_file:
+            cited.append(location_file)
+        repair_task = source.get("_repair_task")
+        if isinstance(repair_task, dict):
+            for entry in repair_task.get("affected_files") or []:
+                if isinstance(entry, str) and entry.strip():
+                    cited.append(entry)
+
+    repo_files: list[str] = []
+    pipeline_files: list[str] = []
+    for raw in _dedupe(cited):
+        kind, rel = _classify_repair_path(raw, root, task_dir)
+        if kind == "repo" and rel:
+            repo_files.append(rel)
+        elif kind == "pipeline" and rel:
+            pipeline_files.append(rel)
+    if repo_files or pipeline_files:
+        return _dedupe(repo_files), _dedupe(pipeline_files)
+
+    try:
+        graph_segments = _load_graph_segments(task_dir)
+    except (OSError, ValueError):
+        graph_segments = []
+    for wanted in (assigned_executor, None):
+        paths = [
+            path
+            for segment in graph_segments
+            if wanted is None or segment.get("executor") == wanted
+            for path in segment.get("files_expected", []) or []
+            if isinstance(path, str) and path
+        ]
+        if paths:
+            return _dedupe(paths), []
+    return [], []
 
 
 def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
@@ -5028,43 +5041,61 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
         root = _root_for_task_dir(task_dir)
         from lib_qlearn import build_repair_plan  # noqa: PLC0415
 
-        q_plan = build_repair_plan(root, findings, task_type)
+        # Q-learning reads `auditor` (e.g. the security model floor); the
+        # cycle plan carries it as `_auditor`.
+        q_findings = [
+            {**f, "auditor": f.get("auditor") or f.get("_auditor") or ""} if isinstance(f, dict) else f
+            for f in findings
+        ]
+        q_plan = build_repair_plan(root, [f for f in q_findings if isinstance(f, dict)], task_type)
         assignments = q_plan.get("assignments", []) if isinstance(q_plan, dict) else []
-        by_finding_id = {
-            str(entry.get("finding_id")): entry
-            for entry in assignments
-            if isinstance(entry, dict) and isinstance(entry.get("finding_id"), str)
-        }
-        live_findings: dict[str, dict[str, str]] = {}
-        audit_dir = task_dir / "audit-reports"
-        if audit_dir.is_dir():
-            for report_path, data in select_eligible_reports(task_dir, stage=None):
-                auditor_name = str(data.get("auditor_name") or data.get("auditor") or report_path.stem)
-                findings_list = data.get("findings", []) if isinstance(data, dict) else []
-                if not isinstance(findings_list, list):
-                    continue
-                for entry in findings_list:
-                    if not isinstance(entry, dict):
-                        continue
-                    finding_id = str(entry.get("id", "") or "")
-                    if not finding_id:
-                        continue
-                    live_findings[finding_id] = {
-                        "auditor": auditor_name,
-                        "severity": str(entry.get("severity", "") or ""),
-                    }
+        # build_repair_plan returns one assignment per finding, in order.
+        assignments_by_key: dict[tuple[str, str], dict] = {}
+        assignments_by_id: dict[str, list[dict]] = {}
+        for queued, entry in zip([f for f in q_findings if isinstance(f, dict)], assignments):
+            if isinstance(entry, dict) and isinstance(entry.get("finding_id"), str):
+                assignments_by_key[(str(queued.get("auditor") or ""), entry["finding_id"])] = entry
+                assignments_by_id.setdefault(entry["finding_id"], []).append(entry)
+
+        # Same view the gate, the cycle plan and validate_repair_log read.
+        live_by_key: dict[tuple[str, str], dict] = {}
+        live_by_id: dict[str, list[dict]] = {}
+        for live_entry in collect_repair_findings(task_dir)["findings"]:
+            live_by_key[(live_entry["_auditor"], live_entry["id"])] = live_entry
+            live_by_id.setdefault(live_entry["id"], []).append(live_entry)
 
         normalized_tasks: list[dict] = []
         unresolved_files: list[str] = []
+        stale: list[str] = []
+        non_repairable: list[dict] = []
+        seen_keys: set[tuple[str, str]] = set()
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
             finding_id = str(finding.get("id", "") or "")
             if not finding_id:
                 continue
-            assignment = by_finding_id.get(finding_id, {})
+            queued_auditor = finding.get("_auditor") or finding.get("auditor") or finding.get("auditor_name")
+            live = live_by_key.get((str(queued_auditor), finding_id)) if queued_auditor else None
+            if live is None and not queued_auditor and len(live_by_id.get(finding_id, [])) == 1:
+                live = live_by_id[finding_id][0]
+            if live is None:
+                stale.append(finding_id)
+                continue
+            key = (live["_auditor"], finding_id)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            assignment = assignments_by_key.get(key)
+            if assignment is None and len(assignments_by_id.get(finding_id, [])) == 1:
+                assignment = assignments_by_id[finding_id][0]
+            assignment = assignment or {}
             assigned_executor = assignment.get("assigned_executor") or finding.get("assigned_executor")
-            if not isinstance(assigned_executor, str) or not assigned_executor:
+            if assigned_executor not in VALID_EXECUTORS:
+                suggested = (live.get("_repair_task") or {}).get("assigned_executor")
+                assigned_executor = suggested if suggested in VALID_EXECUTORS else None
+            if not assigned_executor:
                 category = finding_id.split("-")[0].lower() if "-" in finding_id else ""
                 if category == "db":
                     assigned_executor = "db-executor"
@@ -5076,33 +5107,64 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                     assigned_executor = "backend-executor"
                 else:
                     assigned_executor = "backend-executor"
-            files_to_modify = _repair_files_for_finding(task_dir, finding, assigned_executor)
+            files_to_modify, pipeline_files = _repair_files_for_finding(task_dir, finding, live, assigned_executor)
             if not files_to_modify:
-                unresolved_files.append(finding_id)
+                if pipeline_files:
+                    non_repairable.append({
+                        "finding_id": finding_id,
+                        "auditor": live["_auditor"],
+                        "pipeline_files": pipeline_files,
+                    })
+                else:
+                    unresolved_files.append(finding_id)
                 continue
-            live = live_findings.get(finding_id, {})
-            auditor = (
-                finding.get("auditor")
-                or finding.get("_auditor")
-                or finding.get("auditor_name")
-                or live.get("auditor")
+            description = str(
+                live.get("description") or live.get("title")
+                or finding.get("description") or finding.get("title") or finding_id
             )
-            description = str(finding.get("description") or finding.get("title") or finding_id)
+            instruction = f"Resolve finding {finding_id}: {description}"
+            merged = live.get("_merged") or []
+            if merged:
+                also = ", ".join(f"{m['id']} ({m['auditor']})" for m in merged)
+                instruction += f" The same defect was also reported as: {also}."
             task = {
                 "finding_id": finding_id,
-                "auditor": str(auditor or "unknown"),
+                "auditor": live["_auditor"],
                 "assigned_executor": assigned_executor,
-                "instruction": f"Resolve finding {finding_id}: {description}",
+                "instruction": instruction,
                 "files_to_modify": files_to_modify,
                 "retry_count": int(finding.get("retry_count", 0) or 0),
-                "severity": str(finding.get("severity") or live.get("severity") or "medium"),
+                "severity": normalize_repair_severity(str(live.get("severity") or "medium")),
                 "state": assignment.get("state"),
             }
-            for key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
-                value = assignment.get(key)
+            if merged:
+                task["merged_findings"] = merged
+            for meta_key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
+                value = assignment.get(meta_key)
                 if value is not None:
-                    task[key] = value
+                    task[meta_key] = value
             normalized_tasks.append(task)
+
+        if stale:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": "repair-cycle-plan names findings that are no longer in the binding audit "
+                         "reports; re-run run-audit-repair-cycle-plan",
+                "finding_ids": stale,
+            }, indent=2))
+            return 1
+
+        if non_repairable:
+            print(json.dumps({
+                "status": "escalation_required",
+                "task_dir": str(task_dir),
+                "error": "blocking findings target pipeline-owned artifacts (.dynos receipts, logs, "
+                         "manifests) that no executor may write; a human must resolve them",
+                "non_repairable_findings": non_repairable,
+                "next_action": "write_escalation_and_fail",
+            }, indent=2))
+            return 1
 
         if unresolved_files:
             print(json.dumps({
@@ -5146,11 +5208,19 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
             "batches": batches,
         }
         repair_log_path = task_dir / "repair-log.json"
+        # validate_repair_log reads the file in place, so write first — but
+        # never leave an invalid log behind: the next cycle plan would read it
+        # as a completed cycle and bump every retry count.
+        previous_log = repair_log_path.read_bytes() if repair_log_path.exists() else None
         write_json(repair_log_path, repair_log)
 
         from lib_validate import validate_repair_log  # noqa: PLC0415
         errors = validate_repair_log(task_dir)
         if errors:
+            if previous_log is None:
+                repair_log_path.unlink(missing_ok=True)
+            else:
+                repair_log_path.write_bytes(previous_log)
             print(json.dumps({
                 "status": "repair_log_invalid",
                 "task_dir": str(task_dir),
@@ -6310,22 +6380,14 @@ def cmd_run_repair_q_update(args: argparse.Namespace) -> int:
                     repaired_tasks.append(task)
 
         post_repair_blocking: dict[str, dict] = {}
-        reports_dir = task_dir / "audit-reports"
-        if reports_dir.exists():
-            for report_path in sorted(reports_dir.glob("*.json")):
-                report = load_json(report_path)
-                findings = report.get("findings", []) if isinstance(report, dict) else []
-                if not isinstance(findings, list):
-                    continue
-                for finding in findings:
-                    if not isinstance(finding, dict) or not bool(finding.get("blocking")):
-                        continue
-                    fid = finding.get("id")
-                    if isinstance(fid, str) and fid:
-                        post_repair_blocking[fid] = finding
+        # Binding reports only: a superseded fast-tier or older-attempt copy of
+        # a repaired finding must not count as "still blocking".
+        for finding in collect_repair_findings(task_dir)["findings"]:
+            if bool(finding.get("blocking")):
+                post_repair_blocking[finding["id"]] = finding
 
         new_blocking_ids = sorted(set(post_repair_blocking) - repaired_finding_ids)
-        from lib_qlearn import encode_repair_state, update_from_outcomes  # noqa: PLC0415
+        from lib_qlearn import encode_repair_state, finding_category, update_from_outcomes  # noqa: PLC0415
         root = _root_for_task_dir(task_dir)
         outcomes: list[dict] = []
         for task in repaired_tasks:
@@ -6334,7 +6396,7 @@ def cmd_run_repair_q_update(args: argparse.Namespace) -> int:
                 continue
             retry_count = int(task.get("retry_count", 0) or 0)
             severity = str(task.get("severity", "medium") or "medium")
-            category = finding_id.split("-")[0] if "-" in finding_id else finding_id
+            category = finding_category(finding_id, str(task.get("auditor") or ""))
             resolved = finding_id not in post_repair_blocking
             next_state = None
             if not resolved:

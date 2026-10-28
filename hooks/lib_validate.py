@@ -554,11 +554,11 @@ def select_eligible_reports(
 
         # REPAIR-PLANNING PATH (stage is None): permissive. Every readable
         # report is advisory context regardless of filename scheme, lifecycle
-        # status, or receipt presence. This preserves the pre-cutover
-        # _collect_audit_findings behavior — legacy ``{auditor}.json`` reports
-        # and receipt-less reports stay visible to repair-log cross-checks —
-        # and satisfies AC 1/AC 2 ("repair planning sees all findings,
-        # including incomplete ones, as advisory context").
+        # status, or receipt presence — legacy ``{auditor}.json`` reports and
+        # receipt-less reports stay visible to repair-log cross-checks — and
+        # satisfies AC 1/AC 2 ("repair planning sees all findings, including
+        # incomplete ones, as advisory context"). collect_repair_findings then
+        # decides which of these reports are binding.
         if stage is None:
             results.append((report_file, payload))
             continue
@@ -622,48 +622,228 @@ def select_eligible_reports(
     return results
 
 
-def _collect_audit_findings(
-    task_dir: Path,
-    stage: str | None = None,
-) -> dict[str, dict]:
-    """Return audit findings keyed by finding id from live audit reports.
+_ATTEMPT_SUFFIX_RE: re.Pattern[str] = re.compile(r"-attempt-(\d+)$")
 
-    When stage is provided (gate path), only eligible receipted+complete reports
-    are included. When stage is None (repair-planning path), all receipted reports
-    (including partial/in_progress) are included as advisory context.
+# Audit reports use critical|major|minor (agents/_shared/audit-report.md);
+# repair logs use critical|high|medium|low.
+_REPAIR_SEVERITY_ALIASES = {"major": "high", "minor": "low"}
+
+
+def normalize_repair_severity(severity: str) -> str:
+    """Map an audit-report severity onto the repair-log scale."""
+    return _REPAIR_SEVERITY_ALIASES.get(severity, severity)
+
+
+def _report_shard(report_file: Path, auditor_name: str) -> tuple[str | None, int | None]:
+    """Return ``(model, attempt)`` parsed from ``{auditor}-{model}-attempt-{n}.json``.
+
+    The auditor name is stripped as a known prefix first, so model names that
+    contain hyphens parse correctly. Legacy names yield ``(None, None)``.
     """
-    findings_by_id: dict[str, dict] = {}
-    # Secondary dedup key: {file}:{line}:{category} tuple (AC 8 shard-merged correctness)
-    seen_flc: set[tuple] = set()
+    stem = report_file.stem
+    match = _ATTEMPT_SUFFIX_RE.search(stem)
+    if not match:
+        return None, None
+    attempt = int(match.group(1))
+    head = stem[: match.start()]
+    prefix = auditor_name + "-"
+    if head.startswith(prefix) and len(head) > len(prefix):
+        return head[len(prefix):], attempt
+    named = _REPORT_FILENAME_RE.match(report_file.name)
+    return (named.group(2) if named else None), attempt
 
-    eligible = select_eligible_reports(task_dir, stage=stage)
-    for report_file, payload in eligible:
-        findings = payload.get("findings")
-        if not isinstance(findings, list):
+
+def _escalated_cascades(task_dir: Path) -> dict[str, tuple[str, list[str]]]:
+    """Map auditor -> (escalation model, voting models) for every ensemble
+    auditor whose cascade is complete with verdict ``escalated``.
+
+    Reads the cascade from ``lib_ensemble`` (the single source of truth) so
+    repair planning applies the same verdict ``ctl ensemble-next`` reports.
+    A cascade with gaps is not trusted and is left out.
+    """
+    import lib_ensemble  # noqa: PLC0415 — deferred: lib_ensemble reads receipts
+
+    try:
+        entries = lib_ensemble.load_plan_entries(task_dir)
+    except (OSError, ValueError):
+        return {}
+    escalated: dict[str, tuple[str, list[str]]] = {}
+    for entry in entries:
+        name = entry.get("name")
+        if not isinstance(name, str) or not name or entry.get("action") != "spawn":
             continue
-        auditor_name = (
-            payload.get("auditor_name") or payload.get("auditor") or report_file.stem
-        )
-        for finding in findings:
-            if not isinstance(finding, dict):
-                continue
+        if not lib_ensemble.is_ensemble_entry(entry):
+            continue
+        result = lib_ensemble.ensemble_next(task_dir, name, entry)
+        if (
+            result.get("status") == lib_ensemble.STATUS_COMPLETE
+            and result.get("verdict") == lib_ensemble.VERDICT_ESCALATED
+            and not result.get("gaps")
+            and result.get("escalation_model")
+        ):
+            escalated[name] = (str(result["escalation_model"]), list(result.get("voting_models") or []))
+    return escalated
+
+
+def _finding_location_file(finding: dict) -> str:
+    """Return the file a finding points at, or ``""``.
+
+    Accepts the canonical ``location: "file:line"`` (agents/_shared/
+    audit-report.md) plus the ``file`` / ``evidence.file`` forms older
+    reports and fixtures use.
+    """
+    direct = finding.get("file")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    evidence = finding.get("evidence")
+    if isinstance(evidence, dict):
+        evidence_file = evidence.get("file")
+        if isinstance(evidence_file, str) and evidence_file.strip():
+            return evidence_file.strip()
+    location = finding.get("location")
+    if isinstance(location, str) and location.strip():
+        path, sep, line = location.strip().rpartition(":")
+        if sep and path and line.strip().isdigit():
+            return path.strip()
+        return location.strip()
+    return ""
+
+
+def _finding_location_key(finding: dict) -> tuple[str, str, str] | None:
+    """``(file, line, category)`` used to merge duplicate reports of one
+    defect, or None when the finding names no file (never merged)."""
+    path = _finding_location_file(finding)
+    if not path:
+        return None
+    line = finding.get("line")
+    line_text = "" if line is None else str(line)
+    location = finding.get("location")
+    if not line_text and isinstance(location, str):
+        tail = location.strip().rpartition(":")[2]
+        line_text = tail if tail.isdigit() else ""
+    return path, line_text, str(finding.get("category") or "")
+
+
+def collect_repair_findings(task_dir: Path) -> dict:
+    """The one view of audit findings that repair planning acts on.
+
+    The findings gate, the repair-cycle plan, the repair-log builder and the
+    repair-log validator all read this, so they cannot disagree about which
+    findings exist, how many times, or at what severity.
+
+    Report selection (each superseded report is listed with ``superseded_by``):
+
+    - Ensemble auditor whose cascade verdict is ``escalated``: the deep tier's
+      verdict is final and binding, so the voting-tier reports are superseded.
+      Fail closed: if the escalation tier wrote no report, nothing is
+      superseded and the voting tiers keep blocking.
+    - Several attempts of the same ``(auditor, model)`` shard: the highest
+      attempt supersedes the older ones (a re-audit after repair).
+
+    Findings from the binding reports are keyed by ``(auditor, id)``, so the
+    same ID from two auditors stays two findings. A finding pointing at the
+    same file, line and category as an earlier one is merged into it (recorded
+    in ``_merged``); blocking findings are visited first so a non-blocking
+    duplicate can never shadow a blocking one.
+
+    Returns ``{"reports": [...], "findings": [...]}``. Each finding is a copy
+    of the report entry plus ``_auditor``, ``_report_path``, ``_model``,
+    ``_attempt``, ``_merged`` and, when the report carried one, ``_repair_task``
+    (the auditor's own ``repair_tasks`` entry for that finding).
+    """
+    escalated = _escalated_cascades(task_dir)
+    rows: list[dict] = []
+    for report_file, payload in select_eligible_reports(task_dir, stage=None):
+        reported = str(payload.get("auditor_name") or payload.get("auditor") or report_file.stem)
+        auditor = reported if reported in escalated else (_normalize_auditor_name(reported, set(escalated)) or reported)
+        model, attempt = _report_shard(report_file, reported)
+        if model is None and auditor != reported:
+            model, attempt = _report_shard(report_file, auditor)
+        raw = payload.get("findings")
+        findings = [f for f in raw if isinstance(f, dict)] if isinstance(raw, list) else []
+        repair_tasks = payload.get("repair_tasks")
+        rows.append({
+            "auditor": auditor,
+            "path": report_file,
+            "model": model,
+            "attempt": attempt,
+            "findings": findings,
+            "repair_tasks": [t for t in repair_tasks if isinstance(t, dict)] if isinstance(repair_tasks, list) else [],
+            "superseded_by": None,
+        })
+
+    for auditor, (escalation_model, voting_models) in escalated.items():
+        own = [r for r in rows if r["auditor"] == auditor]
+        if not any(r["model"] == escalation_model for r in own):
+            continue
+        for row in own:
+            if row["model"] in voting_models and row["model"] != escalation_model:
+                row["superseded_by"] = f"escalated cascade: {escalation_model} verdict is binding"
+
+    latest: dict[tuple[str, str], int] = {}
+    for row in rows:
+        if row["superseded_by"] is None and row["model"] is not None and row["attempt"] is not None:
+            key = (row["auditor"], row["model"])
+            latest[key] = max(latest.get(key, row["attempt"]), row["attempt"])
+    for row in rows:
+        if row["superseded_by"] is None and row["model"] is not None and row["attempt"] is not None:
+            newest = latest[(row["auditor"], row["model"])]
+            if row["attempt"] < newest:
+                row["superseded_by"] = f"attempt-{newest}"
+
+    binding = sorted(
+        (r for r in rows if r["superseded_by"] is None),
+        key=lambda r: (r["auditor"], r["model"] or "", -(r["attempt"] or 0), r["path"].name),
+    )
+    candidates: list[dict] = []
+    for row in binding:
+        tasks_by_id = {
+            str(t.get("finding_id")): t for t in row["repair_tasks"] if isinstance(t.get("finding_id"), str)
+        }
+        for finding in row["findings"]:
             finding_id = finding.get("id")
-            if not isinstance(finding_id, str) or not finding_id:
+            if not isinstance(finding_id, str) or not finding_id.strip():
                 continue
-            if finding_id in findings_by_id:
-                continue
-            # Secondary dedup by {file}:{line}:{category}
-            f_file = finding.get("file") or finding.get("location") or ""
-            f_line = finding.get("line", "")
-            f_cat = finding.get("category") or ""
-            flc_key = (str(f_file), str(f_line), str(f_cat))
-            if flc_key in seen_flc and flc_key != ("", "", ""):
-                continue
-            seen_flc.add(flc_key)
-            row = dict(finding)
-            row["_auditor_name"] = auditor_name
-            findings_by_id[finding_id] = row
-    return findings_by_id
+            entry = dict(finding)
+            entry["_auditor"] = row["auditor"]
+            entry["_report_path"] = str(row["path"])
+            entry["_model"] = row["model"]
+            entry["_attempt"] = row["attempt"]
+            entry["_merged"] = []
+            if finding_id in tasks_by_id:
+                entry["_repair_task"] = tasks_by_id[finding_id]
+            candidates.append(entry)
+    # Stable: blocking first, otherwise the binding-report order above.
+    candidates.sort(key=lambda f: 0 if bool(f.get("blocking")) else 1)
+
+    kept: list[dict] = []
+    by_key: set[tuple[str, str]] = set()
+    by_location: dict[tuple[str, str, str], dict] = {}
+    for entry in candidates:
+        key = (entry["_auditor"], entry["id"])
+        if key in by_key:
+            continue
+        by_key.add(key)
+        location = _finding_location_key(entry)
+        if location is not None and location in by_location:
+            by_location[location]["_merged"].append({"auditor": entry["_auditor"], "id": entry["id"]})
+            continue
+        if location is not None:
+            by_location[location] = entry
+        kept.append(entry)
+
+    reports = []
+    for row in rows:
+        reports.append({
+            "auditor_name": row["auditor"],
+            "report_path": str(row["path"]),
+            "model": row["model"],
+            "attempt": row["attempt"],
+            "finding_count": len(row["findings"]),
+            "blocking_count": sum(1 for f in row["findings"] if bool(f.get("blocking"))),
+            "superseded_by": row["superseded_by"],
+        })
+    return {"reports": reports, "findings": kept}
 
 
 def validate_manifest(manifest: dict) -> list[str]:
@@ -1279,12 +1459,18 @@ def validate_repair_log(task_dir: Path) -> list[str]:
     repair_cycle = data.get("repair_cycle")
     if repair_cycle is not None and (not isinstance(repair_cycle, int) or repair_cycle < 0):
         errors.append("repair-log repair_cycle must be a non-negative integer")
-    live_findings = _collect_audit_findings(task_dir)
+    # Same view the repair-log builder uses (collect_repair_findings), keyed by
+    # (auditor, id): two auditors may legitimately reuse an id.
+    live_by_key: dict[tuple[str, str], dict] = {}
+    live_by_id: dict[str, list[dict]] = {}
+    for live in collect_repair_findings(task_dir)["findings"]:
+        live_by_key[(live["_auditor"], live["id"])] = live
+        live_by_id.setdefault(live["id"], []).append(live)
     batches = data.get("batches")
     if not isinstance(batches, list):
         return ["repair-log batches must be an array"]
     seen_batch_ids: set[str] = set()
-    seen_finding_ids: set[str] = set()
+    seen_findings: set[tuple[str, str]] = set()
     for batch in batches:
         if not isinstance(batch, dict):
             errors.append("repair-log batch must be an object")
@@ -1308,32 +1494,42 @@ def validate_repair_log(task_dir: Path) -> list[str]:
                 errors.append(f"{batch_id}: task must be an object")
                 continue
             finding_id = task.get("finding_id")
-            if not isinstance(finding_id, str) or not finding_id.strip():
-                errors.append(f"{batch_id}: finding_id must be a non-empty string")
-            elif finding_id in seen_finding_ids:
-                errors.append(f"duplicate finding_id across repair-log batches: {finding_id}")
-            else:
-                seen_finding_ids.add(finding_id)
-            live_finding = live_findings.get(finding_id) if isinstance(finding_id, str) else None
-            if finding_id and not live_finding:
-                errors.append(f"{batch_id}: finding_id not found in live audit reports: {finding_id}")
             auditor = task.get("auditor")
+            live_finding: dict | None = None
             if auditor is not None and (not isinstance(auditor, str) or not auditor.strip()):
                 errors.append(f"{batch_id}: auditor must be a non-empty string when present")
-            elif (
-                isinstance(auditor, str)
-                and live_finding is not None
-                and auditor != live_finding.get("_auditor_name")
-            ):
-                errors.append(
-                    f"{batch_id}: auditor mismatch for {finding_id}: "
-                    f"repair-log={auditor!r} audit-report={live_finding.get('_auditor_name')!r}"
-                )
+                auditor = None
+            if not isinstance(finding_id, str) or not finding_id.strip():
+                errors.append(f"{batch_id}: finding_id must be a non-empty string")
+            else:
+                if isinstance(auditor, str):
+                    live_finding = live_by_key.get((auditor, finding_id))
+                    if live_finding is None and live_by_id.get(finding_id):
+                        reported_by = sorted(f["_auditor"] for f in live_by_id[finding_id])
+                        errors.append(
+                            f"{batch_id}: auditor mismatch for {finding_id}: "
+                            f"repair-log={auditor!r} audit-report={', '.join(reported_by)!r}"
+                        )
+                        live_finding = live_by_id[finding_id][0]
+                else:
+                    matches = live_by_id.get(finding_id, [])
+                    if len(matches) > 1:
+                        errors.append(
+                            f"{batch_id}: finding_id {finding_id} is reported by several auditors "
+                            f"({', '.join(sorted(f['_auditor'] for f in matches))}); the task must name its auditor"
+                        )
+                    live_finding = matches[0] if matches else None
+                if live_finding is None:
+                    errors.append(f"{batch_id}: finding_id not found in live audit reports: {finding_id}")
+                key = (live_finding["_auditor"] if live_finding is not None else str(auditor or ""), finding_id)
+                if key in seen_findings:
+                    errors.append(f"duplicate finding_id across repair-log batches: {finding_id}")
+                else:
+                    seen_findings.add(key)
             severity = task.get("severity")
-            _SEV_ALIASES = {"major": "high", "minor": "low"}
-            severity = _SEV_ALIASES.get(severity, severity) if severity is not None else None
+            severity = normalize_repair_severity(severity) if severity is not None else None
             live_sev = live_finding.get("severity") if live_finding is not None else None
-            live_sev_norm = _SEV_ALIASES.get(live_sev, live_sev) if isinstance(live_sev, str) else live_sev
+            live_sev_norm = normalize_repair_severity(live_sev) if isinstance(live_sev, str) else live_sev
             if severity is not None and severity not in {"critical", "high", "medium", "low"}:
                 errors.append(f"{batch_id}: invalid severity {severity!r}")
             elif (

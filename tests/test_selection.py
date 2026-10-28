@@ -257,7 +257,7 @@ def test_selection_requires_complete_receipt(tmp_path: Path) -> None:
 def test_skeleton_advisory_context_when_no_stage(tmp_path: Path) -> None:
     """Repair-planning path (stage=None) includes partial/in_progress as advisory.
 
-    AC 1 and AC 2: _collect_audit_findings (repair-planning) omits stage filter,
+    AC 1 and AC 2: the repair-planning path (stage=None) omits the stage filter,
     so it may include skeleton findings as advisory context when a receipt exists.
     This tests that the stage=None path does NOT apply the status='complete' filter.
     """
