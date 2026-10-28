@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.32] - 2026-10-28
+### Changed
+- fix: count severity-only blocking findings and split multi-path repair targets
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.32`.
+
+---
+
 ## [7.5.31] - 2026-10-28
 ### Fixed
 - Findings that say `"severity": "blocking"` without the boolean `blocking` flag now block. Release-auditor and spec-completion-auditor reports were seen omitting the flag. Every counter read `bool(finding.get("blocking"))`, so those findings were treated as non-blocking and the audit could pass over them. The new `lib_core.finding_is_blocking` is now the single rule for the audit receipt's `blocking_count`, the findings gate, the repair cycle plan, `collect_repair_findings`, `run-audit-summary`, the audit-summary validator and the DONE gate's open-finding check. An explicit boolean `blocking` decides. When it is missing, a `blocking` or `critical` severity counts as blocking (fail-closed). `normalize_repair_severity` maps `blocking`/`non-blocking` to `high`/`low`.
