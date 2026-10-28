@@ -453,7 +453,7 @@ The plan audit is deterministic at every risk level. `validate_task_artifacts` a
    "$DYNOS" ctl run-plan-audit .dynos/task-{id}
    ```
    - `status == "passed"`: proceed. `receipt_cached: true` means a fresh receipt already covered these exact artifacts and nothing was redone. Do NOT spawn an auditor.
-   - `status == "replan_required"`: a claimed endpoint or table does not exist. The planner must fix the table or mark the row `to-be-created` (any cell of a Data Model row). Follow **On validation failure** with phase `plan`, then rerun this command.
+   - `status == "replan_required"`: a claimed endpoint or table does not exist. The planner must fix the table or mark the row `to-be-created` (any cell of a Data Model row). The human already approved this plan, so a repaired plan needs approving again: ctl has moved the task back to `PLANNING` (`transitioned_to`). Follow **On validation failure** with phase `plan`, then repeat the end of Step 5 (validation, `plan-validated-receipt`, transition to `PLAN_REVIEW`) and Step 6 for re-approval, and only then rerun this command. Never edit `plan.md` while the task is at `PLAN_AUDIT`: `run-execute-setup` refuses a plan changed after approval.
    - `status == "llm_audit_required"`: only when the project opted in. Spawn `spec-completion-auditor`, then finalize with `run-plan-audit --report-path ... --tokens-used ... --model ...`.
 
 2. Surface any segment where `len(segment.files_expected) >= 10` (computed budget ≥ 35, the `TOOL_BUDGET_ADVISORY` threshold from `hooks/lib_tool_budget.py`) as a non-blocking advisory finding `near-budget-ceiling`. It warns the operator that the segment is approaching the 11-file overflow ceiling and may want decomposition.

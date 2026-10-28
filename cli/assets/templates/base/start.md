@@ -291,7 +291,7 @@ Present `plan.md` to the user and ask for approval.
    "$DYNOS" ctl run-plan-audit .dynos/task-{id}
    ```
 
-2. `status == "replan_required"` means route back to planning, repair, and rerun deterministic artifact validation. `status == "passed"` means proceed; do NOT spawn an auditor. `status == "llm_audit_required"` appears only when the project opted in through `policy.plan_audit_llm`; then spawn `spec-completion-auditor` and finalize with `run-plan-audit --report-path ...`.
+2. `status == "replan_required"` means ctl has moved the task back to `PLANNING`: repair the plan, rerun deterministic artifact validation, and take it through Plan Review again for re-approval before rerunning the audit (`run-execute-setup` refuses a plan changed after approval). `status == "passed"` means proceed; do NOT spawn an auditor. `status == "llm_audit_required"` appears only when the project opted in through `policy.plan_audit_llm`; then spawn `spec-completion-auditor` and finalize with `run-plan-audit --report-path ...`.
 3. Create a git branch safety net: `dynos/task-{id}-snapshot`.
 
 ---

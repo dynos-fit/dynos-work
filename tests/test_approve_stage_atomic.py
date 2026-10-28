@@ -173,3 +173,25 @@ def test_success_stdout_names_new_stage(tmp_path: Path):
     r = _run(tmp_path, "approve-stage", str(task_dir), "SPEC_NORMALIZATION")
     assert r.returncode == 0, r.stderr
     assert "SPEC_REVIEW" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# Wrong current stage: refuse before writing anything
+# ---------------------------------------------------------------------------
+
+
+def test_approve_from_wrong_stage_writes_no_receipt(tmp_path: Path) -> None:
+    """Approving PLAN_REVIEW while the task is at PRE_EXECUTION_SNAPSHOT used to
+    overwrite human-approval-PLAN_REVIEW.json with the current plan.md hash and
+    only then fail with an illegal transition, silently re-approving a plan
+    that had changed since the human saw it."""
+    task_dir = _make_task(tmp_path, "PRE_EXECUTION_SNAPSHOT")
+    (task_dir / "plan.md").write_text("# Plan\nedited after approval\n")
+
+    result = _run(tmp_path, "approve-stage", str(task_dir), "PLAN_REVIEW")
+
+    assert result.returncode == 1
+    assert "is at PRE_EXECUTION_SNAPSHOT" in result.stderr
+    assert not (task_dir / "receipts" / "human-approval-PLAN_REVIEW.json").exists()
+    manifest = json.loads((task_dir / "manifest.json").read_text())
+    assert manifest["stage"] == "PRE_EXECUTION_SNAPSHOT"

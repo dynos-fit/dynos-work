@@ -130,13 +130,15 @@ INJECTED_AGENT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-auditor-prompts/
 FINAL_ENVELOPE=$(... <extract last line of Agent tool return>)
 "$DYNOS" ctl audit-receipt .dynos/task-{id} {auditor_name} \
   --model {model_used} \
-  --report-path .dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json \
+  --report-path "$PWD/.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json" \
   --tokens-used {tokens_used} \
   --route-mode {route_mode} \
   --agent-path {agent_path} \
   --injected-agent-sha256 "${INJECTED_AGENT_SHA256}" \
   --final-envelope "${FINAL_ENVELOPE}"
 ```
+
+`--report-path` must be the same absolute path you gave the auditor, which it echoes as `report_path` in its envelope. The receipt compares the two strings exactly (no path normalization), so a relative `--report-path` against an absolute envelope path is refused.
 
 For `route_mode == "generic"` the `--final-envelope` argument may be omitted.
 
@@ -158,11 +160,11 @@ It evaluates every spawn-action auditor against the shard receipts on disk and r
 - `"status": "complete"` with `verdict` `pass` (every voting tier clean) or `escalated` (deep tier ran; its verdict is final and binding);
 - `"status": "single"` for non-ensemble auditors, carrying the plan `model`.
 
-The audit batch is a loop. In the first batch, spawn every auditor whose status is `spawn` or `single` (in parallel, at the returned `model`) and write each receipt. Non-ensemble (`single`) auditors are spawned once in the first batch and never again while `receipts/audit-{name}.json` exists. Every later iteration, and every retry after a `receipt gaps in ...` refusal, runs `ensemble-next` and spawns only `status: spawn` auditors at the returned `model` and `shard_step_name`; `complete` auditors are never re-spawned. Stop only when the output reports `"complete": true`. Do not decide by hand whether a tier is needed — the cascade (fast tier → balanced tier on no blocking findings → deep tier on any blocking finding) is computed by ctl. Log each ensemble spawn as `{timestamp} [VOTE] {name} — {reason} → {model}`.
+The audit batch is a loop. In the first batch, spawn every auditor whose status is `spawn` or `single` (in parallel, at the returned `model`) and write each receipt. Non-ensemble (`single`) auditors are spawned once in the first batch and never again while `receipts/audit-{name}.json` exists. Every later iteration, and every retry after a `receipt gaps in ...` refusal, runs `ensemble-next` and spawns only `status: spawn` auditors at the returned `model` and `shard_step_name`; `complete` auditors are never re-spawned. Stop only when the output reports `"complete": true`. Do not decide by hand whether a tier is needed — the cascade (fast tier → balanced tier on no blocking findings → deep tier on any blocking finding) is computed by ctl. Log each ensemble spawn with `"$DYNOS" ctl log-append .dynos/task-{id} --tag VOTE --message "{name} — {reason} → {model}"`.
 
 **Enforcement (there is no shortcut):** `router.py audit-inject-prompt` refuses to build a prompt for an ensemble auditor at any model other than the one `ensemble-next` returns; `audit-receipt` refuses a shard receipt written out of cascade order; `run-audit-summary` and the DONE gate refuse while any cascade is incomplete. A single deep-tier spawn does not satisfy an ensemble auditor. On null-model hosts the router sets `"ensemble": false` and the auditor spawns once at the plan model.
 
-**Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log: `{timestamp} [VISION] UI audit complete -- {N} visual bugs found`.
+**Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag VISION --message "UI audit complete -- {N} visual bugs found"`.
 
 **Alongside mode deduplication:** When generic and learned auditors both produce findings for the same role, deduplicate by key `{file}:{line}:{category}`. Count duplicates once, preferring the learned version. The deduplicated set feeds into repair and retrospective counts. Track whether learned findings are a superset of generic findings (for promotion decisions by the learn step).
 
@@ -189,7 +191,7 @@ Do not proceed with spawning auditors. The pause is intentional — the policy i
 
 Spawn the determined auditors simultaneously, passing for each auditor the model returned by `ensemble-next` (never the plan `model` for an ensemble auditor) in the subagent spawn configuration. For alongside-mode auditors, this means two spawns for that role (generic + learned), both counted in {N}.
 
-Each auditor writes its own report to `.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json`. Every auditor agent has a write capability sufficient for this: auditors with `Bash` use a heredoc; `spec-completion-auditor` has the `Write` tool scoped via `write_policy.py` to its own report path. The hook-stamped auditor role unlocks the `audit-reports/` write rule for these subagents.
+Each auditor writes its own report to the absolute path `{repo_root}/.dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json`. Put that exact string in the spawn prompt and reuse it verbatim as `--report-path`. Every auditor agent has a write capability sufficient for this: auditors with `Bash` use a heredoc; `spec-completion-auditor` has the `Write` tool scoped via `write_policy.py` to its own report path. The hook-stamped auditor role unlocks the `audit-reports/` write rule for these subagents.
 
 **The orchestrator MUST NOT materialize audit-report files.** Direct `Write`/`Edit`/Bash redirection from the orchestrator (role=`execute-inline`) to `audit-reports/` is denied by `write_policy.decide_write` because the role is not `audit-*`. The orchestrator cannot self-elevate through direct writes to the wrapper-required role file. The only legitimate path for an audit-report file to land on disk is the auditor subagent's own write call. If the auditor returns text instead of writing the file, treat the audit as **failed for this auditor** and re-spawn — do NOT backfill from the auditor's text response. Backfilling is the exact mechanism behind the 2026-04-30 audit-chain forgery incident: 7 of 8 ensemble auditors were synthesized by the orchestrator after one truncation, and the receipt chain validated as clean because there was no harness-level cross-check. The Agent-tool spawn-log hook (`hooks/agent-spawn-log`) now provides that cross-check; the absence of a matching `agent_spawn_post` entry for an auditor whose report is on disk is a hard fail at receipt time (`receipt_audit_done`).
 
@@ -232,9 +234,9 @@ Use this JSON output as authoritative:
 
 Do NOT collect early findings, late findings, queued findings, or increment retry counts in prompt logic.
 
-Append to log:
-```
-{timestamp} [REPAIR] {phase} cycle={repair_cycle} findings={list of finding IDs}
+Record the cycle:
+```text
+"$DYNOS" ctl log-append .dynos/task-{id} --tag REPAIR --message "{phase} cycle={repair_cycle} findings={list of finding IDs}"
 ```
 
 Build the repair log through ctl — Q-learning assignments are computed inside this command from `repair-cycle-plan.json`; do NOT construct or pipe a separate findings payload:

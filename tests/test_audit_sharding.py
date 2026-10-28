@@ -281,3 +281,45 @@ def test_audit_setup_includes_untracked_files(tmp_path: Path) -> None:
     assert not any(f.startswith(".dynos") for f in plan["diff_files"])
     # 1 insertion + 1 deletion per modified file, plus 2 untracked lines.
     assert plan["diff_loc"] == 6
+
+
+def test_audit_setup_skips_untracked_caches_and_binaries(tmp_path: Path) -> None:
+    """Untracked, non-gitignored tool caches are environment state, not task
+    work: 7.5.28 pulled 11,364 `.pnpm-store` / `celerybeat-schedule` files
+    into one task's audit scope."""
+    task_dir = _create_task_dir(tmp_path)
+    project = task_dir.parent.parent
+    (project / "src" / "brand_new.py").write_text("x = 1\n", encoding="utf-8")
+    store = project / "frontend" / ".pnpm-store" / "v3"
+    store.mkdir(parents=True)
+    for i in range(3):
+        (store / f"pkg{i}.json").write_text("{}", encoding="utf-8")
+    (project / "celerybeat-schedule.db").write_bytes(b"\x00\x01")
+    (project / "src" / "blob.bin").write_bytes(b"abc\x00def")
+
+    result = _run_audit_setup(task_dir)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert "src/brand_new.py" in out["diff_files"]
+    assert not any(".pnpm-store" in f or "celerybeat" in f or f.endswith(".bin") for f in out["diff_files"])
+    assert out["untracked_skipped"] == 5
+    assert out["untracked_warning"] is None
+
+
+def test_audit_setup_caps_untracked_files_with_a_warning(tmp_path: Path) -> None:
+    import lib_core
+
+    task_dir = _create_task_dir(tmp_path)
+    project = task_dir.parent.parent
+    generated = project / "generated"
+    generated.mkdir()
+    for i in range(lib_core.UNTRACKED_SCOPE_CAP + 1):
+        (generated / f"f{i}.txt").write_text("x\n", encoding="utf-8")
+
+    result = _run_audit_setup(task_dir)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert not any(f.startswith("generated/") for f in out["diff_files"])
+    # Tracked changes are never dropped by the cap.
+    assert {"hooks/file_a.py", "src/file_b.py"} <= set(out["diff_files"])
+    assert "gitignore" in out["untracked_warning"].lower()

@@ -204,3 +204,16 @@ def test_invalid_branch_empty(tmp_path):
     r = _ctl("record-snapshot", str(task_dir), "--head-sha", "0" * 40, "--branch", "   ")
     assert r.returncode == 1
     assert "branch" in r.stderr.lower()
+
+
+def test_repo_without_commits_explains_how_to_proceed(tmp_path):
+    """An unborn HEAD has nothing to snapshot. The refusal says to make an
+    initial commit instead of the opaque 'cannot auto-detect HEAD SHA'."""
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    task_dir = _make_task_dir(tmp_path, task_id="task-unborn")
+    r = _ctl("record-snapshot", str(task_dir))
+    assert r.returncode == 1
+    assert "no commits yet" in r.stderr
+    assert "initial commit" in r.stderr
+    manifest = json.loads((task_dir / "manifest.json").read_text())
+    assert "snapshot" not in manifest or not manifest.get("snapshot")

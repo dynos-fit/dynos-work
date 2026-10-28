@@ -61,7 +61,7 @@ After each auditor spawn returns, you MUST write the audit receipt via the deter
 INJECTED_AGENT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256)
 python3 "{{HOOKS_PATH}}/ctl.py" audit-receipt .dynos/task-{id} {auditor_name} \
   --model {model_used} \
-  --report-path .dynos/task-{id}/audit-reports/{report_filename}.json \
+  --report-path "$PWD/.dynos/task-{id}/audit-reports/{report_filename}.json" \
   --tokens-used {tokens_used} \
   --route-mode {route_mode} \
   --agent-path {agent_path} \
@@ -84,11 +84,11 @@ It evaluates every spawn-action auditor against the shard receipts on disk and r
 - `"status": "complete"` with `verdict` `pass` (every voting tier clean) or `escalated` (deep tier ran; its verdict is final and binding);
 - `"status": "single"` for non-ensemble auditors, carrying the plan `model`.
 
-The audit batch is a loop: spawn every auditor whose status is `spawn` or `single` (in parallel, at the returned `model`), write each receipt, then run `ensemble-next` again. Stop only when the output reports `"complete": true`. Do not decide by hand whether a tier is needed — the cascade (fast tier → balanced tier on zero findings → deep tier on any finding) is computed by ctl. Log each ensemble spawn as `{timestamp} [VOTE] {name} — {reason} → {model}`.
+The audit batch is a loop: spawn every auditor whose status is `spawn` or `single` (in parallel, at the returned `model`), write each receipt, then run `ensemble-next` again. Stop only when the output reports `"complete": true`. Do not decide by hand whether a tier is needed — the cascade (fast tier → balanced tier on zero findings → deep tier on any finding) is computed by ctl. Log each ensemble spawn with `python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag VOTE --message "{name} — {reason} → {model}"`.
 
 **Enforcement (there is no shortcut):** `router.py audit-inject-prompt` refuses to build a prompt for an ensemble auditor at any model other than the one `ensemble-next` returns; `audit-receipt` refuses a shard receipt written out of cascade order; `run-audit-summary` and the DONE gate refuse while any cascade is incomplete. A single deep-tier spawn does not satisfy an ensemble auditor. On null-model hosts the router sets `"ensemble": false` and the auditor spawns once at the plan model.
 
-**Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log: `{timestamp} [VISION] UI audit complete -- {N} visual bugs found`.
+**Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log it with `python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag VISION --message "UI audit complete -- {N} visual bugs found"`.
 
 **Alongside mode deduplication:** When generic and learned auditors both produce findings for the same role, deduplicate by key `{file}:{line}:{category}`. Count duplicates once, preferring the learned version. The deduplicated set feeds into repair and retrospective counts. Track whether learned findings are a superset of generic findings (for promotion decisions by the learn step).
 
@@ -140,9 +140,9 @@ Use this JSON output as authoritative:
 
 Do NOT collect early findings, late findings, queued findings, or increment retry counts in prompt logic.
 
-Append to log:
-```
-{timestamp} [REPAIR] {phase} cycle={repair_cycle} findings={list of finding IDs}
+Record the cycle:
+```text
+python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag REPAIR --message "{phase} cycle={repair_cycle} findings={list of finding IDs}"
 ```
 
 **Q-learning repair plan (deterministic):** Before spawning the repair coordinator, get executor and model assignments from the Q-learning planner:
@@ -155,7 +155,7 @@ If the response has `"source": "q-learning"`, ctl will use those assignments whe
 
 If `"source": "default"` (Q-learning disabled), ctl uses deterministic fallback executor selection.
 
-Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
+Log it with `python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag REPAIR --message "plan source={source} assignments={N}"`.
 
 Build the repair log through ctl:
 

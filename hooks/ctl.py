@@ -901,6 +901,24 @@ def _do_approve_stage(task_dir: Path, stage: str, *, approver_type: str) -> int:
         return 1
     artifact_rel, next_stage = mapping
 
+    # Check the stage BEFORE writing anything. Writing first and letting
+    # transition_task refuse afterwards left a fresh approval receipt behind:
+    # approving PLAN_REVIEW from PRE_EXECUTION_SNAPSHOT silently re-approved
+    # whatever plan.md said now, then reported an illegal transition.
+    try:
+        current_stage = str(load_json(task_dir / "manifest.json").get("stage", ""))
+    except Exception as exc:
+        print(f"cannot read manifest for {task_dir.name}: {exc}", file=sys.stderr)
+        return 1
+    if current_stage != stage:
+        print(
+            f"cannot approve {stage}: task {task_dir.name} is at {current_stage}. "
+            f"An approval is recorded only while the task is at the stage being reviewed; "
+            f"to re-approve an artifact, transition the task back to that stage first.",
+            file=sys.stderr,
+        )
+        return 1
+
     artifact_path = task_dir / artifact_rel
     if not artifact_path.is_file():
         print(
@@ -2396,6 +2414,8 @@ def cmd_set_planner_phase(args: argparse.Namespace) -> int:
 _LOG_APPEND_TAGS: frozenset[str] = frozenset({
     "GATE", "SKIP", "DECISION", "DONE", "ADVANCE", "ROUTE", "SPAWN", "HUMAN",
     "FAILED", "NOTE", "BUDGET-PAUSE", "CONTINUATION-STALLED",
+    # Tags the audit and execute skills record; refused before 7.5.30.
+    "VOTE", "REPAIR", "VISION", "INLINE", "CACHE",
 })
 _LOG_APPEND_MAX_MESSAGE = 500
 
@@ -3440,12 +3460,22 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
                 gap_errors.append(f"unverified data model entry: {item}")
 
         if gap_errors:
+            # A plan repaired here would no longer be the plan the human
+            # approved at PLAN_REVIEW, and run-execute-setup refuses a plan
+            # mutated after approval. Send the task back to PLANNING so the
+            # repair is re-validated (run-planning) and re-approved.
+            transitioned_to = None
+            if _load_manifest(task_dir).get("stage") == "PLAN_AUDIT":
+                _, updated = transition_task(task_dir, "PLANNING")
+                transitioned_to = updated.get("stage")
             print(json.dumps({
                 "status": "replan_required",
                 "task_dir": str(task_dir),
                 "mode": "deterministic_gap_analysis",
                 "errors": gap_errors,
                 "gap_report": gap_report,
+                "transitioned_to": transitioned_to,
+                "next_action": "repair_plan_then_reapprove",
             }, indent=2))
             return 1
 
@@ -3960,6 +3990,21 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
                 capture_output=True, text=True, timeout=10, check=False,
             )
             if r.returncode != 0:
+                # An unborn HEAD (repo with no commits) has nothing to
+                # snapshot: there is no commit to diff against or restore.
+                unborn = _sub.run(
+                    [_GIT or "git", "-C", str(root), "symbolic-ref", "-q", "HEAD"],
+                    capture_output=True, text=True, timeout=10, check=False,
+                ).returncode == 0
+                if unborn:
+                    print(
+                        "cannot record a snapshot: the repository has no commits yet. "
+                        "Create an initial commit (for example "
+                        "`git commit --allow-empty -m \"chore: initial commit\"`) "
+                        "and re-run record-snapshot.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 print(
                     f"cannot auto-detect HEAD SHA: git rev-parse failed "
                     f"(returncode={r.returncode}); provide --head-sha",
@@ -4604,10 +4649,11 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
 
         diff_files: list[str] = []
         diff_error = None
+        scope_report: dict = {}
         if diff_base is not None:
             # Includes untracked files: new work that was never `git add`ed is
             # still part of the task's change and must be in audit scope.
-            diff_files, diff_error = git_changed_files(root, diff_base)
+            diff_files, diff_error = git_changed_files(root, diff_base, report=scope_report)
 
         # AC 8: Measure diff LOC (insertions + deletions) for sharding threshold.
         diff_loc = 0
@@ -4718,6 +4764,8 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
             "diff_base": diff_base,
             "diff_files": diff_files,
             "diff_error": diff_error,
+            "untracked_skipped": scope_report.get("untracked_skipped", 0),
+            "untracked_warning": scope_report.get("untracked_warning"),
             "spawn_auditors": [a for a in plan.get("auditors", []) if isinstance(a, dict) and a.get("action") == "spawn"],
             "skip_auditors": [a for a in plan.get("auditors", []) if isinstance(a, dict) and a.get("action") == "skip"],
         }, indent=2))

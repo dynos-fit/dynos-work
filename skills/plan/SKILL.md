@@ -113,7 +113,7 @@ Run the deterministic plan-audit controller first:
 
 Interpret the JSON result:
 
-- `status == "replan_required"`: deterministic gap analysis found errors. Follow **On validation failure**.
+- `status == "replan_required"`: deterministic gap analysis found errors. The human already approved this plan, so ctl has moved the task back to `PLANNING` (`transitioned_to`). Follow **On validation failure**, then run Step 2's `run-planning` and Step 3's review again so the repaired plan is re-approved, and only then rerun this step. Never edit `plan.md` while the task is at `PLAN_AUDIT`: `run-execute-setup` refuses a plan changed after approval.
 - `status == "passed"` with `mode == "deterministic_only"`: the deterministic audit is authoritative at every risk level. The command wrote the hash-bound `plan-audit-check` receipt itself (`receipt_cached: true` means a fresh receipt already existed and nothing was redone). Do NOT spawn an auditor.
 - `status == "llm_audit_required"`: only appears when the project opted in through `policy.plan_audit_llm`. Spawn `spec-completion-auditor`, then finalize with:
 
@@ -121,7 +121,7 @@ Interpret the JSON result:
   "$DYNOS" ctl run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}
   ```
 
-If the final `run-plan-audit` call returns `status == "replan_required"`, follow **On validation failure** and rerun it. If it returns `status == "passed"`, proceed.
+If the final `run-plan-audit` call returns `status == "replan_required"`, handle it the same way: repair, `run-planning`, re-approve, then rerun it. If it returns `status == "passed"`, proceed.
 
 ### Step 5 — Done
 

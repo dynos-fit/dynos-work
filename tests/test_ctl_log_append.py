@@ -79,3 +79,14 @@ def test_external_solution_gate_logs_its_own_line(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     log = (task / "execution-log.md").read_text()
     assert "[GATE] external-solution — recommended: false" in log
+
+
+def test_log_append_accepts_every_tag_the_skills_record(tmp_path: Path) -> None:
+    """The audit and execute skills record these tags; log-append used to
+    refuse them (`[VOTE]` for every ensemble spawn)."""
+    task = _task(tmp_path)
+    for tag in ("VOTE", "REPAIR", "VISION", "INLINE", "CACHE"):
+        result = _run("log-append", str(task), "--tag", tag, "--message", f"{tag.lower()} line")
+        assert result.returncode == 0, (tag, result.stderr)
+    text = (task / "execution-log.md").read_text()
+    assert "[VOTE] vote line" in text and "[CACHE] cache line" in text
