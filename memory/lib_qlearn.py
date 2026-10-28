@@ -71,6 +71,34 @@ _DEFAULT_ACTION_SPACE: dict[str, list[str]] = {
     "infra": ["infra-executor", "release-executor"],
     "data": ["data-executor", "db-executor"],
     "obs": ["observability-executor", "backend-executor"],
+    "test": ["testing-executor"],
+    "docs": ["docs-executor"],
+}
+
+# The reporting auditor is the reliable category signal; finding IDs are
+# free-form auditor output (``SC-`` is both spec-completion's prefix and what
+# supply-chain auditors emit). An ID prefix that matches no action space used
+# to fall through to every executor, so an unseen state picked one at random
+# (a data-executor assigned to a receipt file).
+_AUDITOR_CATEGORY: dict[str, str] = {
+    "security-auditor": "sec",
+    "privacy-auditor": "sec",
+    "threat-model-auditor": "sec",
+    "code-quality-auditor": "cq",
+    "architecture-auditor": "cq",
+    "dead-code-auditor": "dc",
+    "db-schema-auditor": "db",
+    "data-integrity-auditor": "data",
+    "ui-auditor": "ui",
+    "accessibility-auditor": "ui",
+    "performance-auditor": "perf",
+    "spec-completion-auditor": "sc",
+    "infrastructure-auditor": "infra",
+    "supply-chain-auditor": "infra",
+    "release-auditor": "infra",
+    "observability-auditor": "obs",
+    "test-strategy-auditor": "test",
+    "docs-accuracy-auditor": "docs",
 }
 
 EXECUTOR_ACTION_SPACE = _DEFAULT_ACTION_SPACE  # module-level default
@@ -132,9 +160,13 @@ def encode_repair_state(
     return f"{finding_category}:{severity}:{task_type}:{retry_count}"
 
 
-def _finding_category(finding_id: str) -> str:
-    """Extract category from finding ID. 'sec-001' → 'sec'."""
-    return finding_id.split("-")[0] if "-" in finding_id else finding_id
+def finding_category(finding_id: str, auditor: str = "") -> str:
+    """Action-space category for a finding: from the auditor when known,
+    else the lowercased ID prefix. 'SEC-001' → 'sec'."""
+    if auditor in _AUDITOR_CATEGORY:
+        return _AUDITOR_CATEGORY[auditor]
+    prefix = finding_id.split("-")[0] if "-" in finding_id else finding_id
+    return prefix.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +373,7 @@ def build_repair_plan(
         severity = finding.get("severity", "medium")
         auditor = finding.get("auditor", finding.get("auditor_name", ""))
         retry_count = int(finding.get("retry_count", 0))
-        category = _finding_category(finding_id)
+        category = finding_category(finding_id, auditor)
 
         # Base state: category:severity:task_type:retry
         base_state = encode_repair_state(category, severity, task_type, retry_count)

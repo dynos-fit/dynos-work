@@ -245,6 +245,12 @@ Build the repair log through ctl — Q-learning assignments are computed inside 
 
 This command reads `repair-cycle-plan.json`, calls Q-learning itself, derives `files_to_modify`, writes `.dynos/task-{id}/repair-log.json`, and validates the result. Do NOT ask an LLM to draft `repair-log.json`.
 
+The gate, the cycle plan, this build and the validator all read the same binding findings: when an ensemble cascade escalated, only the deep tier's report counts (the voting-tier reports are listed with `superseded_by`), a later attempt of the same auditor shard supersedes an earlier one, and findings are keyed by `(auditor, id)`.
+
+Interpret a non-zero exit:
+- `status == "escalation_required"`: a blocking finding targets pipeline-owned artifacts (`.dynos` receipts, logs, manifests) that no executor may write. Write `.dynos/task-{id}/escalation.md` naming each entry in `non_repairable_findings`, transition to `FAILED`, and stop. Do NOT edit those artifacts to make the finding go away.
+- `status == "blocked"` naming stale findings: the audit reports changed after the plan was written. Re-run `run-audit-repair-cycle-plan`, then this command.
+
 Wait for completion, then finalize repair execution readiness through the control plane:
 
 ```text
