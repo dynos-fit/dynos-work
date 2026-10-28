@@ -15,6 +15,7 @@ from lib_core import (
     VALID_DOMAINS,
     VALID_EXECUTORS,
     VALID_RISK_LEVELS,
+    finding_is_blocking,
     load_json,
     require,
     write_ctl_json,
@@ -626,7 +627,7 @@ _ATTEMPT_SUFFIX_RE: re.Pattern[str] = re.compile(r"-attempt-(\d+)$")
 
 # Audit reports use critical|major|minor (agents/_shared/audit-report.md);
 # repair logs use critical|high|medium|low.
-_REPAIR_SEVERITY_ALIASES = {"major": "high", "minor": "low"}
+_REPAIR_SEVERITY_ALIASES = {"major": "high", "minor": "low", "blocking": "high", "non-blocking": "low"}
 
 
 def normalize_repair_severity(severity: str) -> str:
@@ -814,7 +815,7 @@ def collect_repair_findings(task_dir: Path) -> dict:
                 entry["_repair_task"] = tasks_by_id[finding_id]
             candidates.append(entry)
     # Stable: blocking first, otherwise the binding-report order above.
-    candidates.sort(key=lambda f: 0 if bool(f.get("blocking")) else 1)
+    candidates.sort(key=lambda f: 0 if finding_is_blocking(f) else 1)
 
     kept: list[dict] = []
     by_key: set[tuple[str, str]] = set()
@@ -840,7 +841,7 @@ def collect_repair_findings(task_dir: Path) -> dict:
             "model": row["model"],
             "attempt": row["attempt"],
             "finding_count": len(row["findings"]),
-            "blocking_count": sum(1 for f in row["findings"] if bool(f.get("blocking"))),
+            "blocking_count": sum(1 for f in row["findings"] if finding_is_blocking(f)),
             "superseded_by": row["superseded_by"],
         })
     return {"reports": reports, "findings": kept}
@@ -2053,7 +2054,7 @@ def compute_reward(task_dir: Path) -> dict:
                 "no fix needed",
             )
             for finding in findings:
-                if not isinstance(finding, dict) or not finding.get("blocking"):
+                if not finding_is_blocking(finding):
                     continue
                 recommendation = str(finding.get("recommendation", ""))
                 rec = recommendation.lower()
@@ -2075,12 +2076,12 @@ def compute_reward(task_dir: Path) -> dict:
             count = len(findings)
             findings_by_auditor[auditor] = findings_by_auditor.get(auditor, 0) + count
             total_findings += count
-            total_blocking += sum(1 for f in findings if isinstance(f, dict) and f.get("blocking"))
+            total_blocking += sum(1 for f in findings if finding_is_blocking(f))
             for finding in findings:
                 if not isinstance(finding, dict):
                     continue
                 fid = finding.get("id", "") or ""
-                if finding.get("blocking") and isinstance(fid, str) and fid:
+                if finding_is_blocking(finding) and isinstance(fid, str) and fid:
                     post_repair_blocking_ids.add(fid)
                 category = fid.split("-")[0] if "-" in fid else fid
                 if category:
