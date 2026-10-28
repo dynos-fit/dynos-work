@@ -14,6 +14,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 # PRO-007: pin git binary to absolute path resolved at import time.
 _GIT: str | None = shutil.which("git")
@@ -4881,8 +4882,15 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
                         except (TypeError, ValueError):
                             retry_count = 0
                         task_auditor = task.get("auditor")
-                        key = (task_auditor if isinstance(task_auditor, str) and task_auditor else None, fid)
-                        prior_retry_counts[key] = max(prior_retry_counts.get(key, retry_count), retry_count)
+                        keys = [(task_auditor if isinstance(task_auditor, str) and task_auditor else None, fid)]
+                        # A merged duplicate was repaired by this task too; the
+                        # next cycle may pick it as the primary instead.
+                        for merged in task.get("merged_findings", []) or []:
+                            if isinstance(merged, dict) and isinstance(merged.get("id"), str) and merged["id"]:
+                                merged_auditor = merged.get("auditor")
+                                keys.append((merged_auditor if isinstance(merged_auditor, str) and merged_auditor else None, merged["id"]))
+                        for key in keys:
+                            prior_retry_counts[key] = max(prior_retry_counts.get(key, retry_count), retry_count)
 
         next_cycle = max(1, prior_cycle + 1)
         if next_cycle == 1:
@@ -4993,6 +5001,82 @@ def _classify_repair_path(raw: str, root: Path, task_dir: Path) -> tuple[str, st
     return "repo", rel
 
 
+# A citation's trailing line reference: ":81", ":81-83", ":L81", ":81, 90".
+_CITATION_LINE_RE = re.compile(r":L?\d[\d\s,-]*$")
+# A parenthetical note inside a citation ("x.py:81 (guard, see below)"),
+# including one cut off before its closing paren.
+_CITATION_NOTE_RE = re.compile(r"\([^)]*\)|\(.*$")
+_REPO_PATH_RE = re.compile(r"[\w.@+-]+(?:/[\w.@+-]+)*")
+# File-like tokens in finding prose: at least one dot-extension.
+_PROSE_PATH_RE = re.compile(r"(?<![\w/.-])((?:[\w.@+-]+/)*[\w@+-][\w.@+-]*\.[A-Za-z0-9]{1,8})(?![\w/-])")
+
+
+def _split_citation(raw: str) -> list[str]:
+    """Split one cited-files field into bare repo paths.
+
+    Auditors list several files in one field (".gitignore, infra/x.yml" or
+    "client.ts:7; status.tsx:28") and annotate them ("x.py:81 (guard)").
+    Notes go first, so a comma inside one cannot split it into a fake path;
+    then each part loses its line reference, and anything left that is not
+    path-shaped (":103-104", "see above") is dropped.
+    """
+    parts: list[str] = []
+    for part in re.split(r"[,;]", _CITATION_NOTE_RE.sub("", raw)):
+        text = _CITATION_LINE_RE.sub("", part.strip()).strip().strip("`'\"")
+        if text and _REPO_PATH_RE.fullmatch(text) and not re.fullmatch(r"[\d.-]+", text):
+            parts.append(text)
+    return parts
+
+
+def _resolve_repair_path(rel: str, root: Path, known: Callable[[], list[str]], *, keep_unknown: bool) -> str | None:
+    """Map a cited path onto the repo path it names.
+
+    A path that exists is kept. A partial one ("revision.py",
+    "audit/revision.py") is matched against the task's planned files and
+    kept only if exactly one ends with it, so two citations of one file
+    cannot slip into the same parallel batch under different spellings.
+    With ``keep_unknown``, a path nothing matches (a file the repair may
+    have to create) is kept as written.
+    """
+    if (root / rel).exists():
+        return rel
+    matches = [k for k in known() if k == rel or k.endswith("/" + rel)]
+    if len(matches) == 1:
+        return matches[0]
+    if keep_unknown and not matches:
+        return rel
+    return None
+
+
+def _repo_file_list(root: Path) -> list[str]:
+    """Tracked plus untracked-but-not-ignored files, or ``[]`` without git."""
+    try:
+        result = subprocess.run(
+            [_GIT or "git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard"],
+            capture_output=True, check=False, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    # Pipeline state is never a repair target, tracked or not.
+    return [
+        line.strip() for line in result.stdout.splitlines()
+        if line.strip() and not line.strip().startswith(".dynos/")
+    ]
+
+
+def _finding_prose(source: dict) -> str:
+    chunks: list[str] = []
+    for key in ("title", "description", "evidence", "recommendation", "fix", "remediation"):
+        value = source.get(key)
+        if isinstance(value, str):
+            chunks.append(value)
+        elif isinstance(value, (dict, list)):
+            chunks.append(json.dumps(value))
+    return "\n".join(chunks)
+
+
 def _repair_files_for_finding(
     task_dir: Path,
     finding: dict,
@@ -5005,12 +5089,29 @@ def _repair_files_for_finding(
     canonical ``location`` ("file:line"), the older ``file`` /
     ``evidence.file`` forms, and the auditor's own ``repair_tasks``
     ``affected_files``. Pipeline-owned paths are returned separately and
-    never become repair targets. Only a finding that cites no file at all
-    falls back to the execution graph.
+    never become repair targets. A finding that cites no file is scoped to
+    the existing files its prose names; only when it names none does it fall
+    back to the execution graph.
     """
     from lib_validate import _finding_location_file  # noqa: PLC0415
 
     root = _root_for_task_dir(task_dir)
+    try:
+        graph_segments = _load_graph_segments(task_dir)
+    except (OSError, ValueError):
+        graph_segments = []
+    known_cache: list[list[str]] = []
+
+    def known() -> list[str]:
+        if not known_cache:
+            known_cache.append(_dedupe([
+                path
+                for segment in graph_segments
+                for path in segment.get("files_expected", []) or []
+                if isinstance(path, str) and path
+            ] + _repo_file_list(root)))
+        return known_cache[0]
+
     cited: list[str] = []
     for source in (finding, live or {}):
         location_file = _finding_location_file(source)
@@ -5022,30 +5123,32 @@ def _repair_files_for_finding(
                 if isinstance(entry, str) and entry.strip():
                     cited.append(entry)
 
-    # Auditors list several files in one field (".gitignore, infra/x.yml" or
-    # "client.ts:7; status.tsx:28"); each is its own target, minus any line.
-    split_cited = [
-        re.sub(r":\d[\d\s-]*$", "", part.strip())
-        for raw in cited
-        for part in re.split(r"[,;]", raw)
-        if part.strip() and not re.fullmatch(r"[\d\s-]+", part.strip())
-    ]
-
-    repo_files: list[str] = []
-    pipeline_files: list[str] = []
-    for raw in _dedupe(split_cited):
-        kind, rel = _classify_repair_path(raw, root, task_dir)
-        if kind == "repo" and rel:
-            repo_files.append(rel)
-        elif kind == "pipeline" and rel:
-            pipeline_files.append(rel)
-    if repo_files or pipeline_files:
+    def _classified(paths: list[str], *, keep_unknown: bool) -> tuple[list[str], list[str]]:
+        repo_files: list[str] = []
+        pipeline_files: list[str] = []
+        for raw in _dedupe(paths):
+            kind, rel = _classify_repair_path(raw, root, task_dir)
+            if kind == "pipeline" and rel:
+                pipeline_files.append(rel)
+            elif kind == "repo" and rel:
+                resolved = _resolve_repair_path(rel, root, known, keep_unknown=keep_unknown)
+                if resolved:
+                    repo_files.append(resolved)
         return _dedupe(repo_files), _dedupe(pipeline_files)
 
-    try:
-        graph_segments = _load_graph_segments(task_dir)
-    except (OSError, ValueError):
-        graph_segments = []
+    repo_files, pipeline_files = _classified(
+        [part for raw in cited for part in _split_citation(raw)], keep_unknown=True,
+    )
+    if repo_files or pipeline_files:
+        return repo_files, pipeline_files
+
+    prose = "\n".join(_finding_prose(source) for source in (finding, live or {}))
+    repo_files, _ = _classified(
+        [m.group(1) for m in _PROSE_PATH_RE.finditer(prose)], keep_unknown=False,
+    )
+    if repo_files:
+        return repo_files, []
+
     for wanted in (assigned_executor, None):
         paths = [
             path
@@ -5329,6 +5432,9 @@ def cmd_run_audit_reaudit_plan(args: argparse.Namespace) -> int:
                 fid = task.get("finding_id")
                 if isinstance(fid, str) and fid:
                     repaired_finding_ids.add(fid)
+                for merged in task.get("merged_findings", []) or []:
+                    if isinstance(merged, dict) and isinstance(merged.get("id"), str) and merged["id"]:
+                        repaired_finding_ids.add(merged["id"])
                 for path in task.get("files_to_modify", []) or []:
                     if isinstance(path, str) and path:
                         modified_files.add(path)

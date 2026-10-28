@@ -54,17 +54,27 @@ Violating this budget can waste 1M+ tokens per audit spawn.
 
 ### Step 1 — Generate the rules JSON
 
-Run the deterministic helper to extract and classify all CLAUDE.md rules. Use this exact Bash invocation (substitute the actual task ID for `{id}`):
+Run the deterministic helper to extract and classify all CLAUDE.md rules. Use this exact Bash invocation (substitute the actual task ID for `{id}`, and the path from the spawn prompt's `PLUGIN_HOOKS=<path>` line for `{plugin_hooks}`):
 
 ```bash
-python3 "${PLUGIN_HOOKS}/lib_claude_md.py" --root . --task-dir .dynos/task-{id}
+HOOKS=""
+for candidate in "${PLUGIN_HOOKS:-}" "{plugin_hooks}" "${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/hooks}" "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/hooks}"; do
+  if [ -n "$candidate" ] && [ -f "$candidate/lib_claude_md.py" ]; then HOOKS="$candidate"; break; fi
+done
+if [ -z "$HOOKS" ]; then
+  echo "lib_claude_md.py not found (PLUGIN_HOOKS, CODEX_PLUGIN_ROOT and CLAUDE_PLUGIN_ROOT unresolved)" >&2
+  exit 3
+fi
+python3 "$HOOKS/lib_claude_md.py" --root . --task-dir .dynos/task-{id}
 ```
 
 The helper writes `claude-md-rules-extracted.json` into the task directory. Each rule has a `tier` field set to `hard` or `preference` and a `citation` block (`rule_file`, `rule_line`, `rule_text`).
 
 ### Step 2 — Handle helper failure (tool-error path)
 
-If the Bash call exits non-zero, you MUST stop processing and emit a report containing exactly one finding:
+If the Bash call exits with code 3, the helper could not be located: that is a session-environment problem no code repair can fix, so it MUST NOT block. Stop processing and emit a report with `status: "complete"`, `can_block_completion: false`, `blocking_count: 0`, and exactly one finding: `id` `cmd-001`, `category` `infrastructure`, `severity` `major`, `blocking` `false`, a `description` that quotes the stderr and says CLAUDE.md rules were not evaluated, `location` `""`, and an empty `citation`.
+
+If the Bash call exits with any other non-zero code, you MUST stop processing and emit a report containing exactly one finding:
 
 - `id`: `cmd-001`
 - `category`: `tool-error`

@@ -11,6 +11,21 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.32] - 2026-10-28
+### Fixed
+- **A re-audit whose cascade passes no longer stays blocked by the previous deep-tier report.** A re-audit restarts an ensemble cascade at the fast tier. When the voting tiers come back clean, the deep tier never runs. The deep-tier report from the earlier attempt was still binding, so findings that had already been fixed kept the gate at `repair_required` until the retry cap. `collect_repair_findings` now supersedes an auditor's deep-tier reports from attempts older than its current fast-tier attempt when the cascade verdict is `pass` (`superseded_by: "cascade pass at attempt-N: <model> did not run"`). A deep-tier report from the current attempt still binds (fail-closed).
+- **One defect reported by many auditors becomes one repair task.** Findings at the same file and line now merge whatever category each auditor gave them. Before, one fix at `pagination.py:81`, reported under twelve IDs, was queued as about ten tasks across nine serial batches and six executor types. Without a line number, findings still merge only when the category matches. The next cycle plan carries the retry count over to every merged finding, and `run-audit-reaudit-plan` re-spawns the merged findings' auditors.
+- **Repair tasks get the right files.**
+  - Parenthetical notes are removed from citations before they are split, so `x.py:81, :103-104 (guard, …)` no longer yields a junk path like `:103-104 (DB-eval guard …)`. Fragments that are not path-shaped are dropped. Line forms `:L81` and `:81-83` are stripped.
+  - A partial path such as `revision.py` resolves to the single repo or planned file that ends with it. Two spellings of one file therefore can no longer land in the same parallel batch.
+  - A finding that cites no file is now scoped to the files its title, description, evidence or recommendation names, when those files exist. Before, it fell back straight to its executor's segment files: every file in the task, or files that did not include the file to fix.
+- **Plan audit accepts new endpoints and Django routes.** `analyze_api_contracts` now:
+  - exempts API Contracts rows marked `to-be-created` in any cell (reported under `to_be_created`), as the Data Model check already did;
+  - treats a cell that names several paths as several endpoints;
+  - resolves Django `path()` routes through the `include("pkg.urls")` prefixes that mount them, and normalizes `<int:pk>` params. A relative route whose module nothing includes matches a claimed endpoint by suffix.
+- **claude-md-auditor no longer blocks on a missing `PLUGIN_HOOKS`.** It looks for `lib_claude_md.py` under `PLUGIN_HOOKS`, the path in the spawn prompt, `CODEX_PLUGIN_ROOT` and `CLAUDE_PLUGIN_ROOT`. If none of them has it, it reports a non-blocking `infrastructure` finding instead of a blocking critical `tool-error` that no repair could clear. The audit skill now puts `PLUGIN_HOOKS=<plugin-root>/hooks` in every auditor spawn prompt.
+- **The pipeline skills' command funnel works without `CLAUDE_PLUGIN_ROOT`.** When both plugin-root variables are unset, start, plan, execute and audit now resolve the plugin root from the skill's base directory instead of exiting 2.
+
 ## [7.5.31] - 2026-10-28
 ### Fixed
 - Findings that say `"severity": "blocking"` without the boolean `blocking` flag now block. Release-auditor and spec-completion-auditor reports were seen omitting the flag. Every counter read `bool(finding.get("blocking"))`, so those findings were treated as non-blocking and the audit could pass over them. The new `lib_core.finding_is_blocking` is now the single rule for the audit receipt's `blocking_count`, the findings gate, the repair cycle plan, `collect_repair_findings`, `run-audit-summary`, the audit-summary validator and the DONE gate's open-finding check. An explicit boolean `blocking` decides. When it is missing, a `blocking` or `critical` severity counts as blocking (fail-closed). `normalize_repair_severity` maps `blocking`/`non-blocking` to `high`/`low`.

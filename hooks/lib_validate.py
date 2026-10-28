@@ -654,9 +654,9 @@ def _report_shard(report_file: Path, auditor_name: str) -> tuple[str | None, int
     return (named.group(2) if named else None), attempt
 
 
-def _escalated_cascades(task_dir: Path) -> dict[str, tuple[str, list[str]]]:
-    """Map auditor -> (escalation model, voting models) for every ensemble
-    auditor whose cascade is complete with verdict ``escalated``.
+def _completed_cascades(task_dir: Path) -> dict[str, dict]:
+    """Map auditor -> ``{"verdict", "escalation_model", "voting_models"}`` for
+    every ensemble auditor whose cascade is complete.
 
     Reads the cascade from ``lib_ensemble`` (the single source of truth) so
     repair planning applies the same verdict ``ctl ensemble-next`` reports.
@@ -668,7 +668,7 @@ def _escalated_cascades(task_dir: Path) -> dict[str, tuple[str, list[str]]]:
         entries = lib_ensemble.load_plan_entries(task_dir)
     except (OSError, ValueError):
         return {}
-    escalated: dict[str, tuple[str, list[str]]] = {}
+    completed: dict[str, dict] = {}
     for entry in entries:
         name = entry.get("name")
         if not isinstance(name, str) or not name or entry.get("action") != "spawn":
@@ -676,14 +676,17 @@ def _escalated_cascades(task_dir: Path) -> dict[str, tuple[str, list[str]]]:
         if not lib_ensemble.is_ensemble_entry(entry):
             continue
         result = lib_ensemble.ensemble_next(task_dir, name, entry)
-        if (
-            result.get("status") == lib_ensemble.STATUS_COMPLETE
-            and result.get("verdict") == lib_ensemble.VERDICT_ESCALATED
-            and not result.get("gaps")
-            and result.get("escalation_model")
-        ):
-            escalated[name] = (str(result["escalation_model"]), list(result.get("voting_models") or []))
-    return escalated
+        if result.get("status") != lib_ensemble.STATUS_COMPLETE or result.get("gaps"):
+            continue
+        verdict = result.get("verdict")
+        if verdict == lib_ensemble.VERDICT_ESCALATED and not result.get("escalation_model"):
+            continue
+        completed[name] = {
+            "verdict": verdict,
+            "escalation_model": str(result.get("escalation_model") or ""),
+            "voting_models": list(result.get("voting_models") or []),
+        }
+    return completed
 
 
 def _finding_location_file(finding: dict) -> str:
@@ -712,7 +715,13 @@ def _finding_location_file(finding: dict) -> str:
 
 def _finding_location_key(finding: dict) -> tuple[str, str, str] | None:
     """``(file, line, category)`` used to merge duplicate reports of one
-    defect, or None when the finding names no file (never merged)."""
+    defect, or None when the finding names no file (never merged).
+
+    A finding that names a line merges on ``(file, line)`` alone: auditors
+    file the same defect under their own categories (one fix at
+    ``pagination.py:81`` came back as twelve findings from twelve auditors).
+    Without a line, the category keeps distinct defects in one file apart.
+    """
     path = _finding_location_file(finding)
     if not path:
         return None
@@ -722,7 +731,9 @@ def _finding_location_key(finding: dict) -> tuple[str, str, str] | None:
     if not line_text and isinstance(location, str):
         tail = location.strip().rpartition(":")[2]
         line_text = tail if tail.isdigit() else ""
-    return path, line_text, str(finding.get("category") or "")
+    if line_text:
+        return path, line_text, ""
+    return path, "", str(finding.get("category") or "")
 
 
 def collect_repair_findings(task_dir: Path) -> dict:
@@ -738,13 +749,17 @@ def collect_repair_findings(task_dir: Path) -> dict:
       verdict is final and binding, so the voting-tier reports are superseded.
       Fail closed: if the escalation tier wrote no report, nothing is
       superseded and the voting tiers keep blocking.
+    - Ensemble auditor whose cascade verdict is ``pass``: a re-audit restarts
+      the cascade at the fast tier, and a clean voting run never reaches the
+      deep tier. Deep-tier reports from attempts older than the current
+      fast-tier attempt belong to a finished cascade and are superseded.
     - Several attempts of the same ``(auditor, model)`` shard: the highest
       attempt supersedes the older ones (a re-audit after repair).
 
     Findings from the binding reports are keyed by ``(auditor, id)``, so the
     same ID from two auditors stays two findings. A finding pointing at the
-    same file, line and category as an earlier one is merged into it (recorded
-    in ``_merged``); blocking findings are visited first so a non-blocking
+    same file and line as an earlier one (or, with no line, the same file and
+    category) is merged into it (recorded in ``_merged``); blocking findings are visited first so a non-blocking
     duplicate can never shadow a blocking one.
 
     Returns ``{"reports": [...], "findings": [...]}``. Each finding is a copy
@@ -752,11 +767,11 @@ def collect_repair_findings(task_dir: Path) -> dict:
     ``_attempt``, ``_merged`` and, when the report carried one, ``_repair_task``
     (the auditor's own ``repair_tasks`` entry for that finding).
     """
-    escalated = _escalated_cascades(task_dir)
+    cascades = _completed_cascades(task_dir)
     rows: list[dict] = []
     for report_file, payload in select_eligible_reports(task_dir, stage=None):
         reported = str(payload.get("auditor_name") or payload.get("auditor") or report_file.stem)
-        auditor = reported if reported in escalated else (_normalize_auditor_name(reported, set(escalated)) or reported)
+        auditor = reported if reported in cascades else (_normalize_auditor_name(reported, set(cascades)) or reported)
         model, attempt = _report_shard(report_file, reported)
         if model is None and auditor != reported:
             model, attempt = _report_shard(report_file, auditor)
@@ -773,13 +788,26 @@ def collect_repair_findings(task_dir: Path) -> dict:
             "superseded_by": None,
         })
 
-    for auditor, (escalation_model, voting_models) in escalated.items():
+    for auditor, cascade in cascades.items():
+        escalation_model = cascade["escalation_model"]
+        voting_models = cascade["voting_models"]
         own = [r for r in rows if r["auditor"] == auditor]
-        if not any(r["model"] == escalation_model for r in own):
+        if cascade["verdict"] == "escalated":
+            if not any(r["model"] == escalation_model for r in own):
+                continue
+            for row in own:
+                if row["model"] in voting_models and row["model"] != escalation_model:
+                    row["superseded_by"] = f"escalated cascade: {escalation_model} verdict is binding"
             continue
+        if not escalation_model or escalation_model in voting_models or not voting_models:
+            continue
+        fast_attempts = [r["attempt"] for r in own if r["model"] == voting_models[0] and r["attempt"] is not None]
+        if not fast_attempts:
+            continue
+        current = max(fast_attempts)
         for row in own:
-            if row["model"] in voting_models and row["model"] != escalation_model:
-                row["superseded_by"] = f"escalated cascade: {escalation_model} verdict is binding"
+            if row["model"] == escalation_model and row["attempt"] is not None and row["attempt"] < current:
+                row["superseded_by"] = f"cascade pass at attempt-{current}: {escalation_model} did not run"
 
     latest: dict[tuple[str, str], int] = {}
     for row in rows:

@@ -295,15 +295,127 @@ def _read_safe(path: Path) -> str:
 def _normalize_path(path: str) -> str:
     """Normalize an API path for comparison.
 
-    Strips backticks, collapses path params like :id / {id} / [id] to a
-    canonical placeholder, and lowercases.
+    Strips backticks, collapses path params like :id / {id} / [id] /
+    <int:pk> to a canonical placeholder, and lowercases.
     """
     path = path.strip("`").strip()
     # Collapse param variants
+    path = re.sub(r"<[^>]+>", ":param", path)
     path = re.sub(r":\w+", ":param", path)
     path = re.sub(r"\{[^}]+\}", ":param", path)
     path = re.sub(r"\[[^\]]+\]", ":param", path)
     return path.lower().rstrip("/")
+
+
+_DJANGO_ROUTE_RE = re.compile(r"""\b(?:re_)?path\s*\(\s*r?['"]([^'"]*)['"]\s*,\s*(include\s*\(\s*['"]([\w.]+)['"])?""")
+# Path-like tokens in an endpoint cell: "/a, /b" or "`/a` and `/b`".
+_CELL_PATH_RE = re.compile(r"/[^\s`,;|]*")
+
+
+def _cell_endpoints(value: str) -> list[str]:
+    """Every path in an endpoint cell; the cell itself when it holds none."""
+    text = value.strip().strip("`").strip()
+    paths = [p.strip("`") for p in _CELL_PATH_RE.findall(value)]
+    return paths or ([text] if text else [])
+
+
+def _module_name(fpath: Path, root: Path) -> str:
+    try:
+        rel = fpath.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        rel = Path(fpath.name)
+    return ".".join(rel.with_suffix("").parts)
+
+
+def _scan_routes(files: list[Path], root: Path) -> tuple[set[str], set[str]]:
+    """Return ``(routes, unmounted)`` defined in ``files``, normalized.
+
+    ``routes`` are absolute. Django ``path()`` routes are relative and
+    mounted through ``include("pkg.urls")`` under a parent prefix, so each
+    urls module's prefix is resolved from the ``include()`` calls that name
+    it. A relative route whose module no scanned file includes keeps no
+    known mount point and lands in ``unmounted``; a claim may match it by
+    suffix.
+    """
+    found: set[str] = set()
+    relative: dict[str, list[str]] = {}
+    mounts: dict[str, list[tuple[str, str]]] = {}
+    for fpath in files:
+        content = _read_safe(fpath)
+        if not content:
+            continue
+        for pattern, kind in _ROUTE_PATTERNS:
+            if kind == "django-urls":
+                continue
+            for match in pattern.finditer(content):
+                for g in match.groups():
+                    if g and g.startswith("/"):
+                        found.add(_normalize_path(g))
+        module = _module_name(fpath, root)
+        for match in _DJANGO_ROUTE_RE.finditer(content):
+            route, included = match.group(1), match.group(3)
+            if route.startswith("/"):
+                found.add(_normalize_path(route))
+            elif included:
+                mounts.setdefault(included, []).append((module, route.lstrip("^")))
+            else:
+                relative.setdefault(module, []).append(route.lstrip("^").rstrip("$"))
+
+    def _prefixes(module: str, seen: frozenset[str]) -> list[str] | None:
+        parents = [
+            (parent, route)
+            for target, entries in mounts.items()
+            if module == target or module.endswith("." + target)
+            for parent, route in entries
+        ]
+        if not parents:
+            return None
+        out: list[str] = []
+        for parent, route in parents:
+            if parent in seen:
+                continue
+            above = _prefixes(parent, seen | {parent})
+            out.extend(prefix + route for prefix in (above if above is not None else [""]))
+        return out
+
+    unmounted: set[str] = set()
+    for module, routes in relative.items():
+        prefixes = _prefixes(module, frozenset({module}))
+        for route in routes:
+            if prefixes is None:
+                if route:
+                    unmounted.add(_normalize_path("/" + route))
+                continue
+            for prefix in prefixes:
+                found.add(_normalize_path("/" + prefix + route))
+    return found, unmounted
+
+
+def _route_matches(claim: str, routes: set[str], unmounted: set[str]) -> bool:
+    """Segment-level match: same segment count, non-param segments equal.
+
+    An unmounted relative route matches the tail of a claim, provided it
+    pins at least one literal segment.
+    """
+    norm = _normalize_path(claim)
+    norm_parts = [p for p in norm.split("/") if p]
+
+    def _same(a: list[str], b: list[str]) -> bool:
+        return len(a) == len(b) and all(x == y or x == ":param" or y == ":param" for x, y in zip(a, b))
+
+    for fr in routes:
+        if norm == fr or _same(norm_parts, [p for p in fr.split("/") if p]):
+            return True
+    for fr in unmounted:
+        fr_parts = [p for p in fr.split("/") if p]
+        if (
+            fr_parts
+            and any(p != ":param" for p in fr_parts)
+            and len(fr_parts) <= len(norm_parts)
+            and _same(norm_parts[len(norm_parts) - len(fr_parts):], fr_parts)
+        ):
+            return True
+    return False
 
 
 def analyze_api_contracts(
@@ -312,7 +424,13 @@ def analyze_api_contracts(
     *,
     _precomputed_files: list[Path] | None = None,
 ) -> dict[str, Any]:
-    """Check API Contracts section claims against actual route definitions."""
+    """Check API Contracts section claims against actual route definitions.
+
+    Rows marked ``to-be-created`` (in any cell) are reported separately and
+    exempted from the codebase match, as in the Data Model check: a new
+    endpoint cannot exist until its execution segment runs. A cell naming
+    several paths is several endpoints.
+    """
     section = extract_section(plan_text, "API Contracts")
     if not section.strip():
         return {"skipped": True, "reason": "no API Contracts section"}
@@ -323,20 +441,30 @@ def analyze_api_contracts(
 
     # Extract claimed endpoints
     claimed: list[dict[str, str]] = []
+    to_be_created: list[dict[str, str]] = []
     for row in rows:
-        endpoint = ""
+        endpoints: list[str] = []
         method = ""
         for key, val in row.items():
             k = key.lower().strip()
             if k in ("endpoint", "path", "url", "route"):
-                endpoint = val.strip("`").strip()
+                endpoints = _cell_endpoints(val)
             elif k in ("method", "http method", "verb"):
                 method = val.strip("`").strip().upper()
-        if endpoint:
-            claimed.append({"endpoint": endpoint, "method": method})
+        target = to_be_created if any("to-be-created" in value.lower() for value in row.values()) else claimed
+        target.extend({"endpoint": endpoint, "method": method} for endpoint in endpoints)
 
-    if not claimed:
+    if not claimed and not to_be_created:
         return {"skipped": True, "reason": "no endpoints found in API Contracts table"}
+    if not claimed:
+        return {
+            "skipped": False,
+            "claimed_endpoints": 0,
+            "to_be_created": to_be_created,
+            "verified": 0,
+            "unverified": [],
+            "routes_found_in_code": 0,
+        }
 
     # Two-pass scan: try plan-implied paths first (cheap), fall back to the
     # full repo walk only if at least one claim was unmatched. The full-scan
@@ -344,84 +472,31 @@ def analyze_api_contracts(
     # work in the common case.
     plan_paths = _extract_plan_paths(plan_text)
 
-    def _scan_files(files: list[Path]) -> set[str]:
-        found: set[str] = set()
-        for fpath in files:
-            content = _read_safe(fpath)
-            if not content:
-                continue
-            for pattern, _ in _ROUTE_PATTERNS:
-                for match in pattern.finditer(content):
-                    for g in match.groups():
-                        if g and g.startswith("/"):
-                            found.add(_normalize_path(g))
-        return found
-
     found_routes: set[str] = set()
+    unmounted: set[str] = set()
     narrow_files: list[Path] = []
     if plan_paths:
         narrow_files = _iter_plan_implied_files(root, plan_paths, _CODE_EXTENSIONS)
-        found_routes = _scan_files(narrow_files)
+        found_routes, unmounted = _scan_routes(narrow_files, root)
 
-    def _all_claims_matched(claimed_list: list[dict[str, str]], routes: set[str]) -> bool:
-        for c in claimed_list:
-            norm = _normalize_path(c["endpoint"])
-            norm_parts = [p for p in norm.split("/") if p]
-            matched = False
-            for fr in routes:
-                if norm == fr:
-                    matched = True
-                    break
-                fr_parts = [p for p in fr.split("/") if p]
-                if len(norm_parts) == len(fr_parts) and all(
-                    np == fp or np == ":param" or fp == ":param"
-                    for np, fp in zip(norm_parts, fr_parts)
-                ):
-                    matched = True
-                    break
-            if not matched:
-                return False
-        return True
-
-    if not narrow_files or not _all_claims_matched(claimed, found_routes):
+    if not narrow_files or not all(_route_matches(c["endpoint"], found_routes, unmounted) for c in claimed):
         code_files = (
             [f for f in _precomputed_files if f.suffix in _CODE_EXTENSIONS]
             if _precomputed_files is not None
             else _iter_code_files(root, _CODE_EXTENSIONS)
         )
-        found_routes = _scan_files(code_files)
+        found_routes, unmounted = _scan_routes(code_files, root)
 
-    # Cross-reference — match by path segments, not string prefix
-    claimed_not_found: list[dict[str, str]] = []
-    claimed_found: list[dict[str, str]] = []
-    for c in claimed:
-        norm = _normalize_path(c["endpoint"])
-        norm_parts = [p for p in norm.split("/") if p]
-        matched = False
-        for fr in found_routes:
-            if norm == fr:
-                matched = True
-                break
-            # Segment-level match: same number of segments, non-param segments equal
-            fr_parts = [p for p in fr.split("/") if p]
-            if len(norm_parts) == len(fr_parts):
-                if all(
-                    np == fp or np == ":param" or fp == ":param"
-                    for np, fp in zip(norm_parts, fr_parts)
-                ):
-                    matched = True
-                    break
-        if matched:
-            claimed_found.append(c)
-        else:
-            claimed_not_found.append(c)
+    claimed_found = [c for c in claimed if _route_matches(c["endpoint"], found_routes, unmounted)]
+    claimed_not_found = [c for c in claimed if c not in claimed_found]
 
     return {
         "skipped": False,
         "claimed_endpoints": len(claimed),
+        "to_be_created": to_be_created,
         "verified": len(claimed_found),
         "unverified": claimed_not_found,
-        "routes_found_in_code": len(found_routes),
+        "routes_found_in_code": len(found_routes) + len(unmounted),
     }
 
 
