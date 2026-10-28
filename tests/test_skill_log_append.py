@@ -20,6 +20,8 @@ _HAND_APPEND_PATTERNS = [
     re.compile(r"(?i)append[^\n]{0,40}line[^\n]{0,60}to `execution-log\.md`"),
     re.compile(r">>\s*\.?dynos/task-\{id\}/execution-log\.md"),
     re.compile(r"(?m)^\{timestamp\} \[(GATE|SKIP|DONE|ADVANCE|BUDGET-PAUSE)\]"),
+    # Tags added to log-append's allowlist in 7.5.30, anywhere in the prose.
+    re.compile(r"\{timestamp\} \[(VOTE|REPAIR|VISION|INLINE|CACHE)\]"),
 ]
 
 

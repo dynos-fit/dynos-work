@@ -52,10 +52,11 @@ Read `spec.md`, `plan.md`, and `execution-graph.json`. Ensure you understand the
 ### Step 2 — Snapshot the Base
 
 Before any modification starts:
-1. Create a temporary git branch and return to the working branch:
+1. Create a snapshot branch at the current commit without leaving the working branch:
    ```
-   git checkout -b dynos/task-{id}-snapshot && git checkout -
+   git branch dynos/task-{id}-snapshot
    ```
+   (`git checkout -b … && git checkout -` must not be used: on a repository with no commits it renames the unborn branch and then fails. With no commits there is nothing to snapshot; `record-snapshot` says so and asks for an initial commit.)
 2. Record the snapshot SHA into manifest.snapshot via the audited ctl wrapper:
    ```
    "$DYNOS" ctl record-snapshot .dynos/task-{id}
@@ -116,7 +117,7 @@ If any segment has route_mode in {replace, alongside} with non-null agent_path, 
 "$DYNOS" ctl transition .dynos/task-{id} EXECUTION
 ```
 
-Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
+Then read the segment, extract the criteria from `spec.md`, make the code changes yourself and write evidence. Finalize the segment with `run-execution-segment-done` exactly as in **Segment finalization** below (its receipt is what marks the segment complete), then run the end of Step 3 (rules check, `run-execution-finish`, evidence verification) before Step 4: `run-tests` refuses a task still at `EXECUTION`. Log it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag INLINE --message "seg-1 — fast-track inline execution (no subagent spawn)"`.
 
 Inline execution does not relax standards. It removes spawn overhead, not rigor.
 
@@ -140,7 +141,7 @@ This command is authoritative for:
 
 Do NOT re-derive dependency depth, cache reuse, or runnable batches in prompt logic. Consume the JSON output and follow it.
 
-If `cached_segments` is non-empty, treat those segments as already satisfied and reuse their evidence files. Append to log: `{timestamp} [CACHE] {segment-id} — skipping (inputs unchanged)`.
+If `cached_segments` is non-empty, treat those segments as already satisfied and reuse their evidence files. Log each with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CACHE --message "{segment-id} — skipping (inputs unchanged)"`.
 
 If `next_batch` is empty while `pending_segments` is non-empty, stop and fail the task as blocked. That means dependency resolution or receipt state is inconsistent; do not guess.
 
@@ -283,13 +284,39 @@ Parse the JSON `status`:
   After each continuation executor returns, run `run-execution-segment-done` for that segment (the same authoritative completion gate the normal batch loop uses — it writes the receipt and verifies ownership + evidence; a segment is not "complete" until that receipt exists). Then **re-run `next-continuation` and repeat.** There is no spawn-count cap in this loop — keep going as long as segments make progress. Do NOT run `check-spawn-budget` for continuation spawns; the spawn-budget backstop is for audit thrash, not for finishing execution.
 - **`stalled`** (exit code 3) — every remaining incomplete segment moved nothing across two consecutive continuations; `stalled_segments` names them. This is the ONLY automatic halt. Write `escalation.md` with `stalled_segments` and their `incomplete_reasons`, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CONTINUATION-STALLED --message "{stalled_segments}"`, and stop: the orchestrator cannot make progress and a human must intervene. Do NOT keep re-spawning.
 
-Only once `next-continuation` reports `complete` do you advance the stage:
+Only once `next-continuation` reports `complete` do you advance the stage.
+
+Run the prevention-rules check. `run-execution-finish` refuses to advance without its `rules-check-passed` receipt:
+
+```bash
+"$DYNOS" ctl run-rules-check .dynos/task-{id} --mode all
+```
+
+- `status == "rules_check_passed"`: continue.
+- `status == "rules_check_failed"` (exit 1; the JSON is on stderr and names the rule and files): fix the violations and re-run. A violation in a file this task did not touch still blocks; fix it when it is small, otherwise write `escalation.md` naming the rule and file, and stop.
+
+Use `--mode all`. The default `staged` mode checks only `git diff --cached`, and execution never stages files, so it would pass without checking anything.
+
+Then advance:
 
 ```bash
 "$DYNOS" ctl run-execution-finish .dynos/task-{id}
 ```
 
 This command refuses the transition if any segment is still pending, AND it runs the full evidence verification (non-empty `evidence/{seg-id}.md` per segment, every `files_expected` entry on disk) inside the stage gate before advancing to `TEST_EXECUTION`. It should pass now that the continuation loop reported `complete`; if it still reports `"status": "blocked"`, re-run `next-continuation` (state changed under it) and resolve what it surfaces. Do not manually decide that execution is complete.
+
+While the task is at `TEST_EXECUTION`, confirm the result with the deterministic evidence verifier. It accepts only `EXECUTION` and `TEST_EXECUTION`, and Step 4's `run-tests` advances the task to `CHECKPOINT_AUDIT`, so run it now, not after the tests:
+
+```bash
+"$DYNOS" ctl run-execution-verify-evidence .dynos/task-{id}
+```
+
+It checks that every non-cached segment's evidence file exists and is non-empty and that every `files_expected` entry exists on disk, and exits non-zero with a JSON error payload if any check fails. **Do NOT assert completion in prompt logic — consume this command's output as the authoritative pass/fail signal.** If it reports `"status": "blocked"`, address each listed failure before proceeding.
+
+Record it:
+```bash
+"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "execute — all segments verified by ctl (segments_verified={N})"
+```
 
 ### Step 4 — Run tests
 
@@ -310,26 +337,9 @@ ctl runs each command from the repo root, takes the exit codes as the verdict, w
 
 Do NOT move a test failure to `REPAIR_PLANNING`. The repair log can only cite audit-report findings, so before any audit has run nothing can be planned there, and the only way out is `FAILED`.
 
-### Step 5 — Verify completion
-
-After successfully completing execution and tests (and any repairs triggered by tests or audit), re-run the deterministic evidence verifier as confirmation:
-
-```bash
-"$DYNOS" ctl run-execution-verify-evidence .dynos/task-{id}
-```
-
-This command checks every non-cached segment's evidence file exists and is non-empty, and that every `files_expected` entry exists on disk. It is legal at both `EXECUTION` and `TEST_EXECUTION` (the same verification already ran inside the `run-execution-finish` stage gate in Step 3 — this re-run confirms nothing regressed during test execution). It exits non-zero with a JSON error payload if any check fails. **Do NOT assert completion in prompt logic — consume this command's output as the authoritative pass/fail signal.**
-
-If the command reports `"status": "blocked"`, address each listed failure before proceeding.
-
-Record it:
-```bash
-"$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "execute — all segments verified by ctl (segments_verified={N})"
-```
-
 ### Handoff — Write handoff record
 
-After Step 5, run:
+After Step 4, run:
 
 ```text
 "$DYNOS" ctl write-execute-handoff .dynos/task-{id}

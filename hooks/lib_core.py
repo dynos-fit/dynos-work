@@ -270,20 +270,63 @@ def require(path: Path) -> str:
     return path.read_text()
 
 
-def git_changed_files(root: Path, base: str) -> tuple[list[str], str | None]:
+# Untracked paths under these directories are tool caches and build output,
+# not task work (a repo that does not gitignore them still must not put
+# 11k `.pnpm-store` files into audit scope). Tracked changes are never
+# filtered: a tracked file is always the task's to audit.
+_UNTRACKED_SKIP_DIRS: frozenset[str] = frozenset({
+    ".dynos", ".git", "node_modules", ".pnpm-store", ".yarn", ".npm", ".cache",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+    ".venv", "venv", ".gradle", ".next", ".nuxt", ".turbo", "dist", "build",
+    "target", "coverage", "htmlcov",
+})
+_UNTRACKED_SKIP_PREFIXES: tuple[str, ...] = ("celerybeat-schedule",)
+_UNTRACKED_SKIP_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo", ".log")
+# Above this many untracked files (after filtering) none are included and a
+# warning is returned: a count that large is environment state, not a change.
+UNTRACKED_SCOPE_CAP = 500
+
+
+def _untracked_is_noise(root: Path, path: str) -> bool:
+    parts = path.split("/")
+    if any(part in _UNTRACKED_SKIP_DIRS for part in parts[:-1]):
+        return True
+    name = parts[-1]
+    if name.startswith(_UNTRACKED_SKIP_PREFIXES) or name.endswith(_UNTRACKED_SKIP_SUFFIXES):
+        return True
+    try:
+        with open(root / path, "rb") as fh:
+            return b"\0" in fh.read(8192)  # binary
+    except OSError:
+        return False
+
+
+def git_changed_files(
+    root: Path,
+    base: str,
+    *,
+    report: dict | None = None,
+) -> tuple[list[str], str | None]:
     """Return (changed_files, error) for the working tree against ``base``.
 
     ``git diff --name-only <base>`` alone misses untracked files, so a task
     whose work is all new, not-yet-added files would present an empty audit
     scope. Untracked files (``git ls-files --others --exclude-standard``) are
-    appended after the diff entries, deduplicated, in stable order. Untracked
-    ``.dynos/`` state is skipped for repos that do not gitignore it.
+    appended after the diff entries, deduplicated, in stable order.
+
+    Untracked files are filtered first: cache and build directories, cache
+    files and binaries are skipped (``_untracked_is_noise``). If more than
+    ``UNTRACKED_SCOPE_CAP`` remain, none are included. ``report``, when given,
+    receives ``untracked_skipped`` (count) and ``untracked_warning`` (str or
+    None) so callers can tell the user to gitignore them.
 
     On any git failure returns ([], error-message); callers treat that as
     "scope unavailable" rather than "nothing changed".
     """
     files: list[str] = []
     seen: set[str] = set()
+    untracked: list[str] = []
+    skipped = 0
     for cmd in (
         [_GIT or "git", "diff", "--name-only", base],
         [_GIT or "git", "ls-files", "--others", "--exclude-standard"],
@@ -300,11 +343,29 @@ def git_changed_files(root: Path, base: str) -> tuple[list[str], str | None]:
             path = line.strip()
             if not path or path in seen:
                 continue
-            if cmd[1] == "ls-files" and (path == ".dynos" or path.startswith(".dynos/")):
-                continue
             seen.add(path)
-            files.append(path)
-    return files, None
+            if cmd[1] == "ls-files":
+                if path == ".dynos" or path.startswith(".dynos/"):
+                    continue  # dynos's own task state: never scope, never reported
+                if _untracked_is_noise(root, path):
+                    skipped += 1
+                else:
+                    untracked.append(path)
+            else:
+                files.append(path)
+    warning = None
+    if len(untracked) > UNTRACKED_SCOPE_CAP:
+        warning = (
+            f"{len(untracked)} untracked files remain after skipping caches and binaries "
+            f"(cap {UNTRACKED_SCOPE_CAP}); none were added to the audit scope. Gitignore "
+            f"generated or environment files, or `git add` the ones that are task work."
+        )
+        skipped += len(untracked)
+        untracked = []
+    if report is not None:
+        report["untracked_skipped"] = skipped
+        report["untracked_warning"] = warning
+    return files + untracked, None
 
 
 # ---------------------------------------------------------------------------

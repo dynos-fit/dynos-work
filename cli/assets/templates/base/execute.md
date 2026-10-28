@@ -60,7 +60,7 @@ This command is authoritative for:
 
 Do NOT re-derive dependency depth, cache reuse, or runnable batches in prompt logic. Consume the JSON output and follow it.
 
-If `cached_segments` is non-empty, treat those segments as already satisfied and reuse their evidence files. Append to log: `{timestamp} [CACHE] {segment-id} — skipping (inputs unchanged)`.
+If `cached_segments` is non-empty, treat those segments as already satisfied and reuse their evidence files. Log each with `python3 "{{HOOKS_PATH}}/ctl.py" log-append .dynos/task-{id} --tag CACHE --message "{segment-id} — skipping (inputs unchanged)"`.
 
 If `next_batch` is empty while `pending_segments` is non-empty, stop and fail the task as blocked. That means dependency resolution or receipt state is inconsistent; do not guess.
 
@@ -150,7 +150,13 @@ After each batch (or cached resolution) completes, record events and verify:
 
 **Test execution** (Step 4): Record test runner events with `--phase execution --stage TEST_EXECUTION`.
 
-When `run-execution-batch-plan` reports no pending segments, advance through ctl:
+When `run-execution-batch-plan` reports no pending segments, run the prevention-rules check (`run-execution-finish` refuses without its receipt; use `--mode all`, because execution never stages files and the default `staged` mode would check nothing):
+
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-rules-check .dynos/task-{id} --mode all
+```
+
+On `rules_check_failed`, fix the named violations and re-run. Then advance through ctl:
 
 ```bash
 python3 "{{HOOKS_PATH}}/ctl.py" run-execution-finish .dynos/task-{id}

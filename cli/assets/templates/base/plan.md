@@ -89,7 +89,7 @@ If it returns `llm_audit_required`, run the auditor and finalize with:
 python3 "{{HOOKS_PATH}}/ctl.py" run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}
 ```
 
-If either call returns `replan_required`, repair the plan and rerun the controller. If it returns `passed`, proceed.
+If either call returns `replan_required`, ctl has moved the task back to `PLANNING`: repair the plan, run `run-planning`, take it through Plan Review again for re-approval, then rerun the controller (`run-execute-setup` refuses a plan changed after approval). If it returns `passed`, proceed.
 
 ### Step 5 — Done
 

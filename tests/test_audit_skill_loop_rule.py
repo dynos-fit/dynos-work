@@ -35,3 +35,11 @@ def test_skill_uses_canonical_report_path():
     assert ".dynos/task-{id}/audit-reports/{auditor_name}-{model}-attempt-{n}.json" in text
     assert "{report_filename}" not in text
     assert "-checkpoint-{timestamp}" not in text
+
+
+def test_audit_receipt_report_path_example_is_absolute():
+    """receipt_audit_done compares --report-path with the envelope's absolute
+    report_path as exact strings, so the example must not be relative."""
+    for line in _text().splitlines():
+        if "--report-path" in line and line.strip().startswith("--report-path"):
+            assert '"$PWD/.dynos/' in line, line

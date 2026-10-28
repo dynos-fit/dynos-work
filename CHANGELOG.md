@@ -11,6 +11,23 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.30] - 2026-10-28
+### Fixed
+- **A plan repaired after approval is approved again.** `run-plan-audit` runs at `PLAN_AUDIT`, after the human approved `plan.md` at `PLAN_REVIEW`. On `replan_required` the skills had the planner repair `plan.md` in place, so `run-execute-setup` later refused with "plan.md was mutated after human approval". `run-plan-audit` now moves the task back to `PLANNING` itself (`transitioned_to`, `next_action: repair_plan_then_reapprove`). The start and plan skills route the repaired plan through validation, the `PLAN_REVIEW` transition and human review before the audit reruns.
+- **`approve-stage` refuses before writing anything when the task is not at the stage being approved.** It used to write the approval receipt first and only then fail the transition. Approving `PLAN_REVIEW` from `PRE_EXECUTION_SNAPSHOT` therefore re-signed whatever `plan.md` said at that moment, then printed `Illegal stage transition: PRE_EXECUTION_SNAPSHOT -> PLAN_AUDIT`.
+- **The execute skill runs its ctl commands in an order the stage gates accept.**
+  - It runs `ctl run-rules-check --mode all` before `run-execution-finish`. Finish requires the `rules-check-passed` receipt, and no skill ran the check. `all` is used because execution never stages files, so the default `staged` mode would pass without checking anything.
+  - The evidence re-check (`run-execution-verify-evidence`) moves to right after `run-execution-finish`. It accepts only `EXECUTION`/`TEST_EXECUTION`, and Step 4's `run-tests` advances the task to `CHECKPOINT_AUDIT`, so the old Step 5 always failed.
+  - The inline fast-track path now finalizes its segment and runs the end of Step 3 before the tests. It used to go straight to `run-tests`, which refuses a task still at `EXECUTION`.
+- **`ctl log-append` accepts the tags the skills record:** `VOTE`, `REPAIR`, `VISION`, `INLINE` and `CACHE`. It refused `[VOTE]`, which the audit skill asks for on every ensemble spawn. Those skill lines now use `log-append`, and `test_skill_log_append.py` rejects the hand-written form.
+- **Untracked tool caches stay out of audit scope.** Since 7.5.28, `git_changed_files` added every untracked file, so a repo that does not gitignore its caches put 11,364 `frontend/.pnpm-store` and `celerybeat-schedule*` files (57MB of setup output) into one task's scope. The helper now:
+  - skips untracked paths under cache and build directories (`node_modules`, `.pnpm-store`, `.venv`, `.cache`, `__pycache__`, `dist`, `build`, `target`, …), `celerybeat-schedule*`, `*.pyc`/`*.log` and binary files;
+  - includes no untracked files when more than 500 remain after filtering.
+
+  `run-audit-setup` reports `untracked_skipped`, plus an `untracked_warning` telling the user to gitignore or `git add`. Tracked changes are never filtered.
+- **`record-snapshot` on a repository with no commits** now says to create an initial commit, instead of failing with `cannot auto-detect HEAD SHA`. The execute skill creates its snapshot branch with `git branch dynos/task-{id}-snapshot`. The old `git checkout -b … && git checkout -` renamed the unborn branch and then failed.
+- **The audit skill's `audit-receipt` example passes an absolute `--report-path`** (`"$PWD/.dynos/…"`) and says to reuse the exact path given to the auditor. The receipt compares it with the envelope's absolute `report_path` as exact strings, so the relative example was always refused.
+
 ## [7.5.29] - 2026-10-28
 ### Fixed
 - `ctl run-repair-log-build` no longer writes a repair log that fails its own validation when ensemble auditors escalate. The findings gate, the repair-cycle plan, the builder and `validate_repair_log` each derived "the findings" on their own. The first three took every blocking finding from every report, so an ID reused by the fast tier and the deep tier (`SC-1` in both `supply-chain-auditor-haiku-attempt-1.json` and `…-fable-attempt-1.json`) was queued twice with the fast tier's severity. The validator kept whichever copy sorted first by filename, and its location dedup dropped findings the builder kept. The result was `duplicate finding_id`, `severity mismatch` and `not found in live audit reports`, identically on every re-run, with no supported way past `REPAIR_PLANNING`. All four now read one function, `lib_validate.collect_repair_findings`:
