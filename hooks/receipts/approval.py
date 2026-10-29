@@ -443,6 +443,10 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
       - engine_version:     "1" (bootstrap-safe hardcode)
       - rules_file_sha256:  hash_file of the prevention-rules.json path
                             (or "none" if the file does not exist)
+      - waived_rules:       rule IDs the task waived (``ctl waive-rule``);
+                            they are not run and not counted
+      - effective_rules_sha256: digest of the rules minus the waivers; the
+                            transition gate's drift check compares this
       - checked_at:         now_iso()
       - mode:               pass-through
     """
@@ -455,9 +459,19 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     # imported at module load of this file. Importing rules_engine here
     # (at call time) keeps the import graph acyclic.
     import rules_engine as _rules_engine  # noqa: PLC0415
-    from lib_core import _persistent_project_dir  # noqa: PLC0415
+    from lib_core import _persistent_project_dir, load_rule_waivers  # noqa: PLC0415
 
     root = task_dir.parent.parent
+    waived = frozenset(load_rule_waivers(task_dir))
+    rules_file = _persistent_project_dir(root) / "prevention-rules.json"
+
+    def _effective_digest() -> str:
+        raw_rules, _ = _rules_engine._load_rules_file(root, rules_file)
+        return _rules_engine.effective_rules_digest(raw_rules, waived)
+
+    # Digest before and after the engine run: the receipt must not record
+    # a digest for rules the engine never saw.
+    effective_rules_sha256 = _effective_digest()
 
     # Run the engine via run_checks_with_stats — single authoritative call
     # that returns violations plus loaded/skipped rule counts.
@@ -465,7 +479,9 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     # values. Using run_checks_with_stats avoids a second file read in
     # this function for the loaded/skipped counts (TOCTOU-safe at the
     # caller boundary — AC 12).
-    violations, rules_loaded, rules_skipped = _rules_engine.run_checks_with_stats(root, mode)
+    violations, rules_loaded, rules_skipped = _rules_engine.run_checks_with_stats(
+        root, mode, exclude=waived,
+    )
     violations_count = len(violations)
     error_violations = sum(1 for v in violations if getattr(v, "severity", None) == "error")
     advisory_violations = sum(1 for v in violations if getattr(v, "severity", None) == "warn")
@@ -483,7 +499,6 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     # the hash is the literal string "none" (matches legacy schema).
     # rules_evaluated is the total raw entry count (loaded + skipped) —
     # AC 13 invariant: rules_evaluated == rules_loaded + rules_skipped.
-    rules_file = _persistent_project_dir(root) / "prevention-rules.json"
     rules_evaluated = rules_loaded + rules_skipped
     rules_file_sha256: str = "none"
     if rules_file.exists():
@@ -494,6 +509,11 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
                 f"receipt_rules_check_passed: cannot hash prevention-rules "
                 f"file at {rules_file}: {exc}"
             ) from exc
+    if _effective_digest() != effective_rules_sha256:
+        raise ValueError(
+            "receipt_rules_check_passed: prevention-rules changed during the "
+            "check; rerun rules-check"
+        )
 
     return write_receipt(
         task_dir,
@@ -506,6 +526,8 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
         advisory_violations=advisory_violations,
         engine_version="1",
         rules_file_sha256=rules_file_sha256,
+        waived_rules=sorted(waived),
+        effective_rules_sha256=effective_rules_sha256,
         checked_at=now_iso(),
         mode=mode,
     )

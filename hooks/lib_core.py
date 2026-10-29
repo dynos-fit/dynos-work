@@ -106,9 +106,18 @@ def clear_stamped_role(task_dir: Path, role: str) -> bool:
 
 
 def set_planner_phase(task_dir: Path, phase: str) -> Path:
-    """Set the hook-owned planner read-quota phase through ctl."""
+    """Set the hook-owned planner read-quota phase through ctl.
+
+    Every planner spawn is preceded by this call, so it also clears the
+    planner rewrite counts: a second repair spawn in an unchanged phase
+    gets its own allowance instead of inheriting the first one's.
+    """
     path=Path(task_dir)/"active-planner-phase"
     path.write_text(phase,encoding="utf-8")
+    try:
+        (Path(task_dir)/"planner-write-count.json").unlink()
+    except FileNotFoundError:
+        pass
     return path
 
 COMPOSITE_WEIGHTS: tuple[float, float, float] = (0.6, 0.25, 0.15)
@@ -1101,6 +1110,51 @@ def _human_approval_err(
     return None
 
 
+RULE_WAIVERS_FILE = "rules-waivers.json"
+
+
+def load_rule_waivers(task_dir: Path) -> dict[str, str]:
+    """Rule IDs this task waived (``ctl waive-rule``), mapped to the reason.
+
+    The shared prevention-rules file can carry a rule another task added
+    for a symbol this branch does not have; a waiver exempts this task
+    from it without editing the shared file. Unreadable means none.
+    """
+    try:
+        data = json.loads((Path(task_dir) / RULE_WAIVERS_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = data.get("waivers") if isinstance(data, dict) else None
+    return {
+        str(entry["rule_id"]): str(entry.get("reason", ""))
+        for entry in entries or []
+        if isinstance(entry, dict) and entry.get("rule_id")
+    }
+
+
+def _effective_rules_drift(task_dir: Path, receipt: dict) -> str | None:
+    """Why the receipt's ``effective_rules_sha256`` no longer matches the
+    live rules minus the receipt's waivers, or None when it still does."""
+    import rules_engine  # noqa: PLC0415
+    root = Path(task_dir).parent.parent
+    try:
+        raw_rules, _ = rules_engine._load_rules_file(root)
+    except ValueError as exc:
+        return str(exc)
+    waived = receipt.get("waived_rules")
+    live = rules_engine.effective_rules_digest(
+        raw_rules, frozenset(waived) if isinstance(waived, list) else frozenset(),
+    )
+    recorded = str(receipt.get("effective_rules_sha256") or "")
+    if live == recorded:
+        return None
+    return (
+        f"rules drift (receipt={recorded[:12]}, live={live[:12]}); rerun "
+        f"`ctl run-rules-check`, and waive a rule that does not apply to this "
+        f"task with `ctl waive-rule <task_dir> <rule_id> --reason ...`"
+    )
+
+
 def _rules_check_err(
     task_dir: Path,
     current_stage: str | None,
@@ -1847,12 +1901,21 @@ def _replay_gates_for_transition(
             )
 
         # AC 16: live-hash drift check. After confirming error_violations
-        # == 0 above, recompute the live sha256 of prevention-rules.json
-        # and compare against the receipt-recorded hash. A mismatch means
-        # the rules file has changed since the receipt was written; the
-        # receipt is stale and rules-check must be re-run.
+        # == 0 above, recompute the live hash of the rules and compare
+        # against the receipt-recorded one. A mismatch means the rules the
+        # task is held to changed since the receipt was written; the
+        # receipt is stale and rules-check must be re-run. Receipts that
+        # record ``effective_rules_sha256`` compare the rule set minus the
+        # task's waivers, so a waived rule changing (or the shared file
+        # being reordered) is not drift. Older receipts compare file bytes.
+        rules_path = _persistent_project_dir(task_dir.parent.parent) / "prevention-rules.json"
+        if receipt.get("effective_rules_sha256"):
+            drift = _effective_rules_drift(task_dir, receipt)
+            if drift:
+                _refuse(f"Cannot transition {current_stage} -> {next_stage}: {drift}")
+            return
         try:
-            live_rules_hash = _hash_file(_persistent_project_dir(task_dir.parent.parent) / "prevention-rules.json")
+            live_rules_hash = _hash_file(rules_path)
         except FileNotFoundError:
             live_rules_hash = "none"
         receipt_rules_hash = receipt.get("rules_file_sha256", "none")

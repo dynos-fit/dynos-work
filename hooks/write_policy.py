@@ -122,6 +122,9 @@ _WRAPPER_REQUIRED = {
     # primitive as active-segment-role: only the ctl wrapper may append
     # grants, and the wrapper enforces the role allowlist.
     "role-grants.json": "python3 hooks/ctl.py grant-role <task_dir> --role <role>",
+    # A waiver removes a rule from the task's rules check; only the ctl
+    # wrapper (which requires a reason and logs the waiver) may write it.
+    "rules-waivers.json": "python3 hooks/ctl.py waive-rule <task_dir> <rule_id> --reason <why>",
 }
 
 
@@ -144,6 +147,17 @@ def _owning_task_dir(path: Path) -> Path | None:
         if p.parent.name == ".dynos" and p.name.startswith("task-"):
             return p
     return None
+
+
+def is_executor_evidence(rel_posix: str) -> bool:
+    """Return True iff a task-dir-relative path is executor-owned evidence.
+
+    Executors write ``evidence/`` (their segment write-ups); only
+    ``evidence/verification/`` is machine-captured by ctl. The repair-log
+    builder uses this too, so it never escalates a finding an executor
+    is allowed to repair.
+    """
+    return rel_posix.startswith("evidence/") and not rel_posix.startswith("evidence/verification/")
 
 
 def _is_cross_task_control_plane(rel_posix: str) -> bool:
@@ -717,7 +731,7 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             "deny",
         )
 
-    if rel_posix is not None and rel_posix.startswith("evidence/"):
+    if rel_posix is not None and is_executor_evidence(rel_posix):
         if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
             return WriteDecision(True, "evidence markdown is executor-owned", "direct")
         if attempt.role == "orchestrator" and _orchestrator_inline_execution_active(attempt.task_dir):
@@ -841,8 +855,10 @@ def _planner_rewrite_cap(attempt: WriteAttempt, rel_posix: str) -> "WriteDecisio
     hard deny with a reason that tells the planner to stop editing and
     return: validation runs in the orchestrator, and a failing artifact gets
     its own ``repair`` phase with a fresh allowance. Counts are keyed by the
-    active planner phase (``active-planner-phase``) so a repair spawn starts
-    at zero. Returns ``None`` when the write is within the cap.
+    active planner phase (``active-planner-phase``) and cleared by
+    ``ctl set-planner-phase``, which runs before every planner spawn, so
+    each spawn starts at zero even when the phase is unchanged. Returns
+    ``None`` when the write is within the cap.
     """
     task_dir = attempt.task_dir
     if task_dir is None:

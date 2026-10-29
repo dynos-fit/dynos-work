@@ -34,7 +34,7 @@ Immediately after each planner spawn, make exactly one call to `"$DYNOS" ctl pla
 
 ### On validation failure
 
-For a deterministic validation failure, run `ctl planner-retry <task_dir> --phase <discovery|spec|plan|combined|arch-design>`. If `allowed` is true, set planner phase to `repair`:
+For a deterministic validation failure, run `ctl planner-retry <task_dir> --phase <discovery|spec|plan|combined|arch-design>`. If `allowed` is true, set planner phase to `repair` before **every** repair spawn, even when the phase is already `repair`, because the call also resets that spawn's artifact rewrite allowance:
 
 ```text
 "$DYNOS" ctl set-planner-phase .dynos/task-{id} repair
