@@ -331,7 +331,9 @@ def ingest_findings(
         # ready for dedup and append.
         candidates = []
         for report_entry in reports:
-            if not isinstance(report_entry, dict):
+            if not isinstance(report_entry, dict) or report_entry.get("superseded_by"):
+                # Superseded reports (older attempts, overruled voting
+                # tiers) describe findings a later verdict replaced.
                 continue
             auditor_name = report_entry.get("auditor_name")
             report_path = report_entry.get("report_path")
