@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from lib_core import write_json
+from lib_core import _UNTRACKED_SKIP_DIRS, write_json
 
 # ---------------------------------------------------------------------------
 # Route pattern detection — covers major frameworks across ecosystems
@@ -76,6 +76,9 @@ _MODEL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"""model\s+(\w+)\s*\{"""), "prisma-model"),
     # Ecto (Elixir)
     (re.compile(r"""schema\s+['"](\w+)['"]"""), "ecto-schema"),
+    # Explicit table names: SQLAlchemy __tablename__, Django Meta.db_table
+    (re.compile(r"""__tablename__\s*=\s*['"](\w+)['"]"""), "sqlalchemy-tablename"),
+    (re.compile(r"""db_table\s*=\s*['"](\w+)['"]"""), "django-db-table"),
     # GORM (Go)
     (re.compile(r"""type\s+(\w+)\s+struct\s*\{"""), "go-struct"),
     # SQL migration files
@@ -93,7 +96,19 @@ _CODE_EXTENSIONS = {
 
 _MIGRATION_EXTENSIONS = {".sql", ".py", ".js", ".ts", ".rb", ".ex"}
 
-_SKIP_DIRS = {".git", "node_modules", ".dynos", "__pycache__", "dist", "build", ".next", "vendor"}
+# Tool caches, virtualenvs and build output. A repo's ``backend/.venv``
+# alone holds thousands of .py files, enough to spend the whole scan
+# budget before reaching the project's own models.
+_SKIP_DIRS = set(_UNTRACKED_SKIP_DIRS) | {"vendor"}
+
+
+def _walk_dirs(dirpath: str, dirnames: list[str]) -> list[str]:
+    """Subdirectories of ``dirpath`` worth scanning: not a skip dir and not
+    a virtualenv under any name (one is marked by ``pyvenv.cfg``)."""
+    return [
+        d for d in dirnames
+        if d not in _SKIP_DIRS and not os.path.exists(os.path.join(dirpath, d, "pyvenv.cfg"))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +211,7 @@ def _iter_code_files(root: Path, extensions: set[str], limit: int = 2000) -> lis
     """Iterate source files, respecting skip dirs and file limit."""
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        dirnames[:] = _walk_dirs(dirpath, dirnames)
         for name in filenames:
             if Path(name).suffix in extensions:
                 files.append(Path(dirpath) / name)
@@ -269,7 +284,7 @@ def _iter_plan_implied_files(
                 if depth >= 2:
                     dirnames[:] = []  # don't recurse deeper than 2 levels
                 else:
-                    dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+                    dirnames[:] = _walk_dirs(dirpath, dirnames)
                 for name in filenames:
                     p = Path(dirpath) / name
                     if p.suffix in extensions and p not in seen:
@@ -504,6 +519,21 @@ def analyze_api_contracts(
 # Data Model gap analysis
 # ---------------------------------------------------------------------------
 
+_MODEL_NAME_RE = re.compile(r"[A-Za-z_][\w.]*")
+
+
+def _cell_model_name(value: str) -> str:
+    """The model or table a Data Model cell names, lowercased.
+
+    Cells carry notes ("`Organization` (existing, backend/app/models.py)")
+    and dotted paths ("models.Membership"); only the first identifier, last
+    dotted part, is the name. A placeholder ("—") names nothing.
+    """
+    ticked = re.search(r"`([^`]+)`", value)
+    match = _MODEL_NAME_RE.search(ticked.group(1) if ticked else value)
+    return match.group(0).rsplit(".", 1)[-1].lower() if match else ""
+
+
 def analyze_data_model(
     plan_text: str,
     root: Path,
@@ -528,11 +558,11 @@ def analyze_data_model(
     to_be_created_tables: set[str] = set()
     for row in rows:
         names = [
-            val.strip().strip("`").lower()
+            name
             for key, val in row.items()
             if key.lower().strip() in ("table", "model", "collection", "entity", "schema")
-            and val.strip().strip("`")
-            and val.strip().strip("`") != "—"
+            for name in [_cell_model_name(val)]
+            if name
         ]
         # Greenfield schemas cannot exist in the repository until their
         # execution segment runs. Honor the same explicit marker the plan

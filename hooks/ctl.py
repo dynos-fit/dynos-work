@@ -4978,8 +4978,21 @@ def _classify_repair_path(raw: str, root: Path, task_dir: Path) -> tuple[str, st
     Pipeline-owned paths are anything under ``.dynos/`` and task-dir
     artifacts named relative to the task dir (``receipts/…``,
     ``events.jsonl``). Executors may not write them (write_policy), so a
-    repair task that targets one can only fail.
+    repair task that targets one can only fail. The exception is this
+    task's executor-owned evidence (``evidence/seg-1.md``), which
+    write_policy lets executors write: it is returned as a repo path.
     """
+    from write_policy import _is_cross_task_control_plane, is_executor_evidence  # noqa: PLC0415
+
+    def task_evidence(candidate: Path) -> str | None:
+        try:
+            task_rel = candidate.resolve().relative_to(task_dir.resolve()).as_posix()
+            if is_executor_evidence(task_rel):
+                return candidate.resolve().relative_to(root.resolve()).as_posix()
+        except (ValueError, OSError):
+            pass
+        return None
+
     text = raw.strip()
     while text.startswith("./"):
         text = text[2:]
@@ -4993,10 +5006,13 @@ def _classify_repair_path(raw: str, root: Path, task_dir: Path) -> tuple[str, st
         return "outside", None
     rel = path.as_posix()
     if path.parts[0] == ".dynos":
-        return "pipeline", rel
+        evidence = task_evidence(root / path)
+        return ("repo", evidence) if evidence else ("pipeline", rel)
     if not (root / path).exists():
-        from write_policy import _is_cross_task_control_plane  # noqa: PLC0415
-        if (task_dir / path).exists() or _is_cross_task_control_plane(rel):
+        if (task_dir / path).exists():
+            evidence = task_evidence(task_dir / path)
+            return ("repo", evidence) if evidence else ("pipeline", rel)
+        if _is_cross_task_control_plane(rel):
             return "pipeline", rel
     return "repo", rel
 
@@ -5077,13 +5093,29 @@ def _finding_prose(source: dict) -> str:
     return "\n".join(chunks)
 
 
+# Acceptance-criterion references in finding prose: "AC 3", "AC-3",
+# "criterion 3", "criteria #3".
+_CRITERION_REF_RE = re.compile(r"\b(?:AC|criteri(?:on|a))[\s#-]*(\d+)\b", re.IGNORECASE)
+
+
 def _repair_files_for_finding(
     task_dir: Path,
     finding: dict,
     live: dict | None,
     assigned_executor: str | None,
 ) -> tuple[list[str], list[str]]:
-    """Return ``(files_to_modify, pipeline_files)`` for one finding.
+    """``(files_to_modify, pipeline_files)``; see ``_repair_scope_for_finding``."""
+    files, pipeline_files, _ = _repair_scope_for_finding(task_dir, finding, live, assigned_executor)
+    return files, pipeline_files
+
+
+def _repair_scope_for_finding(
+    task_dir: Path,
+    finding: dict,
+    live: dict | None,
+    assigned_executor: str | None,
+) -> tuple[list[str], list[str], bool]:
+    """Return ``(files_to_modify, pipeline_files, inferred)`` for one finding.
 
     Cited files come from the queued finding and its live audit entry: the
     canonical ``location`` ("file:line"), the older ``file`` /
@@ -5091,7 +5123,10 @@ def _repair_files_for_finding(
     ``affected_files``. Pipeline-owned paths are returned separately and
     never become repair targets. A finding that cites no file is scoped to
     the existing files its prose names; only when it names none does it fall
-    back to the execution graph.
+    back to the execution graph: first the segments delivering the
+    acceptance criteria the prose names ("AC 3"), then the assigned
+    executor's segments, then every segment. ``inferred`` is True for that
+    fallback, whose scope is a guess.
     """
     from lib_validate import _finding_location_file  # noqa: PLC0415
 
@@ -5140,26 +5175,78 @@ def _repair_files_for_finding(
         [part for raw in cited for part in _split_citation(raw)], keep_unknown=True,
     )
     if repo_files or pipeline_files:
-        return repo_files, pipeline_files
+        return repo_files, pipeline_files, False
 
     prose = "\n".join(_finding_prose(source) for source in (finding, live or {}))
     repo_files, _ = _classified(
         [m.group(1) for m in _PROSE_PATH_RE.finditer(prose)], keep_unknown=False,
     )
     if repo_files:
-        return repo_files, []
+        return repo_files, [], False
 
-    for wanted in (assigned_executor, None):
+    criteria = {int(m) for m in _CRITERION_REF_RE.findall(prose)}
+
+    def delivers_criteria(segment: dict) -> bool:
+        ids = segment.get("criteria_ids") or []
+        return bool(criteria) and any(isinstance(c, int) and c in criteria for c in ids)
+
+    for wanted in (delivers_criteria, lambda s: s.get("executor") == assigned_executor, lambda s: True):
         paths = [
             path
             for segment in graph_segments
-            if wanted is None or segment.get("executor") == wanted
+            if wanted(segment)
             for path in segment.get("files_expected", []) or []
             if isinstance(path, str) and path
         ]
         if paths:
-            return _dedupe(paths), []
-    return [], []
+            return _dedupe(paths), [], True
+    return [], [], False
+
+
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def _merge_overlapping_repair_tasks(tasks: list[dict]) -> list[dict]:
+    """Merge repair tasks whose files overlap (transitively) into one task.
+
+    The highest-severity task leads (first wins a tie): its finding, auditor,
+    executor and routing stay. The others become ``merged_findings`` and
+    their instructions are appended, files are unioned, and the retry count
+    is the highest, so the retry cap still sees every merged finding.
+    """
+    clusters: list[list[dict]] = []
+    cluster_files: list[set[str]] = []
+    for task in tasks:
+        files = set(task["files_to_modify"])
+        hits = [i for i, owned in enumerate(cluster_files) if owned & files]
+        merged_cluster = [task]
+        for i in reversed(hits):
+            merged_cluster = clusters.pop(i) + merged_cluster
+            files |= cluster_files.pop(i)
+        clusters.append(merged_cluster)
+        cluster_files.append(files)
+
+    out: list[dict] = []
+    for cluster in clusters:
+        if len(cluster) == 1:
+            out.append(cluster[0])
+            continue
+        lead = min(cluster, key=lambda t: _SEVERITY_RANK.get(t["severity"], 2))
+        task = dict(lead)
+        others = [t for t in cluster if t is not lead]
+        task["files_to_modify"] = _dedupe([p for t in [lead, *others] for p in t["files_to_modify"]])
+        task["retry_count"] = max(t["retry_count"] for t in cluster)
+        task["merged_findings"] = list(lead.get("merged_findings") or []) + [
+            entry
+            for other in others
+            for entry in [{"auditor": other["auditor"], "id": other["finding_id"]},
+                          *(other.get("merged_findings") or [])]
+        ]
+        task["instruction"] = lead["instruction"] + " These findings touch the same files; resolve them in the same change: " + " ".join(
+            other["instruction"] for other in others
+        )
+        out.append(task)
+    return out
 
 
 def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
@@ -5268,7 +5355,9 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                     assigned_executor = "backend-executor"
                 else:
                     assigned_executor = "backend-executor"
-            files_to_modify, pipeline_files = _repair_files_for_finding(task_dir, finding, live, assigned_executor)
+            files_to_modify, pipeline_files, files_inferred = _repair_scope_for_finding(
+                task_dir, finding, live, assigned_executor,
+            )
             if not files_to_modify:
                 if pipeline_files:
                     non_repairable.append({
@@ -5300,6 +5389,8 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
             }
             if merged:
                 task["merged_findings"] = merged
+            if files_inferred:
+                task["files_inferred"] = True
             for meta_key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
                 value = assignment.get(meta_key)
                 if value is not None:
@@ -5336,6 +5427,16 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
+        # Findings that touch the same file are one change for one executor:
+        # nine executors editing a shared helper in sequence for one root
+        # cause is nine spawns and nine chances to undo each other. Tasks
+        # whose files were inferred from the graph stay out of the merge
+        # (their scope is a guess and would absorb everything) and run last.
+        inferred_tasks = [t for t in normalized_tasks if t.get("files_inferred")]
+        normalized_tasks = _merge_overlapping_repair_tasks(
+            [t for t in normalized_tasks if not t.get("files_inferred")]
+        )
+
         groups: list[dict] = []
         for task in normalized_tasks:
             task_files = set(task["files_to_modify"])
@@ -5352,6 +5453,9 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                     "tasks": [task],
                     "files": set(task_files),
                 })
+
+        groups.extend({"tasks": [task], "files": set(task["files_to_modify"])} for task in inferred_tasks)
+        normalized_tasks += inferred_tasks
 
         batches: list[dict] = []
         for idx, group in enumerate(groups, start=1):
@@ -5859,6 +5963,49 @@ def cmd_run_rules_check(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def cmd_waive_rule(args: argparse.Namespace) -> int:
+    """Exempt this task from one shared prevention rule.
+
+    The rules file is shared across tasks and branches, so it can hold a
+    rule for a symbol this branch never had. Removing the rule to pass the
+    check (and restoring it later) moves the rules hash and trips the drift
+    gate; a waiver leaves the shared file alone. Re-run ``run-rules-check``
+    afterwards; the receipt records the waiver.
+    """
+    import rules_engine  # noqa: PLC0415
+    from lib_core import RULE_WAIVERS_FILE, load_rule_waivers  # noqa: PLC0415
+
+    task_dir = Path(args.task_dir).resolve()
+    rule_id = str(args.rule_id).strip()
+    reason = str(args.reason or "").strip()
+    if not reason:
+        print("waive-rule: --reason is required and must be non-empty", file=sys.stderr)
+        return 1
+    try:
+        raw_rules, _ = rules_engine._load_rules_file(_root_for_task_dir(task_dir))
+    except ValueError as exc:
+        print(f"waive-rule: {exc}", file=sys.stderr)
+        return 1
+    if rule_id not in {rules_engine._raw_rule_id(raw) for raw in raw_rules}:
+        print(f"waive-rule: no prevention rule with id {rule_id!r}", file=sys.stderr)
+        return 1
+    waivers = load_rule_waivers(task_dir)
+    waivers[rule_id] = reason
+    write_json(task_dir / RULE_WAIVERS_FILE, {"waivers": [
+        {"rule_id": rid, "reason": why} for rid, why in sorted(waivers.items())
+    ]})
+    from lib_log import log_event  # noqa: PLC0415
+    log_event(_root_for_task_dir(task_dir), "rule_waived", task=task_dir.name, rule_id=rule_id, reason=reason)
+    print(json.dumps({
+        "status": "rule_waived",
+        "task_dir": str(task_dir),
+        "rule_id": rule_id,
+        "waived_rules": sorted(waivers),
+        "next_action": "rerun run-rules-check",
+    }, indent=2))
+    return 0
 
 
 def _verify_execution_evidence(task_dir: Path, cached_ids: set[str]) -> tuple[list[str], list[str]]:
@@ -7787,6 +7934,17 @@ def register_task_lifecycle_parsers(subparsers: argparse._SubParsersAction) -> N
     active_parser.set_defaults(func=cmd_active_task)
 
 
+def _token_count(value: str) -> int:
+    """``--tokens-used`` value; skills pass ``None``/``null`` when the
+    Agent result carried no token count, which records as 0."""
+    if value.strip().lower() in {"", "none", "null", "unknown"}:
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid token count: {value!r}") from None
+
+
 def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register planning-stage subcommands: run-start-classification, run-spec-ready,
     run-planning-mode, run-planning, run-plan-audit, plan-validated-receipt,
@@ -7814,7 +7972,7 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--test-file", action="append", default=[],
         help="Test file path written this run (repeatable)",
     )
-    tdd_receipt_parser.add_argument("--tokens-used", type=int, default=0)
+    tdd_receipt_parser.add_argument("--tokens-used", type=_token_count, default=0)
     tdd_receipt_parser.add_argument("--model", default="unknown")
     tdd_receipt_parser.set_defaults(func=cmd_tdd_receipt)
 
@@ -7864,7 +8022,7 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_plan_audit_parser.add_argument(
         "--tokens-used",
-        type=int,
+        type=_token_count,
         default=0,
         help="Tokens consumed by the spec-completion auditor run.",
     )
@@ -7903,7 +8061,7 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Write the plan-audit spawn receipt deterministically",
     )
     plan_audit_receipt_parser.add_argument("task_dir")
-    plan_audit_receipt_parser.add_argument("--tokens-used", type=int, default=0)
+    plan_audit_receipt_parser.add_argument("--tokens-used", type=_token_count, default=0)
     plan_audit_receipt_parser.add_argument("--model", default=None)
     plan_audit_receipt_parser.set_defaults(func=cmd_plan_audit_receipt)
 
@@ -7913,7 +8071,7 @@ def register_planning_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     planner_receipt_parser.add_argument("task_dir")
     planner_receipt_parser.add_argument("phase", choices=("discovery", "arch-design", "spec", "plan"))
-    planner_receipt_parser.add_argument("--tokens-used", type=int, default=0)
+    planner_receipt_parser.add_argument("--tokens-used", type=_token_count, default=0)
     planner_receipt_parser.add_argument("--model", default=None)
     planner_receipt_parser.add_argument("--agent-name", default=None)
     planner_receipt_parser.set_defaults(func=cmd_planner_receipt)
@@ -7952,7 +8110,7 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     run_execution_segment_done_parser.add_argument("--agent-name", default=None)
     run_execution_segment_done_parser.add_argument("--executor-type", default=None)
     run_execution_segment_done_parser.add_argument("--evidence-path", default=None)
-    run_execution_segment_done_parser.add_argument("--tokens-used", type=int, default=0)
+    run_execution_segment_done_parser.add_argument("--tokens-used", type=_token_count, default=0)
     run_execution_segment_done_parser.add_argument(
         "--files",
         nargs="*",
@@ -8082,7 +8240,7 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     audit_receipt_parser.add_argument(
         "--tokens-used",
-        type=int,
+        type=_token_count,
         default=0,
         help="Tokens consumed by the auditor run.",
     )
@@ -8143,6 +8301,15 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Check staged files only (default) or all files",
     )
     run_rules_check_parser.set_defaults(func=cmd_run_rules_check)
+
+    waive_rule_parser = subparsers.add_parser(
+        "waive-rule",
+        help="Exempt this task from one shared prevention rule (then rerun run-rules-check)",
+    )
+    waive_rule_parser.add_argument("task_dir")
+    waive_rule_parser.add_argument("rule_id")
+    waive_rule_parser.add_argument("--reason", required=True)
+    waive_rule_parser.set_defaults(func=cmd_waive_rule)
 
 
 def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:

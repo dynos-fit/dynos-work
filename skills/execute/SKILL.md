@@ -291,6 +291,14 @@ Parse the JSON `status`:
 
 Only once `next-continuation` reports `complete` do you advance the stage.
 
+If any segment in `execution-graph.json` declares `verify_commands`, capture their machine evidence now. `run-execution-finish` refuses to advance while a declared command has no passing record, and the spec-completion auditor accepts only these records (or `test-results.json`) as proof for criteria that require running something:
+
+```bash
+"$DYNOS" ctl run-verification-evidence .dynos/task-{id}
+```
+
+A failing command is a defect in the segment that declared it: fix it (re-spawn that segment's executor) and re-run the command above. Do not edit the command; it was locked at plan approval.
+
 Run the prevention-rules check. `run-execution-finish` refuses to advance without its `rules-check-passed` receipt:
 
 ```bash
@@ -298,7 +306,7 @@ Run the prevention-rules check. `run-execution-finish` refuses to advance withou
 ```
 
 - `status == "rules_check_passed"`: continue.
-- `status == "rules_check_failed"` (exit 1; the JSON is on stderr and names the rule and files): fix the violations and re-run. A violation in a file this task did not touch still blocks; fix it when it is small, otherwise write `escalation.md` naming the rule and file, and stop.
+- `status == "rules_check_failed"` (exit 1; the JSON is on stderr and names the rule and files): fix the violations and re-run. A violation in a file this task did not touch still blocks; fix it when it is small, otherwise write `escalation.md` naming the rule and file, and stop. A rule that cannot apply to this task, such as one another task added for a symbol this branch does not have, is waived instead of edited out of the shared rules file: `"$DYNOS" ctl waive-rule .dynos/task-{id} <rule_id> --reason "<why it does not apply>"`, then re-run the check. Removing and later restoring a rule changes the rules hash, and the stage gate refuses that as drift.
 
 Use `--mode all`. The default `staged` mode checks only `git diff --cached`, and execution never stages files, so it would pass without checking anything.
 

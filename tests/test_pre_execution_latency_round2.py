@@ -267,6 +267,21 @@ def test_planner_rewrite_cap_denies_after_allowance(tmp_path: Path):
     assert decide_write(attempt).allowed is True
 
 
+def test_planner_rewrite_cap_resets_for_each_spawn_in_the_same_phase(tmp_path: Path):
+    """A second repair spawn must not inherit the first one's exhausted cap."""
+    from lib_core import set_planner_phase
+    from lib_tool_budget import PLANNER_WRITE_TURNS
+    task_dir = _task(tmp_path)
+    attempt = WriteAttempt(role="planning", task_dir=task_dir, path=task_dir / "plan.md",
+                           operation="modify", source="agent")
+    set_planner_phase(task_dir, "repair")
+    for _ in range(PLANNER_WRITE_TURNS):
+        assert decide_write(attempt).allowed is True
+    assert decide_write(attempt).allowed is False
+    set_planner_phase(task_dir, "repair")
+    assert decide_write(attempt).allowed is True
+
+
 def test_planner_bash_guard_blocks_validators_and_stage_commands(tmp_path: Path):
     task_dir = _task(tmp_path)
     root = tmp_path / "project"

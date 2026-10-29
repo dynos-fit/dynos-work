@@ -46,7 +46,7 @@ def test_new_signature_writes_valid_receipt(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         rules_engine,
         "run_checks_with_stats",
-        lambda root, mode: ([], 0, 0),
+        lambda root, mode, **_kw: ([], 0, 0),
     )
     monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
 
@@ -218,7 +218,7 @@ def test_run_checks_with_stats_returns_skipped_count(tmp_path: Path, monkeypatch
     monkeypatch.setattr(
         rules_engine,
         "_resolve_files",
-        lambda root, mode: [],
+        lambda root, mode, **_kw: [],
     )
 
     violations, loaded, skipped = rules_engine.run_checks_with_stats(tmp_path, "all")
@@ -250,7 +250,7 @@ def test_receipt_rules_check_passed_includes_loaded_skipped(tmp_path: Path, monk
     monkeypatch.setattr(
         rules_engine,
         "run_checks_with_stats",
-        lambda root, mode: ([], 5, 2),
+        lambda root, mode, **_kw: ([], 5, 2),
     )
     monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
 
@@ -289,7 +289,7 @@ def test_receipt_rules_check_passed_invariant(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         rules_engine,
         "run_checks_with_stats",
-        lambda root, mode: ([], 5, 2),
+        lambda root, mode, **_kw: ([], 5, 2),
     )
     monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
 

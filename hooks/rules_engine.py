@@ -1078,9 +1078,31 @@ def run_checks(
     return violations
 
 
+def _raw_rule_id(raw: Any) -> str:
+    return str(raw.get("rule_id") or raw.get("id") or "") if isinstance(raw, dict) else ""
+
+
+def effective_rules_digest(raw_rules: list, waived: "frozenset[str] | set[str]" = frozenset()) -> str:
+    """sha256 of the rules a task is held to: every rule but its waivers.
+
+    Canonical JSON, so reordering or reformatting the shared file is not a
+    change, and a waived rule may be edited or removed without moving the
+    digest.
+    """
+    import hashlib  # noqa: PLC0415
+    kept = sorted(
+        json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        for raw in raw_rules
+        if _raw_rule_id(raw) not in waived
+    )
+    return hashlib.sha256("\n".join(kept).encode("utf-8")).hexdigest()
+
+
 def run_checks_with_stats(
     root: Path,
     mode: str = "all",
+    *,
+    exclude: "frozenset[str] | set[str]" = frozenset(),
 ) -> "tuple[list[Violation], int, int]":
     """Like run_checks but also returns loaded and skipped rule counts.
 
@@ -1100,6 +1122,8 @@ def run_checks_with_stats(
     """
     root = Path(root)
     raw_rules, _ = _load_rules_file(root)
+    # Rules the task waived (``ctl waive-rule``) are neither run nor counted.
+    raw_rules = [raw for raw in raw_rules if _raw_rule_id(raw) not in exclude]
     loaded_count = 0
     skipped_count = 0
     for raw in raw_rules:

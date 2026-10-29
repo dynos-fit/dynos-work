@@ -272,6 +272,52 @@ def test_findings_on_pipeline_artifacts_escalate_instead_of_becoming_repairs(tmp
     assert not (td / "repair-log.json").exists()
 
 
+def test_findings_on_executor_evidence_become_repairs(tmp_path):
+    """write_policy lets executors write evidence/*.md, so a finding citing
+    one (by repo path or task-relative path) is repairable, not escalated."""
+    td = _setup(tmp_path, [_single_entry("code-quality-auditor")], stage="REPAIR_PLANNING")
+    (td / "evidence").mkdir()
+    (td / "evidence" / "seg-1.md").write_text("Playwright 38 passed\n")
+    (td / "evidence" / "seg-2.md").write_text("ok\n")
+    _report(td, "code-quality-auditor", DEEP, [
+        {"id": "CQ-1", "severity": "high", "blocking": True,
+         "location": ".dynos/task-20261027-001/evidence/seg-1.md:1"},
+        {"id": "CQ-2", "severity": "high", "blocking": True, "location": "evidence/seg-2.md:1"},
+    ])
+    env = {"DYNOS_HOME": str(tmp_path / "dynos-home")}
+    assert _run_ctl("run-audit-repair-cycle-plan", str(td), env=env).returncode == 0
+    build = _run_ctl("run-repair-log-build", str(td), env=env)
+    assert build.returncode == 0, build.stdout + build.stderr
+    files = {
+        t["finding_id"]: t["files_to_modify"]
+        for batch in json.loads((td / "repair-log.json").read_text())["batches"]
+        for t in batch["tasks"]
+    }
+    assert files == {
+        "CQ-1": [".dynos/task-20261027-001/evidence/seg-1.md"],
+        "CQ-2": [".dynos/task-20261027-001/evidence/seg-2.md"],
+    }
+
+
+def test_findings_on_verification_evidence_still_escalate(tmp_path):
+    td = _setup(tmp_path, [_single_entry("code-quality-auditor")], stage="REPAIR_PLANNING")
+    (td / "evidence" / "verification").mkdir(parents=True)
+    (td / "evidence" / "verification" / "seg-1.json").write_text("{}")
+    _report(td, "code-quality-auditor", DEEP, [
+        {"id": "CQ-1", "severity": "high", "blocking": True,
+         "location": ".dynos/task-20261027-001/evidence/verification/seg-1.json"},
+        {"id": "CQ-2", "severity": "high", "blocking": True,
+         "location": ".dynos/task-20261026-009/evidence/seg-1.md:1"},
+    ])
+    env = {"DYNOS_HOME": str(tmp_path / "dynos-home")}
+    assert _run_ctl("run-audit-repair-cycle-plan", str(td), env=env).returncode == 0
+    build = _run_ctl("run-repair-log-build", str(td), env=env)
+    assert build.returncode == 1
+    payload = json.loads(build.stdout)
+    assert payload["status"] == "escalation_required"
+    assert sorted(f["finding_id"] for f in payload["non_repairable_findings"]) == ["CQ-1", "CQ-2"]
+
+
 def test_pipeline_paths_are_stripped_from_mixed_findings(tmp_path):
     td = _setup(tmp_path, [_single_entry("code-quality-auditor")], stage="REPAIR_PLANNING")
     path = _report(td, "code-quality-auditor", DEEP, [
