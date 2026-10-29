@@ -444,18 +444,28 @@ def derive_user_summary(audit_summary: dict) -> str:
     Format (em-dash is U+2014). Per-auditor lines aggregate by auditor_name
     (handles multi-cycle reaudit reports). Skipped auditors are absent because
     they don't appear in reports. Empty reports yields header + blank + footer.
+
+    Reports carrying ``superseded_by`` (an older attempt, or a voting tier
+    overruled by a binding deep-tier verdict) are ignored, and when the
+    summary carries ``blocking_by_auditor`` (the findings gate's deduplicated
+    counts) those counts win over the per-report sums, so the summary agrees
+    with ``run-audit-findings-gate``. Summaries written before either field
+    existed derive exactly as they did.
     """
     task_id = str(audit_summary.get("task_id", ""))
     reports = audit_summary.get("reports", []) or []
+    gate_counts = audit_summary.get("blocking_by_auditor")
 
     by_auditor: dict[str, int] = {}
     for r in reports:
-        if not isinstance(r, dict):
+        if not isinstance(r, dict) or r.get("superseded_by"):
             continue
         name = str(r.get("auditor_name") or r.get("auditor") or "")
         if not name:
             continue
         by_auditor[name] = by_auditor.get(name, 0) + int(r.get("blocking_count", 0) or 0)
+    if isinstance(gate_counts, dict):
+        by_auditor = {name: int(gate_counts.get(name, 0) or 0) for name in by_auditor}
 
     total_blocking = sum(by_auditor.values())
 

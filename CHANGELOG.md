@@ -11,6 +11,13 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.34] - 2026-10-29
+### Fixed
+- **The completion summary no longer reports a failure the findings gate cleared.** `run-audit-summary` and `derive_user_summary` added up `blocking_count` across every report file, including attempts a re-audit after repair had replaced and voting-tier reports a binding deep-tier cascade verdict had overruled. On a field task the gate returned `clear` and the task reached DONE, yet `completion.json::user_summary` read "FAILED — 20 blocking findings" with five auditors marked FAIL. `run-audit-summary` now builds its totals from `collect_repair_findings`, the same selection the gate uses. Superseded reports stay in `reports` with their `superseded_by` reason and raw counts, but `total_findings`, `total_blocking`, `audit_result`, `findings_by_auditor` and `findings_by_category` count only binding findings, and a new `blocking_by_auditor` field carries the gate's deduplicated per-auditor counts. `derive_user_summary` skips superseded reports and uses `blocking_by_auditor` when it is present, so the header and per-auditor lines match `run-audit-findings-gate`. Summaries written before this change derive exactly as before, so `verify-audit-summary-text` still matches them.
+- **Residual ingestion at DONE skips superseded reports.** `lib_residuals.ingest_findings` read every report listed in the summary, so non-blocking findings from replaced attempts and overruled voting tiers could enter the proactive-residual queue.
+
+---
+
 ## [7.5.33] - 2026-10-28
 ### Fixed
 - **A blocking finding about a segment's evidence write-up becomes a repair task instead of failing the task.** `run-repair-log-build` treated every path under `.dynos/` as pipeline-owned. A finding citing `.dynos/task-…/evidence/seg-11b.md` (for example, an evidence claim that a later test run contradicts) therefore returned `escalation_required`, and the audit skill moved the whole task to `FAILED`. `write_policy` lets executors write `evidence/` everywhere except `evidence/verification/`. The repair-path classifier and `write_policy` now call one shared predicate, `write_policy.is_executor_evidence`. A finding that cites the current task's evidence by repo path (`.dynos/task-X/evidence/seg-1.md`) or by task-relative path (`evidence/seg-1.md`) is assigned to an executor, with the repo path in `files_to_modify`. Machine-captured `evidence/verification/` files and other tasks' evidence still escalate.

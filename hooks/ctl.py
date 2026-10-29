@@ -56,7 +56,7 @@ from lib_receipts import (
     receipt_executor_routing,
     write_receipt,
 )
-from lib_validate import apply_fast_track, check_segment_ownership, collect_repair_findings, normalize_repair_severity, require_nonblank, select_eligible_reports, validate_task_artifacts
+from lib_validate import apply_fast_track, check_segment_ownership, collect_repair_findings, normalize_repair_severity, require_nonblank, validate_task_artifacts
 from lib_models import TIER_DEEP, resolve_model_for_tier
 from lib_host import detect_host, host_emits_web_tool_telemetry, resolve_host
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
@@ -5620,45 +5620,31 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
-        reports_dir = task_dir / "audit-reports"
-        reports: list[dict] = []
+        # Same report selection as the findings gate: reports superseded by a
+        # later attempt or by a binding deep-tier cascade verdict stay listed
+        # (with ``superseded_by``) but contribute nothing to the totals.
+        collected = collect_repair_findings(task_dir)
+        reports: list[dict] = collected["reports"]
         findings_by_auditor: dict[str, int] = {}
+        blocking_by_auditor: dict[str, int] = {}
         findings_by_category: dict[str, int] = {}
-        total_findings = 0
-        total_blocking = 0
-
-        if reports_dir.exists():
-            for report_path, data in select_eligible_reports(task_dir, stage=None):
-                findings = data.get("findings", []) if isinstance(data, dict) else []
-                if not isinstance(findings, list):
-                    findings = []
-                auditor_name = str(data.get("auditor_name") or data.get("auditor") or report_path.stem)
-                finding_count = 0
-                blocking_count = 0
-                for finding in findings:
-                    if not isinstance(finding, dict):
-                        continue
-                    finding_count += 1
-                    if finding_is_blocking(finding):
-                        blocking_count += 1
-                    fid = str(finding.get("id", "") or "")
-                    category = fid.split("-")[0] if "-" in fid else fid
-                    if category:
-                        findings_by_category[category] = findings_by_category.get(category, 0) + 1
-                findings_by_auditor[auditor_name] = findings_by_auditor.get(auditor_name, 0) + finding_count
-                total_findings += finding_count
-                total_blocking += blocking_count
-                reports.append({
-                    "auditor_name": auditor_name,
-                    "report_path": str(report_path),
-                    "finding_count": finding_count,
-                    "blocking_count": blocking_count,
-                })
+        for finding in collected["findings"]:
+            auditor_name = finding["_auditor"]
+            findings_by_auditor[auditor_name] = findings_by_auditor.get(auditor_name, 0) + 1
+            if finding_is_blocking(finding):
+                blocking_by_auditor[auditor_name] = blocking_by_auditor.get(auditor_name, 0) + 1
+            fid = str(finding.get("id", "") or "")
+            category = fid.split("-")[0] if "-" in fid else fid
+            if category:
+                findings_by_category[category] = findings_by_category.get(category, 0) + 1
+        total_findings = len(collected["findings"])
+        total_blocking = sum(blocking_by_auditor.values())
 
         summary = {
             "task_id": _load_manifest(task_dir).get("task_id", task_dir.name),
             "reports": reports,
             "findings_by_auditor": findings_by_auditor,
+            "blocking_by_auditor": blocking_by_auditor,
             "findings_by_category": findings_by_category,
             "total_findings": total_findings,
             "total_blocking": total_blocking,
