@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.5.35] - 2026-10-29
+### Changed
+- fix: make the completion summary agree with the findings gate
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.5.35`.
+
+---
+
 ## [7.5.34] - 2026-10-29
 ### Fixed
 - **The completion summary no longer reports a failure the findings gate cleared.** `run-audit-summary` and `derive_user_summary` added up `blocking_count` across every report file, including attempts a re-audit after repair had replaced and voting-tier reports a binding deep-tier cascade verdict had overruled. On a field task the gate returned `clear` and the task reached DONE, yet `completion.json::user_summary` read "FAILED — 20 blocking findings" with five auditors marked FAIL. `run-audit-summary` now builds its totals from `collect_repair_findings`, the same selection the gate uses. Superseded reports stay in `reports` with their `superseded_by` reason and raw counts, but `total_findings`, `total_blocking`, `audit_result`, `findings_by_auditor` and `findings_by_category` count only binding findings, and a new `blocking_by_auditor` field carries the gate's deduplicated per-auditor counts. `derive_user_summary` skips superseded reports and uses `blocking_by_auditor` when it is present, so the header and per-auditor lines match `run-audit-findings-gate`. Summaries written before this change derive exactly as before, so `verify-audit-summary-text` still matches them.
