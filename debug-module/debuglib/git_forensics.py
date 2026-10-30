@@ -7,7 +7,8 @@ Public API:
     analyze(repo_path: str, files: list[str], since: str | None) -> dict
 
 Returns a dict with keys:
-    - blame_ranges: dict[str, list[dict]]  # file -> blame line records
+    - blame_ranges: dict[str, list[dict]]  # file -> contiguous blame ranges
+                                           #   {start_line, end_line, commit, author, date}
     - recent_commits: list[dict]           # commit records
     - co_change_pairs: list[dict]          # files that co-changed >= 2 times
 
@@ -220,6 +221,38 @@ def _parse_blame_porcelain(text: str) -> list[dict[str, Any]]:
     return finalized
 
 
+def _coalesce_blame(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive per-line blame records from the same commit into
+    {start_line, end_line, commit, author, date} ranges.
+
+    Per-line records for a large file run to megabytes in the dossier while
+    carrying no more information than the ranges.
+    """
+    ranges: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        line = rec.get("line_no")
+        if not isinstance(line, int):
+            continue
+        last = ranges[-1] if ranges else None
+        if (
+            last is not None
+            and last["commit"] == rec.get("commit")
+            and last["end_line"] == line - 1
+        ):
+            last["end_line"] = line
+            continue
+        ranges.append({
+            "start_line": line,
+            "end_line": line,
+            "commit": rec.get("commit", ""),
+            "author": rec.get("author", ""),
+            "date": rec.get("date", ""),
+        })
+    return ranges
+
+
 def _collect_recent_commits(
     repo_path: str, since: str | None
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -391,7 +424,7 @@ def analyze(
         if not isinstance(f, str) or not f:
             continue
         try:
-            blame_ranges[f] = _blame_file(repo_path, f)
+            blame_ranges[f] = _coalesce_blame(_blame_file(repo_path, f))
         except Exception as exc:  # defensive: never propagate
             blame_errors.append(f"blame {f}: {exc}")
             blame_ranges[f] = []

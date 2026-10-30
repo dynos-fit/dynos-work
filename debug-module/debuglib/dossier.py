@@ -9,7 +9,10 @@ the same inputs always yields the same IDs (no module-level mutable state).
 
 ID prefixes:
     MF-NNN  manifest / file-level linter findings
-    F-NNN   symbol / frame findings
+    F-NNN   mentioned files (path, size, line count, head) and snippets
+            around file:line references from the bug text / stack trace
+    SY-NNN  symbol definitions (file, line range, bounded source) for
+            identifiers named in the bug text
     S-NNN   Semgrep findings
     T-NNN   test findings
     ST-NNN  stack trace frames
@@ -25,6 +28,8 @@ from typing import Any
 # duplicating string literals.
 PREFIX_MANIFEST = "MF"
 PREFIX_FRAME = "F"
+PREFIX_FILE = PREFIX_FRAME
+PREFIX_SYMBOL = "SY"
 PREFIX_SEMGREP = "S"
 PREFIX_TEST = "T"
 PREFIX_STACK = "ST"
@@ -100,12 +105,14 @@ def assemble(pipeline_outputs: dict | None) -> dict:
     semgrep_findings = pipeline_outputs.get("semgrep_findings") or []
     test_results = pipeline_outputs.get("test_results") or []
     coverage_gaps = pipeline_outputs.get("coverage_gaps") or []
-    mentioned_symbols = pipeline_outputs.get("mentioned_symbols") or []
+    file_evidence = pipeline_outputs.get("file_evidence") or []
+    symbol_evidence = pipeline_outputs.get("symbol_evidence") or []
 
     # Order is deterministic and stable across calls. Each block uses its own
     # counter starting at 1.
     mf_ids = _mint_block(PREFIX_MANIFEST, linter_findings, evidence_index)
-    f_ids = _mint_block(PREFIX_FRAME, mentioned_symbols, evidence_index)
+    f_ids = _mint_block(PREFIX_FILE, file_evidence, evidence_index)
+    sy_ids = _mint_block(PREFIX_SYMBOL, symbol_evidence, evidence_index)
     s_ids = _mint_block(PREFIX_SEMGREP, semgrep_findings, evidence_index)
     t_ids = _mint_block(PREFIX_TEST, test_results, evidence_index)
     st_ids = _mint_block(PREFIX_STACK, stack_frames, evidence_index)
@@ -144,7 +151,8 @@ def assemble(pipeline_outputs: dict | None) -> dict:
         # order without re-sorting the index keys.
         "evidence_ids_by_kind": {
             PREFIX_MANIFEST: mf_ids,
-            PREFIX_FRAME: f_ids,
+            PREFIX_FILE: f_ids,
+            PREFIX_SYMBOL: sy_ids,
             PREFIX_SEMGREP: s_ids,
             PREFIX_TEST: t_ids,
             PREFIX_STACK: st_ids,
@@ -157,6 +165,10 @@ def assemble(pipeline_outputs: dict | None) -> dict:
         "log_entries": list(pipeline_outputs.get("log_entries") or []),
         "schema_drift": list(pipeline_outputs.get("schema_drift") or []),
         "mentioned_files": list(pipeline_outputs.get("mentioned_files") or []),
+        "mentioned_symbols": list(pipeline_outputs.get("mentioned_symbols") or []),
+        # How evidence was scoped (resolved files, unresolved names, linter /
+        # semgrep findings dropped as out-of-scope noise).
+        "evidence_scope": dict(pipeline_outputs.get("evidence_scope") or {}),
     }
 
     return dossier
