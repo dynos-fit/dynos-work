@@ -262,6 +262,8 @@ This command deterministically:
 "$DYNOS" ctl clear-role .dynos/task-{id}
 ```
 
+It is safe to run while other executors of the same batch are still running: it keeps the stamp and grants of every role whose spawn has not returned (`roles_kept_in_flight` in its output) and drops the rest. Do not pass `--all` during a parallel batch; that revokes the running executors' roles and their next writes are denied as `orchestrator`.
+
 Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
 
 - Use `run-execution-segment-done` as the authoritative completion gate.

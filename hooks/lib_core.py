@@ -15,7 +15,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from lib_project_id import _safe_git_env, resolve_project_id
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
@@ -82,24 +82,59 @@ def role_for_subagent_type(subagent_type: str) -> str | None:
     return None
 
 
-def stamp_role(task_dir: Path, role: str) -> Path:
-    """Write the role file from the trusted ctl or Agent-spawn-hook path."""
+def read_stamped_roles(task_dir: Path) -> list[str]:
+    """Roles in the role file, one per line, oldest first, deduplicated.
+
+    Parallel spawns each stamp a role, so the file holds every role whose
+    subagent may still be running. A missing or unreadable file is empty.
+    """
     path = Path(task_dir) / "active-segment-role"
-    path.write_text(role, encoding="utf-8")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    roles: list[str] = []
+    for line in lines:
+        role = line.strip()
+        if role and role not in roles:
+            roles.append(role)
+    return roles
+
+
+def write_stamped_roles(task_dir: Path, roles: list[str]) -> None:
+    path = Path(task_dir) / "active-segment-role"
+    if roles:
+        path.write_text("\n".join(roles), encoding="utf-8")
+    elif path.exists():
+        path.unlink()
+
+
+def stamp_role(task_dir: Path, role: str, keep: Iterable[str] = ()) -> Path:
+    """Write the role file from the trusted ctl or Agent-spawn-hook path.
+
+    ``role`` becomes the newest entry. Of the roles already stamped, only
+    those in ``keep`` (the roles of subagents still running) survive, so a
+    sequential stamp still replaces the previous role while a parallel one
+    no longer revokes its siblings.
+    """
+    path = Path(task_dir) / "active-segment-role"
+    keep_set = set(keep)
+    roles = [r for r in read_stamped_roles(task_dir) if r in keep_set and r != role]
+    write_stamped_roles(task_dir, roles + [role])
     return path
 
 
 def clear_stamped_role(task_dir: Path, role: str) -> bool:
-    """Unlink the role file only if its stripped content equals ``role``.
+    """Remove ``role`` from the role file, unlinking it once empty.
 
-    Returns True when unlinked; False otherwise. Never raises on a missing
-    or unreadable file.
+    Returns True when the role was present; False otherwise. Never raises on
+    a missing or unreadable file.
     """
-    path = Path(task_dir) / "active-segment-role"
+    roles = read_stamped_roles(task_dir)
+    if role not in roles:
+        return False
     try:
-        if path.read_text(encoding="utf-8").strip() != role:
-            return False
-        path.unlink()
+        write_stamped_roles(task_dir, [r for r in roles if r != role])
     except OSError:
         return False
     return True

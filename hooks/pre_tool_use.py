@@ -15,6 +15,7 @@ Stderr on denial is prefixed with "write-policy: ".
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -105,23 +106,49 @@ def _subagent_isolation(task_dir: "Path | None") -> bool:
         return False
 
 
-def _adoptable_stamped_role(task_dir: "Path | None") -> "str | None":
-    """Return the stamped active-segment-role when it is a valid,
-    non-orchestrator executor/planning/audit role; else None. Lets the
-    orchestrator session adopt the current segment role under a
-    non-isolating harness (see ``_subagent_isolation``)."""
+def _stamped_roles(task_dir: "Path | None") -> "list[str]":
+    """Valid roles in the role file, oldest first. Parallel spawns each
+    stamp one line, so several subagent roles can be active at once."""
     if task_dir is None:
-        return None
+        return []
     try:
         rf = task_dir / "active-segment-role"
         if not rf.is_file():
-            return None
-        val = rf.read_text(encoding="utf-8").strip()
-        if val and val != "orchestrator" and val in _EXECUTOR_ROLE_ALLOWLIST:
-            return val
+            return []
+        roles: list[str] = []
+        for line in rf.read_text(encoding="utf-8").splitlines():
+            val = line.strip()
+            if val and val in _EXECUTOR_ROLE_ALLOWLIST and val not in roles:
+                roles.append(val)
+        return roles
     except Exception:
-        return None
-    return None
+        return []
+
+
+def _adoptable_stamped_roles(task_dir: "Path | None") -> "list[str]":
+    """Return the stamped roles the orchestrator session may adopt: valid,
+    non-orchestrator executor/planning/audit roles, newest last. Lets the
+    orchestrator session act for every running segment under a
+    non-isolating harness (see ``_subagent_isolation``)."""
+    return [r for r in _stamped_roles(task_dir) if r != "orchestrator"]
+
+
+def _decide_for_roles(attempt, roles: "list[str]"):
+    """Decide a write for ``attempt.role``, falling back to the other active
+    roles. Under a shared session the hook cannot tell which running
+    subagent made the call, so the write is allowed when any of their roles
+    allows it; the denial reported is the primary role's."""
+    decision = decide_write(attempt)
+    if decision.allowed:
+        return attempt, decision
+    for other in roles:
+        if other == attempt.role:
+            continue
+        alt = dataclasses.replace(attempt, role=other)
+        alt_decision = decide_write(alt)
+        if alt_decision.allowed:
+            return alt, alt_decision
+    return attempt, decision
 
 
 # ---------------------------------------------------------------------------
@@ -992,6 +1019,9 @@ def main() -> int:
     #     subagents on tasks that still stamp active-segment-role
     # (e) default "execute-inline"
     role_file_searched: bool = False
+    # Every role active for this call; more than one only when parallel
+    # segments share the role file. Writes are checked against all of them.
+    candidate_roles: list[str] = []
     role_file_path: Path | None = None
     role_file_reason: str | None = None  # "absent" | "empty" | "invalid"
 
@@ -1019,12 +1049,14 @@ def main() -> int:
                 # control-plane.json and the pin are denied to ALL roles,
                 # and audit-report writes remain cross-checked against
                 # spawn-log.jsonl at receipt time.
-                adopted = (
-                    None if _subagent_isolation(task_dir)
-                    else _adoptable_stamped_role(task_dir)
+                adoptable = (
+                    [] if _subagent_isolation(task_dir)
+                    else _adoptable_stamped_roles(task_dir)
                 )
+                adopted = adoptable[-1] if adoptable else None
                 if adopted is not None:
                     role = adopted
+                    candidate_roles = adoptable
                     role_missing = False
                     try:
                         if log_event is not None:
@@ -1068,8 +1100,10 @@ def main() -> int:
                 try:
                     if role_file_path.is_file():
                         file_contents = role_file_path.read_text(encoding="utf-8").strip()
-                        if file_contents and file_contents in _EXECUTOR_ROLE_ALLOWLIST:
-                            role = file_contents
+                        file_roles = _stamped_roles(task_dir)
+                        if file_roles:
+                            role = file_roles[-1]
+                            candidate_roles = file_roles
                             role_missing = False
                         elif file_contents and file_contents not in _EXECUTOR_ROLE_ALLOWLIST:
                             # Not an allowed executor role — reject and fall to
@@ -1280,7 +1314,7 @@ def main() -> int:
                 operation="modify",
                 source="agent",
             )
-            decision = decide_write(attempt)
+            attempt, decision = _decide_for_roles(attempt, candidate_roles)
             _emit_policy_event(attempt, decision)
 
             # Emit structured bash_check event
@@ -1341,7 +1375,7 @@ def main() -> int:
                 operation="modify",
                 source="agent",
             )
-            decision = decide_write(attempt)
+            attempt, decision = _decide_for_roles(attempt, candidate_roles)
             _emit_policy_event(attempt, decision)
 
             if not decision.allowed:

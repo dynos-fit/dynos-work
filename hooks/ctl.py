@@ -2741,8 +2741,9 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
 
     role_file = task_dir / "active-segment-role"
     try:
+        from agent_spawn_log import spawns_in_flight
         from lib_core import stamp_role
-        stamp_role(task_dir, role)
+        stamp_role(task_dir, role, keep=spawns_in_flight(task_dir / "spawn-log.jsonl"))
     except OSError as exc:
         print(f"stamp-role: failed to write {role_file}: {exc}", file=sys.stderr)
         return 1
@@ -2794,12 +2795,17 @@ def cmd_grant_role(args: argparse.Namespace) -> int:
 
 
 def cmd_clear_role(args: argparse.Namespace) -> int:
-    """Expire all unconsumed grants and remove the legacy role file.
+    """Expire unconsumed grants and drop stamped roles nothing still needs.
 
     This is the sanctioned replacement for the (policy-denied)
     `rm active-segment-role` step the skills used to prescribe. Clearing
-    only ever REDUCES privilege: existing session bindings are untouched
-    (a running subagent keeps its role), no new role can be minted here.
+    only ever REDUCES privilege. Under a harness that shares one session
+    across subagents, every running subagent resolves its role from the
+    role file, so a role whose spawn is still in flight (per
+    spawn-log.jsonl) keeps both its stamp and its grants: clearing after
+    one parallel segment returns must not revoke its siblings. ``--role``
+    drops that one role regardless; ``--all`` restores the old
+    clear-everything behaviour.
     """
     task_dir = Path(args.task_dir).resolve()
     if not task_dir.is_dir():
@@ -2807,30 +2813,50 @@ def cmd_clear_role(args: argparse.Namespace) -> int:
         return 1
 
     import actor_identity
+    from agent_spawn_log import spawns_in_flight
+    from lib_core import read_stamped_roles, write_stamped_roles
 
     def _ctl_writer(path: Path, data: object) -> None:
         _write_ctl_json(task_dir, path, data)
 
+    only_role = (getattr(args, "role", None) or "").strip() or None
+    stamped = read_stamped_roles(task_dir)
+    if getattr(args, "all", False):
+        keep: set[str] = set()
+    else:
+        in_flight = spawns_in_flight(task_dir / "spawn-log.jsonl")
+        keep = {r for r in stamped if in_flight.get(r)}
+        if only_role is not None:
+            keep = {r for r in stamped if r != only_role}
+    if only_role is None:
+        keep_grants = keep
+    else:
+        keep_grants = {
+            str(g.get("role")) for g in actor_identity.pending_grants(task_dir)
+        } - {only_role}
+
     try:
-        expired = actor_identity.expire_grants(task_dir, write_json_fn=_ctl_writer)
+        expired = actor_identity.expire_grants(
+            task_dir, write_json_fn=_ctl_writer, keep_roles=keep_grants,
+        )
     except Exception as exc:
         print(f"clear-role: failed to expire grants: {exc}", file=sys.stderr)
         return 1
 
     role_file = task_dir / "active-segment-role"
-    removed = False
-    if role_file.is_file():
-        try:
-            role_file.unlink()
-            removed = True
-        except OSError as exc:
-            print(f"clear-role: failed to remove {role_file}: {exc}", file=sys.stderr)
-            return 1
+    remaining = [r for r in stamped if r in keep]
+    try:
+        write_stamped_roles(task_dir, remaining)
+    except OSError as exc:
+        print(f"clear-role: failed to update {role_file}: {exc}", file=sys.stderr)
+        return 1
 
     print(json.dumps({
         "status": "role_cleared",
         "grants_expired": expired,
-        "legacy_role_file_removed": removed,
+        "roles_cleared": [r for r in stamped if r not in keep],
+        "roles_kept_in_flight": remaining,
+        "legacy_role_file_removed": bool(stamped) and not remaining,
     }, indent=2))
     return 0
 
@@ -8474,6 +8500,8 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Expire unconsumed role grants and remove the legacy role file (privilege-reducing)",
     )
     clear_role_parser.add_argument("task_dir")
+    clear_role_parser.add_argument("--role", default=None, help="Drop only this role's stamp and grants")
+    clear_role_parser.add_argument("--all", action="store_true", help="Drop every role, even those of subagents still running")
     clear_role_parser.set_defaults(func=cmd_clear_role)
 
     run_audit_reflect_parser = subparsers.add_parser(

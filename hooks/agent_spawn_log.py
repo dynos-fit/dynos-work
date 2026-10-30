@@ -38,6 +38,7 @@ import json
 import os
 import sys
 import time
+from collections import Counter
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -257,42 +258,59 @@ def _append_jsonl(path: Path, entry: dict[str, Any]) -> None:
         fh.write(line)
 
 
-# A planner `pre` row older than this cannot belong to a live spawn; ignoring
-# it keeps one crashed spawn (pre without post) from pinning the planning
-# stamp for the rest of the task.
-_PLANNER_INFLIGHT_WINDOW_SECONDS = 2 * 60 * 60
+# A `pre` row older than this cannot belong to a live spawn; ignoring it keeps
+# one crashed spawn (pre without post) from pinning its role stamp for the
+# rest of the task.
+_SPAWN_INFLIGHT_WINDOW_SECONDS = 2 * 60 * 60
 
 
 def _planner_spawns_in_flight(log_path: Path, pending: dict[str, Any] | None = None) -> int:
-    """Count planner spawns that have not finished yet.
+    """Count planner spawns that have not finished yet (see ``spawns_in_flight``)."""
+    return spawns_in_flight(log_path, pending).get("planning", 0)
 
-    Pairs planning ``pre`` rows with ``post`` rows by ``prompt_sha256`` (a
-    multiset, so identical prompts pair one-to-one) and counts recent ``pre``
-    rows left unmatched. A foreground post means the planner returned; an
-    ``async_launch`` post only means it started, so that spawn stays in
-    flight until a SubagentStop ``stop`` row with its ``agent_id`` appears
-    (or, failing an id match, any planning stop row not claimed by id). ``pending`` is a post row not yet in the log. Any read problem
-    returns 0, which preserves the single-planner behaviour of clearing.
+
+def spawns_in_flight(log_path: Path, pending: dict[str, Any] | None = None) -> Counter[str]:
+    """Count unfinished spawns per write-policy role.
+
+    For each role, pairs ``pre`` rows with ``post`` rows by ``prompt_sha256``
+    (a multiset, so identical prompts pair one-to-one) and counts recent
+    ``pre`` rows left unmatched. A foreground post means the subagent
+    returned; an ``async_launch`` post only means it started, so that spawn
+    stays in flight until a SubagentStop ``stop`` row with its ``agent_id``
+    appears (or, failing an id match, any stop row of that role not claimed
+    by id). ``pending`` is a post row not yet in the log. Any read problem
+    returns an empty count, which preserves the clear-everything behaviour.
     """
-    import datetime as _dt
-    from collections import Counter
     from lib_core import role_for_subagent_type
 
     try:
         lines = log_path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return 0
-    rows: list[dict[str, Any]] = []
+        return Counter()
+    rows_by_role: dict[str, list[dict[str, Any]]] = {}
     for line in lines:
         try:
             row = json.loads(line)
         except ValueError:
             continue
-        if isinstance(row, dict) and row.get("tool") == "Agent" and \
-                role_for_subagent_type(str(row.get("subagent_type", ""))) == "planning":
-            rows.append(row)
+        if isinstance(row, dict) and row.get("tool") == "Agent":
+            role = role_for_subagent_type(str(row.get("subagent_type", "")))
+            if role:
+                rows_by_role.setdefault(role, []).append(row)
     if pending is not None:
-        rows.append(pending)
+        role = role_for_subagent_type(str(pending.get("subagent_type", "")))
+        if role:
+            rows_by_role.setdefault(role, []).append(pending)
+    counts: Counter[str] = Counter()
+    for role, rows in rows_by_role.items():
+        outstanding = _unfinished_spawns(rows)
+        if outstanding:
+            counts[role] = outstanding
+    return counts
+
+
+def _unfinished_spawns(rows: list[dict[str, Any]]) -> int:
+    import datetime as _dt
 
     now = _dt.datetime.now(_dt.timezone.utc)
     pres: list[str] = []
@@ -311,7 +329,7 @@ def _planner_spawns_in_flight(log_path: Path, pending: dict[str, Any] | None = N
                 continue
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=_dt.timezone.utc)
-            if (now - ts).total_seconds() <= _PLANNER_INFLIGHT_WINDOW_SECONDS:
+            if (now - ts).total_seconds() <= _SPAWN_INFLIGHT_WINDOW_SECONDS:
                 pres.append(digest)
 
     outstanding = 0
@@ -415,7 +433,9 @@ def main(argv: list[str]) -> int:
                 pass
         else:
             try:
-                stamp_role(task_dir, role)
+                # Parallel spawns share the role file: keep the roles of
+                # siblings still running instead of overwriting them.
+                stamp_role(task_dir, role, keep=spawns_in_flight(log_path))
                 # Keep the one-shot actor grant path used by pinned sessions.
                 ctl = Path(__file__).with_name("ctl.py")
                 grant = subprocess.run([sys.executable, str(ctl), "grant-role", str(task_dir), "--role", role], capture_output=True, text=True)
