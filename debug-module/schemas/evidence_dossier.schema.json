@@ -36,7 +36,7 @@
       "type": "object",
       "description": "Index of evidence keyed by pattern-matching evidence ID",
       "patternProperties": {
-        "^(MF|F|S|T|ST|CG)-\\d{3}$": {
+        "^(MF|F|SY|S|T|ST|CG)-\\d{3,}$": {
           "type": "object",
           "description": "Evidence object"
         }

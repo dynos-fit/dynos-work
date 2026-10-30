@@ -24,6 +24,7 @@ sys.path.insert(0, _SCRIPT_DIR)
 
 from debuglib import (  # noqa: E402  (sys.path tweak above is intentional)
     bug_classifier,
+    code_evidence,
     coverage_gaps,
     dossier,
     git_forensics,
@@ -206,6 +207,54 @@ def _merge_stack_files(
     return out
 
 
+# Cap on linter / semgrep findings kept when the bug text names no file that
+# resolves in the repo. With resolved files, only findings inside those files
+# are kept — repo-wide lint noise otherwise dominates the dossier.
+_UNSCOPED_FINDINGS_CAP = 100
+
+
+def _scope_findings(
+    findings: list[dict[str, Any]],
+    scope_paths: list[str],
+    repo_path: str,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Keep tool-status records plus findings relevant to the bug.
+
+    With `scope_paths`, keep findings whose file is one of them; otherwise
+    keep the first `_UNSCOPED_FINDINGS_CAP` findings. Returns the kept list
+    and a summary of what was dropped.
+    """
+    scope = set(scope_paths)
+    kept: list[dict[str, Any]] = []
+    total = 0
+    dropped_out_of_scope = 0
+    dropped_cap = 0
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        if f.get("skipped") or f.get("error"):
+            kept.append(f)
+            continue
+        total += 1
+        if scope:
+            rel = code_evidence.normalize_path(f.get("file"), repo_path)
+            if rel not in scope:
+                dropped_out_of_scope += 1
+                continue
+            kept.append(f)
+        else:
+            if total > _UNSCOPED_FINDINGS_CAP:
+                dropped_cap += 1
+                continue
+            kept.append(f)
+    return kept, {
+        "total": total,
+        "kept": total - dropped_out_of_scope - dropped_cap,
+        "dropped_outside_mentioned_files": dropped_out_of_scope,
+        "dropped_over_cap": dropped_cap,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -269,6 +318,38 @@ def run_pipeline(
         _record_error(pipeline_errors, "parse_stacktrace.parse", exc)
     pipeline_outputs["stack_frames"] = stack_frames
 
+    # Step 3.2: code evidence — mint the source the bug text names: mentioned
+    # files (F), file:line snippets (F), and symbol definitions (SY). The
+    # investigator cannot read source, so without this the dossier carries
+    # no code at all.
+    code_result: dict[str, Any] = {
+        "files": [], "snippets": [], "symbols": [], "resolved_paths": [],
+        "stats": {},
+    }
+    try:
+        result = code_evidence.collect(
+            repo_path,
+            mentioned_files_struct,
+            mentioned_symbols,
+            bug_text,
+            extra_files=[f for f in stack_frames if isinstance(f, dict)],
+        )
+        if isinstance(result, dict):
+            code_result.update(result)
+    except Exception as exc:
+        _record_error(pipeline_errors, "code_evidence.collect", exc)
+    pipeline_outputs["file_evidence"] = (
+        [dict(f, type="file") for f in code_result.get("files") or []]
+        + [dict(sn, type="snippet") for sn in code_result.get("snippets") or []]
+    )
+    pipeline_outputs["symbol_evidence"] = list(code_result.get("symbols") or [])
+    scope_paths: list[str] = list(code_result.get("resolved_paths") or [])
+    evidence_scope: dict[str, Any] = {
+        "resolved_files": scope_paths,
+        "code_evidence": code_result.get("stats") or {},
+    }
+    pipeline_outputs["evidence_scope"] = evidence_scope
+
     # Step 3.5: branch dispatch — set per-bug-type pipeline flags.
     semgrep_rule_ids = _SEMGREP_RULE_FILTERS.get(bug_type)  # may be None
     enable_run_tests = bool(run_tests_flag)
@@ -296,6 +377,9 @@ def run_pipeline(
             linter_findings = result
     except Exception as exc:
         _record_error(pipeline_errors, "run_linters.run", exc)
+    linter_findings, evidence_scope["linter_findings"] = _scope_findings(
+        linter_findings, scope_paths, repo_path
+    )
     pipeline_outputs["linter_findings"] = linter_findings
 
     # Step 6: semgrep.
@@ -308,6 +392,9 @@ def run_pipeline(
             semgrep_findings = result
     except Exception as exc:
         _record_error(pipeline_errors, "run_semgrep.run", exc)
+    semgrep_findings, evidence_scope["semgrep_findings"] = _scope_findings(
+        semgrep_findings, scope_paths, repo_path
+    )
     pipeline_outputs["semgrep_findings"] = semgrep_findings
 
     # Step 7: git forensics — blame mentioned files + stack-frame files.
