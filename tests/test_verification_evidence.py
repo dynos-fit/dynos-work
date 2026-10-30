@@ -270,3 +270,48 @@ def test_write_execution_graph_rejects_malformed_verify_commands(tmp_path: Path)
     result = _run_ctl("write-execution-graph", str(task_dir), "--from", str(payload_path))
     assert result.returncode == 1
     assert "verify_commands" in result.stderr
+
+
+def test_command_timeout_defaults_to_an_hour(tmp_path: Path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    _add_verify_commands(task_dir, "seg-1", [{"id": "vc-1", "command": "true"}])
+
+    result = _run_ctl("run-verification-evidence", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    artifact = json.loads((task_dir / "evidence" / "verification" / "seg-1.json").read_text())
+    assert artifact["results"][0]["timeout_s"] == 3600
+
+
+def test_command_declared_timeout_wins_over_flag(tmp_path: Path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    _add_verify_commands(task_dir, "seg-1", [
+        {"id": "slow", "command": "sleep 3", "timeout": 1},
+        {"id": "fast", "command": "true"},
+    ])
+
+    result = _run_ctl("run-verification-evidence", str(task_dir), "--timeout", "120")
+    assert result.returncode == 1
+    artifact = json.loads((task_dir / "evidence" / "verification" / "seg-1.json").read_text())
+    by_id = {r["id"]: r for r in artifact["results"]}
+    assert by_id["slow"]["timed_out"] is True
+    assert by_id["slow"]["timeout_s"] == 1
+    assert by_id["fast"]["timeout_s"] == 120
+
+
+def test_graph_normalizer_keeps_and_validates_timeout(tmp_path: Path) -> None:
+    import pytest
+
+    from ctl import _normalize_execution_graph_payload
+
+    def _graph(vc: dict) -> dict:
+        return {"segments": [{
+            "id": "seg-1", "executor": "backend-executor", "description": "d",
+            "files_expected": ["a.py"], "depends_on": [], "parallelizable": True,
+            "criteria_ids": [1], "verify_commands": [vc],
+        }]}
+
+    out = _normalize_execution_graph_payload(tmp_path, _graph({"id": "e2e", "command": "x", "timeout": "900"}))
+    assert out["segments"][0]["verify_commands"][0]["timeout"] == 900
+    for bad in ("soon", 0, -5):
+        with pytest.raises(ValueError):
+            _normalize_execution_graph_payload(tmp_path, _graph({"id": "e2e", "command": "x", "timeout": bad}))

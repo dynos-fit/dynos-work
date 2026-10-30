@@ -397,6 +397,14 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
                 raise ValueError(f"duplicate verify_commands id: {vc_id}")
             seen_vc_ids.add(vc_id)
             vc: dict = {"id": vc_id, "command": command}
+            if entry.get("timeout") is not None:
+                try:
+                    vc_timeout = int(entry["timeout"])
+                except (TypeError, ValueError):
+                    raise ValueError(f"verify_commands {vc_id}: timeout must be an integer of seconds") from None
+                if vc_timeout <= 0:
+                    raise ValueError(f"verify_commands {vc_id}: timeout must be positive")
+                vc["timeout"] = vc_timeout
             vc_criteria: list[int] = []
             for crit in entry.get("criteria_ids", []) or []:
                 try:
@@ -6548,7 +6556,9 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
         )
         return 1
 
-    timeout_s = int(args.timeout or 300)
+    # A command's own `timeout` (seconds, declared in the plan) wins; else
+    # --timeout; else an hour, the same budget `run-tests` gives a suite.
+    default_timeout_s = int(args.timeout) if args.timeout else 3600
     tail_bytes = 8192
     summary: list[dict] = []
     any_failed = False
@@ -6559,6 +6569,10 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
         all_passed = True
         for vc in seg.get("verify_commands", []):
             command = str(vc.get("command", ""))
+            try:
+                timeout_s = int(vc.get("timeout") or default_timeout_s)
+            except (TypeError, ValueError):
+                timeout_s = default_timeout_s
             started = _time.monotonic()
             try:
                 proc = _subprocess.run(
@@ -6588,6 +6602,7 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
                 "criteria_ids": list(vc.get("criteria_ids", []) or []),
                 "exit_code": exit_code,
                 "timed_out": timed_out,
+                "timeout_s": timeout_s,
                 "duration_ms": duration_ms,
                 "stdout_tail": stdout_tail,
                 "stderr_tail": stderr_tail,
@@ -8171,7 +8186,7 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_verification_parser.add_argument("task_dir")
     run_verification_parser.add_argument("--segment", help="Limit to one segment id")
-    run_verification_parser.add_argument("--timeout", type=int, default=300, help="Per-command timeout in seconds")
+    run_verification_parser.add_argument("--timeout", type=int, default=None, help="Per-command timeout in seconds for commands that declare none (default 3600)")
     run_verification_parser.set_defaults(func=cmd_run_verification_evidence)
 
     ownership_parser = subparsers.add_parser("check-ownership", help="Check that files belong to a segment")
