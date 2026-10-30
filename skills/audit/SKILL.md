@@ -324,7 +324,7 @@ Update Q-learning outcomes through ctl:
 
 This command derives outcomes from `repair-log.json` plus the current blocking audit findings and updates the Q-tables deterministically. Do NOT build `outcomes` JSON by hand.
 
-- If `status == "clear"`: proceed to Step 5.
+- If `status == "clear"`: proceed to Step 5. A clear gate after a repair cycle also moves the task from `REPAIR_EXECUTION` back to `CHECKPOINT_AUDIT` (`transitioned_to` in its output). If `transition_error` is set instead, the stage gate refused the move: fix what it names before Step 5, because `run-audit-finish` only finishes from an audit stage.
 - If `status == "repair_required"`: let the control plane decide whether another repair cycle is legal:
 
   ```text
@@ -421,7 +421,7 @@ Finalize completion through ctl:
 "$DYNOS" ctl run-audit-finish .dynos/task-{id}
 ```
 
-This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic.
+This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic. It refuses when an audit report is newer than `audit-summary.json`: re-run `ctl run-audit-summary` (and `run-audit-reflect`) and finish again.
 
 If it refuses on `test-results.json`, the last recorded test run did not pass. Re-run `ctl run-tests` with the same commands. If they still fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate.
 

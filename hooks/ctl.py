@@ -4818,6 +4818,22 @@ def _is_critical_spec_finding(finding: dict) -> bool:
     )
 
 
+def _leave_repair_execution_if_clear(task_dir: Path, blocking_count: int) -> str | None:
+    """Return a repaired task to CHECKPOINT_AUDIT once its re-audit is clear.
+
+    After a repair cycle the stage stays REPAIR_EXECUTION while the
+    re-audit runs; nothing else moves it back, and `run-audit-finish`
+    only finishes from an audit stage. Returns the new stage, or None when
+    the task was not in REPAIR_EXECUTION or still has blocking findings.
+    """
+    if blocking_count:
+        return None
+    if str(_load_manifest(task_dir).get("stage", "")) != "REPAIR_EXECUTION":
+        return None
+    transition_task(task_dir, "CHECKPOINT_AUDIT")
+    return "CHECKPOINT_AUDIT"
+
+
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -4836,9 +4852,17 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
 
         next_action = "repair_phase_1" if blocking_findings else "reflect"
         status = "repair_required" if blocking_findings else "clear"
+        transitioned_to: str | None = None
+        transition_error: str | None = None
+        try:
+            transitioned_to = _leave_repair_execution_if_clear(task_dir, len(blocking_findings))
+        except ValueError as exc:
+            transition_error = str(exc)
         print(json.dumps({
             "status": status,
             "task_dir": str(task_dir),
+            "transitioned_to": transitioned_to,
+            "transition_error": transition_error,
             "reports_seen": reports,
             "findings_by_auditor": findings_by_auditor,
             "blocking_findings": blocking_findings,
@@ -6989,6 +7013,23 @@ def _residual_update_for_target(root: Path, residual_id: str, target: str) -> No
     # Any other target: no-op.
 
 
+def _newer_audit_report(task_dir: Path, summary_path: Path) -> Path | None:
+    """The newest audit report written after ``summary_path``, if any."""
+    try:
+        summary_mtime = summary_path.stat().st_mtime
+    except OSError:
+        return None
+    newest: tuple[float, Path] | None = None
+    for report in (task_dir / "audit-reports").glob("*.json"):
+        try:
+            mtime = report.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > summary_mtime and (newest is None or mtime > newest[0]):
+            newest = (mtime, report)
+    return newest[1] if newest else None
+
+
 def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -6998,6 +7039,11 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     try:
         manifest = _load_manifest(task_dir)
         stage = manifest.get("stage")
+        if stage == "REPAIR_EXECUTION":
+            blocking = [f for f in collect_repair_findings(task_dir)["findings"] if finding_is_blocking(f)]
+            if _leave_repair_execution_if_clear(task_dir, len(blocking)):
+                manifest = _load_manifest(task_dir)
+                stage = manifest.get("stage")
         if stage not in {"CHECKPOINT_AUDIT", "FINAL_AUDIT"}:
             print(json.dumps({
                 "status": "blocked",
@@ -7013,6 +7059,20 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
                 "status": "blocked",
                 "task_dir": str(task_dir),
                 "error": "audit-summary.json and task-retrospective.json must exist before DONE",
+            }, indent=2))
+            return 1
+
+        # completion.json is a copy of the summary, so a summary written
+        # before the final re-audit would report that audit's failures.
+        stale_against = _newer_audit_report(task_dir, summary_path)
+        if stale_against is not None:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": (
+                    f"audit-summary.json predates audit report {stale_against.name}; "
+                    "re-run `ctl run-audit-summary` before finishing"
+                ),
             }, indent=2))
             return 1
 

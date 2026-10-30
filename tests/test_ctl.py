@@ -1373,6 +1373,8 @@ def test_run_audit_finish_writes_completion_and_transitions_done(tmp_path) -> No
     audit_dir = task_dir / "audit-reports"
     audit_dir.mkdir(exist_ok=True)
     (audit_dir / "report.json").write_text(json.dumps({"findings": []}) + "\n")
+    # The summary is written after the last audit report.
+    os.utime(task_dir / "audit-summary.json")
     receipts = task_dir / "receipts"
     receipts.mkdir(exist_ok=True)
     receipt_audit_routing(task_dir, [
