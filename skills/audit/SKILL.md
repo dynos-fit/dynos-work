@@ -333,7 +333,17 @@ This command derives outcomes from `repair-log.json` plus the current blocking a
 
   Interpret the JSON result:
   - `status == "repair_retry_ready"`: another repair cycle is allowed. Re-run `run-audit-repair-cycle-plan` and continue with the returned queue.
-  - `status == "escalation_required"`: the retry cap blocked another loop. Write `.dynos/task-{id}/escalation.md`, transition to `FAILED`, and stop.
+  - `status == "escalation_required"`: a repair cap blocked another loop. `cap_reasons` names which: the per-finding retry cap (a finding, or a reworded variant with the same auditor, category and file, was already repaired 4 times) or the per-auditor cycle cap (one auditor's findings already drove 3 repair cycles; a project may raise it with `max_repair_cycles_per_auditor` in its `policy.json`). Write `.dynos/task-{id}/escalation.md` naming each reason, transition to `FAILED`, and stop.
+
+**Accepting a finding instead of repairing it.** When a human decides a blocking finding is an acceptable trade-off (or out of scope), and another repair cycle would not change that, record the decision instead of looping:
+
+```text
+"$DYNOS" ctl accept-finding .dynos/task-{id} --auditor {auditor-name} --finding-id {finding-id} --reason "{why it is accepted}" [--decision-ref "{ADR, ticket or PR link}"]
+```
+
+Use it only on a human's explicit decision (typically after an `escalation_required` stop, or when the user tells you to accept the finding); never accept a finding on your own judgment to get past the gate. The command refuses a finding that is not in the binding audit reports and requires a non-empty reason. The acceptance is written to `accepted-findings.json`, which only this command may write. From then on the finding, and any re-audit variant of it from the same auditor with the same category and file, stops counting as blocking in `run-audit-findings-gate`, the repair-cycle plan and `run-audit-summary` (each lists it under `accepted_findings`), and re-auditors are told not to re-raise it. Re-run `run-audit-findings-gate` afterwards.
+
+Re-audits converge on their own as well: when `repair-log.json` exists, the auditor prompt (`audit-inject-prompt`) lists that auditor's previous-cycle findings with what the repair did about each, plus the accepted findings, and tells the auditor to report a whole issue class as one finding and to re-raise a repaired finding only when the fix is wrong.
 
 ### Step 5 — Gate to DONE
 

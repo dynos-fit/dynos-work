@@ -45,6 +45,10 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # Audit trail for `ctl waive-rule`; the waiver itself lives in the
     # task's rules-waivers.json and the rules-check receipt.
     "rule_waived",
+    # Audit trail for `ctl accept-finding` (accepted-findings.json) and for
+    # `ctl run-repair-retry` refusing another cycle on a convergence cap.
+    "finding_accepted",
+    "repair_cap_reached",
     "prevention_rules_healed",
     "pre_repair_snapshot_failed",
     "learned_agent_missing",

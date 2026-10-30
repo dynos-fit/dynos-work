@@ -4845,6 +4845,20 @@ def _leave_repair_execution_if_clear(task_dir: Path, blocking_count: int) -> str
     return "CHECKPOINT_AUDIT"
 
 
+def _accepted_finding_rows(findings: list[dict]) -> list[dict]:
+    """The findings ``ctl accept-finding`` took out of the blocking set."""
+    return [
+        {
+            "auditor": f["_auditor"],
+            "id": f["id"],
+            "reason": f["accepted"].get("reason"),
+            "decision_ref": f["accepted"].get("decision_ref"),
+            "matched_by": f["accepted"].get("matched_by"),
+        }
+        for f in findings if isinstance(f.get("accepted"), dict)
+    ]
+
+
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -4880,12 +4894,141 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
             "blocking_finding_ids": [str(f.get("id", "")) for f in blocking_findings if f.get("id")],
             "critical_spec_failure": bool(critical_spec_findings),
             "critical_spec_finding_ids": [str(f.get("id", "")) for f in critical_spec_findings if f.get("id")],
+            "accepted_findings": _accepted_finding_rows(collected["findings"]),
             "next_action": next_action,
         }, indent=2))
         return 0
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def _prior_repair_retry_index(
+    task_dir: Path,
+) -> tuple[int, dict[tuple[str | None, str], int], dict[tuple[str, str, str], int]]:
+    """Retry counts the last repair cycle recorded.
+
+    Returns ``(prior_cycle, by_id, by_class)``. ``by_id`` is keyed by
+    ``(auditor, finding_id)`` from repair-log.json; a task written without an
+    auditor (older logs) is keyed by ``(None, finding_id)`` and matches any
+    auditor. ``by_class`` is keyed by ``finding_class_keys`` of the findings
+    the previous repair-cycle-plan.json queued, so a re-audit that rewords a
+    finding under a new ID (same auditor, class and file) inherits its count.
+    """
+    from lib_validate import finding_class_keys  # noqa: PLC0415
+
+    def as_int(value: object) -> int:
+        try:
+            return int(value or 0)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    prior_cycle = 0
+    by_id: dict[tuple[str | None, str], int] = {}
+    by_class: dict[tuple[str, str, str], int] = {}
+    repair_log_path = task_dir / "repair-log.json"
+    if repair_log_path.exists():
+        repair_log = load_json(repair_log_path)
+        if isinstance(repair_log, dict):
+            prior_cycle = as_int(repair_log.get("repair_cycle", 0))
+            for batch in repair_log.get("batches", []) or []:
+                if not isinstance(batch, dict):
+                    continue
+                for task in batch.get("tasks", []) or []:
+                    if not isinstance(task, dict):
+                        continue
+                    fid = task.get("finding_id")
+                    if not isinstance(fid, str) or not fid:
+                        continue
+                    retry_count = as_int(task.get("retry_count", 0))
+                    task_auditor = task.get("auditor")
+                    keys = [(task_auditor if isinstance(task_auditor, str) and task_auditor else None, fid)]
+                    # A merged duplicate was repaired by this task too; the
+                    # next cycle may pick it as the primary instead.
+                    for merged in task.get("merged_findings", []) or []:
+                        if isinstance(merged, dict) and isinstance(merged.get("id"), str) and merged["id"]:
+                            merged_auditor = merged.get("auditor")
+                            keys.append((merged_auditor if isinstance(merged_auditor, str) and merged_auditor else None, merged["id"]))
+                    for key in keys:
+                        by_id[key] = max(by_id.get(key, retry_count), retry_count)
+    try:
+        prior_plan = load_json(task_dir / "repair-cycle-plan.json")
+    except (OSError, ValueError):
+        prior_plan = None
+    if not isinstance(prior_plan, dict):
+        return prior_cycle, by_id, by_class
+    # ``retry_history`` carries the class keys of every earlier executed plan,
+    # so a variant matches a finding from any earlier cycle, and re-planning
+    # the same upcoming cycle reads the same history.
+    for row in prior_plan.get("retry_history", []) or []:
+        if isinstance(row, list) and len(row) == 4 and all(isinstance(v, str) for v in row[:3]):
+            key = (row[0], row[1], row[2])
+            by_class[key] = max(by_class.get(key, as_int(row[3])), as_int(row[3]))
+    # The plan's own findings count only when its repairs ran (its cycle is
+    # the log's cycle); a plan re-run for the upcoming cycle must not inherit
+    # from itself.
+    if prior_cycle and as_int(prior_plan.get("repair_cycle")) == prior_cycle:
+        for finding in prior_plan.get("blocking_findings", []) or []:
+            if not isinstance(finding, dict):
+                continue
+            retry_count = as_int(finding.get("retry_count", 0))
+            for key in finding_class_keys(str(finding.get("_auditor") or ""), finding):
+                by_class[key] = max(by_class.get(key, retry_count), retry_count)
+    return prior_cycle, by_id, by_class
+
+
+def _retry_history_rows(by_class: dict[tuple[str, str, str], int]) -> list[list]:
+    """``by_class`` as JSON rows ``[auditor, class, file, retry_count]``."""
+    return [[a, c, f, n] for (a, c, f), n in sorted(by_class.items())]
+
+
+def _inherited_retry_count(
+    finding: dict,
+    by_id: dict[tuple[str | None, str], int],
+    by_class: dict[tuple[str, str, str], int],
+) -> int | None:
+    """The previous retry count this finding inherits, or None when new.
+
+    Matched by ``(auditor, finding_id)`` first, then by issue class and file
+    (``finding_class_keys``) so a reworded variant does not restart at 0.
+    """
+    from lib_validate import finding_class_keys  # noqa: PLC0415
+
+    auditor = str(finding.get("_auditor") or "")
+    fid = str(finding.get("id") or "")
+    previous = by_id.get((auditor, fid))
+    if previous is None:
+        previous = by_id.get((None, fid))
+    class_hits = [by_class[key] for key in finding_class_keys(auditor, finding) if key in by_class]
+    if class_hits:
+        previous = max(class_hits) if previous is None else max(previous, *class_hits)
+    return previous
+
+
+def _prior_auditor_repair_cycles(task_dir: Path) -> dict[str, list[int]]:
+    """Repair cycles each auditor's blocking findings drove so far, from the
+    previous repair-cycle-plan.json (``auditor_repair_cycles``)."""
+    try:
+        prior_plan = load_json(task_dir / "repair-cycle-plan.json")
+    except (OSError, ValueError):
+        return {}
+    raw = prior_plan.get("auditor_repair_cycles") if isinstance(prior_plan, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(auditor): sorted({int(c) for c in cycles if isinstance(c, int) and not isinstance(c, bool)})
+        for auditor, cycles in raw.items()
+        if isinstance(cycles, list)
+    }
+
+
+def _merge_auditor_cycles(prior: dict[str, list[int]], auditors: set[str], cycle: int) -> dict[str, list[int]]:
+    """Add ``cycle`` to each auditor's history. Idempotent: re-planning the
+    same cycle does not count it twice."""
+    merged = {auditor: set(cycles) for auditor, cycles in prior.items()}
+    for auditor in auditors:
+        merged.setdefault(auditor, set()).add(cycle)
+    return {auditor: sorted(cycles) for auditor, cycles in sorted(merged.items())}
 
 
 def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
@@ -4919,47 +5062,16 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
                 "phase": None,
                 "blocking_findings": [],
                 "blocking_finding_ids": [],
+                "auditor_repair_cycles": _prior_auditor_repair_cycles(task_dir),
+                "retry_history": _retry_history_rows(_prior_repair_retry_index(task_dir)[2]),
                 "next_action": "reflect",
             }
             write_json(task_dir / "repair-cycle-plan.json", payload)
             print(json.dumps(payload, indent=2))
             return 0
 
-        prior_cycle = 0
-        # Keyed by (auditor, finding_id); a task written without an auditor
-        # (older logs) is keyed by (None, finding_id) and matches any auditor.
-        prior_retry_counts: dict[tuple[str | None, str], int] = {}
-        repair_log_path = task_dir / "repair-log.json"
-        if repair_log_path.exists():
-            repair_log = load_json(repair_log_path)
-            if isinstance(repair_log, dict):
-                try:
-                    prior_cycle = int(repair_log.get("repair_cycle", 0) or 0)
-                except (TypeError, ValueError):
-                    prior_cycle = 0
-                for batch in repair_log.get("batches", []) or []:
-                    if not isinstance(batch, dict):
-                        continue
-                    for task in batch.get("tasks", []) or []:
-                        if not isinstance(task, dict):
-                            continue
-                        fid = task.get("finding_id")
-                        if not isinstance(fid, str) or not fid:
-                            continue
-                        try:
-                            retry_count = int(task.get("retry_count", 0) or 0)
-                        except (TypeError, ValueError):
-                            retry_count = 0
-                        task_auditor = task.get("auditor")
-                        keys = [(task_auditor if isinstance(task_auditor, str) and task_auditor else None, fid)]
-                        # A merged duplicate was repaired by this task too; the
-                        # next cycle may pick it as the primary instead.
-                        for merged in task.get("merged_findings", []) or []:
-                            if isinstance(merged, dict) and isinstance(merged.get("id"), str) and merged["id"]:
-                                merged_auditor = merged.get("auditor")
-                                keys.append((merged_auditor if isinstance(merged_auditor, str) and merged_auditor else None, merged["id"]))
-                        for key in keys:
-                            prior_retry_counts[key] = max(prior_retry_counts.get(key, retry_count), retry_count)
+        prior_cycle, prior_retry_counts, prior_class_retry = _prior_repair_retry_index(task_dir)
+        prior_auditor_cycles = _prior_auditor_repair_cycles(task_dir)
 
         next_cycle = max(1, prior_cycle + 1)
         if next_cycle == 1:
@@ -4983,9 +5095,7 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
         for finding in ordered_findings:
             entry = dict(finding)
             fid = str(entry["id"])
-            previous_retry = prior_retry_counts.get((entry["_auditor"], fid))
-            if previous_retry is None:
-                previous_retry = prior_retry_counts.get((None, fid))
+            previous_retry = _inherited_retry_count(entry, prior_retry_counts, prior_class_retry)
             retry_count = previous_retry + 1 if previous_retry is not None else 0
             entry["retry_count"] = retry_count
             entry["repair_cycle"] = next_cycle
@@ -5026,6 +5136,10 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
             "blocking_finding_ids": [str(f.get("id", "")) for f in planned_findings if f.get("id")],
             "critical_spec_finding_ids": sorted(critical_spec_finding_ids),
             "model_overrides": model_overrides,
+            "auditor_repair_cycles": _merge_auditor_cycles(
+                prior_auditor_cycles, {str(f["_auditor"]) for f in planned_findings}, next_cycle,
+            ),
+            "retry_history": _retry_history_rows(prior_class_retry),
             "next_action": "spawn_repair_coordinator",
         }
         write_json(task_dir / "repair-cycle-plan.json", payload)
@@ -5778,6 +5892,7 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
             "findings_by_category": findings_by_category,
             "total_findings": total_findings,
             "total_blocking": total_blocking,
+            "accepted_findings": _accepted_finding_rows(collected["findings"]),
             "audit_result": "pass" if total_blocking == 0 else "fail",
         }
         # task-20260503-002: derive user_summary BEFORE persisting audit-summary.json
@@ -6120,6 +6235,81 @@ def cmd_waive_rule(args: argparse.Namespace) -> int:
         "rule_id": rule_id,
         "waived_rules": sorted(waivers),
         "next_action": "rerun run-rules-check",
+    }, indent=2))
+    return 0
+
+
+def cmd_accept_finding(args: argparse.Namespace) -> int:
+    """Record a human decision to accept one audit finding for this task.
+
+    The alternative to another repair cycle when the finding is a known,
+    deliberate trade-off. The acceptance lives in accepted-findings.json
+    (ctl-owned; agents cannot write it). An accepted finding stops counting
+    as blocking in the findings gate, the repair plan and the summary, is
+    listed to re-auditors so they do not re-raise it, and covers a re-audit's
+    reworded variant (same auditor, class and file).
+    """
+    from lib_core import ACCEPTED_FINDINGS_FILE, load_accepted_findings  # noqa: PLC0415
+
+    task_dir = Path(args.task_dir).resolve()
+    auditor = str(args.auditor or "").strip()
+    finding_id = str(args.finding_id or "").strip()
+    reason = str(args.reason or "").strip()
+    decision_ref = str(args.decision_ref or "").strip() or None
+    if not auditor or not finding_id:
+        print("accept-finding: --auditor and --finding-id are required and must be non-empty", file=sys.stderr)
+        return 1
+    if not reason:
+        print("accept-finding: --reason is required and must be non-empty", file=sys.stderr)
+        return 1
+    if not (task_dir / "manifest.json").exists():
+        print(f"accept-finding: not a task dir (no manifest.json): {task_dir}", file=sys.stderr)
+        return 1
+    from lib_validate import _finding_location_file  # noqa: PLC0415
+    live = next(
+        (f for f in collect_repair_findings(task_dir)["findings"]
+         if f["_auditor"] == auditor and f["id"] == finding_id),
+        None,
+    )
+    if live is None:
+        print(
+            f"accept-finding: no finding {finding_id!r} from {auditor!r} in the binding audit reports",
+            file=sys.stderr,
+        )
+        return 1
+    entry = {
+        "auditor": auditor,
+        "finding_id": finding_id,
+        "reason": reason,
+        "decision_ref": decision_ref,
+        "title": str(live.get("title") or live.get("description") or "")[:200],
+        "category": live.get("category") if isinstance(live.get("category"), str) else None,
+        "file": _finding_location_file(live) or None,
+        "severity": live.get("severity"),
+        "accepted_at": now_iso(),
+    }
+    accepted = [
+        e for e in load_accepted_findings(task_dir)
+        if not (e.get("auditor") == auditor and e.get("finding_id") == finding_id)
+    ]
+    accepted.append(entry)
+    accepted.sort(key=lambda e: (str(e.get("auditor")), str(e.get("finding_id"))))
+    write_json(task_dir / ACCEPTED_FINDINGS_FILE, {"accepted": accepted})
+    from lib_log import log_event  # noqa: PLC0415
+    log_event(
+        _root_for_task_dir(task_dir), "finding_accepted", task=task_dir.name,
+        auditor=auditor, finding_id=finding_id, reason=reason, decision_ref=decision_ref,
+    )
+    append_execution_log(
+        task_dir, f"[ACCEPT] {auditor} {finding_id} accepted by human decision: {reason}"
+        + (f" (ref: {decision_ref})" if decision_ref else ""),
+    )
+    print(json.dumps({
+        "status": "finding_accepted",
+        "task_dir": str(task_dir),
+        "accepted": entry,
+        "accepted_findings": [f"{e['auditor']}:{e['finding_id']}" for e in accepted],
+        "next_action": "rerun run-audit-findings-gate",
     }, indent=2))
     return 0
 
@@ -6977,6 +7167,44 @@ def cmd_run_repair_batch_plan(args: argparse.Namespace) -> int:
         return 1
 
 
+def _repair_convergence_cap_reasons(task_dir: Path, root: Path) -> list[str]:
+    """Why another repair cycle is refused, or [] when it is allowed.
+
+    Two caps over the findings still blocking (accepted findings excluded):
+
+    - per finding: a finding (or a reworded variant with the same auditor,
+      class and file) already repaired ``MAX_REPAIR_RETRIES + 1`` times;
+    - per auditor: an auditor whose findings already drove
+      ``max_repair_cycles_per_auditor`` repair cycles, which catches an
+      auditor that reports a new variant of the same issue every re-audit.
+    """
+    from lib_core import MAX_REPAIR_RETRIES, max_repair_cycles_per_auditor  # noqa: PLC0415
+
+    blocking = [f for f in collect_repair_findings(task_dir)["findings"] if finding_is_blocking(f)]
+    if not blocking:
+        return []
+    _, by_id, by_class = _prior_repair_retry_index(task_dir)
+    reasons: list[str] = []
+    for finding in blocking:
+        previous = _inherited_retry_count(finding, by_id, by_class)
+        if previous is not None and previous >= MAX_REPAIR_RETRIES:
+            reasons.append(
+                f"retry cap: {finding['_auditor']} {finding['id']} was already repaired "
+                f"{previous + 1} times (max {MAX_REPAIR_RETRIES} retries, counting reworded variants)"
+            )
+    cycle_cap = max_repair_cycles_per_auditor(root)
+    history = _prior_auditor_repair_cycles(task_dir)
+    for auditor in sorted({str(f["_auditor"]) for f in blocking}):
+        used = len(history.get(auditor, []))
+        if used >= cycle_cap:
+            ids = sorted(str(f["id"]) for f in blocking if f["_auditor"] == auditor)
+            reasons.append(
+                f"auditor cycle cap: {auditor} already drove {used} repair cycles "
+                f"(max {cycle_cap}) and still reports blocking {', '.join(ids)}"
+            )
+    return reasons
+
+
 def cmd_run_repair_retry(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -6991,6 +7219,21 @@ def cmd_run_repair_retry(args: argparse.Namespace) -> int:
                 "status": "blocked",
                 "task_dir": str(task_dir),
                 "error": f"unexpected stage for repair retry: {stage}",
+            }, indent=2))
+            return 1
+
+        cap_reasons = _repair_convergence_cap_reasons(task_dir, root)
+        if cap_reasons:
+            from lib_log import log_event  # noqa: PLC0415
+            log_event(root, "repair_cap_reached", task=task_dir.name, reasons=cap_reasons)
+            print(json.dumps({
+                "status": "escalation_required",
+                "task_dir": str(task_dir),
+                "error": "repair cap reached: " + "; ".join(cap_reasons),
+                "cap_reasons": cap_reasons,
+                "next_action": "write_escalation_and_fail",
+                "hint": "a human may accept a finding instead of another cycle: "
+                        "ctl accept-finding <task_dir> --auditor <name> --finding-id <id> --reason <why>",
             }, indent=2))
             return 1
 
@@ -8469,6 +8712,17 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     waive_rule_parser.add_argument("rule_id")
     waive_rule_parser.add_argument("--reason", required=True)
     waive_rule_parser.set_defaults(func=cmd_waive_rule)
+
+    accept_finding_parser = subparsers.add_parser(
+        "accept-finding",
+        help="Record a human decision to accept an audit finding instead of another repair cycle",
+    )
+    accept_finding_parser.add_argument("task_dir")
+    accept_finding_parser.add_argument("--auditor", required=True)
+    accept_finding_parser.add_argument("--finding-id", required=True, dest="finding_id")
+    accept_finding_parser.add_argument("--reason", required=True)
+    accept_finding_parser.add_argument("--decision-ref", default=None, dest="decision_ref")
+    accept_finding_parser.set_defaults(func=cmd_accept_finding)
 
 
 def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:
