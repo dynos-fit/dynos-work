@@ -1134,10 +1134,20 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
     # ``max_amendments_per_artifact`` when a project genuinely needs more.
     prior_amendments = canonical_data.get("amendments", []) if isinstance(canonical_data, dict) else []
     prior_count = len(prior_amendments) if isinstance(prior_amendments, list) else 0
+    policy_path = "<unresolved>"
+    limit_source = "default"
     try:
+        from lib_core import _persistent_project_dir
         from lib_validate import load_project_policy
-        _limit_raw = load_project_policy(task_dir).get("max_amendments_per_artifact", 1)
-        amend_limit = int(_limit_raw) if isinstance(_limit_raw, int) and not isinstance(_limit_raw, bool) and _limit_raw > 0 else 1
+        policy_path = str(_persistent_project_dir(task_dir.parent.parent) / "policy.json")
+        _limit_raw = load_project_policy(task_dir).get("max_amendments_per_artifact")
+        if isinstance(_limit_raw, int) and not isinstance(_limit_raw, bool) and _limit_raw > 0:
+            amend_limit = _limit_raw
+            limit_source = "policy"
+        else:
+            amend_limit = 1
+            if _limit_raw is not None:
+                limit_source = f"default; ignored invalid policy value {_limit_raw!r}"
     except Exception:
         amend_limit = 1
     if prior_count >= amend_limit:
@@ -1152,9 +1162,10 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
             pass
         print(
             f"amend-artifact: amendment window exhausted for {artifact_name} "
-            f"({prior_count}/{amend_limit} used). Repeated post-approval edits are the "
+            f"({prior_count}/{amend_limit} used; limit {amend_limit} from {limit_source}, "
+            f"policy file {policy_path}). Repeated post-approval edits are the "
             "churn this gate exists to stop: fold the change into a new task, or raise "
-            "policy max_amendments_per_artifact for this project.",
+            "max_amendments_per_artifact (a positive integer) in that policy file.",
             file=sys.stderr,
         )
         return 1
