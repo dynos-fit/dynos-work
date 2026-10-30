@@ -16,6 +16,7 @@ from lib_core import (
     VALID_EXECUTORS,
     VALID_RISK_LEVELS,
     finding_is_blocking,
+    load_accepted_findings,
     load_json,
     require,
     write_ctl_json,
@@ -746,6 +747,57 @@ def _finding_location_key(finding: dict) -> tuple[str, str, str] | None:
     return path, "", str(finding.get("category") or "")
 
 
+def _normalize_finding_path(path: str) -> str:
+    path = path.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def finding_class_keys(auditor: str, finding: dict) -> set[tuple[str, str, str]]:
+    """``(auditor, class, file)`` keys that identify a finding's issue class.
+
+    The class is the finding's ``category`` and its ID prefix (``PERF`` of
+    ``PERF-3``), lower-cased; either one matching counts, so a re-audit that
+    rewords a finding under a new ID still lands on the same key. Empty when
+    the finding names no file: without a file the class alone is too broad
+    to match on.
+    """
+    path = _normalize_finding_path(_finding_location_file(finding))
+    if not path or not auditor:
+        return set()
+    classes: set[str] = set()
+    category = finding.get("category")
+    if isinstance(category, str) and category.strip():
+        classes.add(category.strip().lower())
+    fid = finding.get("id") if isinstance(finding.get("id"), str) else finding.get("finding_id")
+    if isinstance(fid, str) and "-" in fid:
+        prefix = fid.rsplit("-", 1)[0].strip().lower()
+        if prefix:
+            classes.add(prefix)
+    return {(auditor, cls, path) for cls in classes}
+
+
+def match_accepted_finding(auditor: str, finding: dict, accepted: list[dict]) -> dict | None:
+    """The ``ctl accept-finding`` entry covering this finding, or None.
+
+    Matches by ``(auditor, finding_id)``, or by ``(auditor, class, file)``
+    (``finding_class_keys``) so a re-audit's reworded variant of an accepted
+    finding stays accepted.
+    """
+    fid = finding.get("id")
+    keys = finding_class_keys(auditor, finding)
+    for entry in accepted:
+        if str(entry.get("auditor")) != auditor:
+            continue
+        if entry.get("finding_id") == fid:
+            return {**entry, "matched_by": "id"}
+        probe = {"id": entry.get("finding_id"), "category": entry.get("category"), "file": entry.get("file") or ""}
+        if keys and keys & finding_class_keys(auditor, probe):
+            return {**entry, "matched_by": "class_and_file"}
+    return None
+
+
 def collect_repair_findings(task_dir: Path) -> dict:
     """The one view of audit findings that repair planning acts on.
 
@@ -775,7 +827,9 @@ def collect_repair_findings(task_dir: Path) -> dict:
     Returns ``{"reports": [...], "findings": [...]}``. Each finding is a copy
     of the report entry plus ``_auditor``, ``_report_path``, ``_model``,
     ``_attempt``, ``_merged`` and, when the report carried one, ``_repair_task``
-    (the auditor's own ``repair_tasks`` entry for that finding).
+    (the auditor's own ``repair_tasks`` entry for that finding). A finding a
+    human accepted (``ctl accept-finding``) carries ``accepted`` and
+    ``blocking: False``, so no blocking count includes it.
     """
     cascades = _completed_cascades(task_dir)
     rows: list[dict] = []
@@ -852,6 +906,20 @@ def collect_repair_findings(task_dir: Path) -> dict:
             if finding_id in tasks_by_id:
                 entry["_repair_task"] = tasks_by_id[finding_id]
             candidates.append(entry)
+    # A human-accepted finding (``ctl accept-finding``) no longer blocks; it
+    # stays listed with an ``accepted`` marker so summaries can show it.
+    accepted = load_accepted_findings(task_dir)
+    if accepted:
+        for entry in candidates:
+            match = match_accepted_finding(entry["_auditor"], entry, accepted)
+            if match is not None:
+                entry["accepted"] = {
+                    "finding_id": match.get("finding_id"),
+                    "reason": match.get("reason", ""),
+                    "decision_ref": match.get("decision_ref"),
+                    "matched_by": match["matched_by"],
+                }
+                entry["blocking"] = False
     # Stable: blocking first, otherwise the binding-report order above.
     candidates.sort(key=lambda f: 0 if finding_is_blocking(f) else 1)
 

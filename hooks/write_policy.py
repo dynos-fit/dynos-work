@@ -125,6 +125,12 @@ _WRAPPER_REQUIRED = {
     # A waiver removes a rule from the task's rules check; only the ctl
     # wrapper (which requires a reason and logs the waiver) may write it.
     "rules-waivers.json": "python3 hooks/ctl.py waive-rule <task_dir> <rule_id> --reason <why>",
+    # The cycle plan carries the per-auditor repair-cycle history and the
+    # retry history the repair caps read; an agent edit could reset them.
+    "repair-cycle-plan.json": "python3 hooks/ctl.py run-audit-repair-cycle-plan <task_dir>",
+    # An accepted finding stops blocking DONE; only the ctl wrapper (which
+    # requires a reason and a live finding, and logs the decision) may write it.
+    "accepted-findings.json": "python3 hooks/ctl.py accept-finding <task_dir> --auditor <name> --finding-id <id> --reason <why>",
 }
 
 

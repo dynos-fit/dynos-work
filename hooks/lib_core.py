@@ -1132,6 +1132,53 @@ def load_rule_waivers(task_dir: Path) -> dict[str, str]:
     }
 
 
+ACCEPTED_FINDINGS_FILE = "accepted-findings.json"
+
+# Hard cap on repair attempts of one finding (retry_count 0..3). A finding a
+# re-audit rewords (same auditor, class and file) inherits the count.
+MAX_REPAIR_RETRIES = 3
+
+# Hard cap on repair cycles one auditor may drive. A single auditor that
+# reports a new variant of the same issue class on every re-audit never hits
+# the per-finding cap; this one stops it. Overridable per project with
+# ``max_repair_cycles_per_auditor`` in ``~/.dynos/projects/{slug}/policy.json``.
+MAX_REPAIR_CYCLES_PER_AUDITOR = 3
+
+
+def max_repair_cycles_per_auditor(root: Path) -> int:
+    """The per-auditor repair-cycle cap: policy override, else the default.
+
+    Reads policy.json without writing it. A missing, unreadable or
+    non-positive value falls back to ``MAX_REPAIR_CYCLES_PER_AUDITOR``.
+    """
+    try:
+        data = json.loads((_persistent_project_dir(root) / "policy.json").read_text())
+    except (OSError, ValueError):
+        return MAX_REPAIR_CYCLES_PER_AUDITOR
+    value = data.get("max_repair_cycles_per_auditor") if isinstance(data, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return MAX_REPAIR_CYCLES_PER_AUDITOR
+
+
+def load_accepted_findings(task_dir: Path) -> list[dict]:
+    """Findings a human accepted for this task (``ctl accept-finding``).
+
+    Each entry carries ``auditor``, ``finding_id``, ``reason`` and, when the
+    finding was in a binding report at acceptance time, ``category``,
+    ``file`` and ``title``. Unreadable means none.
+    """
+    try:
+        data = json.loads((Path(task_dir) / ACCEPTED_FINDINGS_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = data.get("accepted") if isinstance(data, dict) else None
+    return [
+        dict(entry) for entry in entries or []
+        if isinstance(entry, dict) and entry.get("auditor") and entry.get("finding_id")
+    ]
+
+
 def _effective_rules_drift(task_dir: Path, receipt: dict) -> str | None:
     """Why the receipt's ``effective_rules_sha256`` no longer matches the
     live rules minus the receipt's waivers, or None when it still does."""
@@ -1378,6 +1425,11 @@ def _compute_bypassed_gates_for_force(
                 repair_log = None
             if isinstance(repair_log, dict):
                 exhausted: list[str] = []
+                # A finding a human accepted is not repaired again.
+                accepted_keys = {
+                    (str(e.get("auditor")), str(e.get("finding_id")))
+                    for e in load_accepted_findings(task_dir)
+                }
                 for batch in repair_log.get("batches", []):
                     if not isinstance(batch, dict):
                         continue
@@ -1385,6 +1437,8 @@ def _compute_bypassed_gates_for_force(
                         if not isinstance(task_entry, dict):
                             continue
                         fid = task_entry.get("finding_id", "unknown")
+                        if (str(task_entry.get("auditor")), str(fid)) in accepted_keys:
+                            continue
                         retries = task_entry.get("retry_count", 0)
                         try:
                             retries_int = int(retries)
@@ -2148,7 +2202,6 @@ def _replay_gates_for_transition(
     # This is the deterministic hard cap: the LLM cannot loop past 3
     # repair attempts because the state machine itself refuses the
     # transition. Code enforces; prompts advise.
-    MAX_REPAIR_RETRIES = 3
     if next_stage == "REPAIR_PLANNING" and current_stage == "REPAIR_EXECUTION":
         repair_log_path = task_dir / "repair-log.json"
         if repair_log_path.exists():
@@ -2158,6 +2211,11 @@ def _replay_gates_for_transition(
                 repair_log = None
             if isinstance(repair_log, dict):
                 exhausted: list[str] = []
+                # A finding a human accepted is not repaired again.
+                accepted_keys = {
+                    (str(e.get("auditor")), str(e.get("finding_id")))
+                    for e in load_accepted_findings(task_dir)
+                }
                 for batch in repair_log.get("batches", []):
                     if not isinstance(batch, dict):
                         continue
@@ -2165,6 +2223,8 @@ def _replay_gates_for_transition(
                         if not isinstance(task_entry, dict):
                             continue
                         fid = task_entry.get("finding_id", "unknown")
+                        if (str(task_entry.get("auditor")), str(fid)) in accepted_keys:
+                            continue
                         retries = task_entry.get("retry_count", 0)
                         try:
                             retries_int = int(retries)
