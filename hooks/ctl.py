@@ -5082,9 +5082,16 @@ def _repo_file_list(root: Path) -> list[str]:
     ]
 
 
-def _finding_prose(source: dict) -> str:
+# Fields that say what to change. Paths named here (and in the title) are
+# repair targets.
+_FIX_PROSE_KEYS = ("title", "fix", "suggested_fix", "recommendation", "remediation")
+# Every prose field, for criterion references ("AC 3").
+_ALL_PROSE_KEYS = ("title", "description", "evidence", "recommendation", "fix", "suggested_fix", "remediation")
+
+
+def _finding_prose(source: dict, keys: tuple[str, ...] = _ALL_PROSE_KEYS) -> str:
     chunks: list[str] = []
-    for key in ("title", "description", "evidence", "recommendation", "fix", "remediation"):
+    for key in keys:
         value = source.get(key)
         if isinstance(value, str):
             chunks.append(value)
@@ -5122,8 +5129,9 @@ def _repair_scope_for_finding(
     ``evidence.file`` forms, and the auditor's own ``repair_tasks``
     ``affected_files``. Pipeline-owned paths are returned separately and
     never become repair targets. A finding that cites no file is scoped to
-    the existing files its prose names; only when it names none does it fall
-    back to the execution graph: first the segments delivering the
+    the existing files its title or fix/recommendation prose names, else
+    those its description names; paths that appear only in evidence prose
+    are never targets. Only when it names none does it fall back to the execution graph: first the segments delivering the
     acceptance criteria the prose names ("AC 3"), then the assigned
     executor's segments, then every segment. ``inferred`` is True for that
     fallback, whose scope is a guess.
@@ -5177,12 +5185,28 @@ def _repair_scope_for_finding(
     if repo_files or pipeline_files:
         return repo_files, pipeline_files, False
 
-    prose = "\n".join(_finding_prose(source) for source in (finding, live or {}))
-    repo_files, _ = _classified(
-        [m.group(1) for m in _PROSE_PATH_RE.finditer(prose)], keep_unknown=False,
+    # Paths in prose: first from the fields that say what to change (title,
+    # fix, recommendation; the auditor's repair-task description), then from
+    # the description of what is wrong. Evidence is never a source: a path
+    # cited only to show where a pattern was observed is not a file to edit.
+    sources = (finding, live or {})
+    fix_prose = "\n".join(
+        [_finding_prose(source, _FIX_PROSE_KEYS) for source in sources]
+        + [
+            str(source["_repair_task"].get("description") or "")
+            for source in sources
+            if isinstance(source.get("_repair_task"), dict)
+        ]
     )
-    if repo_files:
-        return repo_files, [], False
+    description_prose = "\n".join(_finding_prose(source, ("description",)) for source in sources)
+    for text in (fix_prose, description_prose):
+        repo_files, _ = _classified(
+            [m.group(1) for m in _PROSE_PATH_RE.finditer(text)], keep_unknown=False,
+        )
+        if repo_files:
+            return repo_files, [], False
+
+    prose = "\n".join(_finding_prose(source) for source in sources)
 
     criteria = {int(m) for m in _CRITERION_REF_RE.findall(prose)}
 
@@ -5204,15 +5228,20 @@ def _repair_scope_for_finding(
 
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+_REPAIR_ROUTING_KEYS = ("state", "route_mode", "route_source", "agent_path", "agent_name",
+                        "model_override", "model_source")
 
 
 def _merge_overlapping_repair_tasks(tasks: list[dict]) -> list[dict]:
     """Merge repair tasks whose files overlap (transitively) into one task.
 
-    The highest-severity task leads (first wins a tie): its finding, auditor,
-    executor and routing stay. The others become ``merged_findings`` and
-    their instructions are appended, files are unioned, and the retry count
-    is the highest, so the retry cap still sees every merged finding.
+    The highest-severity task leads (first wins a tie): its finding and
+    auditor stay. The others become ``merged_findings`` and their
+    instructions are appended, files are unioned, the retry count is the
+    highest (so the retry cap still sees every merged finding), and the
+    task is blocking if any member is. Executor and model are not inherited
+    from the lead: the merged task loses its routing fields and is routed
+    afresh on the union of its files and its (highest) severity.
     """
     clusters: list[list[dict]] = []
     cluster_files: list[set[str]] = []
@@ -5232,10 +5261,12 @@ def _merge_overlapping_repair_tasks(tasks: list[dict]) -> list[dict]:
             out.append(cluster[0])
             continue
         lead = min(cluster, key=lambda t: _SEVERITY_RANK.get(t["severity"], 2))
-        task = dict(lead)
+        task = {k: v for k, v in lead.items() if k not in _REPAIR_ROUTING_KEYS}
         others = [t for t in cluster if t is not lead]
         task["files_to_modify"] = _dedupe([p for t in [lead, *others] for p in t["files_to_modify"]])
         task["retry_count"] = max(t["retry_count"] for t in cluster)
+        if any("_blocking" in t for t in cluster):
+            task["_blocking"] = any(t.get("_blocking", True) for t in cluster)
         task["merged_findings"] = list(lead.get("merged_findings") or []) + [
             entry
             for other in others
@@ -5287,23 +5318,12 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
 
         task_type = str((manifest.get("classification") or {}).get("type", "feature"))
         root = _root_for_task_dir(task_dir)
-        from lib_qlearn import build_repair_plan  # noqa: PLC0415
-
-        # Q-learning reads `auditor` (e.g. the security model floor); the
-        # cycle plan carries it as `_auditor`.
-        q_findings = [
-            {**f, "auditor": f.get("auditor") or f.get("_auditor") or ""} if isinstance(f, dict) else f
-            for f in findings
-        ]
-        q_plan = build_repair_plan(root, [f for f in q_findings if isinstance(f, dict)], task_type)
-        assignments = q_plan.get("assignments", []) if isinstance(q_plan, dict) else []
-        # build_repair_plan returns one assignment per finding, in order.
-        assignments_by_key: dict[tuple[str, str], dict] = {}
-        assignments_by_id: dict[str, list[dict]] = {}
-        for queued, entry in zip([f for f in q_findings if isinstance(f, dict)], assignments):
-            if isinstance(entry, dict) and isinstance(entry.get("finding_id"), str):
-                assignments_by_key[(str(queued.get("auditor") or ""), entry["finding_id"])] = entry
-                assignments_by_id.setdefault(entry["finding_id"], []).append(entry)
+        from lib_qlearn import (  # noqa: PLC0415
+            build_repair_plan,
+            default_executor,
+            finding_category,
+            severity_floor_tier,
+        )
 
         # Same view the gate, the cycle plan and validate_repair_log read.
         live_by_key: dict[tuple[str, str], dict] = {}
@@ -5335,26 +5355,15 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                 continue
             seen_keys.add(key)
 
-            assignment = assignments_by_key.get(key)
-            if assignment is None and len(assignments_by_id.get(finding_id, [])) == 1:
-                assignment = assignments_by_id[finding_id][0]
-            assignment = assignment or {}
-            assigned_executor = assignment.get("assigned_executor") or finding.get("assigned_executor")
+            # A provisional executor, used only to scope a finding that cites
+            # no file to that executor's graph segments. The routed executor
+            # is chosen after merging, once each task's files are known.
+            assigned_executor = finding.get("assigned_executor")
             if assigned_executor not in VALID_EXECUTORS:
                 suggested = (live.get("_repair_task") or {}).get("assigned_executor")
                 assigned_executor = suggested if suggested in VALID_EXECUTORS else None
             if not assigned_executor:
-                category = finding_id.split("-")[0].lower() if "-" in finding_id else ""
-                if category == "db":
-                    assigned_executor = "db-executor"
-                elif category == "dc":
-                    assigned_executor = "refactor-executor"
-                elif category == "ui":
-                    assigned_executor = "ui-executor"
-                elif category == "sec":
-                    assigned_executor = "backend-executor"
-                else:
-                    assigned_executor = "backend-executor"
+                assigned_executor = default_executor(finding_category(finding_id, live["_auditor"]), None, root)
             files_to_modify, pipeline_files, files_inferred = _repair_scope_for_finding(
                 task_dir, finding, live, assigned_executor,
             )
@@ -5385,16 +5394,14 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                 "files_to_modify": files_to_modify,
                 "retry_count": int(finding.get("retry_count", 0) or 0),
                 "severity": normalize_repair_severity(str(live.get("severity") or "medium")),
-                "state": assignment.get("state"),
+                # Internal: every queued finding sits in the cycle plan's
+                # blocking list unless it says otherwise. Stripped below.
+                "_blocking": live.get("blocking", finding.get("blocking", True)) is not False,
             }
             if merged:
                 task["merged_findings"] = merged
             if files_inferred:
                 task["files_inferred"] = True
-            for meta_key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
-                value = assignment.get(meta_key)
-                if value is not None:
-                    task[meta_key] = value
             normalized_tasks.append(task)
 
         if stale:
@@ -5436,6 +5443,52 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
         normalized_tasks = _merge_overlapping_repair_tasks(
             [t for t in normalized_tasks if not t.get("files_inferred")]
         )
+
+        # Route every final task on its own files and severity. A merged
+        # task is routed on the union of its cluster's files and the
+        # cluster's highest severity, not on whatever its lead was given:
+        # a code-quality finding on a .tsx file goes to ui-executor, and a
+        # high-severity finding never runs on the fast tier.
+        routed = normalized_tasks + inferred_tasks
+        q_plan = build_repair_plan(root, [
+            {
+                "id": t["finding_id"],
+                "auditor": t["auditor"],
+                "severity": t["severity"],
+                "retry_count": t["retry_count"],
+                "blocking": bool(t.get("_blocking")),
+                "files": t["files_to_modify"],
+            }
+            for t in routed
+        ], task_type)
+        assignments = q_plan.get("assignments", []) if isinstance(q_plan, dict) else []
+        for task, assignment in zip(routed, assignments + [{}] * (len(routed) - len(assignments))):
+            assignment = assignment if isinstance(assignment, dict) else {}
+            blocking = bool(task.pop("_blocking", True))
+            for meta_key in _REPAIR_ROUTING_KEYS:
+                task.pop(meta_key, None)
+            executor = assignment.get("assigned_executor")
+            if executor not in VALID_EXECUTORS:
+                executor = default_executor(
+                    finding_category(task["finding_id"], task["auditor"]), task["files_to_modify"], root,
+                )
+            task["assigned_executor"] = executor
+            if assignment.get("state"):
+                task["state"] = assignment["state"]
+            for meta_key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
+                value = assignment.get(meta_key)
+                if value is not None:
+                    task[meta_key] = value
+            if "model_override" not in task:
+                floor = severity_floor_tier(executor, task["severity"], blocking)
+                if floor is not None:
+                    from lib_models import resolve_model_for_tier  # noqa: PLC0415
+                    from lib_qlearn import _resolve_host  # noqa: PLC0415
+
+                    resolved = resolve_model_for_tier(_resolve_host(root), floor)
+                    if resolved:
+                        task["model_override"] = resolved
+                        task["model_source"] = "severity_floor"
 
         groups: list[dict] = []
         for task in normalized_tasks:
@@ -5502,6 +5555,14 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
             "batch_count": len(batches),
             "task_count": len(normalized_tasks),
             "q_learning_source": repair_log["q_learning_source"],
+            # Findings folded into another task are repaired by it, not
+            # dropped: finding id -> the task that carries it.
+            "merged_finding_ids": {
+                f"{m['auditor']}:{m['id']}": f"{t['auditor']}:{t['finding_id']}"
+                for t in normalized_tasks
+                for m in t.get("merged_findings") or []
+                if isinstance(m, dict) and m.get("id")
+            },
         }, indent=2))
         return 0
     except Exception as exc:
