@@ -2014,7 +2014,14 @@ def _count_files(path: Path, pattern: str) -> int:
         return 0
 
 
-def _build_ruthless_audit_brief(root: Path, task_dir: Path, plan: dict, auditor_name: str) -> str:
+def _is_reaudit(task_dir: Path) -> bool:
+    """A prior audit cycle already drove a repair (repair-log.json exists)."""
+    return (task_dir / "repair-log.json").is_file()
+
+
+def _build_ruthless_audit_brief(
+    root: Path, task_dir: Path, plan: dict, auditor_name: str, *, reaudit: bool = False,
+) -> str:
     """Build a self-implicating audit brief from deterministic task evidence."""
     manifest = _read_task_json_object(task_dir, "manifest.json")
     classification = manifest.get("classification") if isinstance(manifest, dict) else {}
@@ -2095,8 +2102,113 @@ def _build_ruthless_audit_brief(root: Path, task_dir: Path, plan: dict, auditor_
         "- Were blockers downgraded, deferred, hidden in residual work, or converted into non-blocking advisories without proof?",
         "- Do evidence files prove behavior with commands and outputs, or merely narrate completion?",
         "",
-        "Output pressure: if you report no blocking findings, explicitly name the untested or highest-risk surface you exercised and why it is trustworthy.",
+        (
+            "Re-audit focus: verify the repairs listed under Re-Audit Context and report only defects "
+            "that are real and still present. Do not go looking for a new variant to report; if you "
+            "report no blocking findings, name the repaired surfaces you re-checked."
+            if reaudit else
+            "Output pressure: if you report no blocking findings, explicitly name the untested or highest-risk surface you exercised and why it is trustworthy."
+        ),
     ])
+    return "\n".join(lines)
+
+
+def _build_reaudit_context_block(task_dir: Path, auditor_name: str) -> str:
+    """Prior-cycle findings, their repairs, and accepted findings for a re-audit.
+
+    Empty on a first audit (no repair-log.json). Without this a re-auditor
+    sees no history and reports a new variant of the same issue class each
+    cycle, so the repair loop never converges.
+    """
+    if not _is_reaudit(task_dir):
+        return ""
+    from lib_core import finding_is_blocking, load_accepted_findings  # noqa: PLC0415
+    from lib_validate import _finding_location_file, collect_repair_findings  # noqa: PLC0415
+
+    try:
+        repair_log = load_json(task_dir / "repair-log.json")
+    except (OSError, ValueError):
+        repair_log = {}
+    if not isinstance(repair_log, dict):
+        repair_log = {}
+    cycle = repair_log.get("repair_cycle")
+    repairs: dict[str, dict] = {}
+    for batch in repair_log.get("batches", []) or []:
+        if not isinstance(batch, dict):
+            continue
+        for task in batch.get("tasks", []) or []:
+            if not isinstance(task, dict) or not isinstance(task.get("finding_id"), str):
+                continue
+            owner = task.get("auditor")
+            ids = [task["finding_id"]] if owner in (None, "", auditor_name) else []
+            for merged in task.get("merged_findings", []) or []:
+                if isinstance(merged, dict) and merged.get("auditor") == auditor_name and isinstance(merged.get("id"), str):
+                    ids.append(merged["id"])
+            for fid in ids:
+                repairs.setdefault(fid, task)
+
+    try:
+        prior = [f for f in collect_repair_findings(task_dir)["findings"] if f.get("_auditor") == auditor_name]
+    except Exception:  # noqa: BLE001 — context is advisory; never block the spawn
+        prior = []
+    accepted = [e for e in load_accepted_findings(task_dir) if e.get("auditor") == auditor_name]
+
+    def _one_line(value: object, limit: int = 160) -> str:
+        text = " ".join(str(value or "").split())
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    lines = [
+        "\n\n## Re-Audit Context (mandatory — injected)",
+        f"This is a re-audit after repair cycle {cycle if cycle is not None else '?'}. "
+        "Your previous findings, what the repair did about each, and the findings a human accepted "
+        "are listed below.",
+        "",
+        "Rules for this re-audit:",
+        "- Report the WHOLE class of an issue as ONE finding that lists every location it occurs "
+        "(all files and lines), not one location now and the next variant in the next cycle.",
+        "- Do not re-raise an accepted finding, or a variant of it (same issue class and file).",
+        "- Re-raise a previously repaired finding only if the fix is actually wrong or incomplete; "
+        "cite the exact file:line that still shows the defect. Keep its original id.",
+        "- A new finding must be a distinct defect, not a rewording of one listed below.",
+        "",
+        "### Your previous-cycle findings",
+    ]
+    if prior:
+        for finding in prior:
+            fid = str(finding.get("id"))
+            title = _one_line(finding.get("title") or finding.get("description") or "")
+            file_ref = _finding_location_file(finding) or "no file"
+            severity = finding.get("severity") or ("blocking" if finding.get("blocking") else "unknown")
+            lines.append(f"- {fid} [{severity}] {file_ref}: {title}")
+            repair = repairs.get(fid)
+            if isinstance(finding.get("accepted"), dict):
+                lines.append(f"  - status: accepted by human decision ({_one_line(finding['accepted'].get('reason'))})")
+            elif repair is not None:
+                status = repair.get("status") or "repair applied"
+                files = ", ".join(str(f) for f in repair.get("files_to_modify", []) or []) or "unknown files"
+                lines.append(
+                    f"  - status: {status} by {repair.get('assigned_executor') or 'executor'} "
+                    f"(retry {repair.get('retry_count', 0)}) in {files}; instruction: "
+                    f"{_one_line(repair.get('instruction'))}"
+                )
+            elif not finding_is_blocking(finding):
+                lines.append("  - status: non-blocking, not repaired")
+            else:
+                lines.append("  - status: not in the last repair log")
+    else:
+        lines.append("- none recorded")
+    lines.append("")
+    lines.append("### Accepted findings (do not re-raise)")
+    if accepted:
+        for entry in accepted:
+            ref = f"; ref {entry['decision_ref']}" if entry.get("decision_ref") else ""
+            where = entry.get("file") or "no file"
+            lines.append(
+                f"- {entry.get('finding_id')} {where}: {_one_line(entry.get('title'))} — "
+                f"accepted: {_one_line(entry.get('reason'))}{ref}"
+            )
+    else:
+        lines.append("- none")
     return "\n".join(lines)
 
 
@@ -2297,7 +2409,8 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     final_text = (
         final_text.rstrip()
         + "\n\n"
-        + _build_ruthless_audit_brief(root, task_dir, plan, auditor_name)
+        + _build_ruthless_audit_brief(root, task_dir, plan, auditor_name, reaudit=_is_reaudit(task_dir))
+        + _build_reaudit_context_block(task_dir, auditor_name)
         + _build_failing_tests_block(task_dir, auditor_name)
     )
 

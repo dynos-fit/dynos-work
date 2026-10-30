@@ -319,7 +319,8 @@ Build the execution graph payload with this shape and persist it by piping it to
       "parallelizable": true,
       "criteria_ids": [1, 2, 3],
       "verify_commands": [
-        {"id": "lint", "command": "ruff check src", "criteria_ids": [2]}
+        {"id": "lint", "command": "ruff check src", "criteria_ids": [2]},
+        {"id": "e2e", "command": "npx playwright test", "criteria_ids": [3], "timeout": 1800}
       ]
     }
   ]
@@ -332,7 +333,7 @@ Build the execution graph payload with this shape and persist it by piping it to
 - `depends_on` lists segment IDs that must complete before this one can start
 - `criteria_ids` lists the acceptance criterion numbers from `spec.md` this segment satisfies
 - All acceptance criteria must be covered by at least one segment
-- Every criterion that is proven by RUNNING something ("ruff check exits 0", "the build succeeds", "the e2e suite passes") gets a `verify_commands` entry on the segment that delivers it, with that criterion in its `criteria_ids`. ctl runs these commands and records the exit codes in `evidence/verification/{seg-id}.json`; the spec-completion auditor does not accept an executor's claim that a command passed, so a run-based criterion without a verify command is reported missing. Omit `verify_commands` on a segment with no run-based criteria
+- Every criterion that is proven by RUNNING something ("ruff check exits 0", "the build succeeds", "the e2e suite passes") gets a `verify_commands` entry on the segment that delivers it, with that criterion in its `criteria_ids`. ctl runs these commands and records the exit codes in `evidence/verification/{seg-id}.json`; the spec-completion auditor does not accept an executor's claim that a command passed, so a run-based criterion without a verify command is reported missing. Omit `verify_commands` on a segment with no run-based criteria. Each command runs with a one-hour limit; set `timeout` (seconds) on an entry that needs a different one
 - Segments with empty `depends_on` and `parallelizable: true` can run simultaneously
 - The dependency graph must be acyclic
 - Every file path must be repo-relative and must not escape the workspace

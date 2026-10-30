@@ -368,6 +368,9 @@ def test_amend_artifact_second_amendment_refused(tmp_path: Path):
     second = _run_ctl(root, "amend-artifact", str(task_dir), "spec", "--reason", "second")
     assert second.returncode == 1
     assert "amendment window exhausted" in second.stderr
+    # The refusal names the limit's source and the policy file to raise it in.
+    assert "limit 1 from default" in second.stderr
+    assert "policy.json" in second.stderr
     assert len(list((task_dir / "receipts").glob("amend-spec-*.json"))) == 1
 
 

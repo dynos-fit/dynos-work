@@ -8,6 +8,7 @@ Public API:
         Returns a dict with keys:
             - bug_type: str, one of the values in ALLOWED_BUG_TYPES
             - mentioned_files: list[dict] with keys path, line, col
+              (+ end_line for a "file.py:120-140" range)
             - mentioned_symbols: list[str]
 
 No network, no LLM, no third-party dependencies.
@@ -176,31 +177,55 @@ _GROUP_TO_BUG_TYPE: dict[str, str] = {
 # Extraction regexes
 # ---------------------------------------------------------------------------
 
-# File paths like "src/foo.py:42:7" or "lib/bar.ts:10" or "Main.java:34"
-# - path component: at least one slash OR an extension, no whitespace
+# File paths like "src/foo.py:42:7", "lib/bar.ts:10", "Main.java:34" or a
+# line range "hooks/ctl.py:120-140".
+# - path component: optional dir segments + a filename with a known extension
 # - extension: 1-6 alnum chars (covers ts, tsx, py, go, java, rs, rb, dart, js, jsx, kt)
-# - optional :line and :col
+# - optional :line, optional -end_line range, optional :col
 _FILE_PATH_RE = re.compile(
     r"""
-    (?<![\w/])                        # not preceded by a word char or slash
+    (?<![\w/.-])                     # not preceded by a word char, slash, dot or dash
     (
         (?:[\w./-]+/)?[\w.-]+         # optional dir segments + filename
         \.
-        (?:py|pyi|ts|tsx|js|jsx|mjs|cjs|go|rs|java|kt|kts|rb|dart|c|cc|cpp|h|hpp|cs|php|swift|scala|sql|json|ya?ml|toml)
+        (?:py|pyi|ts|tsx|js|jsx|mjs|cjs|go|rs|java|kt|kts|rb|dart|c|cc|cpp|h|hpp|cs|php|swift|scala|sql|json|ya?ml|toml|md|sh)
     )
-    (?::(\d+))?                       # optional :line
+    (?![\w-])                         # extension must end the token
+    (?::(\d+)(?:\s*[-\u2013]\s*(\d+))?)? # optional :line or :line-end_line
     (?::(\d+))?                       # optional :col
     """,
     re.VERBOSE,
 )
 
-# Symbols inside backticks: `name`, `name()`, `Class.method()`
-_BACKTICK_SYMBOL_RE = re.compile(r"`([A-Za-z_][\w.]*)\s*(?:\(\s*\))?`")
+# Symbols inside backticks: `name`, `name()`, `name(arg)`, `Class.method()`
+_BACKTICK_SYMBOL_RE = re.compile(r"`([A-Za-z_][\w.]*)\s*(?:\([^`]*\))?`")
 
-# Bare Name() patterns — capitalised or lower-case identifier followed by ()
-# Only outside backticks (we run this on text with backticks already consumed
-# OR in addition; dedupe at the end).
-_CALL_SYMBOL_RE = re.compile(r"\b([A-Za-z_][\w]{1,})\s*\(\s*\)")
+# Call-shaped identifiers: `name(` with no space before the paren, e.g.
+# "include()" or "include(variable)".
+_CALL_SYMBOL_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\(")
+
+# Identifier-shaped bare tokens that are almost never English words:
+#   snake_case / _private / UPPER_SNAKE   (contains an underscore)
+#   camelCase / PascalCase-with-hump      (an inner lower->upper transition)
+#   dotted.names                          (module.attr, Class.method)
+_SNAKE_RE = re.compile(r"(?<![\w.])(_*[A-Za-z][A-Za-z0-9]*(?:_+[A-Za-z0-9]+)+_*)(?![\w])")
+_CAMEL_RE = re.compile(r"(?<![\w.])([A-Za-z][a-z0-9]+[A-Z][A-Za-z0-9]*)(?![\w])")
+_DOTTED_RE = re.compile(
+    r"(?<![\w.])([A-Za-z_]\w+(?:\.[A-Za-z_]\w+)+)(?![\w(])"
+)
+
+# Tokens that look like calls/identifiers but carry no evidential value.
+_SYMBOL_STOPWORDS: frozenset[str] = frozenset({
+    "is", "if", "or", "and", "not", "the", "in", "on", "of", "to", "a", "an",
+    "e.g", "i.e", "etc", "vs", "see", "via", "for", "with", "as", "at", "by",
+})
+
+_FILE_EXTENSIONS: frozenset[str] = frozenset({
+    "py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs", "java",
+    "kt", "kts", "rb", "dart", "c", "cc", "cpp", "h", "hpp", "cs", "php",
+    "swift", "scala", "sql", "json", "yml", "yaml", "toml", "md", "sh",
+    "txt", "log", "html", "css",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +242,8 @@ def classify(bug_text: Any) -> dict[str, Any]:
     Returns:
         dict with keys:
             - bug_type: str (one of ALLOWED_BUG_TYPES)
-            - mentioned_files: list[dict] each {"path", "line", "col"}
+            - mentioned_files: list[dict] each {"path", "line", "col"},
+              plus "end_line" for a line range
             - mentioned_symbols: list[str]
     """
     text = _coerce_text(bug_text)
@@ -260,58 +286,89 @@ def _classify_type(text: str) -> str:
 
 
 def _extract_files(text: str) -> list[dict[str, Any]]:
-    """Extract file-path-like tokens with optional :line:col into dicts."""
+    """Extract file-path-like tokens with optional :line[-end]:col into dicts.
+
+    Each entry is {"path", "line", "col"} (unset parts are None), plus
+    "end_line" when the reference is a range ("file.py:120-140").
+    """
     if not text:
         return []
 
-    seen: set[tuple[str, int | None, int | None]] = set()
+    seen: set[tuple[str, int | None, int | None, int | None]] = set()
     out: list[dict[str, Any]] = []
 
     for match in _FILE_PATH_RE.finditer(text):
         path = match.group(1)
-        line_str = match.group(2)
-        col_str = match.group(3)
+        if not path:
+            continue
+        line_str, end_str, col_str = match.group(2), match.group(3), match.group(4)
 
         line = int(line_str) if line_str is not None else None
+        end_line = int(end_str) if end_str is not None else None
         col = int(col_str) if col_str is not None else None
+        if line is not None and end_line is not None and end_line < line:
+            end_line = None
 
-        key = (path, line, col)
+        key = (path, line, end_line, col)
         if key in seen:
             continue
         seen.add(key)
 
-        out.append({"path": path, "line": line, "col": col})
+        entry: dict[str, Any] = {"path": path, "line": line, "col": col}
+        if end_line is not None:
+            entry["end_line"] = end_line
+        out.append(entry)
 
     return out
 
 
+def _is_junk_symbol(sym: str) -> bool:
+    if len(sym.strip("_")) < 2:
+        return True
+    if sym.lower() in _SYMBOL_STOPWORDS:
+        return True
+    if "." in sym:
+        parts = sym.split(".")
+        # A dotted token ending in a file extension is a file name, not a
+        # symbol ("lib_qlearn.py"); version-like or single-letter parts are
+        # prose ("e.g", "v1.2").
+        if parts[-1].lower() in _FILE_EXTENSIONS:
+            return True
+        if any(len(p) < 2 for p in parts):
+            return True
+    return False
+
+
 def _extract_symbols(text: str) -> list[str]:
-    """Extract function/class names from backticks and bare Name() patterns."""
+    """Extract identifier-shaped tokens from the bug text, in order of
+    first appearance.
+
+    Sources: backticked names, call-shaped ``name(`` tokens, and bare
+    snake_case / camelCase / dotted identifiers. File paths are masked out
+    first so ``lib_qlearn.py`` does not also yield ``lib_qlearn``.
+    """
     if not text:
         return []
 
+    # Mask file paths (keep offsets stable by replacing with spaces).
+    masked = _FILE_PATH_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+    hits: list[tuple[int, str]] = []
+    for match in _BACKTICK_SYMBOL_RE.finditer(masked):
+        hits.append((match.start(1), match.group(1)))
+    for regex in (_CALL_SYMBOL_RE, _SNAKE_RE, _CAMEL_RE, _DOTTED_RE):
+        for match in regex.finditer(masked):
+            hits.append((match.start(1), match.group(1)))
+    hits.sort(key=lambda h: h[0])
+
     seen: set[str] = set()
     out: list[str] = []
-
-    # 1. Backtick-wrapped symbols.
-    for match in _BACKTICK_SYMBOL_RE.finditer(text):
-        sym = match.group(1)
-        if sym and sym not in seen:
-            seen.add(sym)
-            out.append(sym)
-
-    # 2. Bare Name() patterns. Strip backticked regions first to avoid
-    #    double-counting and then scan the remainder.
-    stripped = re.sub(r"`[^`]*`", " ", text)
-    for match in _CALL_SYMBOL_RE.finditer(stripped):
-        sym = match.group(1)
-        # Skip common english words that can look like calls (best-effort).
-        if sym.lower() in {"is", "if", "or", "and", "not", "the", "in", "on",
-                           "of", "to", "a", "an"}:
+    for _, raw in hits:
+        sym = raw.strip(".")
+        if not sym or sym in seen or _is_junk_symbol(sym):
             continue
-        if sym not in seen:
-            seen.add(sym)
-            out.append(sym)
+        seen.add(sym)
+        out.append(sym)
 
     return out
 

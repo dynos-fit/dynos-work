@@ -23,7 +23,14 @@ mkdir -p "$INVESTIGATION_DIR"
 python3 "${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/debug-module/triage.py" --bug "<bug text>" --repo . --out "$INVESTIGATION_DIR/dossier.json"
 ```
 
-This produces an evidence dossier with pre-minted evidence IDs (`F-001` for files, `S-001` for symbols, etc.), git blame, linter findings, and Semgrep silent-accomplice findings. The LLM does not gather evidence — it reasons over what triage has already found.
+This produces an evidence dossier with pre-minted evidence IDs, git blame ranges, and co-change history. The LLM does not gather evidence — it reasons over what triage has already found, so triage puts the code the bug text names into the dossier:
+
+- `F-NNN` — each mentioned file that exists in the repo (path, size, line count, a short numbered head), plus a numbered snippet for every `file.py:123` or `file.py:120-140` reference (and stack-frame line).
+- `SY-NNN` — the definition of each identifier the bug text names (backticked, `name()`, snake_case, camelCase, dotted, UPPER_CASE constants, and `cmd_*` handlers derived from kebab-case CLI subcommands like `clear-role`): file, line range, and up to 120 numbered source lines. Looked up in the mentioned files first, then repo-wide for distinctive names.
+- `MF-NNN` / `S-NNN` — linter and Semgrep silent-accomplice findings, limited to the mentioned files when any resolve (capped at 100 each otherwise).
+- `T-NNN`, `ST-NNN`, `CG-NNN` — test results, stack frames, coverage gaps.
+
+`evidence_scope` in the dossier records which files and symbols resolved, which did not, and how many out-of-scope findings were dropped.
 
 ## Phase 2 — Causal Reasoning
 

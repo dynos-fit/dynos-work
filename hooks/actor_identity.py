@@ -301,12 +301,15 @@ def append_grant(
     return grant
 
 
-def expire_grants(task_dir: Path, *, write_json_fn=None) -> int:
-    """Mark every unconsumed grant expired. Clearing only reduces privilege."""
+def expire_grants(task_dir: Path, *, write_json_fn=None, keep_roles=()) -> int:
+    """Mark every unconsumed grant expired, except grants for ``keep_roles``
+    (roles of subagents still running). Clearing only reduces privilege."""
     ledger = load_grants(task_dir)
     now = time.time()
     expired = 0
     for grant in ledger["grants"]:
+        if grant.get("role") in keep_roles:
+            continue
         if grant.get("consumed_by") is None and grant.get("expires_at", 0) > now:
             grant["expires_at"] = now
             expired += 1

@@ -397,6 +397,14 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
                 raise ValueError(f"duplicate verify_commands id: {vc_id}")
             seen_vc_ids.add(vc_id)
             vc: dict = {"id": vc_id, "command": command}
+            if entry.get("timeout") is not None:
+                try:
+                    vc_timeout = int(entry["timeout"])
+                except (TypeError, ValueError):
+                    raise ValueError(f"verify_commands {vc_id}: timeout must be an integer of seconds") from None
+                if vc_timeout <= 0:
+                    raise ValueError(f"verify_commands {vc_id}: timeout must be positive")
+                vc["timeout"] = vc_timeout
             vc_criteria: list[int] = []
             for crit in entry.get("criteria_ids", []) or []:
                 try:
@@ -1126,10 +1134,20 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
     # ``max_amendments_per_artifact`` when a project genuinely needs more.
     prior_amendments = canonical_data.get("amendments", []) if isinstance(canonical_data, dict) else []
     prior_count = len(prior_amendments) if isinstance(prior_amendments, list) else 0
+    policy_path = "<unresolved>"
+    limit_source = "default"
     try:
+        from lib_core import _persistent_project_dir
         from lib_validate import load_project_policy
-        _limit_raw = load_project_policy(task_dir).get("max_amendments_per_artifact", 1)
-        amend_limit = int(_limit_raw) if isinstance(_limit_raw, int) and not isinstance(_limit_raw, bool) and _limit_raw > 0 else 1
+        policy_path = str(_persistent_project_dir(task_dir.parent.parent) / "policy.json")
+        _limit_raw = load_project_policy(task_dir).get("max_amendments_per_artifact")
+        if isinstance(_limit_raw, int) and not isinstance(_limit_raw, bool) and _limit_raw > 0:
+            amend_limit = _limit_raw
+            limit_source = "policy"
+        else:
+            amend_limit = 1
+            if _limit_raw is not None:
+                limit_source = f"default; ignored invalid policy value {_limit_raw!r}"
     except Exception:
         amend_limit = 1
     if prior_count >= amend_limit:
@@ -1144,9 +1162,10 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
             pass
         print(
             f"amend-artifact: amendment window exhausted for {artifact_name} "
-            f"({prior_count}/{amend_limit} used). Repeated post-approval edits are the "
+            f"({prior_count}/{amend_limit} used; limit {amend_limit} from {limit_source}, "
+            f"policy file {policy_path}). Repeated post-approval edits are the "
             "churn this gate exists to stop: fold the change into a new task, or raise "
-            "policy max_amendments_per_artifact for this project.",
+            "max_amendments_per_artifact (a positive integer) in that policy file.",
             file=sys.stderr,
         )
         return 1
@@ -2741,8 +2760,9 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
 
     role_file = task_dir / "active-segment-role"
     try:
+        from agent_spawn_log import spawns_in_flight
         from lib_core import stamp_role
-        stamp_role(task_dir, role)
+        stamp_role(task_dir, role, keep=spawns_in_flight(task_dir / "spawn-log.jsonl"))
     except OSError as exc:
         print(f"stamp-role: failed to write {role_file}: {exc}", file=sys.stderr)
         return 1
@@ -2794,12 +2814,17 @@ def cmd_grant_role(args: argparse.Namespace) -> int:
 
 
 def cmd_clear_role(args: argparse.Namespace) -> int:
-    """Expire all unconsumed grants and remove the legacy role file.
+    """Expire unconsumed grants and drop stamped roles nothing still needs.
 
     This is the sanctioned replacement for the (policy-denied)
     `rm active-segment-role` step the skills used to prescribe. Clearing
-    only ever REDUCES privilege: existing session bindings are untouched
-    (a running subagent keeps its role), no new role can be minted here.
+    only ever REDUCES privilege. Under a harness that shares one session
+    across subagents, every running subagent resolves its role from the
+    role file, so a role whose spawn is still in flight (per
+    spawn-log.jsonl) keeps both its stamp and its grants: clearing after
+    one parallel segment returns must not revoke its siblings. ``--role``
+    drops that one role regardless; ``--all`` restores the old
+    clear-everything behaviour.
     """
     task_dir = Path(args.task_dir).resolve()
     if not task_dir.is_dir():
@@ -2807,30 +2832,50 @@ def cmd_clear_role(args: argparse.Namespace) -> int:
         return 1
 
     import actor_identity
+    from agent_spawn_log import spawns_in_flight
+    from lib_core import read_stamped_roles, write_stamped_roles
 
     def _ctl_writer(path: Path, data: object) -> None:
         _write_ctl_json(task_dir, path, data)
 
+    only_role = (getattr(args, "role", None) or "").strip() or None
+    stamped = read_stamped_roles(task_dir)
+    if getattr(args, "all", False):
+        keep: set[str] = set()
+    else:
+        in_flight = spawns_in_flight(task_dir / "spawn-log.jsonl")
+        keep = {r for r in stamped if in_flight.get(r)}
+        if only_role is not None:
+            keep = {r for r in stamped if r != only_role}
+    if only_role is None:
+        keep_grants = keep
+    else:
+        keep_grants = {
+            str(g.get("role")) for g in actor_identity.pending_grants(task_dir)
+        } - {only_role}
+
     try:
-        expired = actor_identity.expire_grants(task_dir, write_json_fn=_ctl_writer)
+        expired = actor_identity.expire_grants(
+            task_dir, write_json_fn=_ctl_writer, keep_roles=keep_grants,
+        )
     except Exception as exc:
         print(f"clear-role: failed to expire grants: {exc}", file=sys.stderr)
         return 1
 
     role_file = task_dir / "active-segment-role"
-    removed = False
-    if role_file.is_file():
-        try:
-            role_file.unlink()
-            removed = True
-        except OSError as exc:
-            print(f"clear-role: failed to remove {role_file}: {exc}", file=sys.stderr)
-            return 1
+    remaining = [r for r in stamped if r in keep]
+    try:
+        write_stamped_roles(task_dir, remaining)
+    except OSError as exc:
+        print(f"clear-role: failed to update {role_file}: {exc}", file=sys.stderr)
+        return 1
 
     print(json.dumps({
         "status": "role_cleared",
         "grants_expired": expired,
-        "legacy_role_file_removed": removed,
+        "roles_cleared": [r for r in stamped if r not in keep],
+        "roles_kept_in_flight": remaining,
+        "legacy_role_file_removed": bool(stamped) and not remaining,
     }, indent=2))
     return 0
 
@@ -4784,6 +4829,36 @@ def _is_critical_spec_finding(finding: dict) -> bool:
     )
 
 
+def _leave_repair_execution_if_clear(task_dir: Path, blocking_count: int) -> str | None:
+    """Return a repaired task to CHECKPOINT_AUDIT once its re-audit is clear.
+
+    After a repair cycle the stage stays REPAIR_EXECUTION while the
+    re-audit runs; nothing else moves it back, and `run-audit-finish`
+    only finishes from an audit stage. Returns the new stage, or None when
+    the task was not in REPAIR_EXECUTION or still has blocking findings.
+    """
+    if blocking_count:
+        return None
+    if str(_load_manifest(task_dir).get("stage", "")) != "REPAIR_EXECUTION":
+        return None
+    transition_task(task_dir, "CHECKPOINT_AUDIT")
+    return "CHECKPOINT_AUDIT"
+
+
+def _accepted_finding_rows(findings: list[dict]) -> list[dict]:
+    """The findings ``ctl accept-finding`` took out of the blocking set."""
+    return [
+        {
+            "auditor": f["_auditor"],
+            "id": f["id"],
+            "reason": f["accepted"].get("reason"),
+            "decision_ref": f["accepted"].get("decision_ref"),
+            "matched_by": f["accepted"].get("matched_by"),
+        }
+        for f in findings if isinstance(f.get("accepted"), dict)
+    ]
+
+
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -4802,21 +4877,158 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
 
         next_action = "repair_phase_1" if blocking_findings else "reflect"
         status = "repair_required" if blocking_findings else "clear"
+        transitioned_to: str | None = None
+        transition_error: str | None = None
+        try:
+            transitioned_to = _leave_repair_execution_if_clear(task_dir, len(blocking_findings))
+        except ValueError as exc:
+            transition_error = str(exc)
         print(json.dumps({
             "status": status,
             "task_dir": str(task_dir),
+            "transitioned_to": transitioned_to,
+            "transition_error": transition_error,
             "reports_seen": reports,
             "findings_by_auditor": findings_by_auditor,
             "blocking_findings": blocking_findings,
             "blocking_finding_ids": [str(f.get("id", "")) for f in blocking_findings if f.get("id")],
             "critical_spec_failure": bool(critical_spec_findings),
             "critical_spec_finding_ids": [str(f.get("id", "")) for f in critical_spec_findings if f.get("id")],
+            "accepted_findings": _accepted_finding_rows(collected["findings"]),
             "next_action": next_action,
         }, indent=2))
         return 0
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def _prior_repair_retry_index(
+    task_dir: Path,
+) -> tuple[int, dict[tuple[str | None, str], int], dict[tuple[str, str, str], int]]:
+    """Retry counts the last repair cycle recorded.
+
+    Returns ``(prior_cycle, by_id, by_class)``. ``by_id`` is keyed by
+    ``(auditor, finding_id)`` from repair-log.json; a task written without an
+    auditor (older logs) is keyed by ``(None, finding_id)`` and matches any
+    auditor. ``by_class`` is keyed by ``finding_class_keys`` of the findings
+    the previous repair-cycle-plan.json queued, so a re-audit that rewords a
+    finding under a new ID (same auditor, class and file) inherits its count.
+    """
+    from lib_validate import finding_class_keys  # noqa: PLC0415
+
+    def as_int(value: object) -> int:
+        try:
+            return int(value or 0)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    prior_cycle = 0
+    by_id: dict[tuple[str | None, str], int] = {}
+    by_class: dict[tuple[str, str, str], int] = {}
+    repair_log_path = task_dir / "repair-log.json"
+    if repair_log_path.exists():
+        repair_log = load_json(repair_log_path)
+        if isinstance(repair_log, dict):
+            prior_cycle = as_int(repair_log.get("repair_cycle", 0))
+            for batch in repair_log.get("batches", []) or []:
+                if not isinstance(batch, dict):
+                    continue
+                for task in batch.get("tasks", []) or []:
+                    if not isinstance(task, dict):
+                        continue
+                    fid = task.get("finding_id")
+                    if not isinstance(fid, str) or not fid:
+                        continue
+                    retry_count = as_int(task.get("retry_count", 0))
+                    task_auditor = task.get("auditor")
+                    keys = [(task_auditor if isinstance(task_auditor, str) and task_auditor else None, fid)]
+                    # A merged duplicate was repaired by this task too; the
+                    # next cycle may pick it as the primary instead.
+                    for merged in task.get("merged_findings", []) or []:
+                        if isinstance(merged, dict) and isinstance(merged.get("id"), str) and merged["id"]:
+                            merged_auditor = merged.get("auditor")
+                            keys.append((merged_auditor if isinstance(merged_auditor, str) and merged_auditor else None, merged["id"]))
+                    for key in keys:
+                        by_id[key] = max(by_id.get(key, retry_count), retry_count)
+    try:
+        prior_plan = load_json(task_dir / "repair-cycle-plan.json")
+    except (OSError, ValueError):
+        prior_plan = None
+    if not isinstance(prior_plan, dict):
+        return prior_cycle, by_id, by_class
+    # ``retry_history`` carries the class keys of every earlier executed plan,
+    # so a variant matches a finding from any earlier cycle, and re-planning
+    # the same upcoming cycle reads the same history.
+    for row in prior_plan.get("retry_history", []) or []:
+        if isinstance(row, list) and len(row) == 4 and all(isinstance(v, str) for v in row[:3]):
+            key = (row[0], row[1], row[2])
+            by_class[key] = max(by_class.get(key, as_int(row[3])), as_int(row[3]))
+    # The plan's own findings count only when its repairs ran (its cycle is
+    # the log's cycle); a plan re-run for the upcoming cycle must not inherit
+    # from itself.
+    if prior_cycle and as_int(prior_plan.get("repair_cycle")) == prior_cycle:
+        for finding in prior_plan.get("blocking_findings", []) or []:
+            if not isinstance(finding, dict):
+                continue
+            retry_count = as_int(finding.get("retry_count", 0))
+            for key in finding_class_keys(str(finding.get("_auditor") or ""), finding):
+                by_class[key] = max(by_class.get(key, retry_count), retry_count)
+    return prior_cycle, by_id, by_class
+
+
+def _retry_history_rows(by_class: dict[tuple[str, str, str], int]) -> list[list]:
+    """``by_class`` as JSON rows ``[auditor, class, file, retry_count]``."""
+    return [[a, c, f, n] for (a, c, f), n in sorted(by_class.items())]
+
+
+def _inherited_retry_count(
+    finding: dict,
+    by_id: dict[tuple[str | None, str], int],
+    by_class: dict[tuple[str, str, str], int],
+) -> int | None:
+    """The previous retry count this finding inherits, or None when new.
+
+    Matched by ``(auditor, finding_id)`` first, then by issue class and file
+    (``finding_class_keys``) so a reworded variant does not restart at 0.
+    """
+    from lib_validate import finding_class_keys  # noqa: PLC0415
+
+    auditor = str(finding.get("_auditor") or "")
+    fid = str(finding.get("id") or "")
+    previous = by_id.get((auditor, fid))
+    if previous is None:
+        previous = by_id.get((None, fid))
+    class_hits = [by_class[key] for key in finding_class_keys(auditor, finding) if key in by_class]
+    if class_hits:
+        previous = max(class_hits) if previous is None else max(previous, *class_hits)
+    return previous
+
+
+def _prior_auditor_repair_cycles(task_dir: Path) -> dict[str, list[int]]:
+    """Repair cycles each auditor's blocking findings drove so far, from the
+    previous repair-cycle-plan.json (``auditor_repair_cycles``)."""
+    try:
+        prior_plan = load_json(task_dir / "repair-cycle-plan.json")
+    except (OSError, ValueError):
+        return {}
+    raw = prior_plan.get("auditor_repair_cycles") if isinstance(prior_plan, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(auditor): sorted({int(c) for c in cycles if isinstance(c, int) and not isinstance(c, bool)})
+        for auditor, cycles in raw.items()
+        if isinstance(cycles, list)
+    }
+
+
+def _merge_auditor_cycles(prior: dict[str, list[int]], auditors: set[str], cycle: int) -> dict[str, list[int]]:
+    """Add ``cycle`` to each auditor's history. Idempotent: re-planning the
+    same cycle does not count it twice."""
+    merged = {auditor: set(cycles) for auditor, cycles in prior.items()}
+    for auditor in auditors:
+        merged.setdefault(auditor, set()).add(cycle)
+    return {auditor: sorted(cycles) for auditor, cycles in sorted(merged.items())}
 
 
 def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
@@ -4850,47 +5062,16 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
                 "phase": None,
                 "blocking_findings": [],
                 "blocking_finding_ids": [],
+                "auditor_repair_cycles": _prior_auditor_repair_cycles(task_dir),
+                "retry_history": _retry_history_rows(_prior_repair_retry_index(task_dir)[2]),
                 "next_action": "reflect",
             }
             write_json(task_dir / "repair-cycle-plan.json", payload)
             print(json.dumps(payload, indent=2))
             return 0
 
-        prior_cycle = 0
-        # Keyed by (auditor, finding_id); a task written without an auditor
-        # (older logs) is keyed by (None, finding_id) and matches any auditor.
-        prior_retry_counts: dict[tuple[str | None, str], int] = {}
-        repair_log_path = task_dir / "repair-log.json"
-        if repair_log_path.exists():
-            repair_log = load_json(repair_log_path)
-            if isinstance(repair_log, dict):
-                try:
-                    prior_cycle = int(repair_log.get("repair_cycle", 0) or 0)
-                except (TypeError, ValueError):
-                    prior_cycle = 0
-                for batch in repair_log.get("batches", []) or []:
-                    if not isinstance(batch, dict):
-                        continue
-                    for task in batch.get("tasks", []) or []:
-                        if not isinstance(task, dict):
-                            continue
-                        fid = task.get("finding_id")
-                        if not isinstance(fid, str) or not fid:
-                            continue
-                        try:
-                            retry_count = int(task.get("retry_count", 0) or 0)
-                        except (TypeError, ValueError):
-                            retry_count = 0
-                        task_auditor = task.get("auditor")
-                        keys = [(task_auditor if isinstance(task_auditor, str) and task_auditor else None, fid)]
-                        # A merged duplicate was repaired by this task too; the
-                        # next cycle may pick it as the primary instead.
-                        for merged in task.get("merged_findings", []) or []:
-                            if isinstance(merged, dict) and isinstance(merged.get("id"), str) and merged["id"]:
-                                merged_auditor = merged.get("auditor")
-                                keys.append((merged_auditor if isinstance(merged_auditor, str) and merged_auditor else None, merged["id"]))
-                        for key in keys:
-                            prior_retry_counts[key] = max(prior_retry_counts.get(key, retry_count), retry_count)
+        prior_cycle, prior_retry_counts, prior_class_retry = _prior_repair_retry_index(task_dir)
+        prior_auditor_cycles = _prior_auditor_repair_cycles(task_dir)
 
         next_cycle = max(1, prior_cycle + 1)
         if next_cycle == 1:
@@ -4914,9 +5095,7 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
         for finding in ordered_findings:
             entry = dict(finding)
             fid = str(entry["id"])
-            previous_retry = prior_retry_counts.get((entry["_auditor"], fid))
-            if previous_retry is None:
-                previous_retry = prior_retry_counts.get((None, fid))
+            previous_retry = _inherited_retry_count(entry, prior_retry_counts, prior_class_retry)
             retry_count = previous_retry + 1 if previous_retry is not None else 0
             entry["retry_count"] = retry_count
             entry["repair_cycle"] = next_cycle
@@ -4957,6 +5136,10 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
             "blocking_finding_ids": [str(f.get("id", "")) for f in planned_findings if f.get("id")],
             "critical_spec_finding_ids": sorted(critical_spec_finding_ids),
             "model_overrides": model_overrides,
+            "auditor_repair_cycles": _merge_auditor_cycles(
+                prior_auditor_cycles, {str(f["_auditor"]) for f in planned_findings}, next_cycle,
+            ),
+            "retry_history": _retry_history_rows(prior_class_retry),
             "next_action": "spawn_repair_coordinator",
         }
         write_json(task_dir / "repair-cycle-plan.json", payload)
@@ -5082,9 +5265,16 @@ def _repo_file_list(root: Path) -> list[str]:
     ]
 
 
-def _finding_prose(source: dict) -> str:
+# Fields that say what to change. Paths named here (and in the title) are
+# repair targets.
+_FIX_PROSE_KEYS = ("title", "fix", "suggested_fix", "recommendation", "remediation")
+# Every prose field, for criterion references ("AC 3").
+_ALL_PROSE_KEYS = ("title", "description", "evidence", "recommendation", "fix", "suggested_fix", "remediation")
+
+
+def _finding_prose(source: dict, keys: tuple[str, ...] = _ALL_PROSE_KEYS) -> str:
     chunks: list[str] = []
-    for key in ("title", "description", "evidence", "recommendation", "fix", "remediation"):
+    for key in keys:
         value = source.get(key)
         if isinstance(value, str):
             chunks.append(value)
@@ -5122,8 +5312,9 @@ def _repair_scope_for_finding(
     ``evidence.file`` forms, and the auditor's own ``repair_tasks``
     ``affected_files``. Pipeline-owned paths are returned separately and
     never become repair targets. A finding that cites no file is scoped to
-    the existing files its prose names; only when it names none does it fall
-    back to the execution graph: first the segments delivering the
+    the existing files its title or fix/recommendation prose names, else
+    those its description names; paths that appear only in evidence prose
+    are never targets. Only when it names none does it fall back to the execution graph: first the segments delivering the
     acceptance criteria the prose names ("AC 3"), then the assigned
     executor's segments, then every segment. ``inferred`` is True for that
     fallback, whose scope is a guess.
@@ -5177,12 +5368,28 @@ def _repair_scope_for_finding(
     if repo_files or pipeline_files:
         return repo_files, pipeline_files, False
 
-    prose = "\n".join(_finding_prose(source) for source in (finding, live or {}))
-    repo_files, _ = _classified(
-        [m.group(1) for m in _PROSE_PATH_RE.finditer(prose)], keep_unknown=False,
+    # Paths in prose: first from the fields that say what to change (title,
+    # fix, recommendation; the auditor's repair-task description), then from
+    # the description of what is wrong. Evidence is never a source: a path
+    # cited only to show where a pattern was observed is not a file to edit.
+    sources = (finding, live or {})
+    fix_prose = "\n".join(
+        [_finding_prose(source, _FIX_PROSE_KEYS) for source in sources]
+        + [
+            str(source["_repair_task"].get("description") or "")
+            for source in sources
+            if isinstance(source.get("_repair_task"), dict)
+        ]
     )
-    if repo_files:
-        return repo_files, [], False
+    description_prose = "\n".join(_finding_prose(source, ("description",)) for source in sources)
+    for text in (fix_prose, description_prose):
+        repo_files, _ = _classified(
+            [m.group(1) for m in _PROSE_PATH_RE.finditer(text)], keep_unknown=False,
+        )
+        if repo_files:
+            return repo_files, [], False
+
+    prose = "\n".join(_finding_prose(source) for source in sources)
 
     criteria = {int(m) for m in _CRITERION_REF_RE.findall(prose)}
 
@@ -5204,15 +5411,20 @@ def _repair_scope_for_finding(
 
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+_REPAIR_ROUTING_KEYS = ("state", "route_mode", "route_source", "agent_path", "agent_name",
+                        "model_override", "model_source")
 
 
 def _merge_overlapping_repair_tasks(tasks: list[dict]) -> list[dict]:
     """Merge repair tasks whose files overlap (transitively) into one task.
 
-    The highest-severity task leads (first wins a tie): its finding, auditor,
-    executor and routing stay. The others become ``merged_findings`` and
-    their instructions are appended, files are unioned, and the retry count
-    is the highest, so the retry cap still sees every merged finding.
+    The highest-severity task leads (first wins a tie): its finding and
+    auditor stay. The others become ``merged_findings`` and their
+    instructions are appended, files are unioned, the retry count is the
+    highest (so the retry cap still sees every merged finding), and the
+    task is blocking if any member is. Executor and model are not inherited
+    from the lead: the merged task loses its routing fields and is routed
+    afresh on the union of its files and its (highest) severity.
     """
     clusters: list[list[dict]] = []
     cluster_files: list[set[str]] = []
@@ -5232,10 +5444,12 @@ def _merge_overlapping_repair_tasks(tasks: list[dict]) -> list[dict]:
             out.append(cluster[0])
             continue
         lead = min(cluster, key=lambda t: _SEVERITY_RANK.get(t["severity"], 2))
-        task = dict(lead)
+        task = {k: v for k, v in lead.items() if k not in _REPAIR_ROUTING_KEYS}
         others = [t for t in cluster if t is not lead]
         task["files_to_modify"] = _dedupe([p for t in [lead, *others] for p in t["files_to_modify"]])
         task["retry_count"] = max(t["retry_count"] for t in cluster)
+        if any("_blocking" in t for t in cluster):
+            task["_blocking"] = any(t.get("_blocking", True) for t in cluster)
         task["merged_findings"] = list(lead.get("merged_findings") or []) + [
             entry
             for other in others
@@ -5287,23 +5501,12 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
 
         task_type = str((manifest.get("classification") or {}).get("type", "feature"))
         root = _root_for_task_dir(task_dir)
-        from lib_qlearn import build_repair_plan  # noqa: PLC0415
-
-        # Q-learning reads `auditor` (e.g. the security model floor); the
-        # cycle plan carries it as `_auditor`.
-        q_findings = [
-            {**f, "auditor": f.get("auditor") or f.get("_auditor") or ""} if isinstance(f, dict) else f
-            for f in findings
-        ]
-        q_plan = build_repair_plan(root, [f for f in q_findings if isinstance(f, dict)], task_type)
-        assignments = q_plan.get("assignments", []) if isinstance(q_plan, dict) else []
-        # build_repair_plan returns one assignment per finding, in order.
-        assignments_by_key: dict[tuple[str, str], dict] = {}
-        assignments_by_id: dict[str, list[dict]] = {}
-        for queued, entry in zip([f for f in q_findings if isinstance(f, dict)], assignments):
-            if isinstance(entry, dict) and isinstance(entry.get("finding_id"), str):
-                assignments_by_key[(str(queued.get("auditor") or ""), entry["finding_id"])] = entry
-                assignments_by_id.setdefault(entry["finding_id"], []).append(entry)
+        from lib_qlearn import (  # noqa: PLC0415
+            build_repair_plan,
+            default_executor,
+            finding_category,
+            severity_floor_tier,
+        )
 
         # Same view the gate, the cycle plan and validate_repair_log read.
         live_by_key: dict[tuple[str, str], dict] = {}
@@ -5335,26 +5538,15 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                 continue
             seen_keys.add(key)
 
-            assignment = assignments_by_key.get(key)
-            if assignment is None and len(assignments_by_id.get(finding_id, [])) == 1:
-                assignment = assignments_by_id[finding_id][0]
-            assignment = assignment or {}
-            assigned_executor = assignment.get("assigned_executor") or finding.get("assigned_executor")
+            # A provisional executor, used only to scope a finding that cites
+            # no file to that executor's graph segments. The routed executor
+            # is chosen after merging, once each task's files are known.
+            assigned_executor = finding.get("assigned_executor")
             if assigned_executor not in VALID_EXECUTORS:
                 suggested = (live.get("_repair_task") or {}).get("assigned_executor")
                 assigned_executor = suggested if suggested in VALID_EXECUTORS else None
             if not assigned_executor:
-                category = finding_id.split("-")[0].lower() if "-" in finding_id else ""
-                if category == "db":
-                    assigned_executor = "db-executor"
-                elif category == "dc":
-                    assigned_executor = "refactor-executor"
-                elif category == "ui":
-                    assigned_executor = "ui-executor"
-                elif category == "sec":
-                    assigned_executor = "backend-executor"
-                else:
-                    assigned_executor = "backend-executor"
+                assigned_executor = default_executor(finding_category(finding_id, live["_auditor"]), None, root)
             files_to_modify, pipeline_files, files_inferred = _repair_scope_for_finding(
                 task_dir, finding, live, assigned_executor,
             )
@@ -5385,16 +5577,14 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                 "files_to_modify": files_to_modify,
                 "retry_count": int(finding.get("retry_count", 0) or 0),
                 "severity": normalize_repair_severity(str(live.get("severity") or "medium")),
-                "state": assignment.get("state"),
+                # Internal: every queued finding sits in the cycle plan's
+                # blocking list unless it says otherwise. Stripped below.
+                "_blocking": live.get("blocking", finding.get("blocking", True)) is not False,
             }
             if merged:
                 task["merged_findings"] = merged
             if files_inferred:
                 task["files_inferred"] = True
-            for meta_key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
-                value = assignment.get(meta_key)
-                if value is not None:
-                    task[meta_key] = value
             normalized_tasks.append(task)
 
         if stale:
@@ -5436,6 +5626,52 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
         normalized_tasks = _merge_overlapping_repair_tasks(
             [t for t in normalized_tasks if not t.get("files_inferred")]
         )
+
+        # Route every final task on its own files and severity. A merged
+        # task is routed on the union of its cluster's files and the
+        # cluster's highest severity, not on whatever its lead was given:
+        # a code-quality finding on a .tsx file goes to ui-executor, and a
+        # high-severity finding never runs on the fast tier.
+        routed = normalized_tasks + inferred_tasks
+        q_plan = build_repair_plan(root, [
+            {
+                "id": t["finding_id"],
+                "auditor": t["auditor"],
+                "severity": t["severity"],
+                "retry_count": t["retry_count"],
+                "blocking": bool(t.get("_blocking")),
+                "files": t["files_to_modify"],
+            }
+            for t in routed
+        ], task_type)
+        assignments = q_plan.get("assignments", []) if isinstance(q_plan, dict) else []
+        for task, assignment in zip(routed, assignments + [{}] * (len(routed) - len(assignments))):
+            assignment = assignment if isinstance(assignment, dict) else {}
+            blocking = bool(task.pop("_blocking", True))
+            for meta_key in _REPAIR_ROUTING_KEYS:
+                task.pop(meta_key, None)
+            executor = assignment.get("assigned_executor")
+            if executor not in VALID_EXECUTORS:
+                executor = default_executor(
+                    finding_category(task["finding_id"], task["auditor"]), task["files_to_modify"], root,
+                )
+            task["assigned_executor"] = executor
+            if assignment.get("state"):
+                task["state"] = assignment["state"]
+            for meta_key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
+                value = assignment.get(meta_key)
+                if value is not None:
+                    task[meta_key] = value
+            if "model_override" not in task:
+                floor = severity_floor_tier(executor, task["severity"], blocking)
+                if floor is not None:
+                    from lib_models import resolve_model_for_tier  # noqa: PLC0415
+                    from lib_qlearn import _resolve_host  # noqa: PLC0415
+
+                    resolved = resolve_model_for_tier(_resolve_host(root), floor)
+                    if resolved:
+                        task["model_override"] = resolved
+                        task["model_source"] = "severity_floor"
 
         groups: list[dict] = []
         for task in normalized_tasks:
@@ -5502,6 +5738,14 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
             "batch_count": len(batches),
             "task_count": len(normalized_tasks),
             "q_learning_source": repair_log["q_learning_source"],
+            # Findings folded into another task are repaired by it, not
+            # dropped: finding id -> the task that carries it.
+            "merged_finding_ids": {
+                f"{m['auditor']}:{m['id']}": f"{t['auditor']}:{t['finding_id']}"
+                for t in normalized_tasks
+                for m in t.get("merged_findings") or []
+                if isinstance(m, dict) and m.get("id")
+            },
         }, indent=2))
         return 0
     except Exception as exc:
@@ -5648,6 +5892,7 @@ def cmd_run_audit_summary(args: argparse.Namespace) -> int:
             "findings_by_category": findings_by_category,
             "total_findings": total_findings,
             "total_blocking": total_blocking,
+            "accepted_findings": _accepted_finding_rows(collected["findings"]),
             "audit_result": "pass" if total_blocking == 0 else "fail",
         }
         # task-20260503-002: derive user_summary BEFORE persisting audit-summary.json
@@ -5990,6 +6235,81 @@ def cmd_waive_rule(args: argparse.Namespace) -> int:
         "rule_id": rule_id,
         "waived_rules": sorted(waivers),
         "next_action": "rerun run-rules-check",
+    }, indent=2))
+    return 0
+
+
+def cmd_accept_finding(args: argparse.Namespace) -> int:
+    """Record a human decision to accept one audit finding for this task.
+
+    The alternative to another repair cycle when the finding is a known,
+    deliberate trade-off. The acceptance lives in accepted-findings.json
+    (ctl-owned; agents cannot write it). An accepted finding stops counting
+    as blocking in the findings gate, the repair plan and the summary, is
+    listed to re-auditors so they do not re-raise it, and covers a re-audit's
+    reworded variant (same auditor, class and file).
+    """
+    from lib_core import ACCEPTED_FINDINGS_FILE, load_accepted_findings  # noqa: PLC0415
+
+    task_dir = Path(args.task_dir).resolve()
+    auditor = str(args.auditor or "").strip()
+    finding_id = str(args.finding_id or "").strip()
+    reason = str(args.reason or "").strip()
+    decision_ref = str(args.decision_ref or "").strip() or None
+    if not auditor or not finding_id:
+        print("accept-finding: --auditor and --finding-id are required and must be non-empty", file=sys.stderr)
+        return 1
+    if not reason:
+        print("accept-finding: --reason is required and must be non-empty", file=sys.stderr)
+        return 1
+    if not (task_dir / "manifest.json").exists():
+        print(f"accept-finding: not a task dir (no manifest.json): {task_dir}", file=sys.stderr)
+        return 1
+    from lib_validate import _finding_location_file  # noqa: PLC0415
+    live = next(
+        (f for f in collect_repair_findings(task_dir)["findings"]
+         if f["_auditor"] == auditor and f["id"] == finding_id),
+        None,
+    )
+    if live is None:
+        print(
+            f"accept-finding: no finding {finding_id!r} from {auditor!r} in the binding audit reports",
+            file=sys.stderr,
+        )
+        return 1
+    entry = {
+        "auditor": auditor,
+        "finding_id": finding_id,
+        "reason": reason,
+        "decision_ref": decision_ref,
+        "title": str(live.get("title") or live.get("description") or "")[:200],
+        "category": live.get("category") if isinstance(live.get("category"), str) else None,
+        "file": _finding_location_file(live) or None,
+        "severity": live.get("severity"),
+        "accepted_at": now_iso(),
+    }
+    accepted = [
+        e for e in load_accepted_findings(task_dir)
+        if not (e.get("auditor") == auditor and e.get("finding_id") == finding_id)
+    ]
+    accepted.append(entry)
+    accepted.sort(key=lambda e: (str(e.get("auditor")), str(e.get("finding_id"))))
+    write_json(task_dir / ACCEPTED_FINDINGS_FILE, {"accepted": accepted})
+    from lib_log import log_event  # noqa: PLC0415
+    log_event(
+        _root_for_task_dir(task_dir), "finding_accepted", task=task_dir.name,
+        auditor=auditor, finding_id=finding_id, reason=reason, decision_ref=decision_ref,
+    )
+    append_execution_log(
+        task_dir, f"[ACCEPT] {auditor} {finding_id} accepted by human decision: {reason}"
+        + (f" (ref: {decision_ref})" if decision_ref else ""),
+    )
+    print(json.dumps({
+        "status": "finding_accepted",
+        "task_dir": str(task_dir),
+        "accepted": entry,
+        "accepted_findings": [f"{e['auditor']}:{e['finding_id']}" for e in accepted],
+        "next_action": "rerun run-audit-findings-gate",
     }, indent=2))
     return 0
 
@@ -6522,7 +6842,9 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
         )
         return 1
 
-    timeout_s = int(args.timeout or 300)
+    # A command's own `timeout` (seconds, declared in the plan) wins; else
+    # --timeout; else an hour, the same budget `run-tests` gives a suite.
+    default_timeout_s = int(args.timeout) if args.timeout else 3600
     tail_bytes = 8192
     summary: list[dict] = []
     any_failed = False
@@ -6533,6 +6855,10 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
         all_passed = True
         for vc in seg.get("verify_commands", []):
             command = str(vc.get("command", ""))
+            try:
+                timeout_s = int(vc.get("timeout") or default_timeout_s)
+            except (TypeError, ValueError):
+                timeout_s = default_timeout_s
             started = _time.monotonic()
             try:
                 proc = _subprocess.run(
@@ -6562,6 +6888,7 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
                 "criteria_ids": list(vc.get("criteria_ids", []) or []),
                 "exit_code": exit_code,
                 "timed_out": timed_out,
+                "timeout_s": timeout_s,
                 "duration_ms": duration_ms,
                 "stdout_tail": stdout_tail,
                 "stderr_tail": stderr_tail,
@@ -6840,6 +7167,44 @@ def cmd_run_repair_batch_plan(args: argparse.Namespace) -> int:
         return 1
 
 
+def _repair_convergence_cap_reasons(task_dir: Path, root: Path) -> list[str]:
+    """Why another repair cycle is refused, or [] when it is allowed.
+
+    Two caps over the findings still blocking (accepted findings excluded):
+
+    - per finding: a finding (or a reworded variant with the same auditor,
+      class and file) already repaired ``MAX_REPAIR_RETRIES + 1`` times;
+    - per auditor: an auditor whose findings already drove
+      ``max_repair_cycles_per_auditor`` repair cycles, which catches an
+      auditor that reports a new variant of the same issue every re-audit.
+    """
+    from lib_core import MAX_REPAIR_RETRIES, max_repair_cycles_per_auditor  # noqa: PLC0415
+
+    blocking = [f for f in collect_repair_findings(task_dir)["findings"] if finding_is_blocking(f)]
+    if not blocking:
+        return []
+    _, by_id, by_class = _prior_repair_retry_index(task_dir)
+    reasons: list[str] = []
+    for finding in blocking:
+        previous = _inherited_retry_count(finding, by_id, by_class)
+        if previous is not None and previous >= MAX_REPAIR_RETRIES:
+            reasons.append(
+                f"retry cap: {finding['_auditor']} {finding['id']} was already repaired "
+                f"{previous + 1} times (max {MAX_REPAIR_RETRIES} retries, counting reworded variants)"
+            )
+    cycle_cap = max_repair_cycles_per_auditor(root)
+    history = _prior_auditor_repair_cycles(task_dir)
+    for auditor in sorted({str(f["_auditor"]) for f in blocking}):
+        used = len(history.get(auditor, []))
+        if used >= cycle_cap:
+            ids = sorted(str(f["id"]) for f in blocking if f["_auditor"] == auditor)
+            reasons.append(
+                f"auditor cycle cap: {auditor} already drove {used} repair cycles "
+                f"(max {cycle_cap}) and still reports blocking {', '.join(ids)}"
+            )
+    return reasons
+
+
 def cmd_run_repair_retry(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -6854,6 +7219,21 @@ def cmd_run_repair_retry(args: argparse.Namespace) -> int:
                 "status": "blocked",
                 "task_dir": str(task_dir),
                 "error": f"unexpected stage for repair retry: {stage}",
+            }, indent=2))
+            return 1
+
+        cap_reasons = _repair_convergence_cap_reasons(task_dir, root)
+        if cap_reasons:
+            from lib_log import log_event  # noqa: PLC0415
+            log_event(root, "repair_cap_reached", task=task_dir.name, reasons=cap_reasons)
+            print(json.dumps({
+                "status": "escalation_required",
+                "task_dir": str(task_dir),
+                "error": "repair cap reached: " + "; ".join(cap_reasons),
+                "cap_reasons": cap_reasons,
+                "next_action": "write_escalation_and_fail",
+                "hint": "a human may accept a finding instead of another cycle: "
+                        "ctl accept-finding <task_dir> --auditor <name> --finding-id <id> --reason <why>",
             }, indent=2))
             return 1
 
@@ -6948,6 +7328,23 @@ def _residual_update_for_target(root: Path, residual_id: str, target: str) -> No
     # Any other target: no-op.
 
 
+def _newer_audit_report(task_dir: Path, summary_path: Path) -> Path | None:
+    """The newest audit report written after ``summary_path``, if any."""
+    try:
+        summary_mtime = summary_path.stat().st_mtime
+    except OSError:
+        return None
+    newest: tuple[float, Path] | None = None
+    for report in (task_dir / "audit-reports").glob("*.json"):
+        try:
+            mtime = report.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > summary_mtime and (newest is None or mtime > newest[0]):
+            newest = (mtime, report)
+    return newest[1] if newest else None
+
+
 def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -6957,6 +7354,11 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     try:
         manifest = _load_manifest(task_dir)
         stage = manifest.get("stage")
+        if stage == "REPAIR_EXECUTION":
+            blocking = [f for f in collect_repair_findings(task_dir)["findings"] if finding_is_blocking(f)]
+            if _leave_repair_execution_if_clear(task_dir, len(blocking)):
+                manifest = _load_manifest(task_dir)
+                stage = manifest.get("stage")
         if stage not in {"CHECKPOINT_AUDIT", "FINAL_AUDIT"}:
             print(json.dumps({
                 "status": "blocked",
@@ -6972,6 +7374,20 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
                 "status": "blocked",
                 "task_dir": str(task_dir),
                 "error": "audit-summary.json and task-retrospective.json must exist before DONE",
+            }, indent=2))
+            return 1
+
+        # completion.json is a copy of the summary, so a summary written
+        # before the final re-audit would report that audit's failures.
+        stale_against = _newer_audit_report(task_dir, summary_path)
+        if stale_against is not None:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": (
+                    f"audit-summary.json predates audit report {stale_against.name}; "
+                    "re-run `ctl run-audit-summary` before finishing"
+                ),
             }, indent=2))
             return 1
 
@@ -8145,7 +8561,7 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_verification_parser.add_argument("task_dir")
     run_verification_parser.add_argument("--segment", help="Limit to one segment id")
-    run_verification_parser.add_argument("--timeout", type=int, default=300, help="Per-command timeout in seconds")
+    run_verification_parser.add_argument("--timeout", type=int, default=None, help="Per-command timeout in seconds for commands that declare none (default 3600)")
     run_verification_parser.set_defaults(func=cmd_run_verification_evidence)
 
     ownership_parser = subparsers.add_parser("check-ownership", help="Check that files belong to a segment")
@@ -8296,6 +8712,17 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     waive_rule_parser.add_argument("rule_id")
     waive_rule_parser.add_argument("--reason", required=True)
     waive_rule_parser.set_defaults(func=cmd_waive_rule)
+
+    accept_finding_parser = subparsers.add_parser(
+        "accept-finding",
+        help="Record a human decision to accept an audit finding instead of another repair cycle",
+    )
+    accept_finding_parser.add_argument("task_dir")
+    accept_finding_parser.add_argument("--auditor", required=True)
+    accept_finding_parser.add_argument("--finding-id", required=True, dest="finding_id")
+    accept_finding_parser.add_argument("--reason", required=True)
+    accept_finding_parser.add_argument("--decision-ref", default=None, dest="decision_ref")
+    accept_finding_parser.set_defaults(func=cmd_accept_finding)
 
 
 def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:
@@ -8474,6 +8901,8 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Expire unconsumed role grants and remove the legacy role file (privilege-reducing)",
     )
     clear_role_parser.add_argument("task_dir")
+    clear_role_parser.add_argument("--role", default=None, help="Drop only this role's stamp and grants")
+    clear_role_parser.add_argument("--all", action="store_true", help="Drop every role, even those of subagents still running")
     clear_role_parser.set_defaults(func=cmd_clear_role)
 
     run_audit_reflect_parser = subparsers.add_parser(

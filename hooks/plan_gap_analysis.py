@@ -17,6 +17,7 @@ Works for ANY project type — route/model detection adapts to ecosystem.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -207,17 +208,56 @@ def extract_section(plan_text: str, heading: str) -> str:
 # File scanning
 # ---------------------------------------------------------------------------
 
-def _iter_code_files(root: Path, extensions: set[str], limit: int = 2000) -> list[Path]:
-    """Iterate source files, respecting skip dirs and file limit."""
+_SCAN_FILE_LIMIT = 2000
+
+
+def _scan_code_files(
+    root: Path, extensions: set[str], limit: int = _SCAN_FILE_LIMIT
+) -> tuple[list[Path], bool]:
+    """Source files under ``root`` (skip dirs excluded), at most ``limit``.
+
+    Returns ``(files, truncated)``; ``truncated`` is True when at least one
+    more matching file exists beyond the cap, so a "not found" verdict
+    drawn from ``files`` is not conclusive.
+    """
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = _walk_dirs(dirpath, dirnames)
         for name in filenames:
             if Path(name).suffix in extensions:
-                files.append(Path(dirpath) / name)
                 if len(files) >= limit:
-                    return files
-    return files
+                    return files, True
+                files.append(Path(dirpath) / name)
+    return files, False
+
+
+def _iter_code_files(root: Path, extensions: set[str], limit: int = _SCAN_FILE_LIMIT) -> list[Path]:
+    """Iterate source files, respecting skip dirs and file limit."""
+    return _scan_code_files(root, extensions, limit)[0]
+
+
+def _scan_status(truncated: bool, scanned: int) -> dict[str, Any]:
+    """Scan-coverage fields for an analysis result.
+
+    When the repo walk stopped at the file cap, a claim the scanned files
+    do not define may still be defined in a file the walk never reached.
+    Such claims are reported as ``unverified_inconclusive`` (not
+    ``unverified``) with a warning: they do not fail the plan, because
+    sending a plan back to PLANNING over a definition the scanner never
+    looked for is the failure this check exists to avoid.
+    """
+    status: dict[str, Any] = {
+        "scan_truncated": truncated,
+        "files_scanned": scanned,
+        "scan_limit": _SCAN_FILE_LIMIT,
+    }
+    if truncated:
+        status["warnings"] = [
+            f"gap analysis scanned only the first {scanned} source files "
+            f"(limit {_SCAN_FILE_LIMIT}); claims not found in them are "
+            "reported as unverified_inconclusive, not as failures"
+        ]
+    return status
 
 
 def _extract_plan_paths(plan_text: str) -> set[str]:
@@ -322,16 +362,35 @@ def _normalize_path(path: str) -> str:
     return path.lower().rstrip("/")
 
 
-_DJANGO_ROUTE_RE = re.compile(r"""\b(?:re_)?path\s*\(\s*r?['"]([^'"]*)['"]\s*,\s*(include\s*\(\s*['"]([\w.]+)['"])?""")
+_DJANGO_ROUTE_RE = re.compile(
+    r"""\b(?:re_)?path\s*\(\s*r?['"]([^'"]*)['"]\s*,\s*"""
+    r"""(include\s*\(\s*\(?\s*(?:['"]([\w.]+)['"]|([A-Za-z_][\w.]*)))?"""
+)
 # Path-like tokens in an endpoint cell: "/a, /b" or "`/a` and `/b`".
 _CELL_PATH_RE = re.compile(r"/[^\s`,;|]*")
+# Separators between several paths in one cell: "`/a` / `/b`", "/a, /b".
+_CELL_SPLIT_RE = re.compile(r"\s+/\s+|[,;]")
+# A Python file worth parsing for Django URL structure.
+_DJANGO_URLS_HINT_RE = re.compile(r"\b(?:re_)?path\s*\(|\burlpatterns\b|\binclude\s*\(")
 
 
 def _cell_endpoints(value: str) -> list[str]:
-    """Every path in an endpoint cell; the cell itself when it holds none."""
+    """Every path in an endpoint cell; the cell itself when it holds none.
+
+    A cell may list alternatives as "`/a` / `/b`" or "/a, /b"; it is split
+    on those separators first so the separating " / " is not read as the
+    root path. A bare "/" counts only when it is the cell's sole path.
+    """
     text = value.strip().strip("`").strip()
-    paths = [p.strip("`") for p in _CELL_PATH_RE.findall(value)]
-    return paths or ([text] if text else [])
+    paths: list[str] = []
+    for piece in _CELL_SPLIT_RE.split(value):
+        paths.extend(p.strip("`") for p in _CELL_PATH_RE.findall(piece))
+    real = [p for p in paths if p != "/"]
+    if real:
+        return real
+    if paths:
+        return ["/"]
+    return [text] if text else []
 
 
 def _module_name(fpath: Path, root: Path) -> str:
@@ -339,22 +398,224 @@ def _module_name(fpath: Path, root: Path) -> str:
         rel = fpath.resolve().relative_to(root.resolve())
     except (ValueError, OSError):
         rel = Path(fpath.name)
-    return ".".join(rel.with_suffix("").parts)
+    parts = rel.with_suffix("").parts
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _dotted(expr: ast.AST) -> str:
+    """``a.b.c`` for a Name/Attribute chain; "" for anything else."""
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _dotted(expr.value)
+        return f"{base}.{expr.attr}" if base else ""
+    return ""
+
+
+def _call_name(call: ast.AST) -> str:
+    func = getattr(call, "func", None)
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+class _DjangoUrlModule:
+    """Django URL structure of one module.
+
+    Routes are grouped per URL *list* (a module-level variable such as
+    ``urlpatterns`` or ``workspace_urlpatterns``), not per module, because
+    ``include(workspace_urlpatterns)`` mounts one list of a module under a
+    prefix that differs from the one its ``urlpatterns`` gets.
+    """
+
+    def __init__(self, module: str, is_package: bool) -> None:
+        self.module = module
+        self.is_package = is_package
+        # list name -> relative routes defined in it
+        self.routes: dict[str, list[str]] = {}
+        self.absolute: list[str] = []
+        # (container list, prefix, kind, reference); kind is "module" (a
+        # dotted module path from a string include), "name" (a name or
+        # dotted name in this module's namespace) or "local" (a list of
+        # this module, e.g. an inline ``include([...])``).
+        self.mounts: list[tuple[str, str, str, str]] = []
+        self.lists: set[str] = set()
+        # local alias -> (module path, imported attribute or None)
+        self.imports: dict[str, tuple[str, str | None]] = {}
+        self._inline = 0
+
+    def _abs_module(self, level: int, name: str | None) -> str:
+        if level == 0:
+            return name or ""
+        parts = self.module.split(".") if self.module else []
+        if not self.is_package:
+            parts = parts[:-1]
+        drop = level - 1
+        parts = parts[: len(parts) - drop] if drop <= len(parts) else []
+        if name:
+            parts = parts + name.split(".")
+        return ".".join(parts)
+
+    # -- AST walk ---------------------------------------------------------
+
+    def visit(self, tree: ast.Module) -> None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                base = self._abs_module(node.level, node.module)
+                for alias in node.names:
+                    self.imports[alias.asname or alias.name] = (base, alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        self.imports[alias.asname] = (alias.name, None)
+                    else:
+                        head = alias.name.split(".")[0]
+                        self.imports.setdefault(head, (head, None))
+        for stmt in tree.body:
+            self._visit_stmt(stmt, "urlpatterns")
+
+    def _visit_stmt(self, stmt: ast.stmt, container: str) -> None:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        if isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if stmt.value is None:
+                return
+            if not names:
+                self._visit_expr(stmt.value, container)
+                return
+            self.lists.update(names)
+            self._visit_expr(stmt.value, names[0], top=True)
+            for extra in names[1:]:
+                self.mounts.append((extra, "", "local", names[0]))
+            return
+        if isinstance(stmt, ast.Expr):
+            call = stmt.value
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr in ("extend", "append", "insert")
+                and isinstance(call.func.value, ast.Name)
+            ):
+                target = call.func.value.id
+                self.lists.add(target)
+                for arg in call.args:
+                    self._visit_expr(arg, target, top=call.func.attr == "extend")
+                return
+            self._visit_expr(call, container)
+            return
+        # if / try / for / with: their bodies still build module-level lists.
+        for child in ast.iter_child_nodes(stmt):
+            if isinstance(child, ast.stmt):
+                self._visit_stmt(child, container)
+            elif isinstance(child, ast.excepthandler):
+                for sub in child.body:
+                    self._visit_stmt(sub, container)
+
+    def _visit_expr(self, expr: ast.AST, container: str, top: bool = False) -> None:
+        if isinstance(expr, ast.Call) and self._is_path_call(expr):
+            self._record_path(expr, container)
+            return
+        if top:
+            # ``urlpatterns = other`` / ``+= other.urls`` / ``[*other, ...]``
+            ref = _dotted(expr)
+            if ref:
+                self.mounts.append((container, "", "name", ref))
+                return
+            if isinstance(expr, ast.BinOp):
+                self._visit_expr(expr.left, container, top=True)
+                self._visit_expr(expr.right, container, top=True)
+                return
+            if isinstance(expr, (ast.List, ast.Tuple)):
+                for elt in expr.elts:
+                    if isinstance(elt, ast.Starred):
+                        self._visit_expr(elt.value, container, top=True)
+                    else:
+                        self._visit_expr(elt, container)
+                return
+            if isinstance(expr, ast.Call):
+                # ``urlpatterns = format_suffix_patterns(api_patterns)``
+                for arg in expr.args:
+                    self._visit_expr(arg, container, top=True)
+                return
+        for child in ast.iter_child_nodes(expr):
+            self._visit_expr(child, container)
+
+    @staticmethod
+    def _is_path_call(call: ast.Call) -> bool:
+        return (
+            _call_name(call) in ("path", "re_path")
+            and bool(call.args)
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+        )
+
+    def _record_path(self, call: ast.Call, container: str) -> None:
+        route = call.args[0].value
+        include: ast.AST | None = None
+        if len(call.args) > 1:
+            second = call.args[1]
+            if isinstance(second, ast.Call) and _call_name(second) == "include" and second.args:
+                include = second.args[0]
+        if include is None:
+            if route.startswith("/"):
+                self.absolute.append(route)
+            else:
+                self.routes.setdefault(container, []).append(route.lstrip("^").rstrip("$"))
+            return
+        prefix = route.lstrip("^")
+        # include((patterns, "app_name")) mounts its first element.
+        if isinstance(include, ast.Tuple) and include.elts:
+            include = include.elts[0]
+        if isinstance(include, ast.Constant) and isinstance(include.value, str):
+            self.mounts.append((container, prefix, "module", include.value))
+        elif isinstance(include, (ast.List, ast.Tuple)):
+            self._inline += 1
+            key = f"<inline:{self._inline}>"
+            self.lists.add(key)
+            self.mounts.append((container, prefix, "local", key))
+            for elt in include.elts:
+                self._visit_expr(elt, key)
+        else:
+            ref = _dotted(include)
+            if ref:
+                self.mounts.append((container, prefix, "name", ref))
+
+    # -- regex fallback for a file that does not parse ---------------------
+
+    def visit_regex(self, content: str) -> None:
+        self.lists.add("urlpatterns")
+        for match in _DJANGO_ROUTE_RE.finditer(content):
+            route, has_include, by_string, by_name = match.groups()
+            if has_include:
+                kind, ref = ("module", by_string) if by_string else ("name", by_name)
+                self.mounts.append(("urlpatterns", route.lstrip("^"), kind, ref))
+            elif route.startswith("/"):
+                self.absolute.append(route)
+            else:
+                self.routes.setdefault("urlpatterns", []).append(route.lstrip("^").rstrip("$"))
 
 
 def _scan_routes(files: list[Path], root: Path) -> tuple[set[str], set[str]]:
     """Return ``(routes, unmounted)`` defined in ``files``, normalized.
 
     ``routes`` are absolute. Django ``path()`` routes are relative and
-    mounted through ``include("pkg.urls")`` under a parent prefix, so each
-    urls module's prefix is resolved from the ``include()`` calls that name
-    it. A relative route whose module no scanned file includes keeps no
-    known mount point and lands in ``unmounted``; a claim may match it by
-    suffix.
+    mounted through ``include()`` under a parent prefix; mounting is
+    resolved per URL list. ``include("pkg.urls")`` mounts that module's
+    ``urlpatterns``; ``include(name)`` follows the name to a list in the
+    same module or through an import (``from .x import workspace_urls``,
+    ``from app import urls``); ``include((patterns, "app"))`` tuples and
+    inline ``include([...])`` lists are followed too. A relative route
+    whose list nothing scanned mounts keeps no known mount point and lands
+    in ``unmounted``; a claim may match it by suffix.
     """
     found: set[str] = set()
-    relative: dict[str, list[str]] = {}
-    mounts: dict[str, list[tuple[str, str]]] = {}
+    modules: dict[str, _DjangoUrlModule] = {}
     for fpath in files:
         content = _read_safe(fpath)
         if not content:
@@ -366,27 +627,70 @@ def _scan_routes(files: list[Path], root: Path) -> tuple[set[str], set[str]]:
                 for g in match.groups():
                     if g and g.startswith("/"):
                         found.add(_normalize_path(g))
-        module = _module_name(fpath, root)
-        for match in _DJANGO_ROUTE_RE.finditer(content):
-            route, included = match.group(1), match.group(3)
-            if route.startswith("/"):
-                found.add(_normalize_path(route))
-            elif included:
-                mounts.setdefault(included, []).append((module, route.lstrip("^")))
-            else:
-                relative.setdefault(module, []).append(route.lstrip("^").rstrip("$"))
+        if fpath.suffix != ".py" or not _DJANGO_URLS_HINT_RE.search(content):
+            continue
+        name = _module_name(fpath, root)
+        is_package = fpath.name == "__init__.py"
+        mod = _DjangoUrlModule(name, is_package)
+        try:
+            mod.visit(ast.parse(content))
+        except (SyntaxError, ValueError, RecursionError):
+            mod = _DjangoUrlModule(name, is_package)
+            mod.visit_regex(content)
+        modules[name] = mod
+        for route in mod.absolute:
+            found.add(_normalize_path(route))
 
-    def _prefixes(module: str, seen: frozenset[str]) -> list[str] | None:
-        parents = [
-            (parent, route)
-            for target, entries in mounts.items()
-            if module == target or module.endswith("." + target)
-            for parent, route in entries
-        ]
-        if not parents:
+    def find_modules(target: str) -> list[str]:
+        if not target:
+            return []
+        if target in modules:
+            return [target]
+        return [m for m in modules if m.endswith("." + target)]
+
+    def resolve_dotted(path: str, depth: int) -> list[tuple[str, str]]:
+        """A dotted module path, or module path + attribute, to list keys."""
+        mods = find_modules(path)
+        if mods:
+            return [(m, "urlpatterns") for m in mods]
+        if "." in path:
+            base, attr = path.rsplit(".", 1)
+            return [k for m in find_modules(base) for k in resolve_name(m, attr, depth + 1)]
+        return []
+
+    def resolve_name(module: str, ref: str, depth: int = 0) -> list[tuple[str, str]]:
+        """A name in ``module``'s namespace to list keys, following imports."""
+        if depth > 8 or module not in modules:
+            return []
+        mod = modules[module]
+        head, _, rest = ref.partition(".")
+        if not rest and head in mod.lists:
+            return [(module, head)]
+        if head in mod.imports:
+            base, attr = mod.imports[head]
+            full = base if attr is None else (f"{base}.{attr}" if base else attr)
+            return resolve_dotted(f"{full}.{rest}" if rest else full, depth)
+        return resolve_dotted(ref, depth) if rest else []
+
+    # Mount graph: child list -> [(parent list, prefix)].
+    parents: dict[tuple[str, str], list[tuple[tuple[str, str], str]]] = {}
+    for module, mod in modules.items():
+        for container, prefix, kind, ref in mod.mounts:
+            if kind == "module":
+                targets = resolve_dotted(ref, 0)
+            elif kind == "local":
+                targets = [(module, ref)]
+            else:
+                targets = resolve_name(module, ref)
+            for target in targets:
+                parents.setdefault(target, []).append(((module, container), prefix))
+
+    def _prefixes(key: tuple[str, str], seen: frozenset[tuple[str, str]]) -> list[str] | None:
+        entries = parents.get(key)
+        if not entries:
             return None
         out: list[str] = []
-        for parent, route in parents:
+        for parent, route in entries:
             if parent in seen:
                 continue
             above = _prefixes(parent, seen | {parent})
@@ -394,23 +698,31 @@ def _scan_routes(files: list[Path], root: Path) -> tuple[set[str], set[str]]:
         return out
 
     unmounted: set[str] = set()
-    for module, routes in relative.items():
-        prefixes = _prefixes(module, frozenset({module}))
-        for route in routes:
-            if prefixes is None:
-                if route:
-                    unmounted.add(_normalize_path("/" + route))
-                continue
-            for prefix in prefixes:
-                found.add(_normalize_path("/" + prefix + route))
+    for module, mod in modules.items():
+        for container, routes in mod.routes.items():
+            key = (module, container)
+            prefixes = _prefixes(key, frozenset({key}))
+            for route in routes:
+                if prefixes is None:
+                    if route:
+                        unmounted.add(_normalize_path("/" + route))
+                    continue
+                for prefix in prefixes:
+                    full = prefix + route
+                    found.add(_normalize_path(full if full.startswith("/") else "/" + full))
     return found, unmounted
 
 
 def _route_matches(claim: str, routes: set[str], unmounted: set[str]) -> bool:
     """Segment-level match: same segment count, non-param segments equal.
 
-    An unmounted relative route matches the tail of a claim, provided it
-    pins at least one literal segment.
+    Suffix matches are allowed in both directions, on segment boundaries
+    only: an unmounted relative route may match the tail of a claim, and a
+    claim written relative to its mount point (``/attachments/initiate``)
+    may match the tail of a fully mounted route. Either way the shorter
+    side must pin at least one literal segment equal to the aligned
+    segment of the longer side, so a bare ``/:id`` matches nothing by
+    suffix and ``/initiate`` does not match ``/reinitiate``.
     """
     norm = _normalize_path(claim)
     norm_parts = [p for p in norm.split("/") if p]
@@ -418,17 +730,20 @@ def _route_matches(claim: str, routes: set[str], unmounted: set[str]) -> bool:
     def _same(a: list[str], b: list[str]) -> bool:
         return len(a) == len(b) and all(x == y or x == ":param" or y == ":param" for x, y in zip(a, b))
 
+    def _tail(longer: list[str], shorter: list[str]) -> bool:
+        if not shorter or len(shorter) > len(longer):
+            return False
+        tail = longer[len(longer) - len(shorter):]
+        return _same(tail, shorter) and any(s == t != ":param" for s, t in zip(shorter, tail))
+
     for fr in routes:
-        if norm == fr or _same(norm_parts, [p for p in fr.split("/") if p]):
+        fr_parts = [p for p in fr.split("/") if p]
+        if norm == fr or _same(norm_parts, fr_parts):
+            return True
+        if len(norm_parts) < len(fr_parts) and _tail(fr_parts, norm_parts):
             return True
     for fr in unmounted:
-        fr_parts = [p for p in fr.split("/") if p]
-        if (
-            fr_parts
-            and any(p != ":param" for p in fr_parts)
-            and len(fr_parts) <= len(norm_parts)
-            and _same(norm_parts[len(norm_parts) - len(fr_parts):], fr_parts)
-        ):
+        if _tail(norm_parts, [p for p in fr.split("/") if p]):
             return True
     return False
 
@@ -438,13 +753,16 @@ def analyze_api_contracts(
     root: Path,
     *,
     _precomputed_files: list[Path] | None = None,
+    _scan_truncated: bool = False,
 ) -> dict[str, Any]:
     """Check API Contracts section claims against actual route definitions.
 
     Rows marked ``to-be-created`` (in any cell) are reported separately and
     exempted from the codebase match, as in the Data Model check: a new
     endpoint cannot exist until its execution segment runs. A cell naming
-    several paths is several endpoints.
+    several paths is several endpoints. When the repo walk hit its file
+    cap, unmatched claims are reported as ``unverified_inconclusive``
+    rather than ``unverified``; see ``_scan_status``.
     """
     section = extract_section(plan_text, "API Contracts")
     if not section.strip():
@@ -490,22 +808,25 @@ def analyze_api_contracts(
     found_routes: set[str] = set()
     unmounted: set[str] = set()
     narrow_files: list[Path] = []
+    truncated = False
+    full_scan = False
     if plan_paths:
         narrow_files = _iter_plan_implied_files(root, plan_paths, _CODE_EXTENSIONS)
         found_routes, unmounted = _scan_routes(narrow_files, root)
 
     if not narrow_files or not all(_route_matches(c["endpoint"], found_routes, unmounted) for c in claimed):
-        code_files = (
-            [f for f in _precomputed_files if f.suffix in _CODE_EXTENSIONS]
-            if _precomputed_files is not None
-            else _iter_code_files(root, _CODE_EXTENSIONS)
-        )
+        full_scan = True
+        if _precomputed_files is not None:
+            code_files = [f for f in _precomputed_files if f.suffix in _CODE_EXTENSIONS]
+            truncated = _scan_truncated
+        else:
+            code_files, truncated = _scan_code_files(root, _CODE_EXTENSIONS)
         found_routes, unmounted = _scan_routes(code_files, root)
 
     claimed_found = [c for c in claimed if _route_matches(c["endpoint"], found_routes, unmounted)]
     claimed_not_found = [c for c in claimed if c not in claimed_found]
 
-    return {
+    result: dict[str, Any] = {
         "skipped": False,
         "claimed_endpoints": len(claimed),
         "to_be_created": to_be_created,
@@ -513,6 +834,12 @@ def analyze_api_contracts(
         "unverified": claimed_not_found,
         "routes_found_in_code": len(found_routes) + len(unmounted),
     }
+    if full_scan:
+        result.update(_scan_status(truncated, len(code_files)))
+        if truncated:
+            result["unverified_inconclusive"] = claimed_not_found
+            result["unverified"] = []
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -520,18 +847,124 @@ def analyze_api_contracts(
 # ---------------------------------------------------------------------------
 
 _MODEL_NAME_RE = re.compile(r"[A-Za-z_][\w.]*")
+_LEADING_NAME_RE = re.compile(r"[*_~\s]*([A-Za-z_][\w.]*)")
+# Bases that make a Python class a model: Django / SQLAlchemy / auth bases.
+_MODEL_BASE_RE = re.compile(r"Model|Base|AbstractUser|AbstractBaseUser")
+# Cheap pre-check before parsing a .py file for model classes.
+_MODEL_HINT_RE = re.compile(r"Model|Base|AbstractUser|class\s+Meta\b|Field\s*\(|Key\s*\(")
+_TO_BE_CREATED = "to-be-created"
+_EXISTING_MODIFIED = "existing-modified"
 
 
 def _cell_model_name(value: str) -> str:
     """The model or table a Data Model cell names, lowercased.
 
-    Cells carry notes ("`Organization` (existing, backend/app/models.py)")
-    and dotted paths ("models.Membership"); only the first identifier, last
-    dotted part, is the name. A placeholder ("—") names nothing.
+    The name is the cell's leading identifier, last dotted part:
+    "Conversation (add `triage_state`)" names ``conversation`` (not the
+    backticked column), "`Organization` (existing, app/models.py)" names
+    ``organization``, "models.Membership" names ``membership``. A cell that
+    does not start with an identifier falls back to its first backticked
+    token; a placeholder ("—") names nothing.
     """
-    ticked = re.search(r"`([^`]+)`", value)
-    match = _MODEL_NAME_RE.search(ticked.group(1) if ticked else value)
-    return match.group(0).rsplit(".", 1)[-1].lower() if match else ""
+    text = value.strip()
+    ticked = re.match(r"[*_~\s]*`([^`]+)`", text)
+    if ticked:
+        match = _MODEL_NAME_RE.search(ticked.group(1))
+        name = match.group(0) if match else ""
+    else:
+        match = _LEADING_NAME_RE.match(text)
+        if match:
+            name = match.group(1)
+        else:
+            ticked = re.search(r"`([^`]+)`", text)
+            match = _MODEL_NAME_RE.search(ticked.group(1)) if ticked else None
+            name = match.group(0) if match else ""
+    return name.rstrip(".").rsplit(".", 1)[-1].lower()
+
+
+def _django_app_label(path: Path) -> str:
+    """The Django app a models file belongs to: the directory holding
+    ``models.py``, or holding the ``models/`` package."""
+    if path.name == "models.py":
+        return path.parent.name
+    if path.parent.name == "models":
+        return path.parent.parent.name
+    return ""
+
+
+def _is_model_field(value: ast.AST, django: bool) -> bool:
+    """``models.CharField(...)`` / ``models.ForeignKey(...)`` (or a bare
+    ``CharField(...)`` in a file that imports Django)."""
+    if not isinstance(value, ast.Call):
+        return False
+    func = value.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "models":
+        return func.attr.endswith(("Field", "Key"))
+    if django and isinstance(func, ast.Name):
+        return func.id.endswith("Field") or func.id == "ForeignKey"
+    return False
+
+
+def _python_model_names(path: Path, content: str) -> set[str]:
+    """Model class names (and Django default table names) in a .py file.
+
+    A class is a model when its bases mention Model / Base / AbstractUser /
+    AbstractBaseUser, or its body declares ``class Meta`` or Django model
+    fields. For a model in a Django app's models module the default table
+    name ``<app_label>_<modelname>`` is reported too (``app_label`` from
+    ``Meta.app_label`` when set, else the app directory); abstract models
+    have no table.
+    """
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError, RecursionError):
+        return set()
+    django = "django" in content
+    app_label = _django_app_label(path) if django else ""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name == "Meta":
+            continue
+        bases = " ".join(_dotted(b) or "" for b in node.bases)
+        meta = next((s for s in node.body if isinstance(s, ast.ClassDef) and s.name == "Meta"), None)
+        has_fields = any(
+            isinstance(s, (ast.Assign, ast.AnnAssign)) and s.value is not None and _is_model_field(s.value, django)
+            for s in node.body
+        )
+        if not (_MODEL_BASE_RE.search(bases) or meta is not None or has_fields):
+            continue
+        model = node.name.lower()
+        names.add(model)
+        if not django:
+            continue
+        label, abstract = app_label, False
+        for stmt in meta.body if meta is not None else []:
+            if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, ast.Constant):
+                continue
+            for target in stmt.targets:
+                if isinstance(target, ast.Name) and target.id == "app_label" and isinstance(stmt.value.value, str):
+                    label = stmt.value.value
+                elif isinstance(target, ast.Name) and target.id == "abstract" and stmt.value.value is True:
+                    abstract = True
+        if label and not abstract:
+            names.add(f"{label.lower()}_{model}")
+    return names
+
+
+def _scan_model_names(files: list[Path]) -> set[str]:
+    found: set[str] = set()
+    for fpath in files:
+        content = _read_safe(fpath)
+        if not content:
+            continue
+        for pattern, _ in _MODEL_PATTERNS:
+            for match in pattern.finditer(content):
+                name = match.group(1)
+                if name:
+                    found.add(name.lower())
+        if fpath.suffix == ".py" and "class " in content and _MODEL_HINT_RE.search(content):
+            found |= _python_model_names(fpath, content)
+    return found
 
 
 def analyze_data_model(
@@ -539,11 +972,18 @@ def analyze_data_model(
     root: Path,
     *,
     _precomputed_files: list[Path] | None = None,
+    _scan_truncated: bool = False,
 ) -> dict[str, Any]:
     """Check existing Data Model claims against schema/model definitions.
 
-    Rows marked ``to-be-created`` are reported separately and exempted from
-    the codebase match check because their execution segment has not run yet.
+    A model declared ``to-be-created`` in any row is reported separately
+    and exempted from the codebase match in every row that names it,
+    because its execution segment has not run yet. A row marked
+    ``existing-modified`` names a model that must already exist (its new
+    columns are not checked), even if another cell mentions
+    ``to-be-created``. When the repo walk hit its file cap, unmatched
+    claims are reported as ``unverified_inconclusive`` rather than
+    ``unverified``; see ``_scan_status``.
     """
     section = extract_section(plan_text, "Data Model")
     if not section.strip():
@@ -556,6 +996,7 @@ def analyze_data_model(
     # Extract claimed tables
     claimed_tables: set[str] = set()
     to_be_created_tables: set[str] = set()
+    existing_modified: set[str] = set()
     for row in rows:
         names = [
             name
@@ -564,14 +1005,21 @@ def analyze_data_model(
             for name in [_cell_model_name(val)]
             if name
         ]
+        markers = " ".join(row.values()).lower()
+        if _EXISTING_MODIFIED in markers:
+            existing_modified.update(names)
+            claimed_tables.update(names)
         # Greenfield schemas cannot exist in the repository until their
         # execution segment runs. Honor the same explicit marker the plan
         # validation instructions require for planned files. The marker may
         # appear in the table/model cell or another cell in the row.
-        if any("to-be-created" in value.lower() for value in row.values()):
+        elif _TO_BE_CREATED in markers:
             to_be_created_tables.update(names)
-            continue
-        claimed_tables.update(names)
+        else:
+            claimed_tables.update(names)
+    # A model declared new anywhere is new in every row that names it.
+    claimed_tables -= to_be_created_tables
+    existing_modified -= to_be_created_tables
 
     if not claimed_tables and not to_be_created_tables:
         return {"skipped": True, "reason": "no tables found in Data Model table"}
@@ -580,6 +1028,7 @@ def analyze_data_model(
             "skipped": False,
             "claimed_tables": [],
             "to_be_created": sorted(to_be_created_tables),
+            "existing_modified": [],
             "verified": [],
             "unverified": [],
             "models_found_in_code": 0,
@@ -588,47 +1037,43 @@ def analyze_data_model(
     # Two-pass scan: plan-implied paths first, full repo only on fallback.
     plan_paths = _extract_plan_paths(plan_text)
 
-    def _scan_files(files: list[Path]) -> set[str]:
-        found: set[str] = set()
-        for fpath in files:
-            content = _read_safe(fpath)
-            if not content:
-                continue
-            for pattern, _ in _MODEL_PATTERNS:
-                for match in pattern.finditer(content):
-                    name = match.group(1)
-                    if name:
-                        found.add(name.lower())
-        return found
-
     found_models: set[str] = set()
     narrow_files: list[Path] = []
+    truncated = False
+    full_scan = False
     if plan_paths:
         narrow_files = _iter_plan_implied_files(
             root, plan_paths, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS
         )
-        found_models = _scan_files(narrow_files)
+        found_models = _scan_model_names(narrow_files)
 
     if not narrow_files or not claimed_tables.issubset(found_models):
-        all_files = (
-            _precomputed_files
-            if _precomputed_files is not None
-            else _iter_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
-        )
-        found_models = _scan_files(all_files)
+        full_scan = True
+        if _precomputed_files is not None:
+            all_files, truncated = _precomputed_files, _scan_truncated
+        else:
+            all_files, truncated = _scan_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
+        found_models = _scan_model_names(all_files)
 
     # Cross-reference
     verified = claimed_tables & found_models
     unverified = claimed_tables - found_models
 
-    return {
+    result: dict[str, Any] = {
         "skipped": False,
         "claimed_tables": sorted(claimed_tables),
         "to_be_created": sorted(to_be_created_tables),
+        "existing_modified": sorted(existing_modified),
         "verified": sorted(verified),
         "unverified": sorted(unverified),
         "models_found_in_code": len(found_models),
     }
+    if full_scan:
+        result.update(_scan_status(truncated, len(all_files)))
+        if truncated:
+            result["unverified_inconclusive"] = result["unverified"]
+            result["unverified"] = []
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +1151,11 @@ def run_gap_analysis(root: Path, task_dir: Path) -> dict[str, Any]:
     so the three per-task call sites (planning, plan-audit, execute
     preflight) only pay the ~2000-file walk cost once. Set the env var
     DYNOS_GAP_CACHE=0 to disable caching for debugging.
+
+    When the walk stops at the file cap, the report carries
+    ``scan_truncated``/``files_scanned``/``scan_limit``/``warnings`` and
+    each analysis moves its not-found claims to ``unverified_inconclusive``
+    (see ``_scan_status``).
     """
     plan_path = task_dir / "plan.md"
     if not plan_path.exists():
@@ -721,11 +1171,17 @@ def run_gap_analysis(root: Path, task_dir: Path) -> dict[str, Any]:
             return cached
 
     # Single traversal shared by both analyses; covers the superset of extensions.
-    shared_files = _iter_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
-    report = {
-        "api_contracts": analyze_api_contracts(plan_text, root, _precomputed_files=shared_files),
-        "data_model": analyze_data_model(plan_text, root, _precomputed_files=shared_files),
+    shared_files, truncated = _scan_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
+    report: dict[str, Any] = {
+        "api_contracts": analyze_api_contracts(
+            plan_text, root, _precomputed_files=shared_files, _scan_truncated=truncated
+        ),
+        "data_model": analyze_data_model(
+            plan_text, root, _precomputed_files=shared_files, _scan_truncated=truncated
+        ),
     }
+    if truncated:
+        report.update(_scan_status(truncated, len(shared_files)))
 
     if cache_enabled:
         _write_cache(task_dir, fingerprint, report)

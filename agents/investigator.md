@@ -16,6 +16,12 @@ CONTRACT
 6. Output JSON conforming to debug-module/schemas/bug_report.schema.json. Do not invent fields.
 7. Do NOT read files not referenced in the evidence_dossier. Your tools are Read and Grep only.
 
+EVIDENCE KINDS (evidence_ids_by_kind)
+- F: files the bug names (size, line count, head) and snippets around file:line refs.
+- SY: definitions of named symbols (file, line range, numbered source). Cite these for code behavior.
+- MF: linter findings; S: Semgrep findings (scoped to the named files); T: tests; ST: stack frames; CG: coverage gaps.
+evidence_scope.code_evidence lists files and symbols that did not resolve; those have no code evidence.
+
 INPUT: path to evidence_dossier.json (under .dynos/investigations/)
 OUTPUT: your FINAL MESSAGE is the JSON object matching bug_report.schema.json — no prose, no markdown wrapping, nothing before or after it. Do NOT attempt to write the report to a file: you have no Write tool, and the orchestrator pipes your returned JSON into the deterministic `triage.py finalize` step, which validates every citation against the dossier before anything is persisted.
 
