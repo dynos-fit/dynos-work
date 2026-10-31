@@ -471,6 +471,17 @@ def pin_rules_snapshot(task_dir: Path) -> list:
     return raw_rules
 
 
+def _task_snapshot_base(task_dir: Path) -> str | None:
+    """The commit ``ctl record-snapshot`` recorded for this task, or None."""
+    try:
+        manifest = json.loads((Path(task_dir) / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    snap = manifest.get("snapshot") if isinstance(manifest, dict) else None
+    head = snap.get("head_sha") if isinstance(snap, dict) else None
+    return head.strip() if isinstance(head, str) and head.strip() else None
+
+
 def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     """Write receipt proving a rules-check pass (no error-severity violations).
 
@@ -500,11 +511,21 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
       - effective_rules_sha256: digest of the rules minus the waivers; the
                             transition gate's drift check compares this
       - checked_at:         now_iso()
-      - mode:               pass-through
+      - mode:               the scan mode actually used (see below)
+      - requested_mode:     the ``mode`` argument
+      - diff_base:          diff mode: the task snapshot commit, else None
+      - diff_fallback_reason: why a requested diff scan ran as ``all``
+
+    Modes: ``staged`` and ``all`` pass through. ``diff`` scans only the
+    files changed since the task's recorded snapshot (``manifest.snapshot.
+    head_sha``) plus untracked files; ``task`` (the ``run-rules-check``
+    default) is ``diff`` when the task has a snapshot and ``all`` when it
+    does not. A diff scan with no snapshot, or whose git diff fails, runs
+    as ``all`` (stricter, never weaker) and says why.
     """
-    if mode not in ("staged", "all"):
+    if mode not in ("staged", "all", "diff", "task"):
         raise ValueError(
-            f"mode must be 'staged' or 'all' (got mode={mode!r})"
+            f"mode must be 'staged', 'all', 'diff' or 'task' (got mode={mode!r})"
         )
 
     # Deferred import: rules_engine imports lib_core, and lib_core is
@@ -528,15 +549,35 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     # a digest for rules the engine never saw.
     effective_rules_sha256 = _effective_digest()
 
+    requested_mode = mode
+    diff_base: str | None = None
+    diff_fallback_reason: str | None = None
+    if mode in ("diff", "task"):
+        diff_base = _task_snapshot_base(task_dir)
+        if diff_base is None:
+            mode = "all"
+            if requested_mode == "diff":
+                diff_fallback_reason = "task has no recorded snapshot (ctl record-snapshot)"
+        else:
+            mode = "diff"
+
     # Run the engine via run_checks_with_stats — single authoritative call
     # that returns violations plus loaded/skipped rule counts.
     # Callers cannot supply (and therefore cannot falsify) any of these
     # values. Using run_checks_with_stats avoids a second file read in
     # this function for the loaded/skipped counts (TOCTOU-safe at the
     # caller boundary — AC 12).
-    violations, rules_loaded, rules_skipped = _rules_engine.run_checks_with_stats(
-        root, mode, exclude=waived, raw_rules=list(snapshot),
-    )
+    if mode == "diff":
+        try:
+            violations, rules_loaded, rules_skipped = _rules_engine.run_checks_with_stats(
+                root, mode, exclude=waived, raw_rules=list(snapshot), base=diff_base,
+            )
+        except ValueError as exc:
+            mode, diff_base, diff_fallback_reason = "all", None, str(exc)
+    if mode != "diff":
+        violations, rules_loaded, rules_skipped = _rules_engine.run_checks_with_stats(
+            root, mode, exclude=waived, raw_rules=list(snapshot),
+        )
     violations_count = len(violations)
     error_violations = sum(1 for v in violations if getattr(v, "severity", None) == "error")
     advisory_violations = sum(1 for v in violations if getattr(v, "severity", None) == "warn")
@@ -586,6 +627,9 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
         rules_pinned=True,
         checked_at=now_iso(),
         mode=mode,
+        requested_mode=requested_mode,
+        diff_base=diff_base,
+        diff_fallback_reason=diff_fallback_reason,
     )
 
 

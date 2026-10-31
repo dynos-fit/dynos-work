@@ -413,6 +413,114 @@ def _normalize_analysis(analysis: object) -> dict:
     }
 
 
+def _load_repair_cycles(task_dir: Path) -> list[dict]:
+    try:
+        from lib_repair_history import load_repair_cycles  # noqa: PLC0415
+
+        return load_repair_cycles(task_dir)
+    except Exception:  # noqa: BLE001 — the prompt is advisory
+        log = _read_artifact(task_dir / "repair-log.json")
+        if isinstance(log, dict):
+            return [{"repair_cycle": log.get("repair_cycle", "?"), "source": "repair-log",
+                     "batches": [b for b in log.get("batches") or [] if isinstance(b, dict)]}]
+        return []
+
+
+def _task_finding_keys(task: dict) -> set[tuple[str, str]]:
+    """``(auditor, finding_id)`` a repair task covered, merged findings included.
+
+    An auditor-less task (older logs) is keyed with auditor ``""``.
+    """
+    keys = {(str(task.get("auditor") or ""), str(task.get("finding_id")))}
+    for merged in task.get("merged_findings") or []:
+        if isinstance(merged, dict) and merged.get("id"):
+            keys.add((str(merged.get("auditor") or ""), str(merged["id"])))
+    return keys
+
+
+def _keys_overlap(a: set[tuple[str, str]], b: set[tuple[str, str]]) -> bool:
+    for auditor, fid in a:
+        for other_auditor, other_fid in b:
+            if fid == other_fid and (auditor == other_auditor or not auditor or not other_auditor):
+                return True
+    return False
+
+
+def _render_repair_cycles(cycles: list[dict], findings: list[dict]) -> list[str]:
+    """Every repair cycle, oldest first, with each task's outcome.
+
+    repair-log.json records no per-task outcome (``write-repair-log`` only
+    stamps ``pending``), so it is derived: a finding a later cycle repaired
+    again was re-raised; otherwise it is resolved unless it still blocks in
+    the binding audit reports.
+    """
+    still_blocking = {
+        (str(f.get("_auditor") or ""), str(f.get("id"))) for f in findings if finding_is_blocking(f)
+    }
+    per_cycle_keys = [
+        set().union(*(
+            _task_finding_keys(t)
+            for b in c.get("batches") or [] for t in b.get("tasks") or [] if isinstance(t, dict)
+        )) for c in cycles
+    ]
+    lines = [f"## Repair Log ({len(cycles)} cycle{'s' if len(cycles) != 1 else ''})"]
+    for index, cycle_entry in enumerate(cycles[:10]):
+        cycle = cycle_entry.get("repair_cycle", "?")
+        if cycle_entry.get("reconstructed"):
+            auditors = ", ".join(cycle_entry.get("auditors") or []) or "unknown auditors"
+            lines.append(
+                f"- Cycle {cycle}: repair log not archived (task predates repair-log-history.json); "
+                f"repair-cycle-plan.json records findings from {auditors} driving this cycle"
+            )
+            continue
+        for batch in (cycle_entry.get("batches") or [])[:5]:
+            for t in (batch.get("tasks") or [])[:10]:
+                if not isinstance(t, dict):
+                    continue
+                fid = str(t.get("finding_id", "?"))
+                executor = t.get("assigned_executor") or t.get("executor") or "?"
+                keys = _task_finding_keys(t)
+                status = t.get("status")
+                if not status or status == "pending":
+                    later = next(
+                        (cycles[j].get("repair_cycle") for j in range(index + 1, len(cycles))
+                         if _keys_overlap(keys, per_cycle_keys[j])),
+                        None,
+                    )
+                    if later is not None:
+                        status = f"re-raised, repaired again in cycle {later}"
+                    elif _keys_overlap(keys, still_blocking):
+                        status = "still_blocking"
+                    else:
+                        status = "resolved"
+                auditor_label = f" ({t['auditor']})" if t.get("auditor") else ""
+                line = (
+                    f"- Cycle {cycle}, {batch.get('batch_id', '?')}: "
+                    f"{fid}{auditor_label} -> {executor} status={status}"
+                )
+                if t.get("route_mode"):
+                    line += f" route={t.get('route_mode')}"
+                model = t.get("model_override") or t.get("model")
+                if model:
+                    line += f" model={model}"
+                if t.get("retry_count"):
+                    line += f" retry={t.get('retry_count')}"
+                lines.append(line)
+                files = t.get("files_to_modify") or t.get("affected_files") or []
+                if isinstance(files, list) and files:
+                    lines.append(f"  files: {', '.join(str(x) for x in files[:5])}")
+                merged = t.get("merged_findings") or []
+                if isinstance(merged, list) and merged:
+                    lines.append("  merged: " + ", ".join(
+                        f"{m.get('id')} ({m.get('auditor')})" for m in merged if isinstance(m, dict)
+                    ))
+                for key in ("instruction", "error", "failure_reason", "reason", "notes"):
+                    if t.get(key):
+                        lines.append(f"  {key}: {str(t[key])[:400]}")
+    lines.append("")
+    return lines
+
+
 def build_analysis_prompt(task_dir: Path) -> dict:
     """Build a structured prompt for LLM analysis of a completed task.
 
@@ -423,7 +531,7 @@ def build_analysis_prompt(task_dir: Path) -> dict:
     task_dir = Path(task_dir).resolve()
 
     retro = _read_artifact(task_dir / "task-retrospective.json") or {}
-    repair_log = _read_artifact(task_dir / "repair-log.json")
+    repair_cycles = _load_repair_cycles(task_dir)
     findings, superseded_reports = _collect_audit_findings(task_dir)
     manifest = _read_artifact(task_dir / "manifest.json") or {}
 
@@ -538,58 +646,8 @@ def build_analysis_prompt(task_dir: Path) -> dict:
             )
         sections.append("")
 
-    if repair_log and isinstance(repair_log, dict):
-        # Schema written by ``ctl run-repair-log-build``: the cycle number is
-        # top-level, each task names ``assigned_executor``, and no per-task
-        # status is recorded, so the outcome is derived from whether the
-        # finding still blocks in the binding audit reports.
-        still_blocking = {
-            (str(f.get("_auditor") or ""), str(f.get("id")))
-            for f in findings if finding_is_blocking(f)
-        }
-        still_blocking_ids = {fid for _, fid in still_blocking}
-        sections.append("## Repair Log")
-        log_cycle = repair_log.get("repair_cycle", "?")
-        for batch in (repair_log.get("batches") or [])[:5]:
-            if not isinstance(batch, dict):
-                continue
-            cycle = batch.get("repair_cycle", log_cycle)
-            tasks = batch.get("tasks") or []
-            for t in tasks[:10]:
-                if not isinstance(t, dict):
-                    continue
-                fid = str(t.get("finding_id", "?"))
-                executor = t.get("assigned_executor") or t.get("executor") or "?"
-                status = t.get("status")
-                if not status:
-                    auditor = str(t.get("auditor") or "")
-                    blocked = (auditor, fid) in still_blocking if auditor else fid in still_blocking_ids
-                    status = "still_blocking" if blocked else "resolved"
-                auditor_label = f" ({t['auditor']})" if t.get("auditor") else ""
-                line = (
-                    f"- Cycle {cycle}, {batch.get('batch_id', '?')}: "
-                    f"{fid}{auditor_label} -> {executor} status={status}"
-                )
-                if t.get("route_mode"):
-                    line += f" route={t.get('route_mode')}"
-                model = t.get("model_override") or t.get("model")
-                if model:
-                    line += f" model={model}"
-                if t.get("retry_count"):
-                    line += f" retry={t.get('retry_count')}"
-                sections.append(line)
-                files = t.get("files_to_modify") or t.get("affected_files") or []
-                if isinstance(files, list) and files:
-                    sections.append(f"  files: {', '.join(str(x) for x in files[:5])}")
-                merged = t.get("merged_findings") or []
-                if isinstance(merged, list) and merged:
-                    sections.append("  merged: " + ", ".join(
-                        f"{m.get('id')} ({m.get('auditor')})" for m in merged if isinstance(m, dict)
-                    ))
-                for key in ("instruction", "error", "failure_reason", "reason", "notes"):
-                    if t.get(key):
-                        sections.append(f"  {key}: {str(t[key])[:400]}")
-        sections.append("")
+    if repair_cycles:
+        sections.extend(_render_repair_cycles(repair_cycles, findings))
 
     findings_by_cat = retro.get("findings_by_category", {})
     if findings_by_cat:

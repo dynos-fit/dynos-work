@@ -18,6 +18,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "hooks"))
 sys.path.insert(0, str(ROOT))
@@ -26,6 +28,12 @@ from lib_core import _write_pre_repair_blocking_snapshot  # noqa: E402
 from lib_receipts import receipt_audit_routing, write_receipt  # noqa: E402
 from lib_validate import compute_reward  # noqa: E402
 from memory import postmortem_analysis as pa  # noqa: E402
+
+@pytest.fixture(autouse=True)
+def _isolate_dynos_home(monkeypatch, tmp_path):
+    """The tasks below set DYNOS_HOME; restore it after each test."""
+    monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
+
 
 FAST = "haiku"  # noqa: model-literal
 DEEP = "fable"  # noqa: model-literal

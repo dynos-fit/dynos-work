@@ -54,6 +54,8 @@ If validation fails with missing required inputs, print the errors and stop. Do 
 
 Read `spec.md`, `plan.md`, and `execution-graph.json`. Ensure you understand the dependency chain.
 
+If `plan-audit-gap-warnings.json` exists with `advisory: true`, read its `warnings`: plan endpoints or models the gap scanner could not find in the code, downgraded to advisory because the approved plan was unchanged since `run-planning` validated it. Pass each one to the executor of the segment that touches it as a fact to confirm (the route or model exists where the plan says, or the segment creates it); do not edit `plan.md` over them.
+
 ### Step 2 — Snapshot the Base
 
 Before any modification starts:
@@ -309,13 +311,13 @@ A failing command is a defect in the segment that declared it: fix it (re-spawn 
 Run the prevention-rules check. `run-execution-finish` refuses to advance without its `rules-check-passed` receipt:
 
 ```bash
-"$DYNOS" ctl run-rules-check .dynos/task-{id} --mode all
+"$DYNOS" ctl run-rules-check .dynos/task-{id} --mode task
 ```
 
 - `status == "rules_check_passed"`: continue.
-- `status == "rules_check_failed"` (exit 1; the JSON is on stderr and names the rule and files): fix the violations and re-run. A violation in a file this task did not touch still blocks; fix it when it is small, otherwise write `escalation.md` naming the rule and file, and stop. A rule that cannot apply to this task, such as one another task added for a symbol this branch does not have, is waived instead of edited out of the shared rules file: `"$DYNOS" ctl waive-rule .dynos/task-{id} <rule_id> --reason "<why it does not apply>"`, then re-run the check. Removing and later restoring a rule changes the rules hash, and the stage gate refuses that as drift.
+- `status == "rules_check_failed"` (exit 1; the JSON is on stderr and names the rule and files): fix the violations and re-run. A rule that cannot apply to this task, such as one another task added for a symbol this branch does not have, is waived instead of edited out of the shared rules file: `"$DYNOS" ctl waive-rule .dynos/task-{id} <rule_id> --reason "<why it does not apply>"`, then re-run the check. Removing and later restoring a rule changes the rules hash, and the stage gate refuses that as drift.
 
-Use `--mode all`. The default `staged` mode checks only `git diff --cached`, and execution never stages files, so it would pass without checking anything.
+Use `--mode task`. It checks the files this task changed since its `record-snapshot` commit (plus untracked files) against the rules pinned when the task started, so pre-existing violations in code the task never touched do not block it; repo-wide rules (caller counts, signature locks) fail only when the task's change caused the violation. The receipt records the mode used, and a task with no snapshot is checked in `all` mode. `--mode all` scans every tracked file; the `staged` mode checks only `git diff --cached`, and execution never stages files, so it would pass without checking anything.
 
 Then advance:
 

@@ -2925,6 +2925,33 @@ def cmd_clear_role(args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_scope_output(task_dir: Path) -> dict:
+    """Informational write-scope fields for segment-done / findings-gate.
+
+    Files changed since the snapshot that no segment, repair task or human
+    acknowledgment covers (see lib_write_scope). Early warning only: the
+    DONE gate is what refuses. Never raises.
+    """
+    try:
+        from lib_write_scope import ACKNOWLEDGE_COMMAND, write_scope_report  # noqa: PLC0415
+        report = write_scope_report(task_dir)
+    except Exception as exc:  # noqa: BLE001
+        return {"write_scope_status": "unavailable", "write_scope_error": str(exc), "out_of_scope_files": []}
+    out: dict = {
+        "write_scope_status": report.get("status"),
+        "out_of_scope_files": report.get("out_of_scope_files") or [],
+    }
+    if report.get("error"):
+        out["write_scope_error"] = report["error"]
+    if out["out_of_scope_files"]:
+        out["out_of_scope_hint"] = (
+            "these files changed outside the declared write scope; revert them, "
+            "or a human acknowledges them with `" + ACKNOWLEDGE_COMMAND + "` "
+            "(the DONE gate refuses otherwise)"
+        )
+    return out
+
+
 def _release_idle_audit_roles(task_dir: Path) -> list[str]:
     """Drop every `audit-*` stamp (and unconsumed audit grant) whose spawn
     is no longer in flight; return the roles dropped.
@@ -3596,6 +3623,58 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             for item in data_model.get("unverified", []) or []:
                 gap_errors.append(f"unverified data model entry: {item}")
 
+        # Advisory downgrade: when the plan the human approved is byte-for-
+        # byte the plan run-planning validated (gap check included), a miss
+        # here cannot be a plan defect; it comes from repo drift or a
+        # scanner false negative (Django include()/router mounts, models
+        # the regex scan does not see). Sending the approved plan back to
+        # PLANNING would force a re-approval of an identical plan, so the
+        # API Contracts / Data Model misses become recorded warnings. A
+        # report-level error (e.g. plan.md missing) still blocks, and a plan
+        # changed since validation keeps the blocking behaviour.
+        gap_warnings: list[str] = []
+        gap_advisory_reason: str | None = None
+        gap_warnings_path: Path | None = None
+        if gap_errors and not gap_report.get("error"):
+            plan_fresh = plan_validated_receipt_matches(task_dir)
+            if plan_fresh is True:
+                gap_warnings, gap_errors = gap_errors, []
+                gap_advisory_reason = (
+                    "plan-validated receipt hashes match the current spec.md, plan.md and "
+                    "execution-graph.json: the approved plan already passed run-planning's "
+                    "gap check, so these misses are advisory (repo drift or scanner false "
+                    "negatives), not plan defects"
+                )
+                gap_warnings_path = task_dir / "plan-audit-gap-warnings.json"
+                _write_ctl_json(task_dir, gap_warnings_path, {
+                    "task_id": _load_manifest(task_dir).get("task_id", task_dir.name),
+                    "generated_at": now_iso(),
+                    "advisory": True,
+                    "reason": gap_advisory_reason,
+                    "warnings": gap_warnings,
+                    "api_contracts_unverified": (api or {}).get("unverified", []) if isinstance(api, dict) else [],
+                    "data_model_unverified": (data_model or {}).get("unverified", []) if isinstance(data_model, dict) else [],
+                })
+        stale_warnings = task_dir / "plan-audit-gap-warnings.json"
+        if not gap_warnings and stale_warnings.exists():
+            # A warnings file from an earlier audit run must not outlive it.
+            _write_ctl_json(task_dir, stale_warnings, {
+                "task_id": _load_manifest(task_dir).get("task_id", task_dir.name),
+                "generated_at": now_iso(),
+                "advisory": False,
+                "reason": "superseded: the latest run-plan-audit recorded no advisory gap misses",
+                "warnings": [],
+                "api_contracts_unverified": [],
+                "data_model_unverified": [],
+            })
+        _gap_advisory_fields: dict = {
+            "gap_advisory": bool(gap_warnings),
+            "gap_warnings": gap_warnings,
+        }
+        if gap_warnings:
+            _gap_advisory_fields["gap_advisory_reason"] = gap_advisory_reason
+            _gap_advisory_fields["gap_warnings_path"] = str(gap_warnings_path)
+
         if gap_errors:
             # A plan repaired here would no longer be the plan the human
             # approved at PLAN_REVIEW, and run-execute-setup refuses a plan
@@ -3682,10 +3761,16 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             # PLAN_AUDIT exit gate is satisfied for high/critical tasks too.
             from lib_receipts import plan_audit_matches, receipt_plan_audit
             manifest = _load_manifest(task_dir)
-            cached = plan_audit_matches(task_dir) is True
+            # Advisory gap warnings must land in the receipt, so a cached
+            # receipt is rewritten when there are any to record.
+            cached = plan_audit_matches(task_dir) is True and not gap_warnings
             receipt_path = None
             if not cached:
-                receipt_path = receipt_plan_audit(task_dir, tokens_used=0, model_used="deterministic")
+                receipt_path = receipt_plan_audit(
+                    task_dir, tokens_used=0, model_used="deterministic",
+                    gap_warnings=gap_warnings or None,
+                    gap_warnings_path=str(gap_warnings_path) if gap_warnings_path else None,
+                )
             transitioned_to = None
             if get_tdd_required(manifest) and manifest.get("stage") == "PLAN_AUDIT":
                 _, updated = transition_task(task_dir, "TDD_REVIEW")
@@ -3702,6 +3787,7 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
                 "tdd_required": get_tdd_required(manifest),
                 "transitioned_to": transitioned_to,
                 "gap_report": gap_report,
+                **_gap_advisory_fields,
             }
             if llm_opt_in and not args.report_path:
                 payload["status"] = "llm_audit_required"
@@ -3715,6 +3801,8 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             task_dir,
             tokens_used=args.tokens_used,
             model_used=args.model,
+            gap_warnings=gap_warnings or None,
+            gap_warnings_path=str(gap_warnings_path) if gap_warnings_path else None,
         )
         finding_count, blocking_count = _parse_audit_report(report_path, root=_root_for_task_dir(task_dir))
         # Auto-advance to TDD_REVIEW when tdd_required=true and audit passed.
@@ -3737,6 +3825,7 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             "tdd_required": get_tdd_required(manifest),
             "transitioned_to": transitioned_to,
             "gap_report": gap_report,
+            **_gap_advisory_fields,
         }
         print(json.dumps(payload, indent=2))
         return 0 if finding_count == 0 else 1
@@ -4055,13 +4144,37 @@ def cmd_write_execution_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record_repair_history(task_dir: Path, repair_log: dict, previous: bytes | None) -> None:
+    """Keep this cycle (and the log it replaced) in repair-log-history.json.
+
+    Best effort: a history failure is logged and never fails the repair-log
+    write the pipeline depends on.
+    """
+    try:
+        prior = json.loads(previous) if previous else None
+    except (ValueError, UnicodeDecodeError):
+        prior = None
+    try:
+        from lib_repair_history import record_repair_log  # noqa: PLC0415
+        record_repair_log(task_dir, repair_log, previous=prior)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from lib_log import log_event  # noqa: PLC0415
+            log_event(_root_for_task_dir(task_dir), "repair_history_record_failed",
+                      task=task_dir.name, error=str(exc))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def cmd_write_repair_log(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
         payload = _normalize_repair_log_payload(task_dir, _read_json_input(args.from_path))
         _validate_repair_log_payload(task_dir, payload)
         out_path = task_dir / "repair-log.json"
+        previous_log = out_path.read_bytes() if out_path.exists() else None
         _write_ctl_json(task_dir, out_path, payload)
+        _record_repair_history(task_dir, payload, previous_log)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -4235,6 +4348,14 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
         "branch": branch,
         "recorded_at": recorded_at,
     }
+    # Files already dirty when the task starts, with their digests, so the
+    # git write-scope backstop (lib_write_scope) does not blame them on the
+    # task unless they change again. Its presence also arms the DONE gate.
+    try:
+        from lib_write_scope import baseline_dirty_files  # noqa: PLC0415
+        manifest["snapshot"]["baseline_dirty"] = baseline_dirty_files(root)
+    except Exception:
+        pass  # no baseline: the backstop reports but never refuses
     try:
         _write_ctl_json(task_dir, manifest_path, manifest)
     except Exception as exc:
@@ -5017,6 +5138,7 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
             "accepted_findings": _accepted_finding_rows(collected["findings"]),
             "incomplete_audits": _partial_audit_reports(reports),
             "next_action": next_action,
+            **_write_scope_output(task_dir),
         }, indent=2))
         return 0
     except Exception as exc:
@@ -5849,6 +5971,7 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                 "errors": errors,
             }, indent=2))
             return 1
+        _record_repair_history(task_dir, repair_log, previous_log)
 
         print(json.dumps({
             "status": "repair_log_built",
@@ -6401,6 +6524,7 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
             out["next_action"] = (
                 f"run `ctl run-verification-evidence {task_dir} --segment {args.segment_id}`"
             )
+        out.update(_write_scope_output(task_dir))
         print(json.dumps(out, indent=2))
         return 0
     except Exception as exc:
@@ -6549,6 +6673,86 @@ def cmd_accept_finding(args: argparse.Namespace) -> int:
         "accepted": entry,
         "accepted_findings": [f"{e['auditor']}:{e['finding_id']}" for e in accepted],
         "next_action": "rerun run-audit-findings-gate",
+    }, indent=2))
+    return 0
+
+
+def cmd_acknowledge_out_of_scope(args: argparse.Namespace) -> int:
+    """Record a human decision that out-of-scope changed files belong to the task.
+
+    The git write-scope backstop (lib_write_scope) refuses DONE while files
+    changed since the snapshot fall outside every segment's files_expected /
+    files_optional and every repair cycle's files_to_modify. This is the
+    sanctioned way past it for a change a human confirms is task work. The
+    record lives in write-scope.json (ctl-owned; agents cannot write it),
+    requires a reason, and is logged. Only a file that is currently out of
+    scope can be acknowledged.
+    """
+    from lib_log import log_event  # noqa: PLC0415
+    from lib_write_scope import (  # noqa: PLC0415
+        WRITE_SCOPE_FILE, load_write_scope, write_scope_report,
+    )
+
+    task_dir = Path(args.task_dir).resolve()
+    reason = str(args.reason or "").strip()
+    files = [str(f).strip() for f in (args.files or []) if str(f).strip()]
+    if not reason:
+        print("acknowledge-out-of-scope: --reason is required and must be non-empty", file=sys.stderr)
+        return 1
+    if not files:
+        print("acknowledge-out-of-scope: at least one non-empty --file is required", file=sys.stderr)
+        return 1
+    if not (task_dir / "manifest.json").exists():
+        print(f"acknowledge-out-of-scope: not a task dir (no manifest.json): {task_dir}", file=sys.stderr)
+        return 1
+    report = write_scope_report(task_dir)
+    if report.get("status") != "checked":
+        print(
+            f"acknowledge-out-of-scope: write-scope check is {report.get('status')} "
+            f"({report.get('reason') or report.get('error') or 'no detail'}); nothing to acknowledge",
+            file=sys.stderr,
+        )
+        return 1
+    root = _root_for_task_dir(task_dir)
+    candidates = set(report.get("out_of_scope_files") or []) | set(report.get("acknowledged_files") or [])
+    normalized: list[str] = []
+    for f in files:
+        rel = f
+        if rel.startswith("/"):
+            try:
+                rel = str(Path(rel).resolve().relative_to(root.resolve()))
+            except (ValueError, OSError):
+                pass
+        while rel.startswith("./"):
+            rel = rel[2:]
+        normalized.append(rel)
+    unknown = [f for f in normalized if f not in candidates]
+    if unknown:
+        print(
+            "acknowledge-out-of-scope: not currently out of scope: "
+            + ", ".join(unknown)
+            + f"; out-of-scope files are: {', '.join(sorted(candidates)) or '(none)'}",
+            file=sys.stderr,
+        )
+        return 1
+    scope = load_write_scope(task_dir)
+    acknowledged = [e for e in scope["acknowledged"] if e.get("file") not in normalized]
+    at = now_iso()
+    acknowledged.extend({"file": f, "reason": reason, "acknowledged_at": at} for f in normalized)
+    acknowledged.sort(key=lambda e: str(e.get("file")))
+    _write_ctl_json(task_dir, task_dir / WRITE_SCOPE_FILE, {**scope, "acknowledged": acknowledged})
+    log_event(
+        root, "out_of_scope_acknowledged", task=task_dir.name, files=normalized, reason=reason,
+    )
+    append_execution_log(
+        task_dir, f"[SCOPE-ACK] {', '.join(normalized)} acknowledged by human decision: {reason}",
+    )
+    remaining = sorted(set(report.get("out_of_scope_files") or []) - set(normalized))
+    print(json.dumps({
+        "status": "out_of_scope_acknowledged",
+        "task_dir": str(task_dir),
+        "acknowledged": normalized,
+        "out_of_scope_files": remaining,
     }, indent=2))
     return 0
 
@@ -9030,8 +9234,12 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_rules_check_parser.add_argument("task_dir")
     run_rules_check_parser.add_argument(
-        "--mode", choices=["staged", "all"], default="staged",
-        help="Check staged files only (default) or all files",
+        "--mode", choices=["task", "diff", "all", "staged"], default="task",
+        help=(
+            "task (default): files changed since the task snapshot, or all files "
+            "when the task has no snapshot; diff: the same, explicitly; all: every "
+            "tracked file; staged: git diff --cached only"
+        ),
     )
     run_rules_check_parser.set_defaults(func=cmd_run_rules_check)
 
@@ -9054,6 +9262,15 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     accept_finding_parser.add_argument("--reason", required=True)
     accept_finding_parser.add_argument("--decision-ref", default=None, dest="decision_ref")
     accept_finding_parser.set_defaults(func=cmd_accept_finding)
+
+    ack_scope_parser = subparsers.add_parser(
+        "acknowledge-out-of-scope",
+        help="Record a human decision that files changed outside the declared write scope belong to this task",
+    )
+    ack_scope_parser.add_argument("task_dir")
+    ack_scope_parser.add_argument("--file", action="append", required=True, dest="files")
+    ack_scope_parser.add_argument("--reason", required=True)
+    ack_scope_parser.set_defaults(func=cmd_acknowledge_out_of_scope)
 
 
 def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:

@@ -1269,6 +1269,25 @@ def _receipt_chain_err(task_dir: Path, current_stage: str | None, next_stage: st
     )
 
 
+def _write_scope_err(task_dir: Path, current_stage: str | None, next_stage: str) -> str | None:
+    """Why the git write-scope backstop refuses DONE, or None.
+
+    See lib_write_scope. Legacy tasks (no snapshot, or a snapshot without
+    ``baseline_dirty``) never refuse. A missing module never wedges DONE.
+    """
+    try:
+        from lib_write_scope import done_gate_error  # noqa: PLC0415
+    except ImportError:
+        return None
+    try:
+        return done_gate_error(Path(task_dir), current_stage, next_stage)
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"Cannot transition {current_stage} -> {next_stage}: "
+            f"write-scope check failed: {exc}"
+        )
+
+
 def _rules_check_err(
     task_dir: Path,
     current_stage: str | None,
@@ -1545,6 +1564,9 @@ def _compute_bypassed_gates_for_force(
             chain_err = _receipt_chain_err(task_dir, current_stage, next_stage)
             if chain_err:
                 errs.append(chain_err)
+            scope_err = _write_scope_err(task_dir, current_stage, next_stage)
+            if scope_err:
+                errs.append(scope_err)
 
     # ---- DONE -> CALIBRATED requires calibration-applied.
     if current_stage == "DONE" and next_stage == "CALIBRATED":
@@ -2353,6 +2375,12 @@ def _replay_gates_for_transition(
             chain_err = _receipt_chain_err(task_dir, current_stage, next_stage)
             if chain_err:
                 _refuse(chain_err)
+            # Git write-scope backstop: files changed since the snapshot
+            # that no segment / repair task / human acknowledgment covers
+            # (writes the PreToolUse hook could not see).
+            scope_err = _write_scope_err(task_dir, current_stage, next_stage)
+            if scope_err:
+                _refuse(scope_err)
 
     # AC 23 + AC 10: DONE -> CALIBRATED requires EITHER a
     # calibration-applied OR calibration-noop receipt (whichever has

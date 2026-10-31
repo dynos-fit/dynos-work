@@ -91,6 +91,7 @@ For each auditor in the plan:
 - If `action: "spawn"`: spawn with the model returned by `"$DYNOS" ctl ensemble-next` — the plan `model` is only used for non-ensemble auditors (null = default)
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
 - For the plan-auditor: For each AC in spec.md naming a function signature, verify plan.md's Component section names the same signature. Mismatch is a partial finding.
+- If `plan-audit-gap-warnings.json` exists with `advisory: true` (also recorded as `gap_warnings` in the `plan-audit-check` receipt), give its `warnings` to the plan-auditor and spec-completion auditor: each names a plan endpoint or model the gap scanner could not find. Verify each against the final code; one that still does not exist and is not created by the diff is a finding.
 
 **Pre-load diff context (run once, write to sidecar, reference by path):** Using `diff_base` from the audit plan output, write the context ONCE to a sidecar file and reference its path in each auditor's base prompt. Do NOT capture the full content into a shell variable and append it to every prompt — that pattern multiplies (auditors × cascade-models × context-size) input tokens, which is exactly the regression the 2026-04-30 latency investigation flagged in CG-013 (the mislabeled "perf:" commit).
 
@@ -225,6 +226,8 @@ Use the JSON output as authoritative:
 `incomplete_audits` lists binding reports still marked `status: "partial"`: that auditor hit its turn cap before finishing, so its zero findings do not mean clean. Re-spawn each listed auditor once (same model, fresh attempt) before acting on a `clear` status, then re-run the gate. If a second attempt is also partial, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag AUDIT-PARTIAL --message "{auditor}"` and continue.
 
 Do NOT re-count blocking findings, infer critical spec failure, or decide repair-vs-reflect from prompt logic.
+
+The gate output also carries `out_of_scope_files`: files changed since the snapshot that no segment, repair task or acknowledgment covers. It does not change `status`, but `run-audit-finish` refuses DONE while any remain — see Step 5's finish refusal for what to do.
 
 ### Step 4 — Deterministic repair loop
 
@@ -448,6 +451,8 @@ Finalize completion through ctl:
 ```
 
 This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic. It refuses when an audit report is newer than `audit-summary.json`: re-run `ctl run-audit-summary` (and `run-audit-reflect`) and finish again.
+
+If it refuses with `outside the declared write scope`, files changed since the task snapshot are not covered by any segment's `files_expected`/`files_optional`, any repair cycle's `files_to_modify` or the TDD test files — typically a write made through an interpreter or subprocess that the write hook could not see. The refusal names the files. Revert each file that is not task work (`git checkout -- <path>`, or delete an untracked one). If a file IS task work, stop and ask the user; only on their explicit confirmation record it with `"$DYNOS" ctl acknowledge-out-of-scope .dynos/task-{id} --file <path> [--file <path> ...] --reason "<why it belongs to this task>"`, then re-run `run-audit-finish`. Never acknowledge on your own judgment, and never force past this gate. `run-audit-findings-gate` (and `run-execution-segment-done`) already list the same files as `out_of_scope_files`, so deal with them before the finish.
 
 If it refuses on `test-results.json`, the last recorded test run did not pass. Re-run `ctl run-tests` with the same commands. If they still fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate.
 

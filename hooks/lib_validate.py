@@ -1989,6 +1989,13 @@ REPAIR_NONCONVERGENCE_RETRIES = 2
 # of mixing incomparable observations across the definition change.
 WASTED_SPAWNS_SIGNAL_VERSION = 2
 
+# Version of compute_reward's scoring. A retrospective without
+# ``reward_scoring_version`` is version 1. Version 2 (7.6.x) scores blocking
+# findings from the findings gate's binding selection; version 1 counted
+# superseded and overruled reports and scored DONE tasks 0.0.
+# ``lib_retro_rescore`` recomputes retrospectives older than this.
+REWARD_SCORING_VERSION = 2
+
 
 def count_nonconverging_repairs(task_dir: Path) -> int:
     """Count distinct findings whose repair is not converging.
@@ -2572,6 +2579,7 @@ def compute_reward(task_dir: Path) -> dict:
         "subagent_spawn_count": subagent_spawn_count,
         "wasted_spawns": wasted_spawns,
         "wasted_spawns_signal_version": WASTED_SPAWNS_SIGNAL_VERSION,
+        "reward_scoring_version": REWARD_SCORING_VERSION,
         "auditor_zero_finding_streaks": auditor_zero_finding_streaks,
         "executor_zero_repair_streak": executor_zero_repair_streak,
         "token_usage_by_agent": token_usage_by_agent,
