@@ -728,11 +728,38 @@ the plugin source checkout) exempts the plugin-root check only.
 ### Honest enforcement statement
 
 The Bash pre-filter (now shlex-based and quote-aware) is defense-in-depth,
-NOT the trust anchor: interpreter-internal writes (`python3 -c
-"open(p,'w')"`) are invisible to any command-text parser. The unforgeable
-guarantees are: capability-keyed `require_write_allowed` inside ctl,
-receipts + the task receipt chain, and the hook-owned `spawn-log.jsonl`
-cross-check at audit-receipt time.
+NOT the trust anchor. It is ADVISORY for anything a subprocess writes.
+
+What it does see (each destination goes through the same `decide_write` as
+a `Write`/`Edit` call):
+
+- redirects (`>`, `>>`, `&>`, `>|`) and argv write verbs (`tee`, `cp`, `mv`,
+  `rsync`, `install`, `rm`, `unlink`, `shred`, `truncate`, `dd of=`);
+- in-place editors: `sed -i` / `--in-place`, `perl -i`, `ruby -i`;
+- literal-path writes inside inline interpreter code — `python3 -c`,
+  `node -e`/`-p`, `ruby -e`, `perl -e`, and heredoc bodies fed to an
+  interpreter (`python3 - <<'PY'`) or a shell (`bash <<'SH'`): `open(p, 'w'|'a'|'x'|'+')`,
+  `Path(p).write_text/write_bytes/touch/unlink/open('w')`, `os.remove/
+  rename/replace`, `shutil.copy*/move`, `fs.writeFileSync/appendFileSync/
+  copyFileSync/renameSync/createWriteStream/rmSync`, `File.write`, Perl
+  `open(FH, '>', p)` / `open(FH, ">p")`.
+
+What it cannot see: a path computed at run time (`open(p, 'w')`), a script
+file on disk (`python3 tool.py`), `os.system`/`subprocess` calls, `git
+checkout`/`git apply`, symlink tricks, or a heredoc written to a file and run
+in a later call. A `$` left in a heredoc-body path is never substituted and
+is denied fail-closed. The unforgeable guarantees are: capability-keyed
+`require_write_allowed` inside ctl, receipts + the task receipt chain, the
+hook-owned `spawn-log.jsonl` cross-check at audit-receipt time, and the
+`git diff` coverage check at `run-execution-segment-done`.
+
+Same-command variables: `T=.dynos/task-x; cat > "$T/_scratch/f"` (and
+`export T=...`, newline-separated, `&&`-joined) is substituted. Option-only
+`set` (`set -euo pipefail`), `command -v`, `.` used as an argument (`jq .`)
+and single-quoted `$` in unrelated tokens (`awk '{print $1}'`) no longer
+disable substitution; a name that itself appears after a literal `$`
+(`'$T'`, `\$T`) is never substituted. A variable from an earlier Bash call
+is not visible and is denied as `unresolved_shell_variable`.
 
 ### Planner spawn receipt evidence (SEC-004)
 

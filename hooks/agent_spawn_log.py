@@ -351,27 +351,50 @@ def _unfinished_spawns(rows: list[dict[str, Any]]) -> int:
     return outstanding + max(0, unmatched_launches - spare_stops)
 
 
-def release_planning_stamp(task_dir: Path, pending: dict[str, Any] | None = None) -> int:
-    """Clear the planning stamp once no planner spawn is still running.
+def role_released_on_return(role: str | None) -> bool:
+    """Roles whose stamp lives exactly as long as their spawn.
 
-    Returns the number of planner spawns still in flight (0 means the stamp
+    The planner and every auditor are released by the hook when their spawn
+    returns: nothing the orchestrator does afterwards needs their restricted
+    role, and under a shared-session harness a leftover stamp is adopted by
+    the orchestrator (an `audit-*` stamp then denies its next repo write with
+    "auditors write reports only to ..."). Executor stamps are released by
+    the execute skill's `ctl clear-role` after the segment receipt.
+    """
+    return bool(role) and (role == "planning" or str(role).startswith("audit-"))
+
+
+def release_role_stamp(
+    task_dir: Path, role: str, pending: dict[str, Any] | None = None
+) -> int:
+    """Clear ``role``'s stamp (and its unconsumed grants) once no spawn of
+    that role is still running.
+
+    Returns the number of ``role`` spawns still in flight (0 means the stamp
     was cleared, or there was none to clear). Raises when ``ctl clear-role``
     fails, so callers can report it without failing the hook.
     """
     from lib_core import clear_stamped_role
 
-    in_flight = _planner_spawns_in_flight(task_dir / "spawn-log.jsonl", pending)
-    if not in_flight and clear_stamped_role(task_dir, "planning"):
+    in_flight = spawns_in_flight(task_dir / "spawn-log.jsonl", pending).get(role, 0)
+    if not in_flight and clear_stamped_role(task_dir, role):
         ctl = Path(__file__).with_name("ctl.py")
-        cleared = subprocess.run(
-            [sys.executable, str(ctl), "clear-role", str(task_dir)],
-            capture_output=True, text=True,
-        )
+        cmd = [sys.executable, str(ctl), "clear-role", str(task_dir)]
+        if role != "planning":
+            # Auditors run in parallel batches: expire only this role's
+            # grants, never a sibling auditor's or an executor's.
+            cmd += ["--role", role]
+        cleared = subprocess.run(cmd, capture_output=True, text=True)
         if cleared.returncode:
             raise RuntimeError(cleared.stderr.strip() or "clear-role failed")
         if pending is not None:
-            pending["cleared_role"] = "planning"
+            pending["cleared_role"] = role
     return in_flight
+
+
+def release_planning_stamp(task_dir: Path, pending: dict[str, Any] | None = None) -> int:
+    """Clear the planning stamp once no planner spawn is still running."""
+    return release_role_stamp(task_dir, "planning", pending)
 
 
 def main(argv: list[str]) -> int:
@@ -450,15 +473,22 @@ def main(argv: list[str]) -> int:
         # once the planner returns, drop the stamp and expire its grant so
         # the orchestrator stops adopting the planner's restricted role. A
         # background launch has not returned yet; SubagentStop clears it.
+        # Auditor stamps follow the same lifetime (bug 7, 7.6.0 field report).
         from lib_core import role_for_subagent_type
-        if role_for_subagent_type(str(entry.get("subagent_type", ""))) == "planning" \
-                and not entry.get("async_launch"):
+        returned_role = role_for_subagent_type(str(entry.get("subagent_type", "")))
+        if role_released_on_return(returned_role) and not entry.get("async_launch"):
             # Hierarchical planning runs worker planners in parallel and they
-            # share one stamp: only the last one to return may clear it.
+            # share one stamp: only the last one to return may clear it. The
+            # same holds for parallel spawns of one auditor (ensemble shards).
             try:
-                in_flight = release_planning_stamp(task_dir, entry)
+                in_flight = release_role_stamp(task_dir, str(returned_role), entry)
                 if in_flight:
-                    entry["planning_clear_deferred"] = in_flight
+                    key = (
+                        "planning_clear_deferred"
+                        if returned_role == "planning"
+                        else "role_clear_deferred"
+                    )
+                    entry[key] = in_flight
             except Exception as exc:
                 print(f"agent-spawn-log: role clear failed: {exc}", file=sys.stderr)
     try:

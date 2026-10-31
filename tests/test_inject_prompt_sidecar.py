@@ -85,6 +85,11 @@ def test_retry_overwrites_sidecar(tmp_path: Path):
     assert first != second
     expected = hashlib.sha256(r2.stdout.encode("utf-8")).hexdigest()
     assert second == expected
-    # Only one .sha256 + one .txt should exist (no orphans)
-    files = sorted(p.name for p in (graph.parent / "receipts" / "_injected-prompts").iterdir())
+    # Only one .sha256 + one .txt should exist (no orphans); the first
+    # attempt's pair is kept under _superseded/ rather than erased.
+    sidecar_dir = graph.parent / "receipts" / "_injected-prompts"
+    files = sorted(p.name for p in sidecar_dir.iterdir() if p.is_file())
     assert files == ["seg-1.sha256", "seg-1.txt"]
+    archived = sorted(p.name for p in (sidecar_dir / "_superseded").iterdir())
+    assert archived == ["seg-1.v1.sha256", "seg-1.v1.txt"]
+    assert (sidecar_dir / "_superseded" / "seg-1.v1.sha256").read_text().strip() == first

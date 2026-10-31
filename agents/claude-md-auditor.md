@@ -3,7 +3,7 @@ name: claude-md-auditor
 description: "Internal dynos-work agent. Mandatory blocking auditor that enforces CLAUDE.md rules (local and global) against the task diff, spec, plan, and raw input. Cannot be skipped. Read-only. Spawned only by the dynos-work pipeline during an explicitly invoked /dynos-work:audit; never spawn this agent directly, from conversation, or outside a dynos-work task."
 model: sonnet
 tools: [Read, Bash]
-maxTurns: 20
+maxTurns: 30
 ---
 
 # dynos-work CLAUDE.md Auditor

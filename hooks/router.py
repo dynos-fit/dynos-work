@@ -1477,7 +1477,10 @@ def build_executor_prompt(
             f"Write {ledger_target} EARLY and update it incrementally with a progress "
             f"ledger (done / in-flight / next). Work not written to disk does not exist — "
             f"if you stop, a continuation executor resumes from exactly what is on disk "
-            f"and from your ledger, so keep the remaining work recorded there."
+            f"and from your ledger, so keep the remaining work recorded there.\n"
+            f"Create {ledger_target} within your first two tool calls, listing every "
+            f"file you must touch under `next`, and move each file to `done` right "
+            f"after you finish it — not in one write at the end."
         )
 
     return "\n".join(parts)
@@ -1799,6 +1802,17 @@ def _write_prompt_sidecar(
     digest = hashlib.sha256(prompt_bytes).hexdigest()
     sha_path = sidecar_dir / f"{base_name}.sha256"
     txt_path = sidecar_dir / f"{base_name}.txt"
+    # A re-audit re-injects under the same name; keep the earlier attempt's
+    # pair under _superseded/ instead of erasing it.
+    if sha_path.is_file():
+        try:
+            same = sha_path.read_bytes() == digest.encode("ascii")
+        except OSError:
+            same = False
+        if not same:
+            from receipts.core import _archive_superseded  # noqa: PLC0415
+            _archive_superseded(txt_path, task_dir)
+            _archive_superseded(sha_path, task_dir)
     # Write the .txt FIRST so a reader that sees the .sha256 can always
     # find the matching bytes. os.replace is atomic on the same FS.
     _atomic_write_bytes(
@@ -2216,9 +2230,12 @@ def _build_reaudit_context_block(task_dir: Path, auditor_name: str) -> str:
 # or routing-tier name (fast/balanced/deep). Mirrors
 # lib_tool_budget.STATIC_CAPS_BY_MODEL / STATIC_CAPS_BY_TIER so the auditor
 # prompt advertises the same numbers the budget arithmetic uses elsewhere.
+# The advertised budget always stays below the auditor's frontmatter
+# maxTurns (lib_tool_budget.AUDITOR_MAX_TURNS): a deep-tier auditor told
+# "about 25" while its hard cap was 20 was force-stopped with a skeleton report.
 _AUDIT_TOOL_BUDGET_BY_LABEL: dict[str, int] = {
-    "haiku": 15, "sonnet": 20, "opus": 25,  # noqa: model-literal
-    "fast": 15, "balanced": 20, "deep": 25,
+    "haiku": 18, "sonnet": 24, "opus": 28,  # noqa: model-literal
+    "fast": 18, "balanced": 24, "deep": 28,
 }
 
 
@@ -2226,12 +2243,15 @@ def _audit_tool_budget(model: "str | None") -> int:
     """Return the tool-call budget advertised to an auditor for this spawn.
 
     Accepts a model-family name, a routing-tier name, or None. Unknown or
-    null labels fall back to the balanced floor (20) — never lower, so the
+    null labels fall back to the balanced floor (24) — never lower, so the
     write-first checkpoint never collapses to an impossibly small value.
     """
+    from lib_tool_budget import AUDITOR_MAX_TURNS, AUDITOR_WRAPUP_TURNS  # noqa: PLC0415
+
+    cap = AUDITOR_MAX_TURNS - AUDITOR_WRAPUP_TURNS
     if model and model in _AUDIT_TOOL_BUDGET_BY_LABEL:
-        return _AUDIT_TOOL_BUDGET_BY_LABEL[model]
-    return 20
+        return min(cap, _AUDIT_TOOL_BUDGET_BY_LABEL[model])
+    return min(cap, _AUDIT_TOOL_BUDGET_BY_LABEL["balanced"])
 
 
 def _build_audit_budget_block(auditor_name: str, model: "str | None") -> str:
@@ -2258,10 +2278,12 @@ def _build_audit_budget_block(auditor_name: str, model: "str | None") -> str:
         "`## Progress Ledger` with `### Done`, `### In-Flight`, and `### Next` "
         "subsections and `status=\"partial\"`. Write this skeleton BEFORE "
         "reading the diff in depth.\n"
-        "2. Update that file incrementally as you confirm findings. Work that is "
-        "not on disk does not exist.\n"
+        "2. Write each finding to that file the moment you confirm it — one "
+        "Edit per finding, never batched into a final write. Work that is not "
+        "on disk does not exist.\n"
         f"3. By tool call {checkpoint} the file must already hold real content "
-        "(the Progress Ledger plus any findings so far).\n"
+        "(the Progress Ledger plus any findings so far). Review the highest-risk "
+        "files first, so a cut-off report still covers what matters most.\n"
         "4. When within 2 tool calls of the limit, STOP investigating and "
         "finalize the report with `status=\"complete\"`. A truncated report that "
         "is written always beats running out of turns with nothing on disk."

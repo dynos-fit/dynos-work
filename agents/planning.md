@@ -330,6 +330,7 @@ Build the execution graph payload with this shape and persist it by piping it to
 **Execution graph rules:**
 - Each segment must map to exactly one executor type
 - No file may appear in more than one segment's `files_expected`
+- A file the segment changes only conditionally ("regenerate `schema.d.ts` only if the schema changed") also goes in `files_optional` (a subset of `files_expected`). `run-execution-segment-done` accepts an optional file that is unchanged since the snapshot or absent; every other file must still appear in the diff. Do not mark a file optional to dodge that check
 - `depends_on` lists segment IDs that must complete before this one can start
 - `criteria_ids` lists the acceptance criterion numbers from `spec.md` this segment satisfies
 - All acceptance criteria must be covered by at least one segment

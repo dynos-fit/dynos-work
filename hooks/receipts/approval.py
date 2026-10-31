@@ -21,6 +21,7 @@ from lib_validate import require_nonblank, require_nonblank_str
 
 from .core import (
     hash_file,
+    read_receipt,
     write_receipt,
 )
 
@@ -419,6 +420,57 @@ def receipt_calibration_noop(
     )
 
 
+RULES_SNAPSHOT_STEP = "rules-snapshot"
+
+
+def pinned_rules(task_dir: Path) -> list | None:
+    """The prevention rules pinned for this task, or None when unpinned.
+
+    Legacy tasks (created before pinning) have no snapshot until their
+    next ``run-rules-check``; callers then fall back to the live file.
+    """
+    receipt = read_receipt(Path(task_dir), RULES_SNAPSHOT_STEP)
+    rules = receipt.get("rules") if isinstance(receipt, dict) else None
+    return rules if isinstance(rules, list) else None
+
+
+def pin_rules_snapshot(task_dir: Path) -> list:
+    """Pin the shared prevention rules for this task, once.
+
+    ``prevention-rules.json`` is shared by every task and worktree of the
+    project, so a postmortem elsewhere can add a rule mid-task. The task is
+    held to the rules that existed when it was pinned (task start, or the
+    first rules check for a task created before pinning existed); the
+    rules check and the DONE drift gate both read this snapshot. Returns
+    the pinned raw rules. Raises ValueError when the live file is corrupt.
+    """
+    task_dir = Path(task_dir)
+    existing = pinned_rules(task_dir)
+    if existing is not None:
+        return existing
+    import rules_engine as _rules_engine  # noqa: PLC0415
+
+    root = task_dir.parent.parent
+    rules_file = _persistent_project_dir(root) / "prevention-rules.json"
+    raw_rules, _ = _rules_engine._load_rules_file(root, rules_file)
+    rules_file_sha256 = "none"
+    if rules_file.exists():
+        try:
+            rules_file_sha256 = hash_file(rules_file)
+        except OSError:
+            rules_file_sha256 = "unreadable"
+    write_receipt(
+        task_dir,
+        RULES_SNAPSHOT_STEP,
+        rules=raw_rules,
+        rules_count=len(raw_rules),
+        rules_file_sha256=rules_file_sha256,
+        effective_rules_sha256=_rules_engine.effective_rules_digest(raw_rules),
+        pinned_at=now_iso(),
+    )
+    return raw_rules
+
+
 def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     """Write receipt proving a rules-check pass (no error-severity violations).
 
@@ -465,9 +517,12 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     waived = frozenset(load_rule_waivers(task_dir))
     rules_file = _persistent_project_dir(root) / "prevention-rules.json"
 
+    # The task is checked against its pinned rules, not whatever the shared
+    # file holds now (another worktree's postmortem may have added a rule).
+    snapshot = pin_rules_snapshot(task_dir)
+
     def _effective_digest() -> str:
-        raw_rules, _ = _rules_engine._load_rules_file(root, rules_file)
-        return _rules_engine.effective_rules_digest(raw_rules, waived)
+        return _rules_engine.effective_rules_digest(snapshot, waived)
 
     # Digest before and after the engine run: the receipt must not record
     # a digest for rules the engine never saw.
@@ -480,7 +535,7 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
     # this function for the loaded/skipped counts (TOCTOU-safe at the
     # caller boundary — AC 12).
     violations, rules_loaded, rules_skipped = _rules_engine.run_checks_with_stats(
-        root, mode, exclude=waived,
+        root, mode, exclude=waived, raw_rules=list(snapshot),
     )
     violations_count = len(violations)
     error_violations = sum(1 for v in violations if getattr(v, "severity", None) == "error")
@@ -528,6 +583,7 @@ def receipt_rules_check_passed(task_dir: Path, mode: str) -> Path:
         rules_file_sha256=rules_file_sha256,
         waived_rules=sorted(waived),
         effective_rules_sha256=effective_rules_sha256,
+        rules_pinned=True,
         checked_at=now_iso(),
         mode=mode,
     )

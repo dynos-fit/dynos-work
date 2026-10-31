@@ -146,6 +146,8 @@ This command is authoritative for:
 
 Do NOT re-derive dependency depth, cache reuse, or runnable batches in prompt logic. Consume the JSON output and follow it.
 
+If `tdd_covered_segments` is present, those `testing-executor` segments were finalized without a spawn: with `tdd_required`, every one of their `files_expected` is in the `tdd-tests` receipt's file list and on disk, so `run-execution-batch-plan` wrote their `executor-{seg-id}` receipt (`tdd_covered: true`, evidence `evidence/tdd-tests.md`). They appear under `completed_segments`; do not spawn executors or run `run-execution-segment-done` for them.
+
 If `cached_segments` is non-empty, treat those segments as already satisfied and reuse their evidence files. Log each with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CACHE --message "{segment-id} — skipping (inputs unchanged)"`.
 
 If `next_batch` is empty while `pending_segments` is non-empty, stop and fail the task as blocked. That means dependency resolution or receipt state is inconsistent; do not guess.
@@ -232,7 +234,7 @@ The base prompt for each executor (before inject-prompt) must include:
 "$DYNOS" hook build_prompt_context --root . {files_expected_1} {files_expected_2} ...
 ```
 
-Append the printed output verbatim to the base prompt. This gives the executor the current file contents upfront so it does not need to call Read at the start, keeping the context window small. If a file does not exist yet (new file), the script emits a placeholder — include it anyway so the executor knows the file is new.
+Append the printed output verbatim to the base prompt. This gives the executor the current file contents upfront so it does not need to call Read at the start, keeping the context window small. If a file does not exist yet (new file), the script emits a placeholder — include it anyway so the executor knows the file is new. The output is held to a byte budget (48 KB by default; `--max-bytes N` or `DYNOS_PROMPT_CONTEXT_MAX_BYTES` changes it): past the budget, or when one file would take more than half of it, a file is cut to a head excerpt and then listed by path only, and the output's `Prompt-context budget:` line records what was kept. Do not work around the budget by pasting file contents yourself; the executor reads excerpted and path-only files on demand.
 
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 
@@ -289,6 +291,7 @@ Parse the JSON `status`:
   - "Write `evidence/{seg-id}.md` before you run low on turns."
 
   After each continuation executor returns, run `run-execution-segment-done` for that segment (the same authoritative completion gate the normal batch loop uses — it writes the receipt and verifies ownership + evidence; a segment is not "complete" until that receipt exists). Then **re-run `next-continuation` and repeat.** There is no spawn-count cap in this loop — keep going as long as segments make progress. Do NOT run `check-spawn-budget` for continuation spawns; the spawn-budget backstop is for audit thrash, not for finishing execution.
+- **`verification_needed`** — the only thing missing is `verify_commands` evidence (`verification_segments` names the segments; each entry has `verification_only: true`). No executor can produce that record, so do not spawn one: run `run-verification-evidence` (below), then re-run `next-continuation`. Re-reporting a verification-only segment does not raise its `stall_count`. In a `continuation_needed` result, skip entries with `verification_only: true` the same way.
 - **`stalled`** (exit code 3) — every remaining incomplete segment moved nothing across two consecutive continuations; `stalled_segments` names them. This is the ONLY automatic halt. Write `escalation.md` with `stalled_segments` and their `incomplete_reasons`, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CONTINUATION-STALLED --message "{stalled_segments}"`, and stop: the orchestrator cannot make progress and a human must intervene. Do NOT keep re-spawning.
 
 Only once `next-continuation` reports `complete` do you advance the stage.
@@ -298,6 +301,8 @@ If any segment in `execution-graph.json` declares `verify_commands`, capture the
 ```bash
 "$DYNOS" ctl run-verification-evidence .dynos/task-{id}
 ```
+
+Each command gets its own `timeout` from the graph, else `--timeout`, else the project policy's `verification_timeout_s` (`~/.dynos/projects/{slug}/policy.json`), else 3600 s. A run can outlast the Bash tool's foreground limit (about 10 minutes): start it with `run_in_background` and wait for it to exit instead of letting the tool call time out. `run-execution-segment-done` also reports `verification_pending` for a finished segment whose declared commands have no passing record yet; you may run `run-verification-evidence --segment {seg-id}` then.
 
 A failing command is a defect in the segment that declared it: fix it (re-spawn that segment's executor) and re-run the command above. Do not edit the command; it was locked at plan approval.
 

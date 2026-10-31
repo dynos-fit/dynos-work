@@ -366,12 +366,16 @@ _DJANGO_ROUTE_RE = re.compile(
     r"""\b(?:re_)?path\s*\(\s*r?['"]([^'"]*)['"]\s*,\s*"""
     r"""(include\s*\(\s*\(?\s*(?:['"]([\w.]+)['"]|([A-Za-z_][\w.]*)))?"""
 )
-# Path-like tokens in an endpoint cell: "/a, /b" or "`/a` and `/b`".
-_CELL_PATH_RE = re.compile(r"/[^\s`,;|]*")
+# Path-like tokens in an endpoint cell: "/a, /b" or "`/a` and `/b`". A
+# token is path-like when it contains a slash, so a relative claim such as
+# "companies/{company_id}" is kept whole instead of being cut at its first
+# slash (which used to leave only "/{company_id}"). A scheme and host
+# ("https://api.example.com/x") are dropped.
+_CELL_PATH_RE = re.compile(r"(?:[A-Za-z][\w+.-]*://[^/\s`,;|]*)?([^\s`,;|]*/[^\s`,;|]*)")
 # Separators between several paths in one cell: "`/a` / `/b`", "/a, /b".
 _CELL_SPLIT_RE = re.compile(r"\s+/\s+|[,;]")
 # A Python file worth parsing for Django URL structure.
-_DJANGO_URLS_HINT_RE = re.compile(r"\b(?:re_)?path\s*\(|\burlpatterns\b|\binclude\s*\(")
+_DJANGO_URLS_HINT_RE = re.compile(r"\b(?:re_)?path\s*\(|\burlpatterns\b|\binclude\s*\(|Router\s*\(")
 
 
 def _cell_endpoints(value: str) -> list[str]:
@@ -379,12 +383,18 @@ def _cell_endpoints(value: str) -> list[str]:
 
     A cell may list alternatives as "`/a` / `/b`" or "/a, /b"; it is split
     on those separators first so the separating " / " is not read as the
-    root path. A bare "/" counts only when it is the cell's sole path.
+    root path. A bare "/" counts only when it is the cell's sole path. A
+    relative path ("companies/{id}") is read as rooted ("/companies/{id}");
+    the route matcher still accepts it as the tail of a mounted route.
     """
     text = value.strip().strip("`").strip()
     paths: list[str] = []
     for piece in _CELL_SPLIT_RE.split(value):
-        paths.extend(p.strip("`") for p in _CELL_PATH_RE.findall(piece))
+        for token in _CELL_PATH_RE.findall(piece):
+            token = token.strip("`")
+            if not token:
+                continue
+            paths.append(token if token.startswith("/") else "/" + token)
     real = [p for p in paths if p != "/"]
     if real:
         return real
@@ -446,6 +456,9 @@ class _DjangoUrlModule:
         self.lists: set[str] = set()
         # local alias -> (module path, imported attribute or None)
         self.imports: dict[str, tuple[str, str | None]] = {}
+        # DRF router variable -> route prefix its registrations sit under
+        # ("" for a plain router; "companies/<company_pk>/" for a nested one).
+        self.routers: dict[str, str] = {}
         self._inline = 0
 
     def _abs_module(self, level: int, name: str | None) -> str:
@@ -486,6 +499,8 @@ class _DjangoUrlModule:
             names = [t.id for t in targets if isinstance(t, ast.Name)]
             if stmt.value is None:
                 return
+            if len(names) == 1 and self._record_router(names[0], stmt.value):
+                return
             if not names:
                 self._visit_expr(stmt.value, container)
                 return
@@ -506,6 +521,24 @@ class _DjangoUrlModule:
                 self.lists.add(target)
                 for arg in call.args:
                     self._visit_expr(arg, target, top=call.func.attr == "extend")
+                return
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "register"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in self.routers
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+            ):
+                # DRF ``router.register(r"companies", ViewSet)`` serves
+                # ``companies/`` and ``companies/<pk>/`` from ``router.urls``.
+                router = call.func.value.id
+                base = self.routers[router] + call.args[0].value.lstrip("^").strip("/")
+                key = f"{router}.urls"
+                self.lists.add(key)
+                self.routes.setdefault(key, []).extend([f"{base}/", f"{base}/<pk>/"])
                 return
             self._visit_expr(call, container)
             return
@@ -545,6 +578,30 @@ class _DjangoUrlModule:
                 return
         for child in ast.iter_child_nodes(expr):
             self._visit_expr(child, container)
+
+    def _record_router(self, name: str, value: ast.AST) -> bool:
+        """Record ``name = DefaultRouter()`` / ``NestedSimpleRouter(parent,
+        r"companies", lookup="company")``; True when ``value`` is a router."""
+        if not isinstance(value, ast.Call):
+            return False
+        cls = _call_name(value)
+        if not cls.endswith("Router"):
+            return False
+        prefix = ""
+        if cls.startswith("Nested") and len(value.args) >= 2:
+            parent = value.args[0]
+            parent_prefix = self.routers.get(parent.id, "") if isinstance(parent, ast.Name) else ""
+            parent_route = value.args[1]
+            lookup = next(
+                (kw.value.value for kw in value.keywords
+                 if kw.arg == "lookup" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)),
+                "parent",
+            )
+            if isinstance(parent_route, ast.Constant) and isinstance(parent_route.value, str):
+                route = parent_route.value.lstrip("^").strip("/")
+                prefix = f"{parent_prefix}{route}/<{lookup}_pk>/"
+        self.routers[name] = prefix
+        return True
 
     @staticmethod
     def _is_path_call(call: ast.Call) -> bool:
@@ -653,9 +710,14 @@ def _scan_routes(files: list[Path], root: Path) -> tuple[set[str], set[str]]:
         mods = find_modules(path)
         if mods:
             return [(m, "urlpatterns") for m in mods]
-        if "." in path:
-            base, attr = path.rsplit(".", 1)
-            return [k for m in find_modules(base) for k in resolve_name(m, attr, depth + 1)]
+        # ``pkg.urls.workspace_urls`` or ``pkg.routers.router.urls``: try
+        # each split into a module and a (dotted) name inside it.
+        parts = path.split(".")
+        for cut in range(len(parts) - 1, 0, -1):
+            base, attr = ".".join(parts[:cut]), ".".join(parts[cut:])
+            keys = [k for m in find_modules(base) for k in resolve_name(m, attr, depth + 1)]
+            if keys:
+                return keys
         return []
 
     def resolve_name(module: str, ref: str, depth: int = 0) -> list[tuple[str, str]]:
@@ -663,9 +725,10 @@ def _scan_routes(files: list[Path], root: Path) -> tuple[set[str], set[str]]:
         if depth > 8 or module not in modules:
             return []
         mod = modules[module]
+        if ref in mod.lists:
+            # A plain list, or a DRF ``router.urls`` this module registered.
+            return [(module, ref)]
         head, _, rest = ref.partition(".")
-        if not rest and head in mod.lists:
-            return [(module, head)]
         if head in mod.imports:
             base, attr = mod.imports[head]
             full = base if attr is None else (f"{base}.{attr}" if base else attr)

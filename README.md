@@ -68,6 +68,8 @@ Claude Code or Codex, plus Python 3 for the local dynos-work control plane.
 
 The pipeline works without `--dangerously-skip-permissions`. Every deterministic step funnels through one binary — `<plugin-root>/bin/dynos` — so you can allow that single command prefix once (via the permission prompt's "don't ask again" or a `Bash(<plugin-root>/bin/dynos ...)` allow rule in your settings) and then you only interact with the decisions that are actually yours: discovery questions, spec approval, plan approval, and TDD review. Plugin guardrail denials are not Claude Code permission errors — they say so explicitly and name the sanctioned alternative. Details: `docs/write-boundary-spec.md`.
 
+The write guardrail is exact for the `Write`/`Edit` tools and for ctl's own writes. For `Bash` it is best effort: it parses the command text for redirects, write verbs (`tee`, `cp`, `mv`, `install`, `rm`, `dd of=`), in-place editors (`sed -i`, `perl -i`) and literal-path writes in inline interpreter code (`python3 -c`, a heredoc'd `python3 -`, `node -e`, `ruby -e`, `perl -e`). A script file on disk, a path computed at run time, or a write from a subprocess is not seen. Treat it as a tripwire, not a sandbox: the binding guarantees are the receipts, the hook-owned spawn log and the git-diff checks at segment completion.
+
 ## Links
 
 - [Changelog](CHANGELOG.md)

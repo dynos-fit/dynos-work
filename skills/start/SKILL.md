@@ -149,7 +149,7 @@ Finalize classification through the deterministic control-plane entrypoint:
 "$DYNOS" ctl run-start-classification .dynos/task-{id}
 ```
 
-`run-start-classification` validates the classification payload, applies fast-track, `tdd_required`, `planning_path`, and `arch_design_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects. If `risk_floor_applied` is true, print `planner_risk_level` and `risk_floor_signals` once so the user can see why risk was raised. Print `planning_path`, `tdd_required`, and `arch_design_required` once so the user can see which gates this task will run.
+`run-start-classification` validates the classification payload, applies fast-track, `tdd_required`, `planning_path`, and `arch_design_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects. If `risk_floor_applied` is true, print `planner_risk_level` and `risk_floor_signals` once so the user can see why risk was raised. `risk_floor_signals` lists every signal that matched even when nothing was raised; `risk_floor_level` and `risk_floor_reason` say what floor they produced and whether it applied. Print `planning_path`, `tdd_required`, and `arch_design_required` once so the user can see which gates this task will run.
 
 **If the output contains `"tdd_required": true`:** Step 8 (TDD-First Gate) is **mandatory** for this task. The flag is opt-in — it is true only when the user asked for tests before code or the project policy (`tdd_default_risk_levels`) lists this risk level — so do not set it from your own risk assessment. The state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` if Step 8 is skipped while the flag is true. When it is `false`, Step 8 does not run and `testing-executor` writes tests during execute.
 
@@ -483,7 +483,14 @@ Read spec.md and plan.md.
 Write a complete test suite covering every acceptance criterion.
 Do not implement production code.
 Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
+Write the test files named in the files_expected of the execution graph's testing-executor segments.
+Create evidence/tdd-tests.md within your first two tool calls with a ledger listing every test file
+you will write under "next"; move each file to "done" as soon as it is written.
 ```
+
+   If the testing-executor returns before its ledger's `next` list is empty (it ran out of turns), spawn another `testing-executor` with the same instruction plus "Continue from the ledger in evidence/tdd-tests.md; do not rewrite files listed as done." Repeat until the ledger is complete, then validate.
+
+   Pass every written test file to `ctl tdd-receipt` (step 5). During execute, `run-execution-batch-plan` finalizes each `testing-executor` segment whose `files_expected` are all in that receipt and on disk, without spawning an executor for it.
 
 2. Deterministically validate the generated tests before user review:
    - Every acceptance criterion from `spec.md` must be mapped to at least one test case in the evidence summary.

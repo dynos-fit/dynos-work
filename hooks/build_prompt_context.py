@@ -37,6 +37,17 @@ _GIT: str | None = shutil.which("git")
 _MAX_FILE_CHARS = 40_000
 _MAX_TOTAL_CHARS = 150_000
 
+# Byte budgets (UTF-8) for the whole emitted block. Executor pre-loads
+# (file mode) are appended to every executor base prompt verbatim, so they
+# get a tighter default than the audit diff sidecar. Past the budget a file
+# degrades to a head excerpt, then to a path-only listing the agent reads on
+# demand. Override with --max-bytes or DYNOS_PROMPT_CONTEXT_MAX_BYTES.
+_DEFAULT_FILE_MODE_MAX_BYTES = 48_000
+_DEFAULT_DIFF_MODE_MAX_BYTES = 150_000
+_EXCERPT_MAX_BYTES = 4_000
+_MIN_EXCERPT_BYTES = 1_000
+_BUDGET_ENV = "DYNOS_PROMPT_CONTEXT_MAX_BYTES"
+
 _LANG: dict[str, str] = {
     ".py": "python",
     ".ts": "typescript",
@@ -73,36 +84,141 @@ def _read_file(path: Path) -> str:
     return content
 
 
-def build_file_context(files: list[str], root: Path) -> str:
+def _nbytes(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _excerpt(content: str, max_bytes: int) -> tuple[str, int, int]:
+    """Return (excerpt, lines_kept, total_lines): whole leading lines that fit."""
+    lines = content.splitlines(keepends=True)
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        size = _nbytes(line)
+        if used + size > max_bytes:
+            break
+        kept.append(line)
+        used += size
+    return "".join(kept), len(kept), len(lines)
+
+
+def _resolve_budget(explicit: "int | None", default: int) -> int:
+    if explicit is not None and explicit > 0:
+        return explicit
+    import os  # noqa: PLC0415
+    raw = os.environ.get(_BUDGET_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return default
+
+
+def _pack_blocks(
+    entries: list[tuple[str, Path, str]], budget: int, used: int
+) -> tuple[list[str], dict[str, list[str]], int]:
+    """Pack (label, path, heading_suffix) file entries into a byte budget.
+
+    Each file is emitted in full when it fits, else as a head excerpt when at
+    least _MIN_EXCERPT_BYTES remain, else as a path-only line. Returns
+    (blocks, {"full", "excerpt", "path_only"} -> labels, bytes_used).
+    """
+    blocks: list[str] = []
+    tally: dict[str, list[str]] = {"full": [], "excerpt": [], "path_only": []}
+    path_only_lines: list[str] = []
+    # One oversized file must not starve the rest: with several files, a
+    # single file may take at most half the budget in full.
+    per_file_cap = budget if len(entries) <= 1 else max(budget // 2, _MIN_EXCERPT_BYTES)
+    for label, path, suffix in entries:
+        content = _read_file(path)
+        lang = _lang(path.suffix)
+        block = f"### `{label}`{suffix}\n\n```{lang}\n{content}\n```\n"
+        size = _nbytes(block)
+        if used + size <= budget and size <= per_file_cap:
+            blocks.append(block)
+            # _read_file's own per-file char cap already cut this one.
+            truncated = content.endswith(f"[truncated at {_MAX_FILE_CHARS} chars]")
+            tally["excerpt" if truncated else "full"].append(label)
+            used += size
+            continue
+        remaining = budget - used
+        if remaining >= _MIN_EXCERPT_BYTES:
+            excerpt, kept, total = _excerpt(
+                content, min(max(_EXCERPT_MAX_BYTES, per_file_cap // 4), remaining - 400)
+            )
+            if kept:
+                try:
+                    with path.open("rb") as fh:
+                        total = sum(1 for _ in fh)
+                except OSError:
+                    pass
+                block = (
+                    f"### `{label}`{suffix} (excerpt: first {kept} of {total} lines)\n\n"
+                    f"```{lang}\n{excerpt}\n```\n"
+                    f"*(excerpt — over the prompt-context byte budget; Read `{label}` for the rest)*\n"
+                )
+                blocks.append(block)
+                tally["excerpt"].append(label)
+                used += _nbytes(block)
+                continue
+        try:
+            size_note = f"{path.stat().st_size} bytes" if path.exists() else "does not exist yet"
+        except OSError:
+            size_note = "unreadable"
+        path_only_lines.append(f"- `{label}` ({size_note})")
+        tally["path_only"].append(label)
+    if path_only_lines:
+        listing = (
+            "### Not pre-loaded (byte budget reached — Read these on demand)\n\n"
+            + "\n".join(path_only_lines) + "\n"
+        )
+        blocks.append(listing)
+        used += _nbytes(listing)
+    return blocks, tally, used
+
+
+def _budget_line(budget: int, used: int, tally: dict[str, list[str]]) -> str:
+    return (
+        f"Prompt-context budget: max_bytes={budget} used_bytes={used} "
+        f"full={len(tally['full'])} excerpt={len(tally['excerpt'])} "
+        f"path_only={len(tally['path_only'])}\n\n"
+    )
+
+
+def build_file_context(files: list[str], root: Path, max_bytes: "int | None" = None) -> str:
     if not files:
         return ""
 
-    blocks: list[str] = []
-    total = 0
-
+    budget = _resolve_budget(max_bytes, _DEFAULT_FILE_MODE_MAX_BYTES)
+    entries: list[tuple[str, Path, str]] = []
     for filepath in files:
         p = Path(filepath)
         if not p.is_absolute():
             p = (root / filepath).resolve()
-        content = _read_file(p)
-        lang = _lang(p.suffix)
-        block = f"### `{filepath}`\n\n```{lang}\n{content}\n```\n"
-        if total + len(block) > _MAX_TOTAL_CHARS:
-            blocks.append(f"### `{filepath}`\n\n*(omitted — total pre-load limit reached)*\n")
-            break
-        blocks.append(block)
-        total += len(block)
+        entries.append((filepath, p, ""))
+    blocks, tally, used = _pack_blocks(entries, budget, 0)
 
+    degraded = tally["excerpt"] or tally["path_only"]
     header = (
         "## Pre-loaded File Contents\n\n"
-        "The following files are pre-loaded in full. "
-        "Do NOT call Read, Grep, or Glob for these files — use the content below directly. "
-        "This eliminates unnecessary tool calls and keeps your context small.\n\n"
+        + _budget_line(budget, used, tally)
+        + (
+            "Files shown in full below are pre-loaded. "
+            "Do NOT call Read, Grep, or Glob for those files — use the content below directly. "
+            if not degraded else
+            "Files shown in full below are pre-loaded — do NOT call Read for those. "
+            "Excerpted and not-pre-loaded files exceeded the byte budget: Read them "
+            "(or the parts you need) when you get to them. "
+        )
+        + "This eliminates unnecessary tool calls and keeps your context small.\n\n"
     )
     return header + "\n".join(blocks)
 
 
-def build_diff_context(snapshot_sha: str, root: Path) -> str:
+def build_diff_context(snapshot_sha: str, root: Path, max_bytes: "int | None" = None) -> str:
     # Validate the SHA resolves to a commit before passing it to git diff.
     # An abbreviated/wrong SHA that fails to resolve made `git diff` produce
     # an empty diff silently, leading to a 1-byte sidecar. Surface the bad
@@ -140,25 +256,22 @@ def build_diff_context(snapshot_sha: str, root: Path) -> str:
     except subprocess.CalledProcessError:
         diff_text = ""
 
+    budget = _resolve_budget(max_bytes, _DEFAULT_DIFF_MODE_MAX_BYTES)
     blocks: list[str] = []
 
     # Include the unified diff if not too large
-    if diff_text and len(diff_text) <= _MAX_TOTAL_CHARS // 2:
+    if diff_text and _nbytes(diff_text) <= budget // 2:
         blocks.append("### Unified Diff\n\n```diff\n" + diff_text[:_MAX_FILE_CHARS] + "\n```\n")
 
-    # Include current content of each changed file
-    total = sum(len(b) for b in blocks)
-    for filepath in changed:
-        p = (root / filepath).resolve()
-        if not p.exists():
-            continue
-        content = _read_file(p)
-        lang = _lang(p.suffix)
-        block = f"### `{filepath}` (current)\n\n```{lang}\n{content}\n```\n"
-        if total + len(block) > _MAX_TOTAL_CHARS:
-            break
-        blocks.append(block)
-        total += len(block)
+    # Include current content of each changed file, degrading past the budget
+    used = sum(_nbytes(b) for b in blocks)
+    entries = [
+        (filepath, (root / filepath).resolve(), " (current)")
+        for filepath in changed
+        if (root / filepath).resolve().exists()
+    ]
+    file_blocks, tally, used = _pack_blocks(entries, budget, used)
+    blocks.extend(file_blocks)
 
     if not blocks:
         return ""
@@ -168,8 +281,10 @@ def build_diff_context(snapshot_sha: str, root: Path) -> str:
         f"Changed files since snapshot `{snapshot_sha[:12]}`: "
         + ", ".join(f"`{f}`" for f in changed)
         + ".\n\n"
-        "These files are pre-loaded below. "
-        "Do NOT call Read, Grep, or Glob for files listed above — use the content here directly.\n\n"
+        + _budget_line(budget, used, tally)
+        + "Files shown in full below are pre-loaded. "
+        "Do NOT call Read, Grep, or Glob for those — use the content here directly. "
+        "Excerpted or not-pre-loaded files (if any) exceeded the byte budget: Read them on demand.\n\n"
     )
     return header + "\n".join(blocks)
 
@@ -210,6 +325,18 @@ def main() -> None:
     parser.add_argument("files", nargs="*", help="File paths to pre-load")
     parser.add_argument("--root", default=".", help="Repo root (default: cwd)")
     parser.add_argument("--diff", metavar="SHA", help="Pre-load files changed since this git SHA")
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Byte budget for the emitted context (default "
+            f"{_DEFAULT_FILE_MODE_MAX_BYTES} for file lists, "
+            f"{_DEFAULT_DIFF_MODE_MAX_BYTES} for --diff/--task-dir; env "
+            f"{_BUDGET_ENV} overrides the default). Past the budget files "
+            "degrade to head excerpts, then to a path-only listing."
+        ),
+    )
     parser.add_argument(
         "--task-dir",
         metavar="PATH",
@@ -254,11 +381,11 @@ def main() -> None:
         except ValueError as exc:
             print(f"build_prompt_context: {exc}", file=sys.stderr)
             sys.exit(1)
-        content = build_diff_context(sha_from_manifest, root)
+        content = build_diff_context(sha_from_manifest, root, args.max_bytes)
     elif args.diff:
-        content = build_diff_context(args.diff, root)
+        content = build_diff_context(args.diff, root, args.max_bytes)
     elif args.files:
-        content = build_file_context(args.files, root)
+        content = build_file_context(args.files, root, args.max_bytes)
     else:
         parser.print_help()
         sys.exit(1)

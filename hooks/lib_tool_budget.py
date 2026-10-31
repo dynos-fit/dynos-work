@@ -40,6 +40,13 @@ TOOL_BUDGET_CEILING: int = 40
 # Tool-Use Budget block presents the budget as an estimate, not a cutoff.
 TOOL_BUDGET_ADVISORY: int = 35
 
+# Frontmatter ``maxTurns`` every auditor agent declares (the hard stop).
+# The tool-call budget advertised to an auditor must stay at least
+# AUDITOR_WRAPUP_TURNS below it so "finalize when within 2 calls of the
+# limit" happens before the force-stop, not after.
+AUDITOR_MAX_TURNS: int = 30
+AUDITOR_WRAPUP_TURNS: int = 2
+
 PLANNER_PHASE_READ_ALLOWANCE: dict[str, int] = {
     "discovery": 8, "arch-design": 30, "spec": 10,
     "plan": 12, "combined": 15, "repair": 6,

@@ -465,3 +465,40 @@ def test_calibrated_risk_floor_matrix(tmp_path: Path):
     graph["segments"][0]["files_expected"]=files
     (td/"execution-graph.json").write_text(json.dumps(graph))
     assert ctl._compute_risk_floor(td,["backend"],{})[0]=="low"
+
+
+def test_unapplied_floor_reports_level_and_reason(tmp_path: Path) -> None:
+    """Field report: ``risk_floor_applied: false`` beside non-empty
+    ``risk_floor_signals`` read as a contradiction. The signals did fire;
+    their medium floor was simply not above the planner's medium risk."""
+    task_dir = _build_task_dir(tmp_path, raw_input="ordinary work", spec="plain", files_expected=[])
+    payload = {"type": "feature", "domains": ["backend", "db", "security"], "risk_level": "medium"}
+
+    out = ctl._normalize_classification_payload(task_dir, payload)
+
+    assert out["risk_level"] == "medium"
+    assert out["risk_floor_applied"] is False
+    assert out["risk_floor_signals"] == ["security_db_domain", "domain_count"]
+    assert out["risk_floor_level"] == "medium"
+    assert out["risk_floor_reason"].startswith("not applied: planner risk medium is already at or above the medium floor")
+
+
+def test_applied_floor_reason_names_the_raise(tmp_path: Path) -> None:
+    task_dir = _build_task_dir(tmp_path, raw_input="ordinary work", spec="plain", files_expected=[])
+    out = ctl._normalize_classification_payload(
+        task_dir, {"type": "feature", "domains": ["backend", "db"], "risk_level": "low"}
+    )
+    assert out["risk_floor_applied"] is True
+    assert out["risk_floor_level"] == "medium"
+    assert out["risk_floor_reason"] == "raised from low to medium by security_db_domain"
+
+
+def test_no_signals_reason(tmp_path: Path) -> None:
+    task_dir = _build_task_dir(tmp_path, raw_input="ordinary work", spec="plain", files_expected=[])
+    out = ctl._normalize_classification_payload(
+        task_dir, {"type": "feature", "domains": ["backend"], "risk_level": "low"}
+    )
+    assert out["risk_floor_applied"] is False
+    assert out["risk_floor_signals"] == []
+    assert out["risk_floor_level"] == "low"
+    assert out["risk_floor_reason"] == "not applied: no floor signals matched"

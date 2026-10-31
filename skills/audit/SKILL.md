@@ -76,7 +76,7 @@ When spawning auditors, tell them to attack the implementation, not narrate it. 
 
 ## Auditor Prompt Discipline
 
-`router.py audit-inject-prompt` deterministically appends a write-first `## Turn Budget Discipline` block to **every** auditor spawn, sized to the spawn's model/tier (15 / 20 / 25 tool calls). The orchestrator does not need to construct or inject these instructions by hand — they are guaranteed to be in the prompt the router prints. Each spawned auditor is therefore told to:
+`router.py audit-inject-prompt` deterministically appends a write-first `## Turn Budget Discipline` block to **every** auditor spawn, sized to the spawn's model/tier (18 / 24 / 28 tool calls, always at least 2 below the auditors' `maxTurns: 30` hard cap). The orchestrator does not need to construct or inject these instructions by hand — they are guaranteed to be in the prompt the router prints. Each spawned auditor is therefore told to:
 
 - Write its audit-report file (skeleton + a `## Progress Ledger` with `### Done`, `### In-Flight`, `### Next`, and `status="partial"`) as its FIRST or SECOND tool call, before reading the diff in depth, and update it incrementally.
 - Emit only the canonical audit-report JSON envelope as its final message.
@@ -202,6 +202,14 @@ Each auditor writes its own report to the absolute path `{repo_root}/.dynos/task
 
 Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
 
+**Role cleanup (MANDATORY — after the audit batch's last `audit-receipt`, before the findings gate):** Every auditor spawn stamps its `audit-*` role. Under a shared-session harness the orchestrator adopts stamped roles, so a leftover `audit-security` stamp denies the orchestrator's next repo write with `auditors write reports only to ...audit-reports/`. The spawn hook releases an auditor's stamp when its spawn returns, and `audit-receipt`, `run-audit-findings-gate` and `run-audit-finish` drop any auditor stamp whose spawn is no longer running; clear explicitly as well. Do NOT `rm` the role file by hand — `clear-role` is the sanctioned (privilege-reducing) path:
+
+```bash
+"$DYNOS" ctl clear-role .dynos/task-{id}
+```
+
+It keeps the stamp of any auditor still running (`roles_kept_in_flight`), so it is safe mid-batch. Never pass `--all` while auditors are running.
+
 **Audit repair gate (deterministic):**
 
 Decide whether audit proceeds to repair or reflect through ctl:
@@ -213,6 +221,8 @@ Decide whether audit proceeds to repair or reflect through ctl:
 Use the JSON output as authoritative:
 - `status == "repair_required"`: proceed to Step 4
 - `status == "clear"`: skip Step 4 and proceed to Step 5
+
+`incomplete_audits` lists binding reports still marked `status: "partial"`: that auditor hit its turn cap before finishing, so its zero findings do not mean clean. Re-spawn each listed auditor once (same model, fresh attempt) before acting on a `clear` status, then re-run the gate. If a second attempt is also partial, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag AUDIT-PARTIAL --message "{auditor}"` and continue.
 
 Do NOT re-count blocking findings, infer critical spec failure, or decide repair-vs-reflect from prompt logic.
 
@@ -286,6 +296,12 @@ For each batch, spawn executor agents as assigned in `repair-log.json`:
 **Model escalation:** Use the `model_override` values returned by `run-repair-batch-plan` / `repair-log.json`. Do NOT recompute escalation from prose rules.
 
 Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
+
+After each repair batch returns, clear the executors' role stamps (same rule as the execute skill's per-segment cleanup; running executors keep theirs):
+
+```bash
+"$DYNOS" ctl clear-role .dynos/task-{id}
+```
 
 After all batches complete, record it:
 ```bash

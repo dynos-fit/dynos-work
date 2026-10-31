@@ -1103,6 +1103,7 @@ def run_checks_with_stats(
     mode: str = "all",
     *,
     exclude: "frozenset[str] | set[str]" = frozenset(),
+    raw_rules: Optional[list] = None,
 ) -> "tuple[list[Violation], int, int]":
     """Like run_checks but also returns loaded and skipped rule counts.
 
@@ -1121,7 +1122,9 @@ def run_checks_with_stats(
     residual b2910674 flagged. Closes that residual.
     """
     root = Path(root)
-    raw_rules, _ = _load_rules_file(root)
+    if raw_rules is None:
+        raw_rules, _ = _load_rules_file(root)
+    # ``raw_rules`` (a task's pinned rules snapshot) replaces the live file.
     # Rules the task waived (``ctl waive-rule``) are neither run nor counted.
     raw_rules = [raw for raw in raw_rules if _raw_rule_id(raw) not in exclude]
     loaded_count = 0
