@@ -150,10 +150,10 @@ After each batch (or cached resolution) completes, record events and verify:
 
 **Test execution** (Step 4): Record test runner events with `--phase execution --stage TEST_EXECUTION`.
 
-When `run-execution-batch-plan` reports no pending segments, run the prevention-rules check (`run-execution-finish` refuses without its receipt; use `--mode all`, because execution never stages files and the default `staged` mode would check nothing):
+When `run-execution-batch-plan` reports no pending segments, run the prevention-rules check (`run-execution-finish` refuses without its receipt; `--mode task` checks the files this task changed since its snapshot, falling back to `all` when there is no snapshot; `staged` would check nothing, because execution never stages files):
 
 ```bash
-python3 "{{HOOKS_PATH}}/ctl.py" run-rules-check .dynos/task-{id} --mode all
+python3 "{{HOOKS_PATH}}/ctl.py" run-rules-check .dynos/task-{id} --mode task
 ```
 
 On `rules_check_failed`, fix the named violations and re-run. Then advance through ctl:

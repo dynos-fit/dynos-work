@@ -76,7 +76,7 @@ When spawning auditors, tell them to attack the implementation, not narrate it. 
 
 ## Auditor Prompt Discipline
 
-`router.py audit-inject-prompt` deterministically appends a write-first `## Turn Budget Discipline` block to **every** auditor spawn, sized to the spawn's model/tier (15 / 20 / 25 tool calls). The orchestrator does not need to construct or inject these instructions by hand — they are guaranteed to be in the prompt the router prints. Each spawned auditor is therefore told to:
+`router.py audit-inject-prompt` deterministically appends a write-first `## Turn Budget Discipline` block to **every** auditor spawn, sized to the spawn's model/tier (18 / 24 / 28 tool calls, always at least 2 below the auditors' `maxTurns: 30` hard cap). The orchestrator does not need to construct or inject these instructions by hand — they are guaranteed to be in the prompt the router prints. Each spawned auditor is therefore told to:
 
 - Write its audit-report file (skeleton + a `## Progress Ledger` with `### Done`, `### In-Flight`, `### Next`, and `status="partial"`) as its FIRST or SECOND tool call, before reading the diff in depth, and update it incrementally.
 - Emit only the canonical audit-report JSON envelope as its final message.
@@ -91,6 +91,7 @@ For each auditor in the plan:
 - If `action: "spawn"`: spawn with the model returned by `"$DYNOS" ctl ensemble-next` — the plan `model` is only used for non-ensemble auditors (null = default)
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
 - For the plan-auditor: For each AC in spec.md naming a function signature, verify plan.md's Component section names the same signature. Mismatch is a partial finding.
+- If `plan-audit-gap-warnings.json` exists with `advisory: true` (also recorded as `gap_warnings` in the `plan-audit-check` receipt), give its `warnings` to the plan-auditor and spec-completion auditor: each names a plan endpoint or model the gap scanner could not find. Verify each against the final code; one that still does not exist and is not created by the diff is a finding.
 
 **Pre-load diff context (run once, write to sidecar, reference by path):** Using `diff_base` from the audit plan output, write the context ONCE to a sidecar file and reference its path in each auditor's base prompt. Do NOT capture the full content into a shell variable and append it to every prompt — that pattern multiplies (auditors × cascade-models × context-size) input tokens, which is exactly the regression the 2026-04-30 latency investigation flagged in CG-013 (the mislabeled "perf:" commit).
 
@@ -202,6 +203,14 @@ Each auditor writes its own report to the absolute path `{repo_root}/.dynos/task
 
 Token usage is recorded automatically by the SubagentStop hook; do not record it by hand.
 
+**Role cleanup (MANDATORY — after the audit batch's last `audit-receipt`, before the findings gate):** Every auditor spawn stamps its `audit-*` role. Under a shared-session harness the orchestrator adopts stamped roles, so a leftover `audit-security` stamp denies the orchestrator's next repo write with `auditors write reports only to ...audit-reports/`. The spawn hook releases an auditor's stamp when its spawn returns, and `audit-receipt`, `run-audit-findings-gate` and `run-audit-finish` drop any auditor stamp whose spawn is no longer running; clear explicitly as well. Do NOT `rm` the role file by hand — `clear-role` is the sanctioned (privilege-reducing) path:
+
+```bash
+"$DYNOS" ctl clear-role .dynos/task-{id}
+```
+
+It keeps the stamp of any auditor still running (`roles_kept_in_flight`), so it is safe mid-batch. Never pass `--all` while auditors are running.
+
 **Audit repair gate (deterministic):**
 
 Decide whether audit proceeds to repair or reflect through ctl:
@@ -214,7 +223,11 @@ Use the JSON output as authoritative:
 - `status == "repair_required"`: proceed to Step 4
 - `status == "clear"`: skip Step 4 and proceed to Step 5
 
+`incomplete_audits` lists binding reports still marked `status: "partial"`: that auditor hit its turn cap before finishing, so its zero findings do not mean clean. Re-spawn each listed auditor once (same model, fresh attempt) before acting on a `clear` status, then re-run the gate. If a second attempt is also partial, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag AUDIT-PARTIAL --message "{auditor}"` and continue.
+
 Do NOT re-count blocking findings, infer critical spec failure, or decide repair-vs-reflect from prompt logic.
+
+The gate output also carries `out_of_scope_files`: files changed since the snapshot that no segment, repair task or acknowledgment covers. It does not change `status`, but `run-audit-finish` refuses DONE while any remain — see Step 5's finish refusal for what to do.
 
 ### Step 4 — Deterministic repair loop
 
@@ -286,6 +299,12 @@ For each batch, spawn executor agents as assigned in `repair-log.json`:
 **Model escalation:** Use the `model_override` values returned by `run-repair-batch-plan` / `repair-log.json`. Do NOT recompute escalation from prose rules.
 
 Each executor receives: the specific finding, the file(s) to fix, and the relevant acceptance criteria text from `spec.md`.
+
+After each repair batch returns, clear the executors' role stamps (same rule as the execute skill's per-segment cleanup; running executors keep theirs):
+
+```bash
+"$DYNOS" ctl clear-role .dynos/task-{id}
+```
 
 After all batches complete, record it:
 ```bash
@@ -432,6 +451,8 @@ Finalize completion through ctl:
 ```
 
 This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic. It refuses when an audit report is newer than `audit-summary.json`: re-run `ctl run-audit-summary` (and `run-audit-reflect`) and finish again.
+
+If it refuses with `outside the declared write scope`, files changed since the task snapshot are not covered by any segment's `files_expected`/`files_optional`, any repair cycle's `files_to_modify` or the TDD test files — typically a write made through an interpreter or subprocess that the write hook could not see. The refusal names the files. Revert each file that is not task work (`git checkout -- <path>`, or delete an untracked one). If a file IS task work, stop and ask the user; only on their explicit confirmation record it with `"$DYNOS" ctl acknowledge-out-of-scope .dynos/task-{id} --file <path> [--file <path> ...] --reason "<why it belongs to this task>"`, then re-run `run-audit-finish`. Never acknowledge on your own judgment, and never force past this gate. `run-audit-findings-gate` (and `run-execution-segment-done`) already list the same files as `out_of_scope_files`, so deal with them before the finish.
 
 If it refuses on `test-results.json`, the last recorded test run did not pass. Re-run `ctl run-tests` with the same commands. If they still fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate.
 

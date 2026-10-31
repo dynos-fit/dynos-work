@@ -11,7 +11,7 @@ of existing rule shapes:
   satisfies a predicate (callable / hasattr / in_registry)
 - pattern_must_not_appear — regex + optional AST context filter
 - co_modification_required — if trigger glob changes, must-modify glob must too
-  (staged mode only)
+  (staged and diff modes)
 - signature_lock — exact ordered parameter names of a named function
 - caller_count_required — minimum number of call sites summed across a glob
 - import_constant_only — string literal allowed only in listed files
@@ -24,6 +24,24 @@ for `git rev-parse --show-toplevel` (install-hook) and
 `git diff --cached --name-only` (check --staged).
 
 CLI: check, describe, install-hook, validate-rules. Exit codes per spec AC 17.
+
+Scan modes: ``staged`` (git diff --cached), ``all`` (every tracked file) and
+``diff`` (files changed since a base commit plus untracked files — a task's
+own change set, so a rule another task added does not fail on code this task
+never touched). In diff mode each template goes one of two ways:
+
+- per-file (pattern_must_not_appear, import_constant_only): only changed
+  files are examined.
+- co_modification_required: the diff is the change set, as in staged mode.
+- module-anchored (signature_lock, every_name_in_X_satisfies_Y): the check
+  runs repo-wide as before, but a violation is reported only when the file
+  it is anchored to (the function's / module's / registry's source) changed.
+- caller_count_required: the count stays repo-wide; it fails only when the
+  change set lowered the count (callers in changed files at ``base`` vs now)
+  and the total is below min_count. A deficit the task did not cause passes.
+  When the base count cannot be read it fails iff a changed file matches the
+  rule's glob.
+- advisory: never enforced.
 """
 
 from __future__ import annotations
@@ -109,6 +127,9 @@ class Rule:
     scope_override: Optional[dict] = None
 
 
+SCAN_MODES = frozenset({"staged", "all", "diff"})
+
+
 @dataclass(frozen=True)
 class ScanScope:
     """Immutable scan scope handed to every template handler."""
@@ -116,11 +137,15 @@ class ScanScope:
     root: Path
     files: tuple[Path, ...]
     mode: str
+    # diff mode only: the commit the change set is measured against, and
+    # the root-relative paths deleted since it (not in ``files``).
+    base: Optional[str] = None
+    deleted: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.mode not in {"staged", "all"}:
+        if self.mode not in SCAN_MODES:
             raise ValueError(
-                f"ScanScope.mode must be 'staged' or 'all', got {self.mode!r}"
+                f"ScanScope.mode must be 'staged', 'all' or 'diff', got {self.mode!r}"
             )
 
 
@@ -365,13 +390,58 @@ def _all_tracked_files(root: Path) -> list[Path]:
     return out
 
 
-def _resolve_files(root: Path, mode: str) -> tuple[Path, ...]:
+def _diff_changes(root: Path, base: Optional[str]) -> tuple[list[Path], list[str]]:
+    """(files changed since ``base`` plus untracked files, paths deleted
+    since ``base``). Raises ValueError when there is no base or git fails,
+    so a caller never mistakes "scope unavailable" for "nothing changed"."""
+    if not base:
+        raise ValueError("diff mode requires a base commit")
+    from lib_core import git_changed_files  # noqa: PLC0415
+
+    changed, error = git_changed_files(root, base)
+    if error is not None:
+        raise ValueError(f"diff mode: cannot list files changed since {base}: {error}")
+    present: list[Path] = []
+    deleted: list[str] = []
+    for rel in changed:
+        p = root / rel
+        if p.is_file():
+            present.append(p)
+        elif not p.exists():
+            deleted.append(rel)
+    return present, sorted(deleted)
+
+
+def _diff_files(root: Path, base: Optional[str]) -> list[Path]:
+    return _diff_changes(root, base)[0]
+
+
+def _resolve_files(root: Path, mode: str, *, base: Optional[str] = None) -> tuple[Path, ...]:
     """Resolve the file list for a scan scope. Deterministic (sorted)."""
     if mode == "staged":
         files = _staged_files(root)
+    elif mode == "diff":
+        files = _diff_files(root, base)
     else:
         files = _all_tracked_files(root)
     return tuple(sorted(files))
+
+
+def _anchored_in_diff(scope: "ScanScope", source_file: str) -> bool:
+    """diff mode: is the file a module-anchored violation points at part of
+    the change set? Always True outside diff mode."""
+    if scope.mode != "diff":
+        return True
+    if not source_file or source_file.startswith("<"):
+        return False
+    path = Path(source_file)
+    if not path.is_absolute():
+        path = scope.root / path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return any(resolved == f.resolve() for f in scope.files)
 
 
 @lru_cache(maxsize=None)
@@ -583,6 +653,14 @@ def check_every_name_in_X_satisfies_Y(rule: Rule, scope: ScanScope) -> list[Viol
         )
         return []
 
+    # diff mode: report only when the container's module (or, for
+    # in_registry, the registry's module) is part of the change set.
+    if violations and scope.mode == "diff":
+        anchors = [file_path]
+        if predicate == "in_registry":
+            anchors.append(_inspect_source_location(reg_mod)[0])
+        if not any(_anchored_in_diff(scope, a) for a in anchors):
+            return []
     return violations
 
 
@@ -784,6 +862,8 @@ def check_signature_lock(rule: Rule, scope: ScanScope) -> list[Violation]:
         return []
 
     file, line = _inspect_source_location(func)
+    if not _anchored_in_diff(scope, file):
+        return []  # diff mode: the locked function's source is untouched
     return [
         Violation(
             rule_id=rule.rule_id,
@@ -821,37 +901,59 @@ def check_caller_count_required(rule: Rule, scope: ScanScope) -> list[Violation]
         )
         return []
 
-    if scope.mode == "staged":
+    if scope.mode in {"staged", "diff"}:
         files = tuple(sorted(_all_tracked_files(scope.root)))
+        if scope.mode == "diff":
+            # Untracked task files count as callers too.
+            files = tuple(sorted(set(files) | set(scope.files)))
     else:
         files = scope.files
 
-    total = 0
-    for file in files:
-        if not _glob_match(file, scope.root, glob):
-            continue
-        text = _read_text(file)
+    def _count(text: Optional[str], label: str) -> int:
         if text is None:
-            continue
+            return 0
         try:
-            tree = ast.parse(text, filename=str(file))
+            tree = ast.parse(text, filename=label)
         except SyntaxError as exc:
             _warn(
                 f"[rules_engine] WARN rule={rule.rule_id}: syntax error "
-                f"parsing {_relative_path(scope.root, file)}: {exc}; skipping"
+                f"parsing {label}: {exc}; skipping"
             )
-            continue
+            return 0
+        n = 0
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             if isinstance(func, ast.Name) and func.id == symbol:
-                total += 1
+                n += 1
             elif isinstance(func, ast.Attribute) and func.attr == symbol:
-                total += 1
+                n += 1
+        return n
+
+    total = 0
+    for file in files:
+        if not _glob_match(file, scope.root, glob):
+            continue
+        total += _count(_read_text(file), _relative_path(scope.root, file))
 
     if total >= min_count:
         return []
+
+    if scope.mode == "diff":
+        # Attribute the deficit: fail only when the change set lowered the
+        # count. Callers in changed files now vs. the same files at base.
+        changed = [f for f in scope.files if _glob_match(f, scope.root, glob)]
+        gone = [scope.root / rel for rel in scope.deleted
+                if _glob_match(scope.root / rel, scope.root, glob)]
+        if not changed and not gone:
+            return []
+        now_in_changed = sum(
+            _count(_read_text(f), _relative_path(scope.root, f)) for f in changed
+        )
+        base_in_changed = _base_caller_count(scope, changed + gone, _count)
+        if base_in_changed is not None and now_in_changed >= base_in_changed:
+            return []
 
     return [
         Violation(
@@ -866,6 +968,33 @@ def check_caller_count_required(rule: Rule, scope: ScanScope) -> list[Violation]
             severity=rule.severity,
         )
     ]
+
+
+def _base_caller_count(scope: ScanScope, files: list, count) -> Optional[int]:
+    """Callers in ``files`` as of ``scope.base`` (a file absent at base
+    counts 0). None when git cannot read the base."""
+    total = 0
+    for file in files:
+        rel = _relative_path(scope.root, file)
+        try:
+            result = subprocess.run(
+                [_GIT or "git", "-C", str(scope.root), "show", f"{scope.base}:./{rel}"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            # Not at base (new file) is 0; any other failure is unknown.
+            probe = subprocess.run(
+                [_GIT or "git", "-C", str(scope.root), "rev-parse", "--verify", "--quiet",
+                 f"{scope.base}^{{commit}}"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if probe.returncode != 0:
+                return None
+            continue
+        total += count(result.stdout, rel)
+    return total
 
 
 def check_import_constant_only(rule: Rule, scope: ScanScope) -> list[Violation]:
@@ -1012,10 +1141,11 @@ def _rule_from_dict(d: dict) -> Optional[Rule]:
 
 def run_checks(
     root: Path,
-    mode: Literal["staged", "all"],
+    mode: Literal["staged", "all", "diff"],
     rule_filter: Optional[str] = None,
     *,
     raw_rules: Optional[list[dict]] = None,
+    base: Optional[str] = None,
 ) -> list[Violation]:
     """Load prevention-rules.json, dispatch each rule, return sorted violations.
 
@@ -1037,8 +1167,13 @@ def run_checks(
     if not raw_rules:
         return []
 
-    files = _resolve_files(root, mode)
-    scope = ScanScope(root=root.resolve(), files=files, mode=mode)
+    deleted: tuple[str, ...] = ()
+    if mode == "diff":
+        files = _resolve_files(root, mode, base=base)
+        deleted = tuple(_diff_changes(root, base)[1])
+    else:
+        files = _resolve_files(root, mode)
+    scope = ScanScope(root=root.resolve(), files=files, mode=mode, base=base, deleted=deleted)
 
     violations: list[Violation] = []
     for raw in raw_rules:
@@ -1103,6 +1238,8 @@ def run_checks_with_stats(
     mode: str = "all",
     *,
     exclude: "frozenset[str] | set[str]" = frozenset(),
+    raw_rules: Optional[list] = None,
+    base: Optional[str] = None,
 ) -> "tuple[list[Violation], int, int]":
     """Like run_checks but also returns loaded and skipped rule counts.
 
@@ -1121,7 +1258,9 @@ def run_checks_with_stats(
     residual b2910674 flagged. Closes that residual.
     """
     root = Path(root)
-    raw_rules, _ = _load_rules_file(root)
+    if raw_rules is None:
+        raw_rules, _ = _load_rules_file(root)
+    # ``raw_rules`` (a task's pinned rules snapshot) replaces the live file.
     # Rules the task waived (``ctl waive-rule``) are neither run nor counted.
     raw_rules = [raw for raw in raw_rules if _raw_rule_id(raw) not in exclude]
     loaded_count = 0
@@ -1137,7 +1276,10 @@ def run_checks_with_stats(
     # the file. Test code that monkey-patches run_checks still takes
     # effect because the function lookup happens at the call site, not
     # at parse time.
-    violations = run_checks(root, mode, raw_rules=raw_rules)
+    if mode == "diff":
+        violations = run_checks(root, mode, raw_rules=raw_rules, base=base)
+    else:
+        violations = run_checks(root, mode, raw_rules=raw_rules)
     return violations, loaded_count, skipped_count
 
 
@@ -1156,9 +1298,13 @@ def _format_violation_line(v: Violation) -> str:
 
 def _cmd_check(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve() if args.root else Path.cwd()
-    mode = "all" if args.all else "staged"
+    base = getattr(args, "diff_base", None)
+    mode = "diff" if base else ("all" if args.all else "staged")
     try:
-        violations = run_checks(root, mode, rule_filter=args.rule)
+        if mode == "diff":
+            violations = run_checks(root, mode, rule_filter=args.rule, base=base)
+        else:
+            violations = run_checks(root, mode, rule_filter=args.rule)
     except ValueError as exc:
         _warn(f"[rules_engine] ERROR: {exc}")
         return 2
@@ -1448,6 +1594,8 @@ def _build_parser() -> argparse.ArgumentParser:
     grp = p_check.add_mutually_exclusive_group()
     grp.add_argument("--staged", dest="staged", action="store_true")
     grp.add_argument("--all", dest="all", action="store_true")
+    grp.add_argument("--diff", dest="diff_base", default=None, metavar="BASE",
+                     help="check only files changed since BASE (plus untracked files)")
     p_check.add_argument("--rule", dest="rule", default=None)
     p_check.add_argument("--root", dest="root", default=None)
 

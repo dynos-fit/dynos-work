@@ -389,6 +389,171 @@ def _strip_heredocs(command: str) -> str:
     return "\n".join(out)
 
 
+def _heredoc_segments(command: str) -> list[tuple[str, str]]:
+    """Return (opener line, body) for every heredoc in ``command``."""
+    segments: list[tuple[str, str]] = []
+    terminator: str | None = None
+    opener = ""
+    body: list[str] = []
+    for line in command.split("\n"):
+        if terminator is not None:
+            if line.strip() == terminator:
+                segments.append((opener, "\n".join(body)))
+                terminator = None
+                body = []
+            else:
+                body.append(line)
+            continue
+        match = _HEREDOC_OPEN_RE.search(line)
+        if match:
+            terminator = match.group(2)
+            opener = line
+    if terminator is not None and body:
+        segments.append((opener, "\n".join(body)))
+    return segments
+
+
+# ---------------------------------------------------------------------------
+# Best-effort interpreter write detection (bug 2, 7.6.0 field report).
+#
+# `python3 -c "open('docs/x.md','w').write(...)"`, a heredoc'd script fed to
+# an interpreter, `node -e "fs.writeFileSync(...)"`, `perl -pi -e ... f` and
+# `sed -i ... f` write files without any shell redirection. We recognise the
+# common literal-path forms so they go through the same decide_write check
+# as `>`; anything computed at run time (a path in a variable, a script
+# file on disk, os.system, a subprocess) is still invisible. This remains
+# ADVISORY — see docs/write-boundary-spec.md "Honest enforcement statement".
+# ---------------------------------------------------------------------------
+
+_INTERPRETER_RE = re.compile(
+    r"^(?:python(?:\d+(?:\.\d+)*)?|pypy3?|node|nodejs|deno|bun|perl|ruby)$"
+)
+_SHELL_INTERPRETERS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+# Flags whose next argument is inline program text, per interpreter family.
+_INLINE_CODE_FLAGS = {
+    "python": {"-c"},
+    "node": {"-e", "--eval", "-p", "--print"},
+    "perl": {"-e", "-E"},
+    "ruby": {"-e"},
+}
+_Q = r"""(['"`])"""  # opening quote of a string literal
+_P = r"""([^'"`\n]+)"""  # the literal path
+# (regex, group index of the path) — each matches a literal-path write.
+_INLINE_WRITE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    # Python / Ruby: open('p', 'w'|'a'|'x'|'+'), File.open('p', 'w')
+    (re.compile(
+        r"\bopen\(\s*(?:[rbuf]{1,2})?" + _Q + _P + r"\1\s*,\s*(?:mode\s*=\s*)?"
+        r"(?:[rbuf]{1,2})?(['\"])[^'\"]*[wax+][^'\"]*\3"
+    ), 2),
+    # pathlib: Path('p').write_text/write_bytes/touch/unlink, Path('p').open('w')
+    (re.compile(
+        r"\bPath\(\s*(?:[rbuf]{1,2})?" + _Q + _P + r"\1\s*\)\s*\.\s*"
+        r"(?:write_text|write_bytes|touch|unlink|rename|replace|"
+        r"open\(\s*(?:mode\s*=\s*)?['\"][^'\"]*[wax+])"
+    ), 2),
+    # os.remove/unlink('p'), os.rename/replace(src, 'p'), shutil.copy*(src, 'p')
+    (re.compile(r"\bos\.(?:remove|unlink)\(\s*" + _Q + _P + r"\1"), 2),
+    (re.compile(
+        r"\b(?:os\.(?:rename|replace)|shutil\.(?:copy|copy2|copyfile|copytree|move))"
+        r"\(\s*[^,()]+,\s*" + _Q + _P + r"\1"
+    ), 2),
+    # Node: fs.writeFileSync/appendFileSync/writeFile/appendFile/createWriteStream/
+    # rmSync/unlinkSync/truncateSync('p'); copyFileSync/renameSync/cpSync(src, 'p')
+    (re.compile(
+        r"\b(?:writeFileSync|appendFileSync|writeFile|appendFile|createWriteStream|"
+        r"rmSync|unlinkSync|unlink|truncateSync|outputFileSync)\(\s*" + _Q + _P + r"\1"
+    ), 2),
+    (re.compile(
+        r"\b(?:copyFileSync|copyFile|renameSync|rename|cpSync)\(\s*[^,()]+,\s*"
+        + _Q + _P + r"\1"
+    ), 2),
+    # Deno / Bun
+    (re.compile(r"\b(?:Deno\.writeTextFile(?:Sync)?|Deno\.writeFile(?:Sync)?|Bun\.write)\(\s*" + _Q + _P + r"\1"), 2),
+    # Ruby: File.write / IO.write / File.delete / File.unlink
+    (re.compile(r"\b(?:File|IO)\.(?:write|binwrite|delete|unlink)\(?\s*" + _Q + _P + r"\1"), 2),
+    # Perl: open(FH, '>', 'p') and open(FH, '>p') / open FH, ">>p"
+    (re.compile(
+        r"\bopen\s*\(?\s*[^,()'\"]+,\s*(['\"])\s*(?:\+<|\+?>>?)\s*\1\s*,\s*(['\"])([^'\"\n]+)\2"
+    ), 3),
+    (re.compile(r"\bopen\s*\(?\s*[^,()'\"]+,\s*(['\"])\s*\+?>>?\s*([^'\"\s][^'\"\n]*)\1"), 2),
+]
+
+
+def _scan_inline_code_writes(code: str) -> list[str]:
+    """Literal write paths named in inline interpreter code (best effort)."""
+    found: list[str] = []
+    for pattern, group in _INLINE_WRITE_PATTERNS:
+        for match in pattern.finditer(code):
+            dest = match.group(group).strip()
+            if dest and dest not in found:
+                found.append(dest)
+    return found
+
+
+def _interpreter_family(verb: str) -> str | None:
+    if not _INTERPRETER_RE.match(verb):
+        return None
+    if verb.startswith(("python", "pypy")):
+        return "python"
+    if verb in {"node", "nodejs", "deno", "bun"}:
+        return "node"
+    return verb  # perl / ruby
+
+
+def _in_place_editor_targets(verb: str, args: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """File operands of `sed -i` / `perl -i` / `ruby -i` (best effort).
+
+    ``args`` is the raw argv tail (flags included) up to the next separator.
+    Returns [] when the command does not edit in place.
+    """
+    in_place = False
+    script_given = False
+    # Short flags whose operand is the script / program text.
+    script_flags = {"e", "f"} if verb == "sed" else {"e", "E"}
+    operands: list[tuple[str, int]] = []
+    k = 0
+    while k < len(args):
+        tok, idx = args[k]
+        if tok == "--":
+            operands.extend(args[k + 1:])
+            break
+        if tok.startswith("--"):
+            if tok.startswith("--in-place"):
+                in_place = True
+            elif tok in {"--expression", "--file"}:
+                script_given = True
+                k += 1
+            elif tok.startswith(("--expression=", "--file=")):
+                script_given = True
+            k += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            cluster = tok[1:]
+            for pos, flag in enumerate(cluster):
+                if flag == "i":
+                    in_place = True
+                    # GNU sed / perl: the rest of the cluster is the backup
+                    # suffix. BSD sed: a following '' operand is the suffix.
+                    if pos == len(cluster) - 1 and verb == "sed" and k + 1 < len(args) \
+                            and args[k + 1][0] == "":
+                        k += 1
+                    break
+                if flag in script_flags:
+                    script_given = True
+                    if pos == len(cluster) - 1:
+                        k += 1  # script/program text is the next token
+                    break
+            k += 1
+            continue
+        operands.append((tok, idx))
+        k += 1
+    if not in_place:
+        return []
+    if not script_given and operands:
+        operands = operands[1:]  # first operand is the script / program file
+    return [(t, i) for t, i in operands if t]
+
+
 def _tokenize_bash(command: str) -> list[str] | None:
     """shlex-tokenize a command; None when the command cannot be parsed."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
@@ -563,21 +728,35 @@ def _tokenize_bash_statements(stripped: str) -> list[str] | None:
     return tokens
 
 
-def _has_literal_dollar(text: str) -> bool:
-    """True if a `$` is literal to the shell (single-quoted or backslash-escaped)."""
+def _literal_dollar_names(text: str) -> set[str]:
+    """Names that follow a `$` the shell treats literally ('$S', \\$S).
+
+    posix shlex strips the quoting, so such a token reads `$S` exactly like a
+    real expansion. Poisoning these names (instead of disabling substitution
+    for the whole command) keeps `awk '{print $1}'`, `jq '.x'` or
+    `sed 's/$//'` from blocking an unrelated `S=path; cat > "$S"`, while a
+    literal `'$S'` still leaves every `$S` unsubstituted (fail-closed).
+    """
+    names: set[str] = set()
     in_single = in_double = False
     i = 0
     n = len(text)
+
+    def _name_at(j: int) -> None:
+        m = re.match(r"\{?([A-Za-z_][A-Za-z0-9_]*)", text[j:])
+        if m:
+            names.add(m.group(1))
+
     while i < n:
         ch = text[i]
         if in_single:
             if ch == "$":
-                return True
-            if ch == "'":
+                _name_at(i + 1)
+            elif ch == "'":
                 in_single = False
         elif ch == "\\":
             if i + 1 < n and text[i + 1] == "$":
-                return True
+                _name_at(i + 2)
             i += 2
             continue
         elif ch == '"':
@@ -585,24 +764,62 @@ def _has_literal_dollar(text: str) -> bool:
         elif ch == "'" and not in_double:
             in_single = True
         i += 1
-    return False
+    return names
+
+
+# `set` invocations that only toggle shell options (`set -euo pipefail`,
+# `set +x`) never assign a named variable; `set -- a b` (positional
+# parameters) and bare-operand forms keep disabling substitution.
+_SET_OPTION_FLAG_RE = re.compile(r"^[-+][A-Za-z]+$")
+_SET_OPTION_NAME_RE = re.compile(r"^[a-z][a-z-]*$")
+
+
+def _is_option_only_set(tokens: list[str], idx: int) -> bool:
+    """True when the `set` at ``tokens[idx]`` only toggles options."""
+    j = idx + 1
+    saw_flag = False
+    while j < len(tokens) and tokens[j] not in _COMMAND_SEPARATOR_TOKENS \
+            and tokens[j] not in {"&&", "||"}:
+        tok = tokens[j]
+        prev = tokens[j - 1]
+        if _SET_OPTION_FLAG_RE.match(tok):
+            saw_flag = True
+        elif not (
+            saw_flag
+            and _SET_OPTION_FLAG_RE.match(prev)
+            and prev.endswith("o")
+            and _SET_OPTION_NAME_RE.match(tok)
+        ):
+            return False  # `--`, `-`, or a positional operand
+        j += 1
+    return saw_flag
 
 
 def _substitution_disabled(stripped: str, tokens: list[str]) -> bool:
     """True when the command contains constructs that defeat static analysis."""
-    # `\$` and '...$...' are literal dollars in the shell but posix shlex
-    # strips the quoting, so a substituted token would not match the file
-    # the shell actually writes. IFS changes alter word splitting.
-    if "IFS" in stripped or _has_literal_dollar(stripped):
+    # IFS changes alter word splitting. (Literal dollars — '$S', \$S — are
+    # handled per name by _literal_dollar_names, not globally.)
+    if "IFS" in stripped:
         return True
     if any(marker in stripped for marker in _SUBSTITUTION_DISABLING_SYNTAX):
         return True
     paren = 0
     block = 0
     for idx, tok in enumerate(tokens):
-        if tok in _SUBSTITUTION_DISABLING_WORDS:
-            return True
         nxt = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+        if tok in _SUBSTITUTION_DISABLING_WORDS:
+            # Option-only `set` and lookup-only `command -v NAME` cannot
+            # assign a variable; every other form stays disabling.
+            if tok == "set" and _is_option_only_set(tokens, idx):
+                pass
+            elif tok == "command" and nxt in {"-v", "-V"}:
+                pass
+            elif tok == "." and idx > 0 and tokens[idx - 1] not in (
+                _COMMAND_SEPARATOR_TOKENS | {"&&", "||", "then", "do", "else", "{"}
+            ):
+                pass  # `jq .`, `find .`, `git add .` — an argument, not `source`
+            else:
+                return True
         # `printf -v NAME` writes a variable; `export -n`/`-f` and friends
         # change attributes rather than assigning a literal.
         if tok == "printf" and "-v" in tokens[idx + 1:]:
@@ -694,7 +911,9 @@ def _build_assignment_resolver(stripped: str, tokens: list[str]):
     if not counted:
         return None
     names = {name for name, _ in counted.values()}
-    poisoned: set[str] = set()
+    # A name written after a literal `$` ('$S', \$S) reads like an
+    # expansion once shlex strips the quotes; never substitute it.
+    poisoned: set[str] = names & _literal_dollar_names(stripped)
     for idx, tok in enumerate(tokens):
         text = counted[idx][1] if idx in counted else tok
         for name in names:
@@ -804,7 +1023,52 @@ def _extract_bash_destinations(command: str) -> list[str]:
                     _add(*args[-1])
             i = j
             continue
+        # Best-effort interpreter / in-place-editor writes (bug 2).
+        family = _interpreter_family(verb)
+        if family is not None or verb in {"sed", "dd"}:
+            tail: list[tuple[str, int]] = []
+            j = i + 1
+            while j < n and tokens[j] not in _COMMAND_SEPARATOR_TOKENS:
+                t = tokens[j].strip("`")
+                if t in _REDIRECT_TOKENS:
+                    break
+                tail.append((t, j))
+                j += 1
+            if verb == "dd":
+                for t, ti in tail:
+                    if t.startswith("of="):
+                        _add(t[3:], ti)
+            else:
+                if verb in {"sed", "perl", "ruby"}:
+                    for t, ti in _in_place_editor_targets(verb, tail):
+                        _add(t, ti)
+                code_flags = _INLINE_CODE_FLAGS.get(family or "", set())
+                for k, (t, ti) in enumerate(tail):
+                    if t in code_flags and k + 1 < len(tail):
+                        code, ci = tail[k + 1]
+                        for dest in _scan_inline_code_writes(code):
+                            _add(dest, ci)
+            i = j
+            continue
         i += 1
+
+    # Heredoc bodies were stripped before tokenizing; a body fed to an
+    # interpreter (`python3 - <<'PY'`) or a shell (`bash <<EOF`) is code.
+    # `$` in a body path is never substituted (quoted vs unquoted heredoc
+    # expansion differs), so it stays unresolved and is denied fail-closed.
+    for opener, body in _heredoc_segments(command):
+        opener_tokens = _tokenize_bash(_HEREDOC_OPEN_RE.sub(" ", opener)) or opener.split()
+        verbs = {os.path.basename(t.strip("`")) for t in opener_tokens}
+        if any(_interpreter_family(v) for v in verbs):
+            body_dests = _scan_inline_code_writes(body)
+        elif verbs & _SHELL_INTERPRETERS:
+            body_dests = _extract_bash_destinations(body)
+        else:
+            continue
+        for dest in body_dests:
+            if _is_candidate_dest(dest) and dest not in seen:
+                seen.add(dest)
+                destinations.append(dest)
     return destinations
 
 
@@ -1275,7 +1539,11 @@ def main() -> int:
                 f"Claude Code permission; changing permission settings will "
                 f"not affect this] role={role}. Write to a literal path "
                 f"(or assign it literally in the same command, e.g. "
-                f"S=<path>; cat > \"$S\"). Auditors write reports to "
+                f"T=.dynos/task-<id>; cat > \"$T/_scratch/out\"). A "
+                f"variable set by an EARLIER Bash call is not visible to "
+                f"this check (shell state is not carried between calls), "
+                f"and `$(...)`, conditional, subshell or prefix assignments "
+                f"are never substituted. Auditors write reports to "
                 f"{CANONICAL_AUDIT_REPORT_PATH}. "
                 f"See docs/write-boundary-spec.md." + degraded_hint,
                 file=sys.stderr,

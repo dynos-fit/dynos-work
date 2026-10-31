@@ -172,9 +172,9 @@ def test_unknown_auditor_exits_one(tmp_path: Path):
 
 
 @pytest.mark.parametrize("model,budget,checkpoint", [
-    ("haiku", 15, 5),
-    ("sonnet", 20, 7),
-    ("opus", 25, 9),
+    ("haiku", 18, 6),
+    ("sonnet", 24, 8),
+    ("opus", 28, 10),
 ])
 def test_turn_budget_block_injected_for_every_model(tmp_path: Path, model, budget, checkpoint):
     """Every auditor spawn — regardless of agent file — must receive the
@@ -198,4 +198,37 @@ def test_turn_budget_block_present_when_model_unset(tmp_path: Path):
     project, plan_path = _setup(tmp_path, route_mode="generic", agent_path=None)
     r = _run(project, plan_path, model=None)
     assert r.returncode == 0, r.stderr
-    assert "about **20** tool calls" in r.stdout
+    assert "about **24** tool calls" in r.stdout
+
+
+def _frontmatter_max_turns(path: Path) -> "int | None":
+    lines = path.read_text().splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return None
+        if line.startswith("maxTurns:"):
+            return int(line.split(":", 1)[1].strip())
+    return None
+
+
+def test_advertised_auditor_budget_stays_below_every_auditor_max_turns():
+    """The injected budget must end before the hard stop: an opus auditor told
+    "about 25 tool calls" under ``maxTurns: 20`` was force-stopped with only
+    its partial skeleton on disk."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
+    import router  # noqa: PLC0415
+    from lib_tool_budget import AUDITOR_MAX_TURNS, AUDITOR_WRAPUP_TURNS  # noqa: PLC0415
+
+    agents_dir = Path(__file__).resolve().parents[1] / "agents"
+    caps = {
+        p.name: _frontmatter_max_turns(p) for p in sorted(agents_dir.glob("*-auditor.md"))
+    }
+    assert caps, "no auditor agent files found"
+    for name, cap in caps.items():
+        assert cap == AUDITOR_MAX_TURNS, f"{name} maxTurns={cap}, expected {AUDITOR_MAX_TURNS}"
+    for label in ("haiku", "sonnet", "opus", "fast", "balanced", "deep", None, "unknown"):
+        budget = router._audit_tool_budget(label)
+        assert budget <= AUDITOR_MAX_TURNS - AUDITOR_WRAPUP_TURNS, (label, budget)

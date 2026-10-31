@@ -379,6 +379,24 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
             reason = raw.get("no_op_reason")
             if isinstance(reason, str) and reason.strip():
                 normalized["no_op_reason"] = reason
+        # files_optional: per-file conditional marking ("regenerate X only if
+        # changed"). Each entry must also be in files_expected (ownership is
+        # unchanged); segment-done accepts an optional file that is absent
+        # from the diff, and the evidence check accepts one absent on disk.
+        files_optional: list[str] = []
+        for entry in raw.get("files_optional", []) or []:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            item = entry.strip()
+            if item not in seen_files:
+                raise ValueError(
+                    f"files_optional entry {item!r} of segment "
+                    f"{normalized['id'] or '?'} is not in its files_expected"
+                )
+            if item not in files_optional:
+                files_optional.append(item)
+        if files_optional:
+            normalized["files_optional"] = files_optional
         # verify_commands (D6): deterministic verification commands declared
         # at planning time and locked by the plan-approval gate. Executed by
         # `ctl run-verification-evidence`, never by prompt logic.
@@ -787,6 +805,23 @@ def _normalize_classification_payload(task_dir: Path, payload: dict) -> dict:
     out["risk_floor_applied"] = risk_floor_applied
     out["risk_floor_signals"] = triggering_signals
     out["planner_risk_level"] = planner_risk
+    # Signals are evaluated even when they do not raise the risk: a
+    # "medium" floor beside a "medium" planner risk lists its signals but
+    # applies nothing. Name the floor and say why so the output does not
+    # read as a contradiction.
+    out["risk_floor_level"] = observed_floor
+    if risk_floor_applied:
+        out["risk_floor_reason"] = (
+            f"raised from {planner_risk or 'unset'} to {observed_floor} by "
+            f"{', '.join(triggering_signals)}"
+        )
+    elif triggering_signals:
+        out["risk_floor_reason"] = (
+            f"not applied: planner risk {planner_risk or 'unset'} is already at or "
+            f"above the {observed_floor} floor from {', '.join(triggering_signals)}"
+        )
+    else:
+        out["risk_floor_reason"] = "not applied: no floor signals matched"
     return out
 
 
@@ -2672,6 +2707,16 @@ def cmd_run_start_init(args: argparse.Namespace) -> int:
         )
         target.write_text(content, encoding="utf-8")
 
+    # Pin the shared prevention rules at task start so a rule another
+    # worktree's postmortem adds mid-task neither fails this task's rules
+    # check nor trips the DONE drift gate. Best-effort: a corrupt rules file
+    # is refused later by the rules check itself.
+    try:
+        from lib_receipts import pin_rules_snapshot  # noqa: PLC0415
+        pin_rules_snapshot(task_dir)
+    except Exception as _pin_exc:  # noqa: BLE001 — must not block task creation
+        print(f"warning: could not pin prevention rules: {_pin_exc}", file=sys.stderr)
+
     print(json.dumps({
         "status": "task_initialized",
         "task_id": task_id,
@@ -2880,12 +2925,84 @@ def cmd_clear_role(args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_scope_output(task_dir: Path) -> dict:
+    """Informational write-scope fields for segment-done / findings-gate.
+
+    Files changed since the snapshot that no segment, repair task or human
+    acknowledgment covers (see lib_write_scope). Early warning only: the
+    DONE gate is what refuses. Never raises.
+    """
+    try:
+        from lib_write_scope import ACKNOWLEDGE_COMMAND, write_scope_report  # noqa: PLC0415
+        report = write_scope_report(task_dir)
+    except Exception as exc:  # noqa: BLE001
+        return {"write_scope_status": "unavailable", "write_scope_error": str(exc), "out_of_scope_files": []}
+    out: dict = {
+        "write_scope_status": report.get("status"),
+        "out_of_scope_files": report.get("out_of_scope_files") or [],
+    }
+    if report.get("error"):
+        out["write_scope_error"] = report["error"]
+    if out["out_of_scope_files"]:
+        out["out_of_scope_hint"] = (
+            "these files changed outside the declared write scope; revert them, "
+            "or a human acknowledges them with `" + ACKNOWLEDGE_COMMAND + "` "
+            "(the DONE gate refuses otherwise)"
+        )
+    return out
+
+
+def _release_idle_audit_roles(task_dir: Path) -> list[str]:
+    """Drop every `audit-*` stamp (and unconsumed audit grant) whose spawn
+    is no longer in flight; return the roles dropped.
+
+    Privilege-reducing only. Called from the audit flow's ctl steps so a
+    stale auditor stamp cannot outlive the batch: under a shared-session
+    harness the orchestrator adopts stamped roles, and a leftover
+    `audit-security` stamp denied its next repo write (7.6.0 field report,
+    bug 7). Auditors still running (per spawn-log.jsonl) keep their stamp.
+    Never raises: a failure here must not fail the receipt or the gate.
+    """
+    try:
+        import actor_identity
+        from agent_spawn_log import spawns_in_flight
+        from lib_core import read_stamped_roles, write_stamped_roles
+
+        in_flight = spawns_in_flight(task_dir / "spawn-log.jsonl")
+
+        def _idle_audit(role: object) -> bool:
+            return str(role).startswith("audit-") and not in_flight.get(str(role))
+
+        stamped = read_stamped_roles(task_dir)
+        dropped = [r for r in stamped if _idle_audit(r)]
+        pending = [str(g.get("role")) for g in actor_identity.pending_grants(task_dir)]
+        idle_grants = {r for r in pending if _idle_audit(r)}
+        if idle_grants:
+            def _ctl_writer(path: Path, data: object) -> None:
+                _write_ctl_json(task_dir, path, data)
+
+            actor_identity.expire_grants(
+                task_dir,
+                write_json_fn=_ctl_writer,
+                keep_roles=set(pending) - idle_grants,
+            )
+        if dropped:
+            write_stamped_roles(task_dir, [r for r in stamped if r not in dropped])
+        return dropped
+    except Exception as exc:
+        print(f"[warn] idle auditor roles not released: {exc}", file=sys.stderr)
+        return []
+
+
 def cmd_audit_receipt(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
     blocked = _refuse_if_rules_corrupt(root)
     if blocked is not None:
         return blocked
+    # The receipt is written after the auditor returned: release its stamp
+    # (and any other auditor no longer running) before anything else.
+    _release_idle_audit_roles(task_dir)
     try:
         out = receipt_audit_done(
             task_dir,
@@ -3506,6 +3623,58 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             for item in data_model.get("unverified", []) or []:
                 gap_errors.append(f"unverified data model entry: {item}")
 
+        # Advisory downgrade: when the plan the human approved is byte-for-
+        # byte the plan run-planning validated (gap check included), a miss
+        # here cannot be a plan defect; it comes from repo drift or a
+        # scanner false negative (Django include()/router mounts, models
+        # the regex scan does not see). Sending the approved plan back to
+        # PLANNING would force a re-approval of an identical plan, so the
+        # API Contracts / Data Model misses become recorded warnings. A
+        # report-level error (e.g. plan.md missing) still blocks, and a plan
+        # changed since validation keeps the blocking behaviour.
+        gap_warnings: list[str] = []
+        gap_advisory_reason: str | None = None
+        gap_warnings_path: Path | None = None
+        if gap_errors and not gap_report.get("error"):
+            plan_fresh = plan_validated_receipt_matches(task_dir)
+            if plan_fresh is True:
+                gap_warnings, gap_errors = gap_errors, []
+                gap_advisory_reason = (
+                    "plan-validated receipt hashes match the current spec.md, plan.md and "
+                    "execution-graph.json: the approved plan already passed run-planning's "
+                    "gap check, so these misses are advisory (repo drift or scanner false "
+                    "negatives), not plan defects"
+                )
+                gap_warnings_path = task_dir / "plan-audit-gap-warnings.json"
+                _write_ctl_json(task_dir, gap_warnings_path, {
+                    "task_id": _load_manifest(task_dir).get("task_id", task_dir.name),
+                    "generated_at": now_iso(),
+                    "advisory": True,
+                    "reason": gap_advisory_reason,
+                    "warnings": gap_warnings,
+                    "api_contracts_unverified": (api or {}).get("unverified", []) if isinstance(api, dict) else [],
+                    "data_model_unverified": (data_model or {}).get("unverified", []) if isinstance(data_model, dict) else [],
+                })
+        stale_warnings = task_dir / "plan-audit-gap-warnings.json"
+        if not gap_warnings and stale_warnings.exists():
+            # A warnings file from an earlier audit run must not outlive it.
+            _write_ctl_json(task_dir, stale_warnings, {
+                "task_id": _load_manifest(task_dir).get("task_id", task_dir.name),
+                "generated_at": now_iso(),
+                "advisory": False,
+                "reason": "superseded: the latest run-plan-audit recorded no advisory gap misses",
+                "warnings": [],
+                "api_contracts_unverified": [],
+                "data_model_unverified": [],
+            })
+        _gap_advisory_fields: dict = {
+            "gap_advisory": bool(gap_warnings),
+            "gap_warnings": gap_warnings,
+        }
+        if gap_warnings:
+            _gap_advisory_fields["gap_advisory_reason"] = gap_advisory_reason
+            _gap_advisory_fields["gap_warnings_path"] = str(gap_warnings_path)
+
         if gap_errors:
             # A plan repaired here would no longer be the plan the human
             # approved at PLAN_REVIEW, and run-execute-setup refuses a plan
@@ -3592,10 +3761,16 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             # PLAN_AUDIT exit gate is satisfied for high/critical tasks too.
             from lib_receipts import plan_audit_matches, receipt_plan_audit
             manifest = _load_manifest(task_dir)
-            cached = plan_audit_matches(task_dir) is True
+            # Advisory gap warnings must land in the receipt, so a cached
+            # receipt is rewritten when there are any to record.
+            cached = plan_audit_matches(task_dir) is True and not gap_warnings
             receipt_path = None
             if not cached:
-                receipt_path = receipt_plan_audit(task_dir, tokens_used=0, model_used="deterministic")
+                receipt_path = receipt_plan_audit(
+                    task_dir, tokens_used=0, model_used="deterministic",
+                    gap_warnings=gap_warnings or None,
+                    gap_warnings_path=str(gap_warnings_path) if gap_warnings_path else None,
+                )
             transitioned_to = None
             if get_tdd_required(manifest) and manifest.get("stage") == "PLAN_AUDIT":
                 _, updated = transition_task(task_dir, "TDD_REVIEW")
@@ -3612,6 +3787,7 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
                 "tdd_required": get_tdd_required(manifest),
                 "transitioned_to": transitioned_to,
                 "gap_report": gap_report,
+                **_gap_advisory_fields,
             }
             if llm_opt_in and not args.report_path:
                 payload["status"] = "llm_audit_required"
@@ -3625,6 +3801,8 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             task_dir,
             tokens_used=args.tokens_used,
             model_used=args.model,
+            gap_warnings=gap_warnings or None,
+            gap_warnings_path=str(gap_warnings_path) if gap_warnings_path else None,
         )
         finding_count, blocking_count = _parse_audit_report(report_path, root=_root_for_task_dir(task_dir))
         # Auto-advance to TDD_REVIEW when tdd_required=true and audit passed.
@@ -3647,6 +3825,7 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             "tdd_required": get_tdd_required(manifest),
             "transitioned_to": transitioned_to,
             "gap_report": gap_report,
+            **_gap_advisory_fields,
         }
         print(json.dumps(payload, indent=2))
         return 0 if finding_count == 0 else 1
@@ -3757,6 +3936,8 @@ def cmd_run_start_classification(args: argparse.Namespace) -> int:
             "risk_floor_applied": bool((classification or {}).get("risk_floor_applied", False)) if isinstance(classification, dict) else False,
             "risk_floor_signals": (classification or {}).get("risk_floor_signals", []) if isinstance(classification, dict) else [],
             "planner_risk_level": (classification or {}).get("planner_risk_level") if isinstance(classification, dict) else None,
+            "risk_floor_level": (classification or {}).get("risk_floor_level") if isinstance(classification, dict) else None,
+            "risk_floor_reason": (classification or {}).get("risk_floor_reason") if isinstance(classification, dict) else None,
             "tdd_required": tdd_required,
             "arch_design_required": bool(manifest.get("arch_design_required", False)) if isinstance(manifest, dict) else False,
             "transitioned_to": transitioned_to,
@@ -3963,13 +4144,37 @@ def cmd_write_execution_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record_repair_history(task_dir: Path, repair_log: dict, previous: bytes | None) -> None:
+    """Keep this cycle (and the log it replaced) in repair-log-history.json.
+
+    Best effort: a history failure is logged and never fails the repair-log
+    write the pipeline depends on.
+    """
+    try:
+        prior = json.loads(previous) if previous else None
+    except (ValueError, UnicodeDecodeError):
+        prior = None
+    try:
+        from lib_repair_history import record_repair_log  # noqa: PLC0415
+        record_repair_log(task_dir, repair_log, previous=prior)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from lib_log import log_event  # noqa: PLC0415
+            log_event(_root_for_task_dir(task_dir), "repair_history_record_failed",
+                      task=task_dir.name, error=str(exc))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def cmd_write_repair_log(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
         payload = _normalize_repair_log_payload(task_dir, _read_json_input(args.from_path))
         _validate_repair_log_payload(task_dir, payload)
         out_path = task_dir / "repair-log.json"
+        previous_log = out_path.read_bytes() if out_path.exists() else None
         _write_ctl_json(task_dir, out_path, payload)
+        _record_repair_history(task_dir, payload, previous_log)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -4143,6 +4348,14 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
         "branch": branch,
         "recorded_at": recorded_at,
     }
+    # Files already dirty when the task starts, with their digests, so the
+    # git write-scope backstop (lib_write_scope) does not blame them on the
+    # task unless they change again. Its presence also arms the DONE gate.
+    try:
+        from lib_write_scope import baseline_dirty_files  # noqa: PLC0415
+        manifest["snapshot"]["baseline_dirty"] = baseline_dirty_files(root)
+    except Exception:
+        pass  # no baseline: the backstop reports but never refuses
     try:
         _write_ctl_json(task_dir, manifest_path, manifest)
     except Exception as exc:
@@ -4859,8 +5072,36 @@ def _accepted_finding_rows(findings: list[dict]) -> list[dict]:
     ]
 
 
+def _partial_audit_reports(reports: list[dict]) -> list[dict]:
+    """Binding audit reports still marked ``status: "partial"``.
+
+    The injected write-first block has auditors write a ``partial`` skeleton
+    first and flip it to ``complete`` at the end, so a binding report still
+    ``partial`` came from an auditor force-stopped at its turn cap: its zero
+    findings mean "not finished", not "clean". Surfaced, not blocking.
+    """
+    out: list[dict] = []
+    for row in reports:
+        if not isinstance(row, dict) or row.get("superseded_by"):
+            continue
+        try:
+            data = load_json(Path(str(row.get("report_path"))))
+        except Exception:
+            continue
+        if isinstance(data, dict) and str(data.get("status", "")).lower() == "partial":
+            out.append({
+                "auditor_name": row.get("auditor_name"),
+                "report_path": row.get("report_path"),
+                "model": row.get("model"),
+                "finding_count": row.get("finding_count"),
+            })
+    return out
+
+
 def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    # The audit batch is over: no auditor stamp may outlive it into repair.
+    _release_idle_audit_roles(task_dir)
     try:
         _decision = check_circuit_breakers(task_dir, "AUDITING")
         _dispatch_breaker_decision(task_dir, "AUDITING", _decision, task_id=task_dir.name)
@@ -4895,7 +5136,9 @@ def cmd_run_audit_findings_gate(args: argparse.Namespace) -> int:
             "critical_spec_failure": bool(critical_spec_findings),
             "critical_spec_finding_ids": [str(f.get("id", "")) for f in critical_spec_findings if f.get("id")],
             "accepted_findings": _accepted_finding_rows(collected["findings"]),
+            "incomplete_audits": _partial_audit_reports(reports),
             "next_action": next_action,
+            **_write_scope_output(task_dir),
         }, indent=2))
         return 0
     except Exception as exc:
@@ -5728,6 +5971,7 @@ def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
                 "errors": errors,
             }, indent=2))
             return 1
+        _record_repair_history(task_dir, repair_log, previous_log)
 
         print(json.dumps({
             "status": "repair_log_built",
@@ -5999,10 +6243,95 @@ def cmd_run_execute_setup(args: argparse.Namespace) -> int:
         return 1
 
 
+def _auto_finalize_tdd_covered_segments(task_dir: Path) -> list[str]:
+    """Finalize testing segments whose files the TDD-First step already wrote.
+
+    With ``tdd_required`` the Step 8 testing-executor writes the test suite
+    before execution and ``ctl tdd-receipt`` records its file list. A
+    ``testing-executor`` segment whose every ``files_expected`` entry is in
+    that list, and on disk, has nothing left to do; spawning an executor for
+    it only to write a sidecar and an evidence file is waste. This writes its
+    ``executor-{seg}`` receipt (``tdd_covered: true``, evidence pointing at
+    ``evidence/tdd-tests.md``) so batch planning treats it as completed.
+
+    Fail-closed: no-op unless the stage is EXECUTION, tdd_required is true,
+    and the tdd-tests receipt's evidence hash still matches the file.
+    Returns the finalized segment ids.
+    """
+    manifest = _load_manifest(task_dir)
+    if manifest.get("stage") != "EXECUTION" or not get_tdd_required(manifest):
+        return []
+    tdd_receipt = read_receipt(task_dir, "tdd-tests")
+    tdd_evidence = task_dir / "evidence" / "tdd-tests.md"
+    if not isinstance(tdd_receipt, dict) or not tdd_evidence.is_file():
+        return []
+    if tdd_receipt.get("tests_evidence_sha256") != hash_file(tdd_evidence):
+        return []
+    tdd_files = [
+        str(p).strip().removeprefix("./")
+        for p in (tdd_receipt.get("test_file_paths") or [])
+        if isinstance(p, str) and p.strip()
+    ]
+    if not tdd_files:
+        return []
+    from lib_validate import files_expected_entry_matches  # noqa: PLC0415
+
+    root = _root_for_task_dir(task_dir)
+    finalized: list[str] = []
+    for seg in _load_graph_segments(task_dir):
+        seg_id = str(seg.get("id", "") or "")
+        if not seg_id or str(seg.get("executor", "")) != "testing-executor":
+            continue
+        if read_receipt(task_dir, f"executor-{seg_id}") is not None:
+            continue
+        if (task_dir / "evidence" / f"{seg_id}.md").exists():
+            continue  # an executor already ran; let the normal gate decide
+        expected = [str(p) for p in (seg.get("files_expected") or []) if isinstance(p, str) and p]
+        if not expected:
+            continue
+        covered: list[str] = []
+        for entry in expected:
+            matches = [
+                t for t in tdd_files
+                if t == entry or files_expected_entry_matches(entry, t)
+            ]
+            if not matches or not all((root / t).exists() for t in matches):
+                covered = []
+                break
+            covered.extend(m for m in matches if m not in covered)
+        if not covered:
+            continue
+        write_receipt(
+            task_dir,
+            f"executor-{seg_id}",
+            segment_id=seg_id,
+            executor_type="testing-executor",
+            model_used=tdd_receipt.get("model_used"),
+            injected_prompt_sha256=None,
+            agent_name=None,
+            evidence_path=str(tdd_evidence),
+            tokens_used=0,
+            diff_verified_files=covered,
+            no_op_justified=False,
+            tdd_covered=True,
+            tdd_tests_evidence_sha256=tdd_receipt.get("tests_evidence_sha256"),
+        )
+        append_execution_log(
+            task_dir,
+            f"[TDD-COVERED] {seg_id} — files_expected written by the TDD-First step; no executor spawned",
+        )
+        finalized.append(seg_id)
+    return finalized
+
+
 def cmd_run_execution_batch_plan(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
-        print(json.dumps(_compute_execution_batch_payload(task_dir), indent=2))
+        tdd_finalized = _auto_finalize_tdd_covered_segments(task_dir)
+        payload = _compute_execution_batch_payload(task_dir)
+        if tdd_finalized:
+            payload["tdd_covered_segments"] = tdd_finalized
+        print(json.dumps(payload, indent=2))
         return 0
     except Exception as exc:
         print(str(exc), file=sys.stderr)
@@ -6074,6 +6403,7 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
             and isinstance(no_op_reason, str)
             and len(no_op_reason.strip()) >= 20
         )
+        optional_unchanged: list[str] = []
 
         if bypass:
             # AC 5 bypass path: diff_verified_files=[], no_op_justified=True
@@ -6122,6 +6452,15 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
                 }, indent=2))
                 return 1
 
+            # files_optional entries ("regenerate X only if changed") may be
+            # legitimately unchanged; every other file is still enforced.
+            # An explicit --files list is taken as-is (no optional relief).
+            optional_set = set() if args.files else {
+                str(p) for p in (segment.get("files_optional") or []) if isinstance(p, str)
+            }
+            optional_unchanged = [f for f in missing_files if f in optional_set]
+            missing_files = [f for f in missing_files if f not in optional_set]
+
             if missing_files:
                 print(json.dumps({
                     "status": "segment_invalid",
@@ -6129,8 +6468,16 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
                     "segment_id": args.segment_id,
                     "error": "files_expected not present in git diff since snapshot",
                     "missing_files": missing_files,
+                    "optional_unchanged": optional_unchanged,
+                    "hint": (
+                        "mark conditionally-changed files with the segment's "
+                        "files_optional list in execution-graph.json instead of "
+                        "overriding with --files"
+                    ),
                 }, indent=2))
                 return 1
+            if optional_unchanged:
+                files_to_check = [f for f in files_to_check if f not in optional_unchanged]
 
             # AC 5 happy path: diff_verified_files=files_to_check, no_op_justified=False
             executor_type = args.executor_type or str(segment.get("executor", ""))
@@ -6147,6 +6494,7 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
                 no_op_justified=bool(segment.get("no_op_justified")),
             )
 
+        _auto_finalize_tdd_covered_segments(task_dir)
         batch_payload = _compute_execution_batch_payload(task_dir)
         manifest = _load_manifest(task_dir)
         manifest["execution_progress"] = {
@@ -6158,13 +6506,26 @@ def cmd_run_execution_segment_done(args: argparse.Namespace) -> int:
         }
         _write_ctl_json(task_dir, task_dir / "manifest.json", manifest)
 
-        print(json.dumps({
+        out: dict = {
             "status": "segment_finalized",
             "task_dir": str(task_dir),
             "segment_id": args.segment_id,
             "receipt_path": str(receipt_path),
             "execution_progress": manifest["execution_progress"],
-        }, indent=2))
+        }
+        if not bypass and optional_unchanged:
+            out["optional_unchanged"] = optional_unchanged
+        # Surface a missing verify_commands record now, not only through
+        # next-continuation: no executor can produce it — the orchestrator
+        # runs `ctl run-verification-evidence`.
+        verification_reasons = _verification_evidence_errors(task_dir, segment)
+        if verification_reasons:
+            out["verification_pending"] = verification_reasons
+            out["next_action"] = (
+                f"run `ctl run-verification-evidence {task_dir} --segment {args.segment_id}`"
+            )
+        out.update(_write_scope_output(task_dir))
+        print(json.dumps(out, indent=2))
         return 0
     except Exception as exc:
         print(str(exc), file=sys.stderr)
@@ -6219,7 +6580,9 @@ def cmd_waive_rule(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"waive-rule: {exc}", file=sys.stderr)
         return 1
-    if rule_id not in {rules_engine._raw_rule_id(raw) for raw in raw_rules}:
+    from lib_receipts import pinned_rules  # noqa: PLC0415
+    known_ids = {rules_engine._raw_rule_id(raw) for raw in raw_rules + (pinned_rules(task_dir) or [])}
+    if rule_id not in known_ids:
         print(f"waive-rule: no prevention rule with id {rule_id!r}", file=sys.stderr)
         return 1
     waivers = load_rule_waivers(task_dir)
@@ -6314,6 +6677,155 @@ def cmd_accept_finding(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_acknowledge_out_of_scope(args: argparse.Namespace) -> int:
+    """Record a human decision that out-of-scope changed files belong to the task.
+
+    The git write-scope backstop (lib_write_scope) refuses DONE while files
+    changed since the snapshot fall outside every segment's files_expected /
+    files_optional and every repair cycle's files_to_modify. This is the
+    sanctioned way past it for a change a human confirms is task work. The
+    record lives in write-scope.json (ctl-owned; agents cannot write it),
+    requires a reason, and is logged. Only a file that is currently out of
+    scope can be acknowledged.
+    """
+    from lib_log import log_event  # noqa: PLC0415
+    from lib_write_scope import (  # noqa: PLC0415
+        WRITE_SCOPE_FILE, load_write_scope, write_scope_report,
+    )
+
+    task_dir = Path(args.task_dir).resolve()
+    reason = str(args.reason or "").strip()
+    files = [str(f).strip() for f in (args.files or []) if str(f).strip()]
+    if not reason:
+        print("acknowledge-out-of-scope: --reason is required and must be non-empty", file=sys.stderr)
+        return 1
+    if not files:
+        print("acknowledge-out-of-scope: at least one non-empty --file is required", file=sys.stderr)
+        return 1
+    if not (task_dir / "manifest.json").exists():
+        print(f"acknowledge-out-of-scope: not a task dir (no manifest.json): {task_dir}", file=sys.stderr)
+        return 1
+    report = write_scope_report(task_dir)
+    if report.get("status") != "checked":
+        print(
+            f"acknowledge-out-of-scope: write-scope check is {report.get('status')} "
+            f"({report.get('reason') or report.get('error') or 'no detail'}); nothing to acknowledge",
+            file=sys.stderr,
+        )
+        return 1
+    root = _root_for_task_dir(task_dir)
+    candidates = set(report.get("out_of_scope_files") or []) | set(report.get("acknowledged_files") or [])
+    normalized: list[str] = []
+    for f in files:
+        rel = f
+        if rel.startswith("/"):
+            try:
+                rel = str(Path(rel).resolve().relative_to(root.resolve()))
+            except (ValueError, OSError):
+                pass
+        while rel.startswith("./"):
+            rel = rel[2:]
+        normalized.append(rel)
+    unknown = [f for f in normalized if f not in candidates]
+    if unknown:
+        print(
+            "acknowledge-out-of-scope: not currently out of scope: "
+            + ", ".join(unknown)
+            + f"; out-of-scope files are: {', '.join(sorted(candidates)) or '(none)'}",
+            file=sys.stderr,
+        )
+        return 1
+    scope = load_write_scope(task_dir)
+    acknowledged = [e for e in scope["acknowledged"] if e.get("file") not in normalized]
+    at = now_iso()
+    acknowledged.extend({"file": f, "reason": reason, "acknowledged_at": at} for f in normalized)
+    acknowledged.sort(key=lambda e: str(e.get("file")))
+    _write_ctl_json(task_dir, task_dir / WRITE_SCOPE_FILE, {**scope, "acknowledged": acknowledged})
+    log_event(
+        root, "out_of_scope_acknowledged", task=task_dir.name, files=normalized, reason=reason,
+    )
+    append_execution_log(
+        task_dir, f"[SCOPE-ACK] {', '.join(normalized)} acknowledged by human decision: {reason}",
+    )
+    remaining = sorted(set(report.get("out_of_scope_files") or []) - set(normalized))
+    print(json.dumps({
+        "status": "out_of_scope_acknowledged",
+        "task_dir": str(task_dir),
+        "acknowledged": normalized,
+        "out_of_scope_files": remaining,
+    }, indent=2))
+    return 0
+
+
+_VERIFICATION_REASON_MARKERS = (
+    "verification evidence missing",
+    "verification record missing command",
+    "verification record for",
+)
+
+
+def _verification_evidence_errors(task_dir: Path, seg: dict) -> list[str]:
+    """D6 errors ("{seg_id}: ...") for a segment's declared verify_commands.
+
+    Empty when the segment declares none or every declared command has a
+    passing record captured by `ctl run-verification-evidence`.
+    """
+    errors: list[str] = []
+    seg_id = str(seg.get("id", "") or "")
+    declared = seg.get("verify_commands") or []
+    if declared:
+        record_path = task_dir / "evidence" / "verification" / f"{seg_id}.json"
+        if not record_path.exists():
+            errors.append(
+                f"{seg_id}: verification evidence missing — run "
+                f"`ctl.py run-verification-evidence` (expected {record_path})"
+            )
+        else:
+            record = load_json(record_path)
+            results = record.get("results", []) if isinstance(record, dict) else []
+            recorded = {
+                str(r.get("id")): r for r in results if isinstance(r, dict)
+            }
+            for vc in declared:
+                vc_id = str(vc.get("id"))
+                entry = recorded.get(vc_id)
+                if entry is None:
+                    errors.append(
+                        f"{seg_id}: verification record missing command {vc_id!r} — re-run run-verification-evidence"
+                    )
+                elif str(entry.get("command")) != str(vc.get("command")):
+                    errors.append(
+                        f"{seg_id}: verification record for {vc_id!r} captured a different command than the approved graph — re-run run-verification-evidence"
+                    )
+                elif entry.get("exit_code") != 0:
+                    errors.append(
+                        f"{seg_id}: verification command {vc_id!r} failed (exit {entry.get('exit_code')}) — fix and re-run run-verification-evidence"
+                    )
+    return errors
+
+
+def _is_verification_only_reason(reason: str) -> bool:
+    """True for a missing/stale verification record — fixed by the
+    orchestrator running run-verification-evidence, never by an executor.
+    A failing command is NOT included: that is a defect an executor fixes."""
+    return any(marker in reason for marker in _VERIFICATION_REASON_MARKERS)
+
+
+def _segment_evidence_path(task_dir: Path, seg_id: str) -> Path:
+    """evidence/{seg_id}.md, or the TDD evidence a tdd-covered segment's
+    executor receipt points at (see _auto_finalize_tdd_covered_segments)."""
+    default = task_dir / "evidence" / f"{seg_id}.md"
+    if default.exists():
+        return default
+    try:
+        receipt = read_receipt(task_dir, f"executor-{seg_id}")
+    except Exception:
+        receipt = None
+    if isinstance(receipt, dict) and receipt.get("tdd_covered") is True:
+        return task_dir / "evidence" / "tdd-tests.md"
+    return default
+
+
 def _verify_execution_evidence(task_dir: Path, cached_ids: set[str]) -> tuple[list[str], list[str]]:
     """Shared evidence verification: returns (errors, verified) line lists.
 
@@ -6345,7 +6857,7 @@ def _verify_execution_evidence(task_dir: Path, cached_ids: set[str]) -> tuple[li
             verified.append(f"{seg_id}: cached (evidence reused)")
             continue
 
-        evidence_path = task_dir / "evidence" / f"{seg_id}.md"
+        evidence_path = _segment_evidence_path(task_dir, seg_id)
         if not evidence_path.exists():
             errors.append(f"{seg_id}: evidence file missing at {evidence_path}")
             continue
@@ -6354,10 +6866,16 @@ def _verify_execution_evidence(task_dir: Path, cached_ids: set[str]) -> tuple[li
             errors.append(f"{seg_id}: evidence file is empty at {evidence_path}")
             continue
 
+        optional_files = {
+            str(f).strip() for f in (seg.get("files_optional") or []) if isinstance(f, str)
+        }
         for expected_file in (seg.get("files_expected") or []):
             if not isinstance(expected_file, str) or not expected_file.strip():
                 continue
             entry = expected_file.strip()
+            if entry in optional_files:
+                # Conditional file ("only if changed"): may be absent.
+                continue
             # D7-2: directory entries ("dir/") must exist as directories;
             # glob entries must match at least one path; plain entries must
             # exist as before.
@@ -6376,35 +6894,7 @@ def _verify_execution_evidence(task_dir: Path, cached_ids: set[str]) -> tuple[li
 
         # D6: segments that declare verify_commands must have a passing
         # machine-captured verification record before execution can finish.
-        declared = seg.get("verify_commands") or []
-        if declared:
-            record_path = task_dir / "evidence" / "verification" / f"{seg_id}.json"
-            if not record_path.exists():
-                errors.append(
-                    f"{seg_id}: verification evidence missing — run "
-                    f"`ctl.py run-verification-evidence` (expected {record_path})"
-                )
-            else:
-                record = load_json(record_path)
-                results = record.get("results", []) if isinstance(record, dict) else []
-                recorded = {
-                    str(r.get("id")): r for r in results if isinstance(r, dict)
-                }
-                for vc in declared:
-                    vc_id = str(vc.get("id"))
-                    entry = recorded.get(vc_id)
-                    if entry is None:
-                        errors.append(
-                            f"{seg_id}: verification record missing command {vc_id!r} — re-run run-verification-evidence"
-                        )
-                    elif str(entry.get("command")) != str(vc.get("command")):
-                        errors.append(
-                            f"{seg_id}: verification record for {vc_id!r} captured a different command than the approved graph — re-run run-verification-evidence"
-                        )
-                    elif entry.get("exit_code") != 0:
-                        errors.append(
-                            f"{seg_id}: verification command {vc_id!r} failed (exit {entry.get('exit_code')}) — fix and re-run run-verification-evidence"
-                        )
+        errors.extend(_verification_evidence_errors(task_dir, seg))
 
         verified.append(f"{seg_id}: ok")
     return errors, verified
@@ -6713,7 +7203,15 @@ def compute_continuation_status(task_dir: Path) -> dict:
         )
         prev = prev_segments.get(seg_id, {}) if isinstance(prev_segments, dict) else {}
         attempt = int(prev.get("attempt", 0)) + 1
-        if prev.get("fingerprint") == fingerprint:
+        # A segment blocked only by a missing/stale verification record is not
+        # stalled: no executor can produce that record, the orchestrator runs
+        # `ctl run-verification-evidence`. Re-reporting it must not count.
+        verification_only = bool(reasons) and all(
+            _is_verification_only_reason(r) for r in reasons
+        )
+        if verification_only:
+            stall_count = int(prev.get("stall_count", 0) or 0)
+        elif prev.get("fingerprint") == fingerprint:
             stall_count = int(prev.get("stall_count", 0)) + 1
         else:
             stall_count = 0
@@ -6722,7 +7220,7 @@ def compute_continuation_status(task_dir: Path) -> dict:
             "attempt": attempt,
             "stall_count": stall_count,
         }
-        is_stalled = stall_count >= _CONTINUATION_STALL_LIMIT
+        is_stalled = (not verification_only) and stall_count >= _CONTINUATION_STALL_LIMIT
         if is_stalled:
             stalled.append(seg_id)
         evidence_path = task_dir / "evidence" / f"{seg_id}.md"
@@ -6745,28 +7243,43 @@ def compute_continuation_status(task_dir: Path) -> dict:
             "continuation_attempt": attempt,
             "stall_count": stall_count,
             "stalled": is_stalled,
+            "verification_only": verification_only,
         })
 
     write_json(state_path, {"segments": new_segments})
 
+    verification_segments = [e["segment_id"] for e in segments_out if e["verification_only"]]
+    actionable = [e for e in segments_out if not e["verification_only"]]
     if not incomplete:
         status = "complete"
-    elif stalled and len(stalled) == len(segments_out):
-        # Every remaining incomplete segment is stalled: no forward progress is
-        # possible, so this is the hard-error halt (never a budget-count halt).
+    elif actionable and all(e["stalled"] for e in actionable):
+        # Every remaining executor-fixable segment is stalled: no forward
+        # progress is possible, so this is the hard-error halt (never a
+        # budget-count halt).
         status = "stalled"
+    elif not actionable:
+        # Only verification records are missing: run the verify_commands
+        # runner instead of spawning executors.
+        status = "verification_needed"
     else:
         status = "continuation_needed"
 
     completed = list(batch_payload.get("completed_segments", []))
     completed += list(batch_payload.get("cached_segments", []))
-    return {
+    result = {
         "status": status,
         "task_dir": str(task_dir),
         "incomplete_segments": segments_out,
         "stalled_segments": stalled,
         "complete_segments": sorted(completed),
+        "verification_segments": verification_segments,
     }
+    if verification_segments:
+        result["next_action"] = (
+            f"run `ctl run-verification-evidence {task_dir}` "
+            "(do not spawn executors for verification_only segments)"
+        )
+    return result
 
 
 def cmd_next_continuation(args: argparse.Namespace) -> int:
@@ -6776,6 +7289,8 @@ def cmd_next_continuation(args: argparse.Namespace) -> int:
         0 — status "complete": every segment is done, proceed to the finish gate.
         0 — status "continuation_needed": at least one segment can still make
             progress; the printed incomplete_segments are the continuation seeds.
+        0 — status "verification_needed": the only blocker is missing or stale
+            verify_commands evidence; run `ctl run-verification-evidence`.
         3 — status "stalled": every incomplete segment moved nothing across the
             last two continuations; the orchestrator must escalate, not re-spawn.
         1 — internal error.
@@ -6786,12 +7301,30 @@ def cmd_next_continuation(args: argparse.Namespace) -> int:
     if blocked is not None:
         return blocked
     try:
+        _auto_finalize_tdd_covered_segments(task_dir)
         result = compute_continuation_status(task_dir)
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2))
     return 3 if result["status"] == "stalled" else 0
+
+
+_DEFAULT_VERIFICATION_TIMEOUT_S = 3600
+
+
+def _policy_verification_timeout(task_dir: Path) -> int:
+    """Default per-command verify_commands timeout: the project policy's
+    `verification_timeout_s` (positive int, in the project's policy.json)
+    when set, else an hour."""
+    try:
+        from lib_validate import load_project_policy  # noqa: PLC0415
+        value = load_project_policy(task_dir).get("verification_timeout_s")
+    except Exception:
+        value = None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return _DEFAULT_VERIFICATION_TIMEOUT_S
 
 
 def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
@@ -6843,8 +7376,9 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
         return 1
 
     # A command's own `timeout` (seconds, declared in the plan) wins; else
-    # --timeout; else an hour, the same budget `run-tests` gives a suite.
-    default_timeout_s = int(args.timeout) if args.timeout else 3600
+    # --timeout; else the project policy's `verification_timeout_s`; else an
+    # hour, the same budget `run-tests` gives a suite.
+    default_timeout_s = int(args.timeout) if args.timeout else _policy_verification_timeout(task_dir)
     tail_bytes = 8192
     summary: list[dict] = []
     any_failed = False
@@ -7351,6 +7885,7 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     blocked = _refuse_if_rules_corrupt(root)
     if blocked is not None:
         return blocked
+    _release_idle_audit_roles(task_dir)
     try:
         manifest = _load_manifest(task_dir)
         stage = manifest.get("stage")
@@ -8561,7 +9096,7 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_verification_parser.add_argument("task_dir")
     run_verification_parser.add_argument("--segment", help="Limit to one segment id")
-    run_verification_parser.add_argument("--timeout", type=int, default=None, help="Per-command timeout in seconds for commands that declare none (default 3600)")
+    run_verification_parser.add_argument("--timeout", type=int, default=None, help="Per-command timeout in seconds for commands that declare none (default: policy.json verification_timeout_s, else 3600)")
     run_verification_parser.set_defaults(func=cmd_run_verification_evidence)
 
     ownership_parser = subparsers.add_parser("check-ownership", help="Check that files belong to a segment")
@@ -8699,8 +9234,12 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_rules_check_parser.add_argument("task_dir")
     run_rules_check_parser.add_argument(
-        "--mode", choices=["staged", "all"], default="staged",
-        help="Check staged files only (default) or all files",
+        "--mode", choices=["task", "diff", "all", "staged"], default="task",
+        help=(
+            "task (default): files changed since the task snapshot, or all files "
+            "when the task has no snapshot; diff: the same, explicitly; all: every "
+            "tracked file; staged: git diff --cached only"
+        ),
     )
     run_rules_check_parser.set_defaults(func=cmd_run_rules_check)
 
@@ -8723,6 +9262,15 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     accept_finding_parser.add_argument("--reason", required=True)
     accept_finding_parser.add_argument("--decision-ref", default=None, dest="decision_ref")
     accept_finding_parser.set_defaults(func=cmd_accept_finding)
+
+    ack_scope_parser = subparsers.add_parser(
+        "acknowledge-out-of-scope",
+        help="Record a human decision that files changed outside the declared write scope belong to this task",
+    )
+    ack_scope_parser.add_argument("task_dir")
+    ack_scope_parser.add_argument("--file", action="append", required=True, dest="files")
+    ack_scope_parser.add_argument("--reason", required=True)
+    ack_scope_parser.set_defaults(func=cmd_acknowledge_out_of_scope)
 
 
 def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:

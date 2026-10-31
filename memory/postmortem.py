@@ -20,6 +20,7 @@ from lib_core import (
     project_dir,
 )
 from lib_log import log_event
+from lib_retro_rescore import effective_quality, quality_unverified, rescore_all
 from lib_receipts import (
     hash_file,
     receipt_postmortem_generated,
@@ -122,9 +123,11 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
             "detail": f"Used {int(total_tokens)} tokens vs {budget} budget ({total_tokens/budget:.1f}x)",
         })
 
-    # Quality anomaly
-    quality = _safe_float(retro.get("quality_score"), 0)
-    if quality < QUALITY_THRESHOLD_ANOMALY:
+    # Quality anomaly. An old-formula 0.0 on a DONE task that could not be
+    # rescored (task dir gone) is unknown, not low: that formula counted
+    # superseded findings the gate had cleared.
+    quality = effective_quality(retro)
+    if quality is not None and quality < QUALITY_THRESHOLD_ANOMALY:
         anomalies.append({
             "type": "low_quality",
             "severity": "high",
@@ -160,10 +163,9 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
         })
 
     # Compare to similar tasks
-    if similar_tasks:
-        avg_similar_quality = sum(
-            _safe_float(t.get("quality_score"), 0) for t in similar_tasks
-        ) / len(similar_tasks)
+    similar_qualities = [q for q in (effective_quality(t) for t in similar_tasks) if q is not None]
+    if similar_qualities and quality is not None:
+        avg_similar_quality = sum(similar_qualities) / len(similar_qualities)
         if quality < avg_similar_quality - QUALITY_REGRESSION_THRESHOLD:
             anomalies.append({
                 "type": "quality_regression_vs_similar",
@@ -219,7 +221,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DET
         })
 
     # Recurring scoring issues (quality_score exactly 0)
-    zero_quality = sum(1 for r in recent if _safe_float(r.get("quality_score"), -1) == 0)
+    zero_quality = sum(1 for r in recent if effective_quality(r) == 0)
     if zero_quality >= ZERO_QUALITY_PATTERN_THRESHOLD:
         patterns.append({
             "pattern": "recurring_zero_quality_scores",
@@ -238,6 +240,13 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
 
     if not retro_path.exists():
         return {"error": f"no retrospective found for {task_id}"}
+
+    # Retrospectives scored by an older compute_reward are recomputed from
+    # their task dirs (and persisted) before anything reads their scores.
+    try:
+        rescore_all(root)
+    except Exception as exc:  # noqa: BLE001 — rescoring must never block a postmortem
+        log_event(root, "retrospective_rescore_failed", error=str(exc))
 
     retro = load_json(retro_path)
     log_text = _read_execution_log(task_dir)
@@ -268,6 +277,7 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
     total_findings = sum(v for v in findings_by_auditor.values() if isinstance(v, (int, float)))
     quality_summary = {
         "quality_score": _safe_float(retro.get("quality_score"), 0),
+        "quality_unverified": quality_unverified(retro),
         "total_findings": int(total_findings),
         "repair_cycles": _safe_int(retro.get("repair_cycle_count", 0) or 0),
         "findings_by_auditor": findings_by_auditor,
@@ -436,7 +446,8 @@ def _render_markdown(pm: dict) -> str:
         f"- Spawns: {cost.get('subagent_spawns', 0)} total, {cost.get('wasted_spawns', 0)} wasted",
         "",
         "## Quality",
-        f"- Score: {quality.get('quality_score', 0):.2f}",
+        f"- Score: {quality.get('quality_score', 0):.2f}"
+        + (" (unverified: scored by an older formula, task dir unavailable)" if quality.get("quality_unverified") else ""),
         f"- Findings: {quality.get('total_findings', 0)} total, {quality.get('repair_cycles', 0)} repair cycles",
     ]
 
@@ -512,6 +523,21 @@ def cmd_generate_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rescore(args: argparse.Namespace) -> int:
+    """Recompute quality_score on retrospectives an older compute_reward scored."""
+    root = Path(args.root).resolve()
+    if args.task_id:
+        from lib_retro_rescore import rescore_task  # noqa: PLC0415
+        results = [rescore_task(root, args.task_id, persist=not args.dry_run)]
+    else:
+        results = rescore_all(root, persist=not args.dry_run)
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r.get("status", "?")] = counts.get(r.get("status", "?"), 0) + 1
+    print(json.dumps({"dry_run": bool(args.dry_run), "counts": counts, "results": results}, indent=2))
+    return 0 if not any(r.get("status") == "error" for r in results) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -524,6 +550,15 @@ def build_parser() -> argparse.ArgumentParser:
     gen_all = subparsers.add_parser("generate-all", help="Generate postmortems for all tasks")
     gen_all.add_argument("--root", default=".")
     gen_all.set_defaults(func=cmd_generate_all)
+
+    rescore = subparsers.add_parser(
+        "rescore",
+        help="Recompute quality_score on retrospectives scored by an older compute_reward",
+    )
+    rescore.add_argument("--root", default=".")
+    rescore.add_argument("--task-id", default=None, help="One task (default: every stale retrospective)")
+    rescore.add_argument("--dry-run", action="store_true", help="Report new scores without writing")
+    rescore.set_defaults(func=cmd_rescore)
 
     propose = subparsers.add_parser("propose", help="Propose project-local improvements (dry run)")
     propose.add_argument("--root", default=".")

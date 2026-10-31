@@ -278,6 +278,71 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+SUPERSEDED_DIRNAME = "_superseded"
+
+
+def superseded_versions(path: Path) -> list[Path]:
+    """Earlier versions of ``path`` kept by ``_archive_superseded``, oldest first.
+
+    ``receipts/audit-x.json`` → ``receipts/_superseded/audit-x.v1.json``, ...
+    """
+    archive = path.parent / SUPERSEDED_DIRNAME
+    if not archive.is_dir():
+        return []
+    found = []
+    for candidate in archive.glob(f"{path.stem}.v*{path.suffix}"):
+        version = candidate.name[len(path.stem) + 2: len(candidate.name) - len(path.suffix)]
+        if version.isdigit():
+            found.append((int(version), candidate))
+    return [p for _, p in sorted(found)]
+
+
+def _archive_superseded(path: Path, task_dir: Path | None = None) -> Path | None:
+    """Copy an existing file at ``path`` to ``_superseded/{stem}.v{n}{suffix}``
+    before it is overwritten, so a re-audit or re-plan does not erase the
+    earlier attempt's record. Skips when absent or unchanged. Best-effort:
+    an archive failure never blocks the write it precedes.
+    """
+    try:
+        if not path.is_file():
+            return None
+        data = path.read_bytes()
+        versions = superseded_versions(path)
+        if versions and versions[-1].read_bytes() == data:
+            return versions[-1]
+        archive = path.parent / SUPERSEDED_DIRNAME
+        archive.mkdir(parents=True, exist_ok=True)
+        n = len(versions) + 1
+        target = archive / f"{path.stem}.v{n}{path.suffix}"
+        while target.exists():
+            n += 1
+            target = archive / f"{path.stem}.v{n}{path.suffix}"
+        require_write_allowed(
+            WriteAttempt(
+                role=_WRITE_ROLE,
+                task_dir=task_dir if task_dir is not None else path.parent.parent,
+                path=target,
+                operation="create",
+                source=_WRITE_ROLE,
+            ),
+            capability_key=_get_capability_key(_WRITE_ROLE),
+        )
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(archive))
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return target
+    except Exception:  # noqa: BLE001 — history is advisory
+        return None
+
+
 def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     """Write a receipt proving a pipeline step completed.
 
@@ -308,6 +373,7 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
         ),
         capability_key=_get_capability_key(_WRITE_ROLE),
     )
+    _archive_superseded(receipt_path, task_dir)
     _atomic_write_text(receipt_path, json.dumps(receipt, indent=2, default=str))
 
     # Log the receipt write to events.jsonl

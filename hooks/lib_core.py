@@ -1219,10 +1219,18 @@ def _effective_rules_drift(task_dir: Path, receipt: dict) -> str | None:
     live rules minus the receipt's waivers, or None when it still does."""
     import rules_engine  # noqa: PLC0415
     root = Path(task_dir).parent.parent
+    # A task with a pinned rules snapshot is held to that snapshot, so a
+    # rule another task adds to the shared file mid-task is not drift.
     try:
-        raw_rules, _ = rules_engine._load_rules_file(root)
-    except ValueError as exc:
-        return str(exc)
+        from receipts.approval import pinned_rules  # noqa: PLC0415
+        raw_rules = pinned_rules(Path(task_dir))
+    except Exception:  # noqa: BLE001 — fall back to the live file
+        raw_rules = None
+    if raw_rules is None:
+        try:
+            raw_rules, _ = rules_engine._load_rules_file(root)
+        except ValueError as exc:
+            return str(exc)
     waived = receipt.get("waived_rules")
     live = rules_engine.effective_rules_digest(
         raw_rules, frozenset(waived) if isinstance(waived, list) else frozenset(),
@@ -1235,6 +1243,49 @@ def _effective_rules_drift(task_dir: Path, receipt: dict) -> str | None:
         f"`ctl run-rules-check`, and waive a rule that does not apply to this "
         f"task with `ctl waive-rule <task_dir> <rule_id> --reason ...`"
     )
+
+
+def _receipt_chain_err(task_dir: Path, current_stage: str | None, next_stage: str) -> str | None:
+    """Why the task-receipt chain refuses DONE, or None when it is valid.
+
+    A missing chain is a legacy task (run-audit-finish flags it
+    ``chain_unverified``) and does not refuse. Never raises.
+    """
+    try:
+        from lib_chain import validate_chain  # noqa: PLC0415
+        result = validate_chain(Path(task_dir))
+    except Exception as exc:  # noqa: BLE001 — a broken validator must not wedge DONE
+        return None if isinstance(exc, ImportError) else (
+            f"Cannot transition {current_stage} -> {next_stage}: "
+            f"task-receipt chain validation failed: {exc}"
+        )
+    if result.status in {"valid", "chain_missing"}:
+        return None
+    return (
+        f"Cannot transition {current_stage} -> {next_stage}: task-receipt chain "
+        f"{result.status} at entry {result.first_failed_index} "
+        f"({result.first_failed_file_path}, field={result.first_failed_field}): "
+        f"{result.error_reason}; inspect with `ctl validate-task-receipt-chain`"
+    )
+
+
+def _write_scope_err(task_dir: Path, current_stage: str | None, next_stage: str) -> str | None:
+    """Why the git write-scope backstop refuses DONE, or None.
+
+    See lib_write_scope. Legacy tasks (no snapshot, or a snapshot without
+    ``baseline_dirty``) never refuse. A missing module never wedges DONE.
+    """
+    try:
+        from lib_write_scope import done_gate_error  # noqa: PLC0415
+    except ImportError:
+        return None
+    try:
+        return done_gate_error(Path(task_dir), current_stage, next_stage)
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"Cannot transition {current_stage} -> {next_stage}: "
+            f"write-scope check failed: {exc}"
+        )
 
 
 def _rules_check_err(
@@ -1510,6 +1561,12 @@ def _compute_bypassed_gates_for_force(
                     f"Cannot transition {current_stage} -> {next_stage}: "
                     f"receipt gaps in {rd}: " + "; ".join(done_gaps)
                 )
+            chain_err = _receipt_chain_err(task_dir, current_stage, next_stage)
+            if chain_err:
+                errs.append(chain_err)
+            scope_err = _write_scope_err(task_dir, current_stage, next_stage)
+            if scope_err:
+                errs.append(scope_err)
 
     # ---- DONE -> CALIBRATED requires calibration-applied.
     if current_stage == "DONE" and next_stage == "CALIBRATED":
@@ -1654,7 +1711,21 @@ def _write_pre_repair_blocking_snapshot(task_dir: Path) -> Path | None:
     audit_dir = task_dir / "audit-reports"
     blocking_ids: list[str] = []
     seen: set[str] = set()
-    if audit_dir.is_dir():
+    # Binding findings only (the findings gate's selection): a voting-tier
+    # finding a deep-tier verdict overruled, or an attempt a re-audit
+    # replaced, was never part of what repair had to fix.
+    try:
+        from lib_validate import collect_repair_findings  # noqa: PLC0415 — lib_validate imports lib_core
+        binding = collect_repair_findings(task_dir)["findings"]
+    except Exception:
+        binding = None
+    if binding is not None:
+        for finding in binding:
+            fid = finding.get("id")
+            if finding_is_blocking(finding) and isinstance(fid, str) and fid and fid not in seen:
+                seen.add(fid)
+                blocking_ids.append(fid)
+    elif audit_dir.is_dir():
         for report_path in sorted(audit_dir.glob("*.json")):
             try:
                 payload = load_json(report_path)
@@ -2301,6 +2372,15 @@ def _replay_gates_for_transition(
                     f"Cannot transition {current_stage} -> {next_stage}: "
                     f"receipt gaps in {rd}: " + "; ".join(done_gaps)
                 )
+            chain_err = _receipt_chain_err(task_dir, current_stage, next_stage)
+            if chain_err:
+                _refuse(chain_err)
+            # Git write-scope backstop: files changed since the snapshot
+            # that no segment / repair task / human acknowledgment covers
+            # (writes the PreToolUse hook could not see).
+            scope_err = _write_scope_err(task_dir, current_stage, next_stage)
+            if scope_err:
+                _refuse(scope_err)
 
     # AC 23 + AC 10: DONE -> CALIBRATED requires EITHER a
     # calibration-applied OR calibration-noop receipt (whichever has

@@ -48,6 +48,8 @@ from .approval import (
     receipt_calibration_applied,
     receipt_calibration_noop,
     receipt_rules_check_passed,
+    pin_rules_snapshot,
+    pinned_rules,
     receipt_force_override,
 )
 from .budget import (
@@ -84,6 +86,8 @@ __all__ = [
     "receipt_calibration_applied",
     "receipt_calibration_noop",
     "receipt_rules_check_passed",
+    "pin_rules_snapshot",
+    "pinned_rules",
     "receipt_force_override",
     "RECEIPT_CONTRACT_VERSION",
     "MIN_VERSION_PER_STEP",

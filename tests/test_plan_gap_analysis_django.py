@@ -357,3 +357,116 @@ def test_untruncated_scan_still_fails_missing_claims(tmp_path: Path, monkeypatch
     assert report["api_contracts"]["scan_truncated"] is False
     assert _endpoints(report["api_contracts"]) == ["/api/ghost"]
     assert len(findings_from_report(report)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. relative endpoint cells (7.6.0 field report): "companies/{id}" used to
+#    be cut at its first slash to "/{company_id}", which nothing matches.
+# ---------------------------------------------------------------------------
+
+def test_relative_cell_keeps_its_first_segment() -> None:
+    assert _cell_endpoints("companies/{company_id}") == ["/companies/{company_id}"]
+    assert _cell_endpoints("`contacts/{contact_id}`") == ["/contacts/{contact_id}"]
+    assert _cell_endpoints("outreach/sequences/{sequence_id}/mode") == ["/outreach/sequences/{sequence_id}/mode"]
+    assert _cell_endpoints("`/a` / `/b`") == ["/a", "/b"]
+    assert _cell_endpoints("companies/{id}, contacts/{id}") == ["/companies/{id}", "/contacts/{id}"]
+    assert _cell_endpoints("https://api.example.com/v1/items") == ["/v1/items"]
+    assert _cell_endpoints("/") == ["/"]
+
+
+def _workspace_project(root: Path) -> None:
+    _write(root, {
+        "config/urls.py": (
+            "from django.urls import include, path\n"
+            "urlpatterns = [\n"
+            "    path('api/v1/workspaces/<uuid:workspace_id>/', include('apps.crm.urls')),\n"
+            "    path('api/v1/workspaces/<uuid:workspace_id>/outreach/', include('apps.outreach.urls')),\n"
+            "]\n"
+        ),
+        "apps/crm/urls.py": (
+            "from django.urls import path\nfrom . import views\n"
+            "urlpatterns = [\n"
+            "    path('companies/<uuid:company_id>', views.company_detail),\n"
+            "    path('contacts/<uuid:contact_id>', views.contact_detail),\n"
+            "]\n"
+        ),
+        "apps/outreach/urls.py": (
+            "from django.urls import path\nfrom . import views\n"
+            "urlpatterns = [path('sequences/<uuid:sequence_id>/mode', views.mode)]\n"
+        ),
+    })
+
+
+def test_two_segment_relative_claims_match_included_routes(tmp_path: Path) -> None:
+    _workspace_project(tmp_path)
+    plan = _api_plan(
+        "| companies/{company_id} | PATCH | |\n"
+        "| contacts/{contact_id} | PATCH | |\n"
+        "| outreach/sequences/{sequence_id}/mode | PATCH | |\n"
+        "| workspaces/{workspace_id}/companies/{company_id} | PATCH | |\n"
+        "| /api/v1/workspaces/{workspace_id}/contacts/{contact_id} | PATCH | |"
+    )
+    result = analyze_api_contracts(plan, tmp_path)
+    assert result["unverified"] == [], _endpoints(result)
+    assert result["verified"] == 5
+
+
+def test_relative_claim_with_wrong_literal_still_fails(tmp_path: Path) -> None:
+    _workspace_project(tmp_path)
+    result = analyze_api_contracts(_api_plan("| invoices/{invoice_id} | PATCH | |"), tmp_path)
+    assert _endpoints(result) == ["/invoices/{invoice_id}"]
+
+
+def test_bare_param_claim_does_not_suffix_match(tmp_path: Path) -> None:
+    _workspace_project(tmp_path)
+    result = analyze_api_contracts(_api_plan("| /{company_id} | PATCH | |"), tmp_path)
+    assert _endpoints(result) == ["/{company_id}"]
+
+
+# ---------------------------------------------------------------------------
+# 10. DRF routers mounted through include()
+# ---------------------------------------------------------------------------
+
+def test_drf_router_urls_are_mounted(tmp_path: Path) -> None:
+    _write(tmp_path, {
+        "config/urls.py": (
+            "from django.urls import include, path\n"
+            "urlpatterns = [path('api/workspaces/<int:workspace_id>/', include('apps.crm.urls'))]\n"
+        ),
+        "apps/crm/urls.py": (
+            "from django.urls import include, path\n"
+            "from rest_framework.routers import DefaultRouter\n"
+            "from rest_framework_nested.routers import NestedSimpleRouter\n"
+            "from . import views\n"
+            "router = DefaultRouter()\n"
+            "router.register(r'companies', views.CompanyViewSet)\n"
+            "contacts = NestedSimpleRouter(router, r'companies', lookup='company')\n"
+            "contacts.register(r'contacts', views.ContactViewSet)\n"
+            "urlpatterns = [path('', include(router.urls))] + contacts.urls\n"
+        ),
+    })
+    plan = _api_plan(
+        "| companies/{company_id} | PATCH | |\n"
+        "| /api/workspaces/{workspace_id}/companies | GET | |\n"
+        "| companies/{company_id}/contacts/{contact_id} | PATCH | |"
+    )
+    result = analyze_api_contracts(plan, tmp_path)
+    assert result["unverified"] == [], _endpoints(result)
+
+
+def test_drf_router_imported_from_another_module(tmp_path: Path) -> None:
+    _write(tmp_path, {
+        "config/urls.py": (
+            "from django.urls import include, path\n"
+            "from apps.crm.routers import router\n"
+            "urlpatterns = [path('api/', include(router.urls))]\n"
+        ),
+        "apps/crm/routers.py": (
+            "from rest_framework.routers import SimpleRouter\n"
+            "from . import views\n"
+            "router = SimpleRouter()\n"
+            "router.register('companies', views.CompanyViewSet)\n"
+        ),
+    })
+    result = analyze_api_contracts(_api_plan("| /api/companies/{pk} | PATCH | |"), tmp_path)
+    assert result["unverified"] == [], _endpoints(result)

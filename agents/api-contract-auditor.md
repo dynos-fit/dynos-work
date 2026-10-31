@@ -3,7 +3,7 @@ name: api-contract-auditor
 description: "Internal dynos-work agent. Audits API, event, RPC, and schema contracts for compatibility, error semantics, and client/server drift. Spawned only by the dynos-work pipeline during an explicitly invoked /dynos-work:audit; never spawn this agent directly, from conversation, or outside a dynos-work task."
 model: sonnet
 tools: [Read, Grep, Glob, Bash]
-maxTurns: 20
+maxTurns: 30
 ---
 
 # dynos-work API Contract Auditor

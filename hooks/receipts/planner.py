@@ -104,9 +104,16 @@ def receipt_plan_audit(
     task_dir: Path,
     tokens_used: int,
     model_used: str | None = None,
+    gap_warnings: list[str] | None = None,
+    gap_warnings_path: str | None = None,
     **_legacy: Any,
 ) -> Path:
     """Write receipt proving plan audit (spec-completion check) ran.
+
+    ``gap_warnings`` (with the artifact ``gap_warnings_path`` that holds
+    the full report) records gap-analysis misses that ``run-plan-audit``
+    downgraded to advisory because the approved plan already passed
+    ``run-planning``'s gap check unchanged. Omitted when there are none.
 
     Hash-binding (SEC-004 + F2): the writer re-hashes ``spec.md``,
     ``plan.md``, and ``execution-graph.json`` from the task directory at
@@ -157,6 +164,11 @@ def receipt_plan_audit(
     plan_sha256 = _hash_or_missing("plan.md")
     graph_sha256 = _hash_or_missing("execution-graph.json")
 
+    extra: dict[str, Any] = {}
+    if gap_warnings:
+        extra["gap_warnings"] = [str(w) for w in gap_warnings]
+        if gap_warnings_path:
+            extra["gap_warnings_path"] = str(gap_warnings_path)
     return write_receipt(
         task_dir,
         "plan-audit-check",
@@ -165,6 +177,7 @@ def receipt_plan_audit(
         spec_sha256=spec_sha256,
         plan_sha256=plan_sha256,
         graph_sha256=graph_sha256,
+        **extra,
     )
 
 

@@ -728,11 +728,67 @@ the plugin source checkout) exempts the plugin-root check only.
 ### Honest enforcement statement
 
 The Bash pre-filter (now shlex-based and quote-aware) is defense-in-depth,
-NOT the trust anchor: interpreter-internal writes (`python3 -c
-"open(p,'w')"`) are invisible to any command-text parser. The unforgeable
-guarantees are: capability-keyed `require_write_allowed` inside ctl,
-receipts + the task receipt chain, and the hook-owned `spawn-log.jsonl`
-cross-check at audit-receipt time.
+NOT the trust anchor. It is ADVISORY for anything a subprocess writes.
+
+What it does see (each destination goes through the same `decide_write` as
+a `Write`/`Edit` call):
+
+- redirects (`>`, `>>`, `&>`, `>|`) and argv write verbs (`tee`, `cp`, `mv`,
+  `rsync`, `install`, `rm`, `unlink`, `shred`, `truncate`, `dd of=`);
+- in-place editors: `sed -i` / `--in-place`, `perl -i`, `ruby -i`;
+- literal-path writes inside inline interpreter code — `python3 -c`,
+  `node -e`/`-p`, `ruby -e`, `perl -e`, and heredoc bodies fed to an
+  interpreter (`python3 - <<'PY'`) or a shell (`bash <<'SH'`): `open(p, 'w'|'a'|'x'|'+')`,
+  `Path(p).write_text/write_bytes/touch/unlink/open('w')`, `os.remove/
+  rename/replace`, `shutil.copy*/move`, `fs.writeFileSync/appendFileSync/
+  copyFileSync/renameSync/createWriteStream/rmSync`, `File.write`, Perl
+  `open(FH, '>', p)` / `open(FH, ">p")`.
+
+What it cannot see: a path computed at run time (`open(p, 'w')`), a script
+file on disk (`python3 tool.py`), `os.system`/`subprocess` calls, `git
+checkout`/`git apply`, symlink tricks, or a heredoc written to a file and run
+in a later call. A `$` left in a heredoc-body path is never substituted and
+is denied fail-closed. The unforgeable guarantees are: capability-keyed
+`require_write_allowed` inside ctl, receipts + the task receipt chain, the
+hook-owned `spawn-log.jsonl` cross-check at audit-receipt time, and the
+`git diff` coverage check at `run-execution-segment-done`.
+
+**Git write-scope backstop (`hooks/lib_write_scope.py`).** Because the Bash
+filter is advisory, the binding check for repo writes is made against git,
+not against command text. Every file that differs from
+`manifest.snapshot.head_sha` (committed, uncommitted, untracked, deleted;
+paths relative to the project root; `.dynos/` excluded) must be covered by:
+a segment's `files_expected` or `files_optional`, a repair cycle's
+`files_to_modify` (live `repair-log.json` plus every cycle in
+`repair-log-history.json`), the `tdd-tests` receipt's `test_file_paths`, or
+a human acknowledgment in `write-scope.json`. Anything else is an
+`out_of_scope_file`:
+
+- `run-execution-segment-done` and `run-audit-findings-gate` report it
+  (`out_of_scope_files`, `write_scope_status`) as an early warning;
+- the DONE gate (`transition_task`, mirrored in
+  `_compute_bypassed_gates_for_force`) refuses while any remain, naming them;
+- `ctl acknowledge-out-of-scope <task_dir> --file <path> [--file ...]
+  --reason "..."` records a human decision. It only accepts files that are
+  currently out of scope, requires a reason, logs
+  `out_of_scope_acknowledged` and an execution-log line. `write-scope.json`
+  is wrapper-required: no agent role can write it.
+
+`ctl record-snapshot` stores `snapshot.baseline_dirty` (digest of every file
+already dirty when the task started) so pre-existing user edits are not
+blamed on the task unless they change again. A task with no snapshot is
+skipped; a snapshot recorded before this check existed has no baseline and
+is reported but never refused. A git failure on a baselined task refuses
+DONE (fail-closed). Untracked caches/build output/binaries, or more than
+500 untracked files, are not checked (same noise filter as the audit scope).
+
+Same-command variables: `T=.dynos/task-x; cat > "$T/_scratch/f"` (and
+`export T=...`, newline-separated, `&&`-joined) is substituted. Option-only
+`set` (`set -euo pipefail`), `command -v`, `.` used as an argument (`jq .`)
+and single-quoted `$` in unrelated tokens (`awk '{print $1}'`) no longer
+disable substitution; a name that itself appears after a literal `$`
+(`'$T'`, `\$T`) is never substituted. A variable from an earlier Bash call
+is not visible and is denied as `unresolved_shell_variable`.
 
 ### Planner spawn receipt evidence (SEC-004)
 

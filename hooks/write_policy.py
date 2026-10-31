@@ -109,6 +109,9 @@ _CONTROL_PLANE_EXACT = frozenset({
 _WRAPPER_REQUIRED = {
     "execution-graph.json": "python3 hooks/ctl.py write-execution-graph <task_dir> --from <json>",
     "repair-log.json": "python3 hooks/ctl.py write-repair-log <task_dir> --from <json>",
+    # Per-cycle repair history the postmortem reads; recorded by the same
+    # wrappers that write repair-log.json. An agent edit could erase a cycle.
+    "repair-log-history.json": "python3 hooks/ctl.py run-repair-log-build <task_dir>",
     "classification.json": "python3 hooks/ctl.py write-classification <task_dir> --from <json>",
     # active-segment-role gates which role write_policy resolves on the next
     # pre_tool_use call. If an agent could write it directly, it could elevate
@@ -131,6 +134,13 @@ _WRAPPER_REQUIRED = {
     # An accepted finding stops blocking DONE; only the ctl wrapper (which
     # requires a reason and a live finding, and logs the decision) may write it.
     "accepted-findings.json": "python3 hooks/ctl.py accept-finding <task_dir> --auditor <name> --finding-id <id> --reason <why>",
+    # Advisory gap-analysis misses from run-plan-audit; executors and
+    # auditors read it, so an agent must not erase or rewrite it.
+    "plan-audit-gap-warnings.json": "python3 hooks/ctl.py run-plan-audit <task_dir>",
+    # The git write-scope backstop's record of human acknowledgments of
+    # out-of-scope changes. An agent edit could acknowledge its own stray
+    # writes past the DONE gate.
+    "write-scope.json": "python3 hooks/ctl.py acknowledge-out-of-scope <task_dir> --file <path> --reason <why>",
 }
 
 

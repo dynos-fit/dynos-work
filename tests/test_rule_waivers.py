@@ -87,8 +87,14 @@ def test_drift_ignores_waived_rule_edits_and_reordering(task: Path, tmp_path: Pa
     _write_rules(task, [OTHER, {**RULE, "rationale": "edited"}])
     assert _effective_rules_drift(task, receipt) is None
 
-    # A new rule the task has not been checked against is drift.
+    # A rule another task adds to the shared file mid-task is not drift:
+    # the task is held to the rules pinned at its first check.
     _write_rules(task, [OTHER, RULE, {"rule_id": "new", "template": "advisory", "params": {}}])
+    assert _effective_rules_drift(task, receipt) is None
+
+    # A legacy task with no pinned snapshot still compares the live file,
+    # where a new rule the task has not been checked against is drift.
+    (task / "receipts" / "rules-snapshot.json").unlink()
     drift = _effective_rules_drift(task, receipt)
     assert drift is not None and "waive-rule" in drift
 

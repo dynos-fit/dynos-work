@@ -48,6 +48,9 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # Audit trail for `ctl accept-finding` (accepted-findings.json) and for
     # `ctl run-repair-retry` refusing another cycle on a convergence cap.
     "finding_accepted",
+    # Audit trail for `ctl acknowledge-out-of-scope` (write-scope.json).
+    "out_of_scope_acknowledged",
+    "repair_history_record_failed",
     "repair_cap_reached",
     "prevention_rules_healed",
     "pre_repair_snapshot_failed",

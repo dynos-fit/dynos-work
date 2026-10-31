@@ -1989,6 +1989,13 @@ REPAIR_NONCONVERGENCE_RETRIES = 2
 # of mixing incomparable observations across the definition change.
 WASTED_SPAWNS_SIGNAL_VERSION = 2
 
+# Version of compute_reward's scoring. A retrospective without
+# ``reward_scoring_version`` is version 1. Version 2 (7.6.x) scores blocking
+# findings from the findings gate's binding selection; version 1 counted
+# superseded and overruled reports and scored DONE tasks 0.0.
+# ``lib_retro_rescore`` recomputes retrospectives older than this.
+REWARD_SCORING_VERSION = 2
+
 
 def count_nonconverging_repairs(task_dir: Path) -> int:
     """Count distinct findings whose repair is not converging.
@@ -2100,9 +2107,10 @@ def compute_reward(task_dir: Path) -> dict:
     findings_by_auditor: dict[str, int] = {}
     findings_by_category: dict[str, int] = {}
     total_findings = 0
-    total_blocking = 0
-    # AC 15: track ids of findings that are still blocking post-repair.
-    post_repair_blocking_ids: set[str] = set()
+    raw_blocking = 0
+    raw_blocking_ids: set[str] = set()
+    # Report files that passed the routing cross-check (AC 16).
+    routed_report_paths: set[str] = set()
     reports_dir = task_dir / "audit-reports"
     if reports_dir.exists():
         for report_path in sorted(reports_dir.glob("*.json")):
@@ -2182,16 +2190,39 @@ def compute_reward(task_dir: Path) -> dict:
             count = len(findings)
             findings_by_auditor[auditor] = findings_by_auditor.get(auditor, 0) + count
             total_findings += count
-            total_blocking += sum(1 for f in findings if finding_is_blocking(f))
+            routed_report_paths.add(str(report_path))
+            raw_blocking += sum(1 for f in findings if finding_is_blocking(f))
             for finding in findings:
                 if not isinstance(finding, dict):
                     continue
                 fid = finding.get("id", "") or ""
                 if finding_is_blocking(finding) and isinstance(fid, str) and fid:
-                    post_repair_blocking_ids.add(fid)
+                    raw_blocking_ids.add(fid)
                 category = fid.split("-")[0] if "-" in fid else fid
                 if category:
                     findings_by_category[category] = findings_by_category.get(category, 0) + 1
+
+    # Blocking counts use the findings gate's selection: an attempt a re-audit
+    # replaced and a voting-tier report a binding deep-tier verdict overruled
+    # do not block, and neither does a human-accepted finding. Summing raw
+    # report files counted those as "surviving" on a task the gate cleared,
+    # which scored quality 0.0. Reports the routing cross-check dropped stay
+    # dropped.
+    try:
+        binding_blocking = [
+            f for f in collect_repair_findings(task_dir)["findings"]
+            if finding_is_blocking(f) and f.get("_report_path") in routed_report_paths
+        ]
+    except Exception:  # noqa: BLE001 — never fail the retrospective on selection
+        binding_blocking = None
+    if binding_blocking is None:
+        total_blocking = raw_blocking
+        post_repair_blocking_ids = raw_blocking_ids
+    else:
+        total_blocking = len(binding_blocking)
+        post_repair_blocking_ids = {
+            str(f["id"]) for f in binding_blocking if isinstance(f.get("id"), str) and f["id"]
+        }
 
     # --- 2. Repair log ---
     executor_repair_frequency: dict[str, int] = {}
@@ -2548,6 +2579,7 @@ def compute_reward(task_dir: Path) -> dict:
         "subagent_spawn_count": subagent_spawn_count,
         "wasted_spawns": wasted_spawns,
         "wasted_spawns_signal_version": WASTED_SPAWNS_SIGNAL_VERSION,
+        "reward_scoring_version": REWARD_SCORING_VERSION,
         "auditor_zero_finding_streaks": auditor_zero_finding_streaks,
         "executor_zero_repair_streak": executor_zero_repair_streak,
         "token_usage_by_agent": token_usage_by_agent,

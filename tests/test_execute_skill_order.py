@@ -1,8 +1,9 @@
 """Doc test: the execute skill's ctl calls run in an order the stage gates accept.
 
 - `run-execution-finish` refuses without the `rules-check-passed` receipt, so
-  the skill must run `run-rules-check` first, in `--mode all` (execution never
-  stages files, so the default `staged` mode would check nothing).
+  the skill must run `run-rules-check` first, in `--mode task` (the task's own
+  diff since its snapshot; `staged` would check nothing, as execution never
+  stages files).
 - `run-execution-verify-evidence` accepts only EXECUTION / TEST_EXECUTION and
   `run-tests` advances the task to CHECKPOINT_AUDIT, so the verifier must run
   before `run-tests`.
@@ -24,9 +25,9 @@ def _first(text: str, needle: str) -> int:
     return index
 
 
-def test_rules_check_runs_in_all_mode_before_finish():
+def test_rules_check_runs_in_task_mode_before_finish():
     text = _text()
-    rules = _first(text, "ctl run-rules-check .dynos/task-{id} --mode all")
+    rules = _first(text, "ctl run-rules-check .dynos/task-{id} --mode task")
     finish = _first(text, "ctl run-execution-finish .dynos/task-{id}")
     assert rules < finish
 

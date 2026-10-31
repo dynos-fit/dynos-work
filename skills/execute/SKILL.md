@@ -54,6 +54,8 @@ If validation fails with missing required inputs, print the errors and stop. Do 
 
 Read `spec.md`, `plan.md`, and `execution-graph.json`. Ensure you understand the dependency chain.
 
+If `plan-audit-gap-warnings.json` exists with `advisory: true`, read its `warnings`: plan endpoints or models the gap scanner could not find in the code, downgraded to advisory because the approved plan was unchanged since `run-planning` validated it. Pass each one to the executor of the segment that touches it as a fact to confirm (the route or model exists where the plan says, or the segment creates it); do not edit `plan.md` over them.
+
 ### Step 2 — Snapshot the Base
 
 Before any modification starts:
@@ -146,6 +148,8 @@ This command is authoritative for:
 
 Do NOT re-derive dependency depth, cache reuse, or runnable batches in prompt logic. Consume the JSON output and follow it.
 
+If `tdd_covered_segments` is present, those `testing-executor` segments were finalized without a spawn: with `tdd_required`, every one of their `files_expected` is in the `tdd-tests` receipt's file list and on disk, so `run-execution-batch-plan` wrote their `executor-{seg-id}` receipt (`tdd_covered: true`, evidence `evidence/tdd-tests.md`). They appear under `completed_segments`; do not spawn executors or run `run-execution-segment-done` for them.
+
 If `cached_segments` is non-empty, treat those segments as already satisfied and reuse their evidence files. Log each with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CACHE --message "{segment-id} — skipping (inputs unchanged)"`.
 
 If `next_batch` is empty while `pending_segments` is non-empty, stop and fail the task as blocked. That means dependency resolution or receipt state is inconsistent; do not guess.
@@ -232,7 +236,7 @@ The base prompt for each executor (before inject-prompt) must include:
 "$DYNOS" hook build_prompt_context --root . {files_expected_1} {files_expected_2} ...
 ```
 
-Append the printed output verbatim to the base prompt. This gives the executor the current file contents upfront so it does not need to call Read at the start, keeping the context window small. If a file does not exist yet (new file), the script emits a placeholder — include it anyway so the executor knows the file is new.
+Append the printed output verbatim to the base prompt. This gives the executor the current file contents upfront so it does not need to call Read at the start, keeping the context window small. If a file does not exist yet (new file), the script emits a placeholder — include it anyway so the executor knows the file is new. The output is held to a byte budget (48 KB by default; `--max-bytes N` or `DYNOS_PROMPT_CONTEXT_MAX_BYTES` changes it): past the budget, or when one file would take more than half of it, a file is cut to a head excerpt and then listed by path only, and the output's `Prompt-context budget:` line records what was kept. Do not work around the budget by pasting file contents yourself; the executor reads excerpted and path-only files on demand.
 
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 
@@ -289,6 +293,7 @@ Parse the JSON `status`:
   - "Write `evidence/{seg-id}.md` before you run low on turns."
 
   After each continuation executor returns, run `run-execution-segment-done` for that segment (the same authoritative completion gate the normal batch loop uses — it writes the receipt and verifies ownership + evidence; a segment is not "complete" until that receipt exists). Then **re-run `next-continuation` and repeat.** There is no spawn-count cap in this loop — keep going as long as segments make progress. Do NOT run `check-spawn-budget` for continuation spawns; the spawn-budget backstop is for audit thrash, not for finishing execution.
+- **`verification_needed`** — the only thing missing is `verify_commands` evidence (`verification_segments` names the segments; each entry has `verification_only: true`). No executor can produce that record, so do not spawn one: run `run-verification-evidence` (below), then re-run `next-continuation`. Re-reporting a verification-only segment does not raise its `stall_count`. In a `continuation_needed` result, skip entries with `verification_only: true` the same way.
 - **`stalled`** (exit code 3) — every remaining incomplete segment moved nothing across two consecutive continuations; `stalled_segments` names them. This is the ONLY automatic halt. Write `escalation.md` with `stalled_segments` and their `incomplete_reasons`, record it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag CONTINUATION-STALLED --message "{stalled_segments}"`, and stop: the orchestrator cannot make progress and a human must intervene. Do NOT keep re-spawning.
 
 Only once `next-continuation` reports `complete` do you advance the stage.
@@ -299,18 +304,20 @@ If any segment in `execution-graph.json` declares `verify_commands`, capture the
 "$DYNOS" ctl run-verification-evidence .dynos/task-{id}
 ```
 
+Each command gets its own `timeout` from the graph, else `--timeout`, else the project policy's `verification_timeout_s` (`~/.dynos/projects/{slug}/policy.json`), else 3600 s. A run can outlast the Bash tool's foreground limit (about 10 minutes): start it with `run_in_background` and wait for it to exit instead of letting the tool call time out. `run-execution-segment-done` also reports `verification_pending` for a finished segment whose declared commands have no passing record yet; you may run `run-verification-evidence --segment {seg-id}` then.
+
 A failing command is a defect in the segment that declared it: fix it (re-spawn that segment's executor) and re-run the command above. Do not edit the command; it was locked at plan approval.
 
 Run the prevention-rules check. `run-execution-finish` refuses to advance without its `rules-check-passed` receipt:
 
 ```bash
-"$DYNOS" ctl run-rules-check .dynos/task-{id} --mode all
+"$DYNOS" ctl run-rules-check .dynos/task-{id} --mode task
 ```
 
 - `status == "rules_check_passed"`: continue.
-- `status == "rules_check_failed"` (exit 1; the JSON is on stderr and names the rule and files): fix the violations and re-run. A violation in a file this task did not touch still blocks; fix it when it is small, otherwise write `escalation.md` naming the rule and file, and stop. A rule that cannot apply to this task, such as one another task added for a symbol this branch does not have, is waived instead of edited out of the shared rules file: `"$DYNOS" ctl waive-rule .dynos/task-{id} <rule_id> --reason "<why it does not apply>"`, then re-run the check. Removing and later restoring a rule changes the rules hash, and the stage gate refuses that as drift.
+- `status == "rules_check_failed"` (exit 1; the JSON is on stderr and names the rule and files): fix the violations and re-run. A rule that cannot apply to this task, such as one another task added for a symbol this branch does not have, is waived instead of edited out of the shared rules file: `"$DYNOS" ctl waive-rule .dynos/task-{id} <rule_id> --reason "<why it does not apply>"`, then re-run the check. Removing and later restoring a rule changes the rules hash, and the stage gate refuses that as drift.
 
-Use `--mode all`. The default `staged` mode checks only `git diff --cached`, and execution never stages files, so it would pass without checking anything.
+Use `--mode task`. It checks the files this task changed since its `record-snapshot` commit (plus untracked files) against the rules pinned when the task started, so pre-existing violations in code the task never touched do not block it; repo-wide rules (caller counts, signature locks) fail only when the task's change caused the violation. The receipt records the mode used, and a task with no snapshot is checked in `all` mode. `--mode all` scans every tracked file; the `staged` mode checks only `git diff --cached`, and execution never stages files, so it would pass without checking anything.
 
 Then advance:
 

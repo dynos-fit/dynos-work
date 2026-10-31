@@ -46,6 +46,11 @@ _GENESIS_PREV_SHA256: str = hashlib.sha256(b"").hexdigest()
 
 _CHAIN_FILENAME = "task-receipt-chain.jsonl"
 
+# Task-relative paths the chain records but whose live bytes legitimately
+# change after the entry is written without a new entry: manifest.json is
+# chained by record-snapshot and rewritten by every transition_task.
+_MUTABLE_STATE_FILES: frozenset[str] = frozenset({"manifest.json"})
+
 
 @dataclass(frozen=True)
 class ChainValidationResult:
@@ -263,9 +268,9 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
 
     Three independent checks per entry:
       1. content sha256: re-hash the file referenced by file_path,
-         compare to stored sha256 → mismatch is content_mismatch. For
-         versioned artifacts, check only the newest entry for each path;
-         receipts are checked at every entry.
+         compare to stored sha256 → mismatch is content_mismatch. Only
+         the newest entry for each path is checked (rewrites through the
+         writer append a fresh entry); manifest.json is never checked.
       2. prev_sha256: recompute from prior entry's canonical_json,
          compare to stored prev_sha256 → mismatch is chain_corrupt.
       3. _sig: HMAC over canonical_json(entry without _sig),
@@ -304,7 +309,7 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
     task_id = task_dir.name if task_dir.name else None
 
     entries: list[dict] = []
-    latest_artifact_entry: dict[str, int] = {}
+    latest_entry: dict[str, int] = {}
     for idx, line in enumerate(lines):
         try:
             entry = json.loads(line)
@@ -326,20 +331,25 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
             )
 
         entries.append(entry)
-        if entry.get("kind") == "artifact":
-            latest_artifact_entry[entry.get("file_path", "")] = idx
+        latest_entry[entry.get("file_path", "")] = idx
 
     expected_prev = _GENESIS_PREV_SHA256
     for idx, entry in enumerate(entries):
         rel = entry.get("file_path", "")
 
-        # Artifact entries are versioned: later entries for the same path
-        # supersede their live-content hash while preserving the earlier
-        # entry's place in the append-only authenticated chain. Receipts
-        # remain immutable and are checked against every entry.
+        # Entries are versioned per path: a legitimate rewrite (a planner
+        # receipt re-written after a plan-audit bounce, a re-audit receipt,
+        # an amended artifact) goes through the writer, which appends a new
+        # signed entry. The newest entry for a path authenticates the live
+        # content; older entries keep their place in the HMAC-linked chain
+        # but describe superseded bytes, so their sha256 is not re-checked.
+        # A rewrite that bypasses the writer appends nothing and still fails
+        # against the newest entry. ``_MUTABLE_STATE_FILES`` (manifest.json)
+        # are rewritten by every stage transition without re-chaining, so
+        # their live bytes are never compared.
         check_live_content = (
-            entry.get("kind") != "artifact"
-            or latest_artifact_entry.get(rel) == idx
+            latest_entry.get(rel) == idx
+            and rel not in _MUTABLE_STATE_FILES
         )
         if check_live_content:
             artifact_path = task_dir / rel if not Path(rel).is_absolute() else Path(rel)

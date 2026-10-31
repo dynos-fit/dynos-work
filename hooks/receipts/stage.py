@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1370,6 +1371,12 @@ def receipt_audit_done(
     extra_fields: dict = {}
     if stage is not None:
         extra_fields["stage"] = stage
+    # The receipt name carries no attempt (readers key on it); record the
+    # report's attempt so the receipt says which audit pass it proves. The
+    # previous attempt's receipt is kept under receipts/_superseded/.
+    _attempt_match = re.search(r"-attempt-(\d+)\.json$", str(report_path or ""))
+    if _attempt_match:
+        extra_fields["audit_attempt"] = int(_attempt_match.group(1))
 
     return write_receipt(
         task_dir,

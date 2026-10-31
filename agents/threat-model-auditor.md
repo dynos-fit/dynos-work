@@ -3,7 +3,7 @@ name: threat-model-auditor
 description: "Internal dynos-work agent. Reviews trust boundaries, attacker paths, abuse cases, and security assumptions beyond code-level vulnerability checks. Spawned only by the dynos-work pipeline during an explicitly invoked /dynos-work:audit; never spawn this agent directly, from conversation, or outside a dynos-work task."
 model: opus
 tools: [Read, Grep, Glob, Bash]
-maxTurns: 20
+maxTurns: 30
 ---
 
 # dynos-work Threat Model Auditor
