@@ -184,7 +184,7 @@ def test_evaluate_empty_voting_models_is_invalid():
 # ---------------------------------------------------------------------------
 
 def test_ensemble_next_ignores_later_tier_shards_older_than_fast_tier(tmp_path):
-    """A re-audit restarts the cascade: stale balanced/deep shards do not count."""
+    """A restarted cascade: stale balanced/deep shards do not count."""
     td = _setup_task(tmp_path)
     _shard(td, BALANCED, findings=0, ts="2026-09-06T10:00:00Z")
     _shard(td, DEEP, findings=0, ts="2026-09-06T10:05:00Z")
@@ -316,7 +316,7 @@ def test_receipt_accepts_cascade_in_order_and_refuses_after_complete(tmp_path):
     assert lib_ensemble.ensemble_next(td, AUDITOR)["status"] == "complete"
     with pytest.raises(ValueError, match="already complete"):
         _write_shard_receipt(td, DEEP)
-    # A re-audit may always restart at the fast tier.
+    # With no repair-log.json (first audit) the fast tier may always restart.
     _write_shard_receipt(td, FAST, findings=1, blocking=1)
     assert lib_ensemble.ensemble_next(td, AUDITOR)["model"] == DEEP
 
@@ -377,7 +377,7 @@ def test_inject_prompt_accepts_next_cascade_step(tmp_path):
     assert _inject(td, DEEP).returncode == 1
     res = _inject(td, BALANCED)
     assert res.returncode == 0, res.stdout + res.stderr
-    # Fast tier is always allowed: a re-audit restarts the cascade.
+    # First audit: the fast tier is always allowed (restarts the cascade).
     assert _inject(td, FAST).returncode == 0
 
 

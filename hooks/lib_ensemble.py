@@ -16,7 +16,16 @@ orchestrator never has to interpret prose to decide which spawn comes next:
 Cascade state is derived purely from the per-model shard receipts
 ``receipts/audit-{auditor}-{model}.json``. A shard for a later tier that is
 older than the current fast-tier shard is treated as stale (the cascade was
-restarted, e.g. by a re-audit after repair) and ignored.
+restarted) and ignored.
+
+Re-audit (``repair-log.json`` exists): the cascade does not restart. An
+ensemble auditor is re-audited by ONE spawn at the escalation model, whose
+verdict is binding (see ``evaluate_reaudit``). The deep tier usually raised
+the repaired findings, so it is the one that judges the repairs; running the
+fast and balanced tiers again only added serial spawns. The escalation shard
+receipt written during a re-audit is stamped with the repair cycle by
+``receipt_audit_done``; that stamp is what marks the re-audit as done for the
+current cycle.
 """
 from __future__ import annotations
 
@@ -31,6 +40,7 @@ STATUS_INVALID = "invalid"
 
 REASON_CASCADE_STEP = "cascade_step"
 REASON_ESCALATE = "escalate_on_findings"
+REASON_REAUDIT = "reaudit_deep_tier"
 
 VERDICT_PASS = "pass"
 VERDICT_ESCALATED = "escalated"
@@ -104,6 +114,51 @@ def cascade_models(entry: dict) -> tuple[list[str], str]:
 
 def is_ensemble_entry(entry: dict | None) -> bool:
     return isinstance(entry, dict) and entry.get("ensemble") is True
+
+
+def reaudit_model_for(entry: dict) -> str:
+    """The single model an ensemble auditor is re-audited at, or ``""``.
+
+    Only an escalation model that sits above the voting tiers qualifies; when
+    none is configured (or it is one of the voting tiers) a re-audit keeps the
+    normal cascade.
+    """
+    voting, escalation = cascade_models(entry)
+    if escalation and voting and escalation not in voting:
+        return escalation
+    return ""
+
+
+def current_repair_cycle(task_dir: Path) -> int | None:
+    """The repair cycle a re-audit belongs to, or ``None`` on a first audit.
+
+    ``repair-log.json`` existing is what makes an audit a re-audit (the same
+    test ``router._is_reaudit`` uses). An unreadable log fails open to the
+    first-audit cascade rather than inventing a cycle number.
+    """
+    path = task_dir / "repair-log.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    cycle = data.get("repair_cycle", 1)
+    if type(cycle) is not int or cycle < 1:
+        return None
+    return cycle
+
+
+def _stamped_cycle(receipt: dict | None) -> int | None:
+    """Repair cycle a shard receipt was written in (``None`` = first audit)."""
+    if not isinstance(receipt, dict):
+        return None
+    cycle = receipt.get("repair_cycle")
+    if type(cycle) is int and cycle >= 1:
+        return cycle
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -286,12 +341,86 @@ def evaluate_cascade(
     return {**base, "status": STATUS_COMPLETE, "model": None, "verdict": VERDICT_PASS}
 
 
+def evaluate_reaudit(
+    auditor_name: str,
+    entry: dict,
+    receipts: dict[str, dict | None],
+    escalation_receipt: dict | None,
+    cycle: int,
+) -> dict:
+    """Evaluate an ensemble auditor during a re-audit (repair cycle ``cycle``).
+
+    A re-audit is one spawn at the escalation model (``reaudit_model``), never
+    a fresh fast -> balanced -> deep cascade. Pure function:
+    ``receipts`` is the stale-filtered cascade view (``read_cascade_receipts``)
+    and ``escalation_receipt`` the escalation shard as written on disk.
+
+    - Escalation shard stamped with ``cycle``: complete, ``escalated``; the
+      re-audit ran and its deep-tier verdict is binding.
+    - Escalation shard stamped with another cycle: an earlier re-audit's
+      deep-tier verdict is binding (``escalated``); this cycle's re-audit
+      spawn is still available.
+    - No stamped shard: the first audit's cascade decides. A complete cascade
+      stays complete (the binding reports are the ones it produced). An
+      incomplete one is finished by the single re-audit spawn, not by more
+      voting tiers.
+
+    Every result carries ``reaudit_cycle``, ``reaudit_model`` and
+    ``reaudit_done``.
+    """
+    reaudit_model = reaudit_model_for(entry)
+    extra = {
+        "reaudit_cycle": cycle,
+        "reaudit_model": reaudit_model,
+        "reaudit_shard_step_name": f"{auditor_name}-{reaudit_model}",
+    }
+    voting, escalation = cascade_models(entry)
+    base: dict[str, Any] = {
+        "auditor": auditor_name,
+        "ensemble": True,
+        "voting_models": list(voting),
+        "escalation_model": escalation,
+        "gaps": [],
+    }
+    stamped = _stamped_cycle(escalation_receipt)
+    if stamped is not None:
+        return {
+            **base, **extra,
+            "status": STATUS_COMPLETE,
+            "model": None,
+            "verdict": VERDICT_ESCALATED,
+            "reaudit_done": stamped == cycle,
+        }
+    history = evaluate_cascade(auditor_name, entry, receipts)
+    if history["status"] == STATUS_SPAWN:
+        return {
+            **base, **extra,
+            "status": STATUS_SPAWN,
+            "model": reaudit_model,
+            "tier_index": None,
+            "reason": REASON_REAUDIT,
+            "shard_step_name": f"{auditor_name}-{reaudit_model}",
+            "reaudit_done": False,
+            "gaps": [
+                f"auditor {auditor_name} re-audit (repair cycle {cycle}) needs one "
+                f"{reaudit_model!r} spawn; expected receipt: "
+                f"receipts/audit-{auditor_name}-{reaudit_model}.json "
+                f"(shard_step_name {auditor_name}-{reaudit_model})"
+            ],
+        }
+    return {**history, **extra, "reaudit_done": False}
+
+
 # ---------------------------------------------------------------------------
 # Task-dir entry points
 # ---------------------------------------------------------------------------
 
 def ensemble_next(task_dir: Path, auditor_name: str, entry: dict | None = None) -> dict:
-    """Evaluate one auditor's cascade against the receipts on disk."""
+    """Evaluate one auditor's cascade against the receipts on disk.
+
+    During a re-audit (``repair-log.json`` exists) an ensemble auditor with an
+    escalation model is evaluated by ``evaluate_reaudit`` instead.
+    """
     if entry is None:
         entry = load_plan_entry(task_dir, auditor_name)
     if entry is None:
@@ -306,6 +435,14 @@ def ensemble_next(task_dir: Path, auditor_name: str, entry: dict | None = None) 
         return evaluate_cascade(auditor_name, entry, {})
     voting, escalation = cascade_models(entry)
     receipts = read_cascade_receipts(task_dir, auditor_name, voting, escalation)
+    cycle = current_repair_cycle(task_dir)
+    if cycle is not None and reaudit_model_for(entry):
+        from lib_receipts import read_receipt  # noqa: PLC0415
+
+        escalation_receipt = read_receipt(
+            task_dir, f"audit-{auditor_name}-{escalation}", min_version=2
+        )
+        return evaluate_reaudit(auditor_name, entry, receipts, escalation_receipt, cycle)
     return evaluate_cascade(auditor_name, entry, receipts)
 
 

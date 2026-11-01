@@ -811,10 +811,14 @@ def collect_repair_findings(task_dir: Path) -> dict:
       verdict is final and binding, so the voting-tier reports are superseded.
       Fail closed: if the escalation tier wrote no report, nothing is
       superseded and the voting tiers keep blocking.
-    - Ensemble auditor whose cascade verdict is ``pass``: a re-audit restarts
-      the cascade at the fast tier, and a clean voting run never reaches the
-      deep tier. Deep-tier reports from attempts older than the current
-      fast-tier attempt belong to a finished cascade and are superseded.
+    - Ensemble auditor whose cascade verdict is ``pass``: a clean voting run
+      never reaches the deep tier. Deep-tier reports from attempts older than
+      the current fast-tier attempt belong to a finished (restarted) cascade
+      and are superseded.
+    - Re-audit (``repair-log.json`` exists): the single escalation-model
+      re-audit spawn makes the verdict ``escalated`` (``lib_ensemble.
+      evaluate_reaudit``), so the first audit's voting-tier reports are
+      superseded by it.
     - Several attempts of the same ``(auditor, model)`` shard: the highest
       attempt supersedes the older ones (a re-audit after repair).
 

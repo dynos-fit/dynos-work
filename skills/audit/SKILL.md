@@ -168,7 +168,9 @@ It evaluates every spawn-action auditor against the shard receipts on disk and r
 
 The audit batch is a loop. In the first batch, spawn every auditor whose status is `spawn` or `single` (in parallel, at the returned `model`) and write each receipt. Non-ensemble (`single`) auditors are spawned once in the first batch and never again while `receipts/audit-{name}.json` exists. Every later iteration, and every retry after a `receipt gaps in ...` refusal, runs `ensemble-next` and spawns only `status: spawn` auditors at the returned `model` and `shard_step_name`; `complete` auditors are never re-spawned. Stop only when the output reports `"complete": true`. Do not decide by hand whether a tier is needed — the cascade (fast tier → balanced tier on no blocking findings → deep tier on any blocking finding) is computed by ctl. Log each ensemble spawn with `"$DYNOS" ctl log-append .dynos/task-{id} --tag VOTE --message "{name} — {reason} → {model}"`.
 
-**Enforcement (there is no shortcut):** `router.py audit-inject-prompt` refuses to build a prompt for an ensemble auditor at any model other than the one `ensemble-next` returns; `audit-receipt` refuses a shard receipt written out of cascade order; `run-audit-summary` and the DONE gate refuse while any cascade is incomplete. A single deep-tier spawn does not satisfy an ensemble auditor. On null-model hosts the router sets `"ensemble": false` and the auditor spawns once at the plan model.
+**Re-audit (after a repair cycle):** the cascade does not restart. Each ensemble auditor in the re-audit set is spawned **once** at its escalation model, and that deep-tier verdict is binding. `run-audit-reaudit-plan` returns the exact `model` and `shard_step_name` per auditor under `spawns`. While `repair-log.json` exists, `ensemble-next` reports `reaudit_model` and `reaudit_done` for every ensemble auditor, and `audit-inject-prompt` and `audit-receipt` refuse any other tier (no fast or balanced restart). The receipt written for that spawn records the repair cycle, which is what marks the re-audit done.
+
+**Enforcement (there is no shortcut):** `router.py audit-inject-prompt` refuses to build a prompt for an ensemble auditor at any model other than the one `ensemble-next` returns; `audit-receipt` refuses a shard receipt written out of cascade order; `run-audit-summary` and the DONE gate refuse while any cascade is incomplete. On a first audit a single deep-tier spawn does not satisfy an ensemble auditor. On null-model hosts the router sets `"ensemble": false` and the auditor spawns once at the plan model.
 
 **Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag VISION --message "UI audit complete -- {N} visual bugs found"`.
 
@@ -328,6 +330,7 @@ A pass clears the known-failing-tests block from the next spec-completion prompt
 Use its JSON output as authoritative:
 - `modified_files` is the scoped re-audit file set
 - `auditors_to_spawn` is the exact auditor list
+- `spawns` gives the model for each auditor: ensemble auditors get one escalation-model spawn (pass `--ensemble-context --shard-step-name` with the returned `shard_step_name` to `audit-receipt`); other auditors use their plan model
 - `full_scope_auditors` always receive the original broad scope
 - `scoped_auditors` receive only `modified_files`
 

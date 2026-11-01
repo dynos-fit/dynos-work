@@ -6061,6 +6061,35 @@ def cmd_run_audit_reaudit_plan(args: argparse.Namespace) -> int:
             if auditor_name not in auditors_to_spawn:
                 auditors_to_spawn.append(auditor_name)
 
+        # The exact spawn per auditor. An ensemble auditor is re-audited by
+        # one spawn at its escalation model (lib_ensemble.evaluate_reaudit),
+        # not by restarting the fast -> balanced -> deep cascade.
+        import lib_ensemble  # noqa: PLC0415
+
+        spawns: dict[str, dict] = {}
+        for auditor_name in auditors_to_spawn:
+            entry = lib_ensemble.load_plan_entry(task_dir, auditor_name)
+            if entry is None:
+                spawns[auditor_name] = {"model": None, "ensemble": False, "in_plan": False}
+                continue
+            reaudit_model = (
+                lib_ensemble.reaudit_model_for(entry)
+                if lib_ensemble.is_ensemble_entry(entry) else ""
+            )
+            if reaudit_model:
+                spawns[auditor_name] = {
+                    "model": reaudit_model,
+                    "ensemble": True,
+                    "shard_step_name": f"{auditor_name}-{reaudit_model}",
+                    "in_plan": True,
+                }
+            else:
+                spawns[auditor_name] = {
+                    "model": entry.get("model"),
+                    "ensemble": lib_ensemble.is_ensemble_entry(entry),
+                    "in_plan": True,
+                }
+
         print(json.dumps({
             "status": "reaudit_plan_ready",
             "task_dir": str(task_dir),
@@ -6071,6 +6100,7 @@ def cmd_run_audit_reaudit_plan(args: argparse.Namespace) -> int:
             "diff_files": diff_files,
             "diff_error": diff_error,
             "auditors_to_spawn": auditors_to_spawn,
+            "spawns": spawns,
             "full_scope_auditors": ["spec-completion-auditor"],
             "scoped_auditors": [a for a in auditors_to_spawn if a != "spec-completion-auditor"],
         }, indent=2))
