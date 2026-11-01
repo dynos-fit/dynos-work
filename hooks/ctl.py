@@ -2570,7 +2570,7 @@ def cmd_check_ownership(args: argparse.Namespace) -> int:
 
 
 def cmd_check_retro_integrity(args: argparse.Namespace) -> int:
-    """Report persistent retrospectives with no matching flush event in events.jsonl.
+    """Report persistent retrospectives with no matching flush record (events.jsonl or the persistent flush ledger).
 
     Exits non-zero if any persistent-unverified entries exist. Use as a pre-calibration
     gate. Closes the weaker attack variant (no flush event). The stronger variant
@@ -2589,9 +2589,10 @@ def cmd_check_retro_integrity(args: argparse.Namespace) -> int:
                 "task_ids": [e.get("task_id") for e in unverified],
                 "paths": [e.get("_path") for e in unverified],
                 "recommendation": (
-                    "For each path: hash the file with sha256sum and append a "
-                    "'retrospective_flushed' event to .dynos/events.jsonl, "
-                    "or delete the entry if it is spurious."
+                    "If the current content of these files is trusted, run "
+                    f"'ctl.py backfill-retro-flush-ledger --root {root}' to record "
+                    "them in the persistent flush ledger (add --dry-run to preview); "
+                    "otherwise delete the spurious entries."
                 ),
             }, indent=2))
             return 1
@@ -2604,6 +2605,28 @@ def cmd_check_retro_integrity(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def cmd_backfill_retro_flush_ledger(args: argparse.Namespace) -> int:
+    """Record persistent-ledger flush entries for persistent retrospectives
+    that have no flush record, trusting their current content.
+
+    For retrospectives flushed from a worktree before the ledger existed:
+    their flush event was in the worktree's events.jsonl and was deleted with
+    it. Files whose hash disagrees with a known flush record are reported and
+    left alone. Exits 1 when any such mismatch exists.
+    """
+    root = Path(args.root).resolve()
+    from lib_core import backfill_retro_flush_ledger
+    try:
+        result = backfill_retro_flush_ledger(root, dry_run=bool(args.dry_run))
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    summary = dict(result)
+    summary["already_verified"] = len(result["already_verified"])
+    print(json.dumps(summary, indent=2))
+    return 1 if result["hash_mismatch"] else 0
 
 
 # Roles that may be stamped to active-segment-role through this wrapper.
@@ -9352,7 +9375,8 @@ def register_repair_parsers(subparsers: argparse._SubParsersAction) -> None:
 
 def register_artifact_parsers(subparsers: argparse._SubParsersAction) -> None:
     """Register artifact-write subcommands: write-execution-graph, write-classification,
-    write-search-receipt, run-external-solution-gate, check-retro-integrity."""
+    write-search-receipt, run-external-solution-gate, check-retro-integrity,
+    backfill-retro-flush-ledger."""
     graph_write_parser = subparsers.add_parser(
         "write-execution-graph",
         help="Validate, normalize, and atomically write execution-graph.json",
@@ -9423,6 +9447,14 @@ def register_artifact_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     retro_integrity_parser.add_argument("--root", required=True, help="Project root directory")
     retro_integrity_parser.set_defaults(func=cmd_check_retro_integrity)
+
+    retro_backfill_parser = subparsers.add_parser(
+        "backfill-retro-flush-ledger",
+        help="Record flush-ledger entries for persistent retros with no flush record (trusts their current content)",
+    )
+    retro_backfill_parser.add_argument("--root", required=True, help="Project root directory")
+    retro_backfill_parser.add_argument("--dry-run", action="store_true", help="Report what would be recorded without writing")
+    retro_backfill_parser.set_defaults(func=cmd_backfill_retro_flush_ledger)
 
 
 def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:

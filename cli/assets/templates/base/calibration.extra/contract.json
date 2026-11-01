@@ -31,7 +31,7 @@
     "benchmark fixtures": {
       "type": "array",
       "required": false,
-      "source": "benchmarks/fixtures/*.json and benchmarks/generated/*.json"
+      "source": "benchmarks/fixtures/*.json and ~/.dynos/projects/{project_id}/benchmarks/generated/*.json"
     },
     "benchmark results": {
       "type": "array",

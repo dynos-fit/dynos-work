@@ -661,8 +661,57 @@ def test_auto_runner_executes_matching_shadow_fixture_and_promotes(dynos_home) -
     assert queue["items"] == []
 
 
+def _seed_backend_feature_task(dynos_home, task_id: str, quality: float, source: str) -> None:
+    sources = {"backend-executor": source}
+    _make_task(
+        dynos_home,
+        task_id,
+        {
+            "task_id": task_id,
+            "task_outcome": "DONE",
+            "task_type": "feature",
+            "task_domains": "backend",
+            "task_risk_level": "medium",
+            "model_used_by_agent": {"backend-executor": "claude-sonnet-5-5"},
+            "agent_source": sources,
+            "quality_score": quality,
+            "cost_score": 0.7,
+            "efficiency_score": 0.7,
+        },
+    )
+
+
+def test_fixture_synthesis_without_learned_runs_produces_nothing(dynos_home) -> None:
+    """Tasks where the learned agent never ran give no fixture: there is
+    nothing to compare. The old synthesis ranked these tasks and compared
+    the top of the ranking with the rest, so every agent passed."""
+    _seed_tasks(dynos_home)
+    _seed_backend_feature_task(dynos_home, "task-20260402-001", 0.95, "generic")
+    _seed_backend_feature_task(dynos_home, "task-20260402-002", 0.4, "generic")
+    root = dynos_home.root
+    _run_py(dynos_home, "agent_generator.py", "init-registry", "--root", str(root))
+    _run_py(
+        dynos_home, "agent_generator.py", "register-agent", "backend-synth",
+        "backend-executor", "feature", ".dynos/learned-agents/executors/backend-synth.md",
+        "task-20260401-001", "--root", str(root),
+    )
+    synth = _run_py(
+        dynos_home, "fixture.py", "synthesize", "backend-synth", "backend-executor",
+        "feature", "--root", str(root),
+    )
+    assert synth.returncode != 0
+    assert not (dynos_home.persistent_dir / "benchmarks" / "generated").exists() or not list(
+        (dynos_home.persistent_dir / "benchmarks" / "generated").glob("*.json")
+    )
+
+
 def test_fixture_synthesis_and_auto_sync_create_generated_fixture(dynos_home) -> None:
     _seed_tasks(dynos_home)
+    # Two tasks ran the learned agent; two ran the generic backend-executor.
+    _seed_backend_feature_task(dynos_home, "task-20260402-001", 0.9, "learned:backend-synth")
+    _seed_backend_feature_task(dynos_home, "task-20260402-002", 0.6, "generic")
+    _seed_backend_feature_task(dynos_home, "task-20260402-003", 0.5, "learned:backend-synth")
+    _seed_backend_feature_task(dynos_home, "task-20260402-004", 0.95, "learned:other-agent")
     root = dynos_home.root
     _run_py(dynos_home, "agent_generator.py", "init-registry", "--root", str(root))
     register = _run_py(
@@ -691,8 +740,14 @@ def test_fixture_synthesis_and_auto_sync_create_generated_fixture(dynos_home) ->
     assert synth.returncode == 0, synth.stdout + synth.stderr
     payload = json.loads(synth.stdout)
     assert payload["target_name"] == "backend-synth"
-    generated = root / "benchmarks" / "generated" / "agent-backend-synth-feature.json"
+    assert payload["source_tasks"] == ["task-20260402-001", "task-20260402-003"]
+    # Baseline: tasks where backend-executor ran as the generic agent (the
+    # seed's 20260401-001 has no model_used_by_agent, so the role did not run).
+    assert payload["baseline_tasks"] == ["task-20260402-002"]
+    assert payload["policy"]["min_samples"] == 3
+    generated = dynos_home.persistent_dir / "benchmarks" / "generated" / "agent-backend-synth-feature.json"
     assert generated.exists()
+    assert not (root / "benchmarks" / "generated").exists()
     auto = _run_py(dynos_home, "auto.py", "sync", "--root", str(root))
     assert auto.returncode == 0, auto.stdout + auto.stderr
     queue = json.loads((root / ".dynos" / "automation" / "queue.json").read_text())

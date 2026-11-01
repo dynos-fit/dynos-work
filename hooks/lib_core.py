@@ -1667,6 +1667,28 @@ def _flush_retrospective_on_done(*, task_dir: Path, manifest: dict) -> None:
         dst_hash = hash_file(dst)
     except Exception:
         dst_hash = ""
+    # The flush event below lands in ``root/.dynos/events.jsonl``. For a task
+    # run in a git worktree ``root`` is the worktree, and that log is deleted
+    # with it, which left every persistent retrospective without a flush
+    # event once its worktree was removed. The ledger lives beside the
+    # persistent retrospectives (shared by all worktrees), so the SEC-003
+    # verifier can still find the hash after the worktree is gone.
+    if dst_hash:
+        try:
+            _append_retro_flush_ledger(
+                root, task_id=task_id, sha256=dst_hash, source=str(src), origin="flush",
+            )
+        except Exception as exc:
+            try:
+                from lib_log import log_event as _log_ledger_failed
+                _log_ledger_failed(
+                    root,
+                    "retrospective_flush_ledger_failed",
+                    task_id=task_id,
+                    error=str(exc),
+                )
+            except Exception:
+                pass
     try:
         from lib_log import log_event as _log_flush
         # NOTE: do NOT pass task=task_id here. log_event routes events with a
@@ -3016,20 +3038,53 @@ def find_active_tasks(root: Path) -> list[Path]:
 # Retrospective helpers
 # ---------------------------------------------------------------------------
 
-def _flushed_sha_by_task_id(root: Path) -> dict[str, str]:
-    """Parse ``.dynos/events.jsonl`` once and return
-    ``{task_id: last_flushed_sha256}`` from ``retrospective_flushed``
-    events. LAST event wins — re-plays overwrite.
+RETRO_FLUSH_LEDGER_NAME = "retrospective-flush-ledger.jsonl"
 
-    Malformed lines are skipped silently. Missing file → empty dict.
-    Used by SEC-003 cross-check on persistent retrospectives.
+
+def _retro_flush_ledger_path(root: Path) -> Path:
+    """Path of the persistent flush ledger: one JSON line per flush, stored
+    in the persistent project dir next to ``retrospectives/`` so it is shared
+    by every worktree and survives worktree removal."""
+    return _persistent_project_dir(root) / RETRO_FLUSH_LEDGER_NAME
+
+
+def _append_retro_flush_ledger(
+    root: Path, *, task_id: str, sha256: str, source: str, origin: str,
+) -> None:
+    """Append one ``retrospective_flushed`` record to the persistent ledger.
+
+    ``origin`` is ``"flush"`` for the DONE-edge flush and ``"backfill"`` for
+    records added by ``backfill_retro_flush_ledger``. Raises OSError on
+    write failure; callers on the DONE path swallow it.
     """
-    out: dict[str, str] = {}
-    events_path = root / ".dynos" / "events.jsonl"
-    if not events_path.exists():
-        return out
+    path = _retro_flush_ledger_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": now_iso(),
+        "event": "retrospective_flushed",
+        "task_id": task_id,
+        "sha256": sha256,
+        "source": source,
+        "origin": origin,
+    }
+    line = json.dumps(record, sort_keys=True) + "\n"
+    # One write() on an O_APPEND fd: concurrent flushes from different
+    # worktrees do not interleave within a line.
+    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        with events_path.open("r", encoding="utf-8") as fh:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def _read_flush_shas(path: Path, out: dict[str, str]) -> None:
+    """Merge ``{task_id: sha256}`` from ``retrospective_flushed`` lines in
+    ``path`` into ``out`` (later lines overwrite). Missing file, unreadable
+    file and malformed lines are skipped silently."""
+    if not path.exists():
+        return
+    try:
+        with path.open("r", encoding="utf-8") as fh:
             for raw in fh:
                 line = raw.strip()
                 if not line:
@@ -3047,8 +3102,106 @@ def _flushed_sha_by_task_id(root: Path) -> dict[str, str]:
                 if isinstance(tid, str) and tid and isinstance(sha, str) and sha:
                     out[tid] = sha
     except OSError:
-        return {}
+        return
+
+
+def _flushed_sha_by_task_id(root: Path) -> dict[str, str]:
+    """Return ``{task_id: last_flushed_sha256}`` from ``retrospective_flushed``
+    records, for the SEC-003 cross-check on persistent retrospectives.
+
+    Sources, in order (later wins for the same task_id):
+      1. ``root/.dynos/events.jsonl`` — flush events from tasks run in this
+         checkout (and from code that predates the ledger).
+      2. The persistent flush ledger (``_retro_flush_ledger_path``) — shared
+         by all worktrees, so flushes from removed worktrees stay verifiable.
+
+    Within a source the LAST record wins, so re-flushes overwrite. A
+    re-flush always writes both sources, so the ledger is never older than
+    events.jsonl for the same task.
+    """
+    out: dict[str, str] = {}
+    _read_flush_shas(root / ".dynos" / "events.jsonl", out)
+    try:
+        ledger = _retro_flush_ledger_path(root)
+    except OSError:
+        return out
+    _read_flush_shas(ledger, out)
     return out
+
+
+def backfill_retro_flush_ledger(root: Path, *, dry_run: bool = False) -> dict:
+    """Record ledger entries for persistent retrospectives that have none.
+
+    One-time repair for retrospectives flushed before the ledger existed,
+    whose flush event was lost with their worktree. Each such file is hashed
+    as it is now and recorded with ``origin: "backfill"``, so this trusts the
+    current content of those files; run it only when that is acceptable.
+
+    Not backfilled:
+      - files whose hash disagrees with a known flush record (possible
+        tampering; reported under ``hash_mismatch``),
+      - files that are not a JSON object, or whose ``task_id`` is not a valid
+        task slug equal to the file stem (reported under ``invalid``).
+    """
+    from lib_receipts import hash_file
+    import re as _re_slug
+
+    root = Path(root)
+    result: dict = {
+        "root": str(root),
+        "dry_run": dry_run,
+        "ledger": "",
+        "already_verified": [],
+        "backfilled": [],
+        "hash_mismatch": [],
+        "invalid": [],
+    }
+    persistent_dir = _persistent_project_dir(root) / "retrospectives"
+    result["ledger"] = str(_retro_flush_ledger_path(root))
+    if not persistent_dir.exists():
+        return result
+    known = _flushed_sha_by_task_id(root)
+    slug_re = _re_slug.compile(r"^task-[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    for path in sorted(persistent_dir.glob("*.json")):
+        try:
+            data = load_json(path)
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
+            result["invalid"].append(str(path))
+            continue
+        tid = data.get("task_id") if isinstance(data, dict) else None
+        if not isinstance(tid, str) or not slug_re.match(tid) or tid != path.stem:
+            result["invalid"].append(str(path))
+            continue
+        try:
+            actual = hash_file(path)
+        except OSError:
+            result["invalid"].append(str(path))
+            continue
+        expected = known.get(tid)
+        if expected:
+            if expected == actual:
+                result["already_verified"].append(tid)
+            else:
+                result["hash_mismatch"].append(tid)
+            continue
+        if not dry_run:
+            _append_retro_flush_ledger(
+                root, task_id=tid, sha256=actual, source=str(path), origin="backfill",
+            )
+        result["backfilled"].append(tid)
+    if result["backfilled"] and not dry_run:
+        _COLLECT_RETRO_CACHE.pop(root, None)
+        try:
+            from lib_log import log_event as _log_backfill
+            _log_backfill(
+                root,
+                "retrospective_flush_ledger_backfilled",
+                count=len(result["backfilled"]),
+                task_ids=result["backfilled"],
+            )
+        except Exception:
+            pass
+    return result
 
 
 # PERF-003: per-process memo for collect_retrospectives. Key is a stat
@@ -3111,7 +3264,17 @@ def _retros_stat_fingerprint(root: Path) -> tuple:
     except OSError:
         events_sig = ("UNREADABLE",)
 
-    return (dynos_sig, worktree_retros, persistent, events_sig)
+    try:
+        ledger_path = _retro_flush_ledger_path(root)
+        if ledger_path.exists():
+            lst = ledger_path.stat()
+            ledger_sig = (lst.st_mtime_ns, lst.st_size)
+        else:
+            ledger_sig = ("MISSING",)
+    except OSError:
+        ledger_sig = ("UNREADABLE",)
+
+    return (dynos_sig, worktree_retros, persistent, events_sig, ledger_sig)
 
 
 def append_deferred_findings(
@@ -3283,12 +3446,15 @@ def collect_retrospectives(root: Path, *, include_unverified: bool = False) -> l
     happen, but possible).
 
     SEC-003 hardening: for each persistent retro, the content sha256 is
-    re-computed and compared to the ``retrospective_flushed`` event
-    recorded in ``.dynos/events.jsonl`` at DONE time. A mismatch means
-    someone tampered with the persistent file after flush; that retro
-    is SKIPPED (the worktree copy, if present, is used instead). Absence
-    of a flush event for a given task_id is NOT a rejection — cold-
-    start / pre-SEC-003-code retros are trusted by default.
+    re-computed and compared to the ``retrospective_flushed`` record
+    written at DONE time (``.dynos/events.jsonl`` or the persistent flush
+    ledger, see ``_flushed_sha_by_task_id``). A mismatch means someone
+    tampered with the persistent file after flush; that retro is SKIPPED
+    (the worktree copy, if present, is used instead). A retro with no flush
+    record is tagged ``persistent-unverified`` and, unless
+    ``include_unverified`` is set, excluded from the result.
+    ``ctl backfill-retro-flush-ledger`` records ledger entries for such
+    retros when their current content is to be trusted.
 
     PERF-003 hardening: results are memoized per-root, keyed by a stat
     fingerprint of the two source dirs and events.jsonl. Any mutation
@@ -3461,6 +3627,16 @@ def collect_retrospectives(root: Path, *, include_unverified: bool = False) -> l
         entry for entry in result
         if entry.get("_source") != "persistent-unverified"
     ]
+
+
+def count_unverified_retrospectives(root: Path) -> int:
+    """Number of persistent retrospectives ``collect_retrospectives`` drops
+    as ``persistent-unverified``. For diagnostics only: lets a gate explain a
+    low count without handling the unverified entries themselves."""
+    return sum(
+        1 for entry in collect_retrospectives(root, include_unverified=True)
+        if entry.get("_source") == "persistent-unverified"
+    )
 
 
 def _retrospective_task_ids(root: Path) -> list[str]:

@@ -13,7 +13,7 @@ import argparse
 import json
 from pathlib import Path
 
-from lib_core import collect_retrospectives, load_json, now_iso, _persistent_project_dir
+from lib_core import collect_retrospectives, count_unverified_retrospectives, load_json, now_iso, _persistent_project_dir
 from lib_log import log_event
 from lib_registry import ensure_learned_registry, register_learned_agent
 
@@ -34,51 +34,70 @@ CATEGORY_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-def _matching_retrospectives(
-    retrospectives: list[dict], role: str, task_type: str, root: Path
-) -> list[dict]:
-    """Return retrospectives where *role* participated and task_type matches.
+def _retro_participants(retro: dict) -> set[str]:
+    """Roles that took part in the task behind *retro*.
 
-    Role participation is read primarily from the retrospective's own
-    ``model_used_by_agent`` mapping (keyed by role). That mapping lives inside
-    the flushed retrospective JSON, so it SURVIVES worktree removal. For
-    completeness / backward-compat it is unioned with the executors declared in
-    a sibling ``execution-graph.json`` when that file is present (the
-    in-worktree case).
+    Read primarily from the retrospective's own ``model_used_by_agent``
+    mapping (keyed by role). That mapping lives inside the flushed
+    retrospective JSON, so it SURVIVES worktree removal. For completeness /
+    backward-compat it is unioned with the executors declared in a sibling
+    ``execution-graph.json`` when that file is present (the in-worktree case).
 
     Reading the execution graph ALONE was a bug: persistent retrospectives
     (the post-worktree-removal case the DONE-edge flush exists for) have no
     graph sibling — their ``_path`` points at ``.../retrospectives/{task}.json``
-    — so role matching always failed and the generator could never produce a
-    specialist even when signal was present.
+    — so participation was never found for them.
     """
-    matched: list[dict] = []
+    participants: set[str] = set()
+    mua = retro.get("model_used_by_agent")
+    if isinstance(mua, dict):
+        participants.update(k for k in mua if isinstance(k, str) and k)
+    path = retro.get("_path")
+    if path:
+        try:
+            graph_path = Path(path).parent / "execution-graph.json"
+            if graph_path.exists():
+                graph = json.loads(graph_path.read_text())
+                participants.update(
+                    seg.get("executor")
+                    for seg in graph.get("segments", [])
+                    if isinstance(seg, dict) and isinstance(seg.get("executor"), str) and seg.get("executor")
+                )
+        except (json.JSONDecodeError, OSError, KeyError, AttributeError):
+            pass
+    return participants
+
+
+def _matching_retrospectives(
+    retrospectives: list[dict], role: str, task_type: str, root: Path
+) -> list[dict]:
+    """Return retrospectives where *role* participated and task_type matches
+    (participation per ``_retro_participants``)."""
+    return [
+        retro for retro in retrospectives
+        if retro.get("task_type") == task_type and role in _retro_participants(retro)
+    ]
+
+
+def _discover_executor_slots(retrospectives: list[dict]) -> dict[tuple[str, str], int]:
+    """Count, per (executor role, task_type), the TASKS in which that executor
+    ran, from the collected retrospectives.
+
+    Slots used to be discovered by scanning ``root/.dynos/task-*/
+    execution-graph.json``. Those exist only in the checkout that ran the task,
+    so on main (after worktree removal) no slot was ever found. It also counted
+    segments rather than tasks, so one task with three backend segments met the
+    three-sample threshold on its own.
+    """
+    counts: dict[tuple[str, str], int] = {}
     for retro in retrospectives:
-        if retro.get("task_type") != task_type:
+        task_type = retro.get("task_type")
+        if not isinstance(task_type, str) or not task_type:
             continue
-        participants: set[str] = set()
-        mua = retro.get("model_used_by_agent")
-        if isinstance(mua, dict):
-            participants.update(k for k in mua if isinstance(k, str))
-        # Union in execution-graph executors when a sibling graph is present
-        # (in-worktree retros). Absent graph (persistent retros) is expected —
-        # model_used_by_agent already carries participation.
-        path = retro.get("_path")
-        if path:
-            try:
-                graph_path = Path(path).parent / "execution-graph.json"
-                if graph_path.exists():
-                    graph = json.loads(graph_path.read_text())
-                    participants.update(
-                        seg.get("executor")
-                        for seg in graph.get("segments", [])
-                        if isinstance(seg, dict) and seg.get("executor")
-                    )
-            except (json.JSONDecodeError, OSError, KeyError):
-                pass
-        if role in participants:
-            matched.append(retro)
-    return matched
+        for role in _retro_participants(retro):
+            if role.endswith("-executor"):
+                counts[(role, task_type)] = counts.get((role, task_type), 0) + 1
+    return counts
 
 
 def _aggregate_finding_categories(retros: list[dict]) -> dict[str, int]:
@@ -184,7 +203,15 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
     # Step 1: Gate check
     if len(retrospectives) < min_tasks:
-        result["skipped_reasons"].append(f"insufficient retrospectives: {len(retrospectives)} < {min_tasks}")
+        reason = f"insufficient retrospectives: {len(retrospectives)} < {min_tasks}"
+        unverified = count_unverified_retrospectives(root)
+        if unverified:
+            reason += (
+                f" ({unverified} persistent retrospectives excluded as unverified;"
+                " see ctl.py check-retro-integrity / backfill-retro-flush-ledger)"
+            )
+            result["unverified_retrospectives"] = unverified
+        result["skipped_reasons"].append(reason)
         result["steps"].append({"step": "gate_check", "passed": False, "reason": f"{len(retrospectives)} < {min_tasks}"})
         log_event(root, "agent_generator_step", step="gate_check", passed=False, retrospective_count=len(retrospectives))
         print(json.dumps(result, indent=2))
@@ -192,29 +219,9 @@ def cmd_auto(args: argparse.Namespace) -> int:
     result["steps"].append({"step": "gate_check", "passed": True, "retrospective_count": len(retrospectives)})
     log_event(root, "agent_generator_step", step="gate_check", passed=True, retrospective_count=len(retrospectives))
 
-    # Step 2: Discover uncovered (role, task_type) slots
-    # Scan execution graphs for ALL executors that ran, not just those with repairs.
-    role_type_counts: dict[tuple[str, str], int] = {}
-    dynos_dir = root / ".dynos"
-    for task_dir in sorted(dynos_dir.iterdir()) if dynos_dir.exists() else []:
-        if not task_dir.name.startswith("task-"):
-            continue
-        graph_path = task_dir / "execution-graph.json"
-        retro_path = task_dir / "task-retrospective.json"
-        if not (graph_path.exists() and retro_path.exists()):
-            continue
-        try:
-            retro = load_json(retro_path)
-            graph = load_json(graph_path)
-            task_type = retro.get("task_type", "")
-            if not task_type:
-                continue
-            for seg in graph.get("segments", []):
-                role = seg.get("executor", "")
-                if role and isinstance(role, str):
-                    role_type_counts[(role, task_type)] = role_type_counts.get((role, task_type), 0) + 1
-        except (json.JSONDecodeError, OSError):
-            continue
+    # Step 2: Discover uncovered (role, task_type) slots from the retrospectives
+    # themselves (they survive worktree removal), counting tasks per slot.
+    role_type_counts = _discover_executor_slots(retrospectives)
 
     existing = {
         (a.get("role"), a.get("task_type"))

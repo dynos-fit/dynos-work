@@ -10,14 +10,16 @@ from typing import Optional
 
 from lib_core import (
     COMPOSITE_WEIGHTS,
+    _persistent_project_dir,
     _safe_float,
+    collect_retrospectives,
     benchmark_history_path,
     benchmark_index_path,
     load_json,
     now_iso,
     write_json,
 )
-from lib_trajectory import collect_task_summaries
+from lib_trajectory import retrospective_benchmark_score
 
 MAX_BENCHMARK_HISTORY_RUNS: int = 200
 
@@ -266,9 +268,22 @@ def benchmark_fixtures_dir(root: Path) -> Path:
     return root / "benchmarks" / "fixtures"
 
 
+def generated_fixtures_dir(root: Path) -> Path:
+    """Directory for machine-generated fixtures (task-derived and rollout).
+
+    Lives in the persistent project dir, not the repo: generated fixtures are
+    learning state, and writing them into ``root/benchmarks/generated`` put
+    untracked files into the user's project. Fixtures still in that old repo
+    location are no longer read.
+    """
+    return _persistent_project_dir(root) / "benchmarks" / "generated"
+
+
 def iter_benchmark_fixtures(root: Path) -> list[Path]:
-    """Iterate over all benchmark fixture JSON files."""
-    candidates = [benchmark_fixtures_dir(root), root / "benchmarks" / "generated"]
+    """Iterate over all benchmark fixture JSON files: hand-written ones in
+    ``root/benchmarks/fixtures`` and generated ones in
+    ``generated_fixtures_dir(root)``."""
+    candidates = [benchmark_fixtures_dir(root), generated_fixtures_dir(root)]
     fixtures: list[Path] = []
     for directory in candidates:
         if directory.exists():
@@ -332,26 +347,85 @@ def benchmark_fixture_score(result: dict) -> dict:
     }
 
 
+def _learned_agent_ran(retro: dict, role: str, agent_name: str) -> bool:
+    """True when the retrospective records *agent_name* running as *role*,
+    in replace mode (``agent_source[role]``) or alongside mode
+    (``agent_source[f"{role}:learned"]``)."""
+    sources = retro.get("agent_source")
+    if not isinstance(sources, dict):
+        return False
+    claim = f"learned:{agent_name}"
+    return sources.get(role) == claim or sources.get(f"{role}:learned") == claim
+
+
+def _ran_generic_only(retro: dict, role: str) -> bool:
+    """True when *role* took part in the task and no learned agent ran for it."""
+    models = retro.get("model_used_by_agent")
+    if not isinstance(models, dict) or role not in models:
+        return False
+    sources = retro.get("agent_source")
+    if not isinstance(sources, dict):
+        return True
+    return sources.get(role, "generic") == "generic" and f"{role}:learned" not in sources
+
+
+def _task_case_summary(retro: dict) -> dict:
+    domains = [part.strip() for part in str(retro.get("task_domains", "")).split(",") if part.strip()]
+    return {
+        "task_id": retro["task_id"],
+        "domains": domains,
+        "score": retrospective_benchmark_score(retro),
+    }
+
+
 def synthesize_fixture_for_entry(root: Path, entry: dict, *, limit: int = 5) -> Optional[dict]:
-    """Synthesize a benchmark fixture from task retrospectives for a registry entry."""
+    """Synthesize a benchmark fixture from task retrospectives for a registry entry.
+
+    Candidate cases are the most recent (up to *limit*) tasks of the entry's
+    task_type in which this learned agent actually ran for its role, per the
+    retrospective's ``agent_source``. The baseline is every task of that
+    task_type in which the role ran as the generic agent. Tasks where another
+    learned agent ran for the role are in neither group.
+
+    Returns None (and removes any earlier generated fixture for the entry)
+    when there are no candidate tasks or no baseline tasks. A learned agent in
+    shadow mode is routed to the generic agent, so it gets no task-derived
+    fixture; it needs a rollout fixture (``challenge.py``) to be benchmarked.
+
+    This replaces a synthesis that ranked all tasks of the type by score,
+    took the top five as the "candidate" and the rest as the baseline. Neither
+    group had run the learned agent, and the top of a ranking beats the rest
+    by construction, so every learned agent passed promotion.
+    """
     task_type = entry.get("task_type")
-    generated_from = entry.get("generated_from")
-    task_summaries = [item for item in collect_task_summaries(root) if item.get("task_type") == task_type]
-    if not task_summaries:
+    role = entry.get("role")
+    agent_name = entry.get("agent_name")
+    slug = f"{entry.get('item_kind', 'agent')}-{agent_name}-{task_type}".replace("/", "-")
+    fixture_dir = generated_fixtures_dir(root)
+    fixture_path = fixture_dir / f"{slug}.json"
+
+    candidate_tasks: list[dict] = []
+    baseline_pool: list[dict] = []
+    if isinstance(role, str) and role and isinstance(agent_name, str) and agent_name:
+        for retro in collect_retrospectives(root):
+            if retro.get("task_type") != task_type or not isinstance(retro.get("task_id"), str):
+                continue
+            if _learned_agent_ran(retro, role, agent_name):
+                candidate_tasks.append(_task_case_summary(retro))
+            elif _ran_generic_only(retro, role):
+                baseline_pool.append(_task_case_summary(retro))
+    candidate_tasks.sort(key=lambda item: item["task_id"])
+    candidate_tasks = candidate_tasks[-max(1, limit):]
+    baseline_pool.sort(key=lambda item: item["task_id"])
+    if not candidate_tasks or not baseline_pool:
+        try:
+            fixture_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
         return None
-    source_task = next((item for item in task_summaries if item["task_id"] == generated_from), None)
-    ranked = sorted(
-        task_summaries,
-        key=lambda item: (
-            0 if item["task_id"] == generated_from else 1,
-            -float(item["score"]["composite_score"]),
-            item["task_id"],
-        ),
-    )
-    candidate_tasks = ranked[: max(1, min(limit, len(ranked)))]
-    baseline_pool = [item for item in task_summaries if item["task_id"] not in {task["task_id"] for task in candidate_tasks}]
-    if not baseline_pool:
-        baseline_pool = task_summaries
+
     baseline_quality = sum(item["score"]["quality_score"] for item in baseline_pool) / len(baseline_pool)
     baseline_cost = sum(item["score"]["cost_score"] for item in baseline_pool) / len(baseline_pool)
     baseline_efficiency = sum(item["score"]["efficiency_score"] for item in baseline_pool) / len(baseline_pool)
@@ -378,10 +452,7 @@ def synthesize_fixture_for_entry(root: Path, entry: dict, *, limit: int = 5) -> 
                 "candidate": dict(item["score"]),
             }
         )
-    slug = f"{entry.get('item_kind', 'agent')}-{entry.get('agent_name')}-{task_type}".replace("/", "-")
-    fixture_dir = root / "benchmarks" / "generated"
     fixture_dir.mkdir(parents=True, exist_ok=True)
-    fixture_path = fixture_dir / f"{slug}.json"
     fixture: dict = {
         "fixture_id": slug,
         "item_kind": entry.get("item_kind", "agent"),
@@ -392,12 +463,11 @@ def synthesize_fixture_for_entry(root: Path, entry: dict, *, limit: int = 5) -> 
         "baseline_tasks": [item["task_id"] for item in baseline_pool],
         "synthesis": {
             "synthesized_at": now_iso(),
-            "source_task": source_task["task_id"] if source_task else None,
-            "strategy": "task_retrospective_scores_vs_task_type_baseline",
+            "strategy": "learned_agent_tasks_vs_generic_tasks",
             "candidate_limit": len(candidate_tasks),
         },
         "policy": {
-            "min_samples": min(3, len(candidate_tasks)) if candidate_tasks else 3,
+            "min_samples": 3,
             "min_quality_delta": 0.03,
             "min_composite_delta": 0.02,
         },

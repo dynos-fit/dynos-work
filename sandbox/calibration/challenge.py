@@ -10,6 +10,7 @@ from pathlib import Path
 
 from rollout import cmd_run as rollout_cmd_run
 from lib_core import load_json, now_iso
+from lib_benchmark import generated_fixtures_dir
 from lib_registry import ensure_learned_registry
 
 
@@ -63,7 +64,7 @@ def synthesize_task_rollout(root: Path, task_id: str, entry: dict, baseline_comm
             }
         ],
     }
-    output = root / "benchmarks" / "generated" / f"{fixture['fixture_id']}.json"
+    output = generated_fixtures_dir(root) / f"{fixture['fixture_id']}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(fixture, indent=2) + "\n")
     return output
