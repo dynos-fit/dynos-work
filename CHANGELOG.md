@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.7.2] - 2026-11-01
+### Changed
+- fix: count worktree retrospectives in calibration and make benchmarks honest
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.7.2`.
+
+---
+
 ## [7.7.1] - 2026-10-31
 ### Fixed
 - **Retrospectives from removed worktrees count toward calibration again.** `_flush_retrospective_on_done` copied the retrospective to the shared `~/.dynos/projects/<id>/retrospectives/`, but wrote its `retrospective_flushed` event to `<root>/.dynos/events.jsonl`. For a task run in a git worktree, `<root>` is the worktree, so the event was deleted with it. `collect_retrospectives` then had no flush record for the file, tagged it `persistent-unverified` and dropped it. A project that cleans up its worktrees never reached `agent_generator auto`'s 5-retrospective gate (seen as `insufficient retrospectives: 0 < 5` with 41 retrospectives on disk). The patterns.py effectiveness scores were empty for the same reason. Each flush now also appends `{task_id, sha256}` to `retrospective-flush-ledger.jsonl` in the persistent project dir. The SEC-003 verifier reads that ledger as well as `events.jsonl`, so a tampered file is still rejected after its worktree is gone. The `collect_retrospectives` docstring no longer claims unverified retrospectives are trusted by default.
