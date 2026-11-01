@@ -260,34 +260,61 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
             result["applied"] = True
 
     elif action == "add_prevention_rule":
+        import fcntl
+        import os
+        from postmortem_analysis import _generate_rule_id
+
         rules_path = _persistent_project_dir(root) / "prevention-rules.json"
-        rules: list[dict] = []
-        if rules_path.exists():
-            try:
-                data = load_json(rules_path)
-                rules = data.get("rules", [])
-            except (json.JSONDecodeError, OSError):
-                rules = []
+        rules_path.parent.mkdir(parents=True, exist_ok=True)
         category = proposal.get("category", "")
-        existing_cats = {r.get("category") for r in rules}
-        if category and category not in existing_cats:
-            # Aggregate category-trend rules are audit-time signals: they
-            # describe cross-task patterns useful when reviewing code, not
-            # actionable per-line constraints for the executor writing it.
-            # Tag them `executor="auditor-only"` so the executor-facing
-            # filters in agent_generator and router exclude them.
-            rules.append({
-                "category": category,
-                "rule": f"Category '{category}' has {proposal.get('total_occurrences', 0)} findings across tasks. Add extra scrutiny for {category}-class issues.",
-                "executor": "auditor-only",
-                "template": "advisory",
-                "added_at": now_iso(),
-            })
-            write_json(rules_path, {"rules": rules, "updated_at": now_iso()})
-            result["applied"] = True
-            result["reason"] = f"Added prevention rule for category '{category}'"
-        else:
-            result["reason"] = f"Prevention rule for '{category}' already exists"
+        # Same lock as postmortem_analysis's rule merge, so a concurrent
+        # postmortem in another worktree cannot lose this write or ours.
+        lock_path = rules_path.with_name(rules_path.name + ".lock")
+        lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(lock_fd, "w") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            data: dict = {}
+            if rules_path.exists():
+                try:
+                    loaded = load_json(rules_path)
+                    data = loaded if isinstance(loaded, dict) else {}
+                except (json.JSONDecodeError, OSError):
+                    data = {}
+            rules = data.get("rules", [])
+            if not isinstance(rules, list):
+                rules = []
+            existing_cats = {r.get("category") for r in rules if isinstance(r, dict)}
+            if category and category not in existing_cats:
+                # Aggregate category-trend rules are audit-time signals: they
+                # describe cross-task patterns useful when reviewing code, not
+                # actionable per-line constraints for the executor writing it.
+                # Tag them `executor="auditor-only"` so the executor-facing
+                # filters in agent_generator and router exclude them. They
+                # carry the same identity fields as postmortem-merged rules
+                # (rule_id, enforcement, params) so the rules validator
+                # accepts them.
+                total = proposal.get("total_occurrences", 0)
+                text = f"Category '{category}' has {total} findings across tasks. Add extra scrutiny for {category}-class issues."
+                rules.append({
+                    "category": category,
+                    "rule": text,
+                    "rule_id": _generate_rule_id(text, category),
+                    "executor": "auditor-only",
+                    "template": "advisory",
+                    "params": {},
+                    "enforcement": "review-checklist",
+                    "source_task": "",
+                    "source_finding": f"{total} findings in category '{category}' across tasks",
+                    "rationale": "Cross-task category trend from the postmortem improvement cycle.",
+                    "added_at": now_iso(),
+                })
+                data["rules"] = rules
+                data["updated_at"] = now_iso()
+                write_json(rules_path, data)
+                result["applied"] = True
+                result["reason"] = f"Added prevention rule for category '{category}'"
+            else:
+                result["reason"] = f"Prevention rule for '{category}' already exists"
 
     else:
         result["reason"] = f"Action '{action}' not auto-applicable (logged for manual review)"

@@ -204,6 +204,14 @@ def test_orchestrator_scratch_write_with_set_e_allowed(
     assert code == 0, err
 
 
+def test_variable_name_as_path_component_is_not_a_rewrite() -> None:
+    """A path segment equal to the variable name (macOS temp dirs live under
+    /var/folders/.../T/) is not a write to the variable."""
+    assert not pre_tool_use._mentions_name("cp /var/folders/ab/T/x \"$T/y\"", "T")
+    assert pre_tool_use._mentions_name("read T; echo > \"$T/y\"", "T")
+    assert pre_tool_use._mentions_name("unset T; echo > \"$T/y\"", "T")
+
+
 def test_unresolved_denial_explains_earlier_call_variables(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

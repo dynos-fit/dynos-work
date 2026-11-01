@@ -140,7 +140,7 @@ Perform deterministic offline evaluation for agents in `shadow` mode:
 6. Do not promote an agent on fewer than 3 benchmark cases.
 7. If a fixture declares `must_pass_categories`, any regression in those categories blocks promotion and can automatically demote an active `alongside` or `replace` component back out of the route.
 8. Prefer `python3 hooks/auto.py run --root .` after learn/task completion so shadow challengers are benchmarked automatically when matching fixtures exist.
-9. If no benchmark fixture exists yet for a shadow challenger, prefer `python3 hooks/fixture.py sync --root .` to synthesize a task-derived fixture from completed retrospectives before falling back to manual authoring.
+9. `python3 hooks/fixture.py sync --root .` synthesizes task-derived fixtures from completed retrospectives: it compares tasks in which the learned agent actually ran (per `agent_source`) with same-type tasks where the role ran as the generic agent, and writes them to `~/.dynos/projects/{project_id}/benchmarks/generated/`. A shadow challenger is routed to the generic agent, so it has no such tasks and gets no task-derived fixture. Benchmark it with a rollout fixture (`hooks/challenge.py` / `hooks/rollout.py`) or a hand-written fixture instead. Never promote on a fixture whose candidate cases did not run the learned agent.
 
 ### Step 6 -- Proactive Meta-Audit (The Strategic Scanner)
 

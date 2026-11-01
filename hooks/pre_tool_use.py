@@ -883,7 +883,9 @@ def _collect_counted_assignments(tokens: list[str]) -> dict[int, tuple[str, str]
 def _mentions_name(text: str, name: str) -> bool:
     """True if `name` appears in `text` other than as a plain `$name`/`${name}` read."""
     esc = re.escape(name)
-    if re.search(r"(?<![A-Za-z0-9_$])(?<!\$\{)" + esc + r"(?![A-Za-z0-9_])", text):
+    # A name right after `/` is a path component (`/var/folders/.../T/x`, the
+    # macOS temp dir) and cannot assign or rewrite the variable.
+    if re.search(r"(?<![A-Za-z0-9_$/])(?<!\$\{)" + esc + r"(?![A-Za-z0-9_])", text):
         return True  # bare word: read S, for S in, unset S, S+=x, trap bodies
     if re.search(r"\$\{" + esc + r"(?!\})", text):
         return True  # ${S:=x}, ${S=x}, ${S/a/b} ...
