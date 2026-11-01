@@ -11,6 +11,12 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.7.0] - 2026-10-31
+### Changed
+- **A re-audit runs one escalation-model spawn per ensemble auditor.** After a repair cycle, ensemble auditors (security, db-schema, threat-model, supply-chain) used to rerun the whole cascade: a fast-tier spawn, then a balanced-tier one if it was clean or an escalation-model one if it found something blocking. That was at least two spawns in sequence for every re-audit (`security-auditor` is re-audited on every cycle), and a clean fast-plus-balanced run could pass a repair of a finding the escalation tier had raised without that tier ever seeing the fix. While `repair-log.json` exists, `lib_ensemble.ensemble_next` now evaluates ensemble auditors with `evaluate_reaudit`. The re-audit is a single spawn at the escalation model, and its verdict is binding, so the first audit's voting-tier reports are superseded. `audit-inject-prompt` and `audit-receipt` refuse the fast and balanced tiers during a re-audit. `audit-receipt` stamps the escalation shard receipt with the `repair_cycle`, and that stamp marks the re-audit done for the current cycle. `run-audit-reaudit-plan` returns a `spawns` map with the exact `model` (and `shard_step_name` for ensemble auditors) for each re-audited auditor. `ensemble-next` reports `reaudit_model`, `reaudit_cycle` and `reaudit_done`. Unchanged: first audits run the same cascade. An ensemble auditor left out of the re-audit set keeps its first-audit verdict, so the DONE gate does not require a re-audit spawn for it. A first-audit cascade left incomplete is finished by the single re-audit spawn. Auditors with no escalation model above the voting tiers keep the normal cascade.
+
+---
+
 ## [7.6.1] - 2026-10-31
 ### Fixed
 Fixes from the 7.6.0 field report (task T19b).

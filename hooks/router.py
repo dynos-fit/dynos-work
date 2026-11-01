@@ -2378,9 +2378,10 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
 
     # Ensemble cascade enforcement: an ensemble auditor may only be prepared
     # at the tier `lib_ensemble` says comes next (or at the fast tier, which
-    # starts/restarts the cascade). The plan's `model` field is NOT the spawn
+    # starts the cascade). The plan's `model` field is NOT the spawn
     # model for ensemble auditors; refusing here stops the single-spawn
-    # shortcut before an Agent call is ever issued.
+    # shortcut before an Agent call is ever issued. On a re-audit the only
+    # allowed model is the cascade's `reaudit_model` (one escalation spawn).
     if _lib_ensemble.is_ensemble_entry(target):
         cascade = _lib_ensemble.ensemble_next(plan_path.resolve().parent, auditor_name, target)
         voting = cascade.get("voting_models") or []
@@ -2396,11 +2397,22 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
         if not requested:
             print(json.dumps({
                 "error": f"ensemble auditor {auditor_name} requires --model; "
-                         f"next cascade step is {cascade.get('model') or fast_tier!r}",
+                         f"next cascade step is "
+                         f"{cascade.get('reaudit_model') or cascade.get('model') or fast_tier!r}",
                 "cascade": cascade,
             }))
             return 1
-        if requested != fast_tier and (
+        reaudit_model = cascade.get("reaudit_model")
+        if reaudit_model and requested != reaudit_model:
+            print(json.dumps({
+                "error": f"ensemble auditor {auditor_name}: refusing to prepare a "
+                         f"{requested!r} spawn — a re-audit (repair cycle "
+                         f"{cascade.get('reaudit_cycle')}) runs one {reaudit_model!r} "
+                         "spawn per ensemble auditor; the cascade does not restart.",
+                "cascade": cascade,
+            }))
+            return 1
+        if not reaudit_model and requested != fast_tier and (
             cascade.get("status") != _lib_ensemble.STATUS_SPAWN
             or cascade.get("model") != requested
         ):

@@ -1214,8 +1214,13 @@ def _emit_content_pairing_event(
         pass
 
 
-def _assert_cascade_order(task_dir: Path, auditor_name: str, model_used: str | None) -> None:
+def _assert_cascade_order(task_dir: Path, auditor_name: str, model_used: str | None) -> int | None:
     """Refuse an ensemble shard receipt written out of cascade order.
+
+    Returns the repair cycle to stamp on the receipt when it is a re-audit
+    shard (``None`` on a first audit). During a re-audit the only accepted
+    shard is the single escalation-model spawn (``lib_ensemble.evaluate_reaudit``);
+    the fast tier no longer restarts the cascade.
 
     The cascade state is computed by ``lib_ensemble.ensemble_next`` from the
     shard receipts already on disk. The fast tier is always accepted (it
@@ -1244,8 +1249,18 @@ def _assert_cascade_order(task_dir: Path, auditor_name: str, model_used: str | N
             f"audit-{auditor_name}: ensemble cascade cannot be evaluated: "
             + "; ".join(cascade.get("gaps") or [])
         )
+    reaudit_model = cascade.get("reaudit_model")
+    if reaudit_model:
+        if model_used != reaudit_model:
+            raise ValueError(
+                f"audit-{auditor_name}: re-audit (repair cycle "
+                f"{cascade.get('reaudit_cycle')}) runs one {reaudit_model!r} spawn "
+                f"for ensemble auditors, got {model_used!r}. The fast/balanced "
+                "cascade does not restart on a re-audit."
+            )
+        return cascade.get("reaudit_cycle")
     if model_used == fast_tier:
-        return
+        return None
     if status == _lib_ensemble.STATUS_COMPLETE:
         raise ValueError(
             f"audit-{auditor_name}: ensemble cascade already complete "
@@ -1259,6 +1274,7 @@ def _assert_cascade_order(task_dir: Path, auditor_name: str, model_used: str | N
             f"required tier is {expected!r} ({cascade.get('reason')}), got "
             f"{model_used!r}. Run `ctl ensemble-next` before each spawn."
         )
+    return None
 
 
 def receipt_audit_done(
@@ -1362,13 +1378,18 @@ def receipt_audit_done(
                 f"{expected_shard_step_name!r} so the receipt is named "
                 f"audit-{expected_shard_step_name}.json"
             )
-        _assert_cascade_order(task_dir, auditor_name, model_used)
+        reaudit_cycle = _assert_cascade_order(task_dir, auditor_name, model_used)
         receipt_step_name = f"audit-{shard_step_name}"
     else:
+        reaudit_cycle = None
         receipt_step_name = f"audit-{auditor_name}"
 
     # Build optional extra fields for the receipt payload
     extra_fields: dict = {}
+    # Writer-derived (never caller-supplied): marks the shard as this repair
+    # cycle's re-audit, which is what completes it in lib_ensemble.
+    if reaudit_cycle is not None:
+        extra_fields["repair_cycle"] = reaudit_cycle
     if stage is not None:
         extra_fields["stage"] = stage
     # The receipt name carries no attempt (readers key on it); record the
