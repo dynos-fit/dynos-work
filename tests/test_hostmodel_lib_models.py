@@ -171,8 +171,9 @@ class TestLibModelsValidModelsForHost:
 # agents/*-{executor,auditor}.md plus the planner/spec writer roles.
 _EXPECTED_ROLE_TIERS = {
     # Deliberately promoted past its original balanced tier: plan quality
-    # determines the cost of every downstream executor spawn.
-    "planning": "frontier",
+    # determines the cost of every downstream executor spawn. Deep rather
+    # than frontier by default; frontier is opt-in via policy.
+    "planning": "deep",
     "spec-writer": "balanced",
     "backend-executor": "balanced",
     "ui-executor": "balanced",

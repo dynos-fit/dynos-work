@@ -11,6 +11,12 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.7.4] - 2026-11-01
+### Changed
+- **The planner defaults to the deep tier (`opus`) instead of frontier (`fable`).** 7.5.15 made frontier the planner's default in both `agents/planning.md` and `lib_models.ROLE_DEFAULT_TIERS`, so every `dynos-work:planning` spawn ran at frontier rates. That included spawns that passed no `model` and used the frontmatter. With frontier quota limited, that default was too costly. The frontmatter is now `model: opus` and `ROLE_DEFAULT_TIERS["planning"]` is `deep`. The planner's ceiling stays at frontier (`ROLE_TIER_CEILINGS`), so a `model_overrides` entry, learned routing or exploration can still opt it into frontier. Executors remain capped at deep.
+
+---
+
 ## [7.7.3] - 2026-11-01
 ### Fixed
 - **Retrospective rows dropped for an unrecognized model are reported.** `_extract_quads` skipped any role whose model was not a known alias, tier or Claude model ID with a bare `continue`, which is how full model IDs could empty every effectiveness score without any sign. The raw model values it skips are now counted. `compute_effectiveness_scores` accepts an `unrecognized_models` dict to receive the counts. When called with `root`, it logs one `effectiveness_models_unrecognized` event with `rows_dropped` and the per-model counts. `patterns.py effectiveness` prints them as `unrecognized_models` (an empty object when nothing was dropped). The pattern-writing pipeline records `unrecognized_model_rows` on its `ema_compute` learn step and in `steps_completed`.

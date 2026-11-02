@@ -140,7 +140,9 @@ def model_rank(model: Optional[str]) -> int:
 # ---------------------------------------------------------------------------
 
 ROLE_DEFAULT_TIERS: dict[str, str] = {
-    "planning": TIER_FRONTIER,
+    # Deep by default; frontier stays reachable (ROLE_TIER_CEILINGS) through
+    # explicit policy overrides and learned routing.
+    "planning": TIER_DEEP,
     "spec-writer": TIER_BALANCED,
     "backend-executor": TIER_BALANCED,
     "ui-executor": TIER_BALANCED,
