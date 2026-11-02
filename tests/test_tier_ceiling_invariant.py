@@ -80,8 +80,8 @@ class TestCeilingDeclarations:
         for role in EXECUTOR_ROLES:
             assert lib_models.ROLE_DEFAULT_TIERS[role] != lib_models.TIER_FRONTIER
 
-    def test_planning_is_frontier_by_default(self) -> None:
-        assert lib_models.ROLE_DEFAULT_TIERS["planning"] == lib_models.TIER_FRONTIER
+    def test_planning_is_deep_by_default_with_a_frontier_ceiling(self) -> None:
+        assert lib_models.ROLE_DEFAULT_TIERS["planning"] == lib_models.TIER_DEEP
         assert lib_models.max_tier_for_role("planning") == lib_models.TIER_FRONTIER
 
     def test_auditors_may_reach_frontier_but_do_not_default_there(self) -> None:
@@ -227,7 +227,7 @@ class TestResolveModelEnforcesCeiling:
         planner_arms = router._explorable_models_for_role("planning")
         assert FRONTIER_MODEL in planner_arms
 
-    def test_default_path_gives_planning_the_frontier_model(
+    def test_default_path_gives_planning_the_deep_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         router = importlib.import_module("router")
@@ -235,7 +235,7 @@ class TestResolveModelEnforcesCeiling:
         monkeypatch.setattr(router, "is_learning_enabled", lambda root: False)
 
         result = router.resolve_model(tmp_path, "planning", "feature")
-        assert result["model"] == FRONTIER_MODEL
+        assert result["model"] == DEEP_MODEL
 
 
 # ---------------------------------------------------------------------------
