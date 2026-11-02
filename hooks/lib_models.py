@@ -4,6 +4,7 @@ Zero imports from any hooks/ or memory/ module.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -69,8 +70,35 @@ def resolve_model_for_tier(host: str, tier: str) -> Optional[str]:
     return host_map.get(tier)
 
 
+_MODEL_ID_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_model(model: Optional[str]) -> Optional[str]:
+    """Return the alias for a full Claude model ID, else *model* unchanged.
+
+    Subagent transcripts record full IDs ("claude-sonnet-5-5",
+    "us.anthropic.claude-opus-5-5[1m]"), and the token hook stores them raw on
+    purpose. Readers that compare against aliases or tier names call this
+    first. An alias or tier name comes back lowercased; an ID containing
+    "claude" and exactly one known Claude alias comes back as that alias;
+    anything else (None, non-strings, unknown names) comes back unchanged.
+    """
+    if not isinstance(model, str):
+        return model
+    lowered = model.strip().lower()
+    aliases = valid_models_for_host(HOST_CLAUDE)
+    if lowered in aliases or lowered in TIER_RANK:
+        return lowered
+    if "claude" in lowered:
+        families = {t for t in _MODEL_ID_TOKEN_SPLIT.split(lowered) if t in aliases}
+        if len(families) == 1:
+            return families.pop()
+    return model
+
+
 def model_to_tier(model: str) -> Optional[str]:
-    """Return the tier for *model*, or None if unknown."""
+    """Return the tier for *model* (an alias or a full Claude ID), or None."""
+    model = normalize_model(model)
     for host_map in TIER_TO_MODEL.values():
         for tier, m in host_map.items():
             if m is not None and m == model:
@@ -101,6 +129,7 @@ def model_rank(model: Optional[str]) -> int:
     """
     if model is None:
         return -1
+    model = normalize_model(model)
     if model in TIER_RANK:
         return TIER_RANK[model]
     return tier_rank(model_to_tier(model))

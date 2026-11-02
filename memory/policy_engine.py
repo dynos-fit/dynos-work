@@ -43,6 +43,7 @@ from lib_models import (
     ALL_TIERS as _ALL_TIERS,
     valid_models_for_host as _valid_models_for_host,
     HOST_CLAUDE as _HOST_CLAUDE,
+    normalize_model as _normalize_model,
 )
 # Dual-accept: old Claude model literals + new tier names.
 # IR-1: every call site that tests `model in VALID_MODELS` continues to work.
@@ -302,6 +303,8 @@ def _extract_quads(
         )
 
         for role, model in models.items():
+            # Retrospectives carry the raw transcript model (a full model ID).
+            model = _normalize_model(model)
             if not isinstance(model, str) or model not in VALID_MODELS:
                 continue
             source = sources.get(role, "generic") if isinstance(sources, dict) else "generic"
@@ -457,7 +460,8 @@ def derive_model_policy(effectiveness_scores: list[dict]) -> dict[str, dict]:
     groups: dict[tuple[str, str], dict[str, list[dict]]] = {}
     for row in effectiveness_scores:
         key = (row["role"], row["task_type"])
-        groups.setdefault(key, {}).setdefault(row["model"], []).append(row)
+        # Rows persisted before normalization may still hold full model IDs.
+        groups.setdefault(key, {}).setdefault(_normalize_model(row["model"]), []).append(row)
 
     result: dict[str, dict] = {}
     for (role, task_type), model_rows in groups.items():
@@ -583,6 +587,7 @@ def _build_model_policy_data(
         if not isinstance(quality, (int, float)):
             quality = 0.0
         for role, model in models.items():
+            model = _normalize_model(model)
             if isinstance(model, str) and model:
                 observations.setdefault((role, task_type), []).append((model, float(quality)))
     result: dict[str, dict] = {}
