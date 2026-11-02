@@ -145,3 +145,88 @@ def test_model_policy_data_pools_full_ids() -> None:
 
     assert data["backend-executor:feature"]["model"] == "sonnet"
     assert data["backend-executor:feature"]["sample_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Rows dropped for an unrecognized model are reported, not silent
+# ---------------------------------------------------------------------------
+
+
+def _read_global_events(root: Path) -> list[dict]:
+    import json
+
+    path = root / ".dynos" / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_unrecognized_models_are_counted_per_raw_value() -> None:
+    retros = [
+        _retro("task-20261101-001", {"backend-executor": "gpt-5", "ui-executor": "sonnet"}),
+        _retro("task-20261101-002", {"backend-executor": "gpt-5", "docs-executor": "mystery"}),
+    ]
+    dropped: dict[str, int] = {}
+
+    scores = policy_engine.compute_effectiveness_scores(retros, unrecognized_models=dropped)
+
+    assert dropped == {"gpt-5": 2, "mystery": 1}
+    assert [r["role"] for r in scores] == ["ui-executor"]
+
+
+def test_recognized_full_ids_are_not_counted_as_dropped() -> None:
+    dropped: dict[str, int] = {}
+
+    policy_engine.compute_effectiveness_scores(
+        [_retro("task-20261101-001", {"backend-executor": "claude-sonnet-5-5"})],
+        unrecognized_models=dropped,
+    )
+
+    assert dropped == {}
+
+
+def test_dropped_models_emit_one_event_when_root_given(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / ".dynos").mkdir(parents=True)
+    retros = [
+        _retro("task-20261101-001", {"backend-executor": "gpt-5"}),
+        _retro("task-20261101-002", {"backend-executor": "gpt-5", "ui-executor": "mystery"}),
+    ]
+
+    policy_engine.compute_effectiveness_scores(retros, root=root)
+
+    events = [e for e in _read_global_events(root) if e.get("event") == "effectiveness_models_unrecognized"]
+    assert len(events) == 1
+    assert events[0]["rows_dropped"] == 3
+    assert events[0]["models"] == {"gpt-5": 2, "mystery": 1}
+
+
+def test_no_event_when_nothing_is_dropped(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / ".dynos").mkdir(parents=True)
+
+    policy_engine.compute_effectiveness_scores(
+        [_retro("task-20261101-001", {"backend-executor": "claude-sonnet-5-5"})], root=root
+    )
+
+    assert not any(
+        e.get("event") == "effectiveness_models_unrecognized" for e in _read_global_events(root)
+    )
+
+
+def test_effectiveness_cli_reports_unrecognized_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+    import json
+
+    root = tmp_path / "project"
+    (root / ".dynos").mkdir(parents=True)
+    retros = [_retro("task-20261101-001", {"backend-executor": "gpt-5", "ui-executor": "claude-sonnet-5-5"})]
+    monkeypatch.setattr(policy_engine, "collect_retrospectives", lambda _root: retros)
+
+    assert policy_engine.cmd_effectiveness(argparse.Namespace(root=str(root))) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["unrecognized_models"] == {"gpt-5": 1}
+    assert [r["model"] for r in output["effectiveness_scores"]] == ["sonnet"]

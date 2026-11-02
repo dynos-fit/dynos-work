@@ -244,6 +244,7 @@ def _extract_quads(
     retrospectives: list[dict],
     events_by_task: dict[str, list[dict]] | None = None,
     root: Path | None = None,
+    unrecognized_models: dict[str, int] | None = None,
 ) -> list[tuple[QuadKey, float, float, float]]:
     """Extract (quad_key, quality, cost, efficiency) from validated retrospectives.
 
@@ -260,6 +261,11 @@ def _extract_quads(
     provided, a single ``agent_source_reclassified`` event is emitted via
     :func:`log_event` per rewritten quad. When ``events_by_task is None``,
     the cross-check is skipped entirely (legacy path).
+
+    A role whose model is still not in ``VALID_MODELS`` after
+    normalization is skipped. When ``unrecognized_models`` is a dict, each
+    skipped raw model string is counted in it, so callers can report the
+    drop instead of returning silently empty scores.
     """
     # PERF-002: collect reclassification events during extraction and
     # flush them once after the loop completes. Prevents the synchronous
@@ -302,10 +308,12 @@ def _extract_quads(
             else []
         )
 
-        for role, model in models.items():
+        for role, raw_model in models.items():
             # Retrospectives carry the raw transcript model (a full model ID).
-            model = _normalize_model(model)
+            model = _normalize_model(raw_model)
             if not isinstance(model, str) or model not in VALID_MODELS:
+                if unrecognized_models is not None and isinstance(raw_model, str) and raw_model:
+                    unrecognized_models[raw_model] = unrecognized_models.get(raw_model, 0) + 1
                 continue
             source = sources.get(role, "generic") if isinstance(sources, dict) else "generic"
 
@@ -356,6 +364,7 @@ def compute_effectiveness_scores(
     retrospectives: list[dict],
     baseline: dict[QuadKey, tuple[float, float, float]] | None = None,
     root: Path | None = None,
+    unrecognized_models: dict[str, int] | None = None,
 ) -> list[dict]:
     """Compute EMA effectiveness scores from retrospectives.
 
@@ -371,6 +380,11 @@ def compute_effectiveness_scores(
     passed (cross-check runs with zero signal — every ``learned:X`` gets
     reclassified). Legacy callers that omit ``root`` skip the cross-check
     entirely.
+
+    Role entries whose model is not recognized are skipped. They are
+    counted per raw model string into ``unrecognized_models`` when it is
+    given, and, when ``root`` is given, reported once in an
+    ``effectiveness_models_unrecognized`` event.
     """
     if root is not None:
         # PERF-001: pre-filter events.jsonl to only the task_ids that
@@ -386,7 +400,20 @@ def compute_effectiveness_scores(
         )
     else:
         events_by_task = None
-    quads = _extract_quads(retrospectives, events_by_task=events_by_task, root=root)
+    dropped: dict[str, int] = {} if unrecognized_models is None else unrecognized_models
+    quads = _extract_quads(
+        retrospectives,
+        events_by_task=events_by_task,
+        root=root,
+        unrecognized_models=dropped,
+    )
+    if root is not None and dropped:
+        log_event(
+            root,
+            "effectiveness_models_unrecognized",
+            rows_dropped=sum(dropped.values()),
+            models=dict(sorted(dropped.items())),
+        )
 
     # EMA state per quad
     state: dict[QuadKey, dict] = {}
@@ -1027,13 +1054,21 @@ def write_patterns(root: Path) -> dict:
     # Step 2: Compute effectiveness scores (EMA) and derive policies.
     # Pass `root` so the EMA ingest cross-checks retrospective
     # `learned:X` agent_source claims against .dynos/events.jsonl.
-    effectiveness_scores = compute_effectiveness_scores(retrospectives, root=root)
+    unrecognized_models: dict[str, int] = {}
+    effectiveness_scores = compute_effectiveness_scores(
+        retrospectives, root=root, unrecognized_models=unrecognized_models
+    )
     ema_model_policy = derive_model_policy(effectiveness_scores)
     ema_skip_policy = derive_skip_policy(effectiveness_scores)
+    unrecognized_count = sum(unrecognized_models.values())
 
-    steps_completed.append(f"ema:{len(effectiveness_scores)} scores, {len(ema_model_policy)} model, {len(ema_skip_policy)} skip")
+    steps_completed.append(
+        f"ema:{len(effectiveness_scores)} scores, {len(ema_model_policy)} model, "
+        f"{len(ema_skip_policy)} skip, {unrecognized_count} unrecognized-model rows dropped"
+    )
     log_event(root, "learn_step", step="ema_compute", effectiveness_count=len(effectiveness_scores),
-              model_policy_count=len(ema_model_policy), skip_policy_count=len(ema_skip_policy))
+              model_policy_count=len(ema_model_policy), skip_policy_count=len(ema_skip_policy),
+              unrecognized_model_rows=unrecognized_count)
 
     # Step 2b: Legacy policy computation (backward compat, feeds markdown tables)
     model_policy_data = _build_model_policy_data(retrospectives)
@@ -1116,12 +1151,18 @@ def cmd_effectiveness(args: argparse.Namespace) -> int:
     """Compute and print effectiveness scores from retrospectives."""
     root = Path(args.root).resolve()
     retrospectives = collect_retrospectives(root)
-    scores = compute_effectiveness_scores(retrospectives, root=root)
+    unrecognized: dict[str, int] = {}
+    scores = compute_effectiveness_scores(
+        retrospectives, root=root, unrecognized_models=unrecognized
+    )
     output = {
         "effectiveness_scores": scores,
         "model_policy": derive_model_policy(scores),
         "skip_policy": derive_skip_policy(scores),
         "routing_composites": compute_routing_composite(scores),
+        # Role entries skipped because their model is not a known alias, tier
+        # or Claude model ID, counted per raw value. Empty when none.
+        "unrecognized_models": dict(sorted(unrecognized.items())),
     }
     print(json.dumps(output, indent=2))
     return 0

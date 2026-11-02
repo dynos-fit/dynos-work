@@ -11,6 +11,12 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.7.3] - 2026-11-01
+### Fixed
+- **Retrospective rows dropped for an unrecognized model are reported.** `_extract_quads` skipped any role whose model was not a known alias, tier or Claude model ID with a bare `continue`, which is how full model IDs could empty every effectiveness score without any sign. The raw model values it skips are now counted. `compute_effectiveness_scores` accepts an `unrecognized_models` dict to receive the counts. When called with `root`, it logs one `effectiveness_models_unrecognized` event with `rows_dropped` and the per-model counts. `patterns.py effectiveness` prints them as `unrecognized_models` (an empty object when nothing was dropped). The pattern-writing pipeline records `unrecognized_model_rows` on its `ema_compute` learn step and in `steps_completed`.
+
+---
+
 ## [7.7.2] - 2026-11-01
 ### Fixed
 - **Effectiveness scores and model policy work with full Claude model IDs.** On Claude Code the token hook records each agent's model straight from the subagent transcript (`claude-sonnet-5-5`, `claude-fable-5-1`) and deliberately does not normalize it. The policy engine compared those values literally against the aliases and tier names in `VALID_MODELS` (`haiku`, `sonnet`, `opus`, `fable`, `fast`, …), so `_extract_quads` dropped every row. `patterns.py effectiveness` then returned empty `effectiveness_scores`, `model_policy`, `skip_policy` and `routing_composites`, and nothing learned from retrospectives reached the router. The new `lib_models.normalize_model` maps an ID that contains `claude` and exactly one known alias to that alias (`claude-sonnet-5-5` → `sonnet`, `us.anthropic.claude-opus-5-5[1m]` → `opus`), lowercases aliases and tier names, and leaves anything else unchanged. `_extract_quads`, `derive_model_policy` and `_build_model_policy_data` call it on read, so full IDs and aliases for the same family pool into one row. `model_to_tier` and `model_rank` call it too, so a full ID now has a tier and rank. Rank-based checks that go through them, such as the role tier ceiling in `clamp_model_to_role_ceiling`, the security-auditor floor and the circuit breaker's deep-tier predicate, therefore also apply to full IDs, where before they passed through unranked. The recorded transcript value is unchanged on disk.
