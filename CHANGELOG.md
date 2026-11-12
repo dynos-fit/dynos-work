@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.9.0] - 2026-11-12
+### Changed
+- feat: reopen finished tasks, policy-driven repair caps, and field-report fixes
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.9.0`.
+
+---
+
 ## [7.8.0] - 2026-11-12
 Fixes from a field report on unattended runs (about 140 tasks over two days, around 10 in parallel, on 7.7.1 and 7.7.4).
 
