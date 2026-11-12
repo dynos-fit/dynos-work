@@ -11,6 +11,8 @@ uncommitted and untracked changes, deletions included) must be covered by the ta
   plus every cycle in ``repair-log-history.json``, because each cycle
   overwrites the repair log),
 * the TDD receipt's ``test_file_paths``,
+* the project policy's ``always_in_scope`` entries (paths every task may
+  write, such as ``docs/follow-ups/``; same syntax as ``files_expected``),
 * files a human acknowledged with ``ctl acknowledge-out-of-scope``.
 
 Anything else is an ``out_of_scope_file``. ``run-execution-segment-done``
@@ -226,6 +228,15 @@ def declared_scope(task_dir: Path) -> list[str]:
     tdd = _load(task_dir / "receipts" / "tdd-tests.json")
     if isinstance(tdd, dict):
         for f in tdd.get("test_file_paths") or []:
+            _add(f)
+    try:
+        from lib_validate import load_project_policy  # noqa: PLC0415
+
+        always = load_project_policy(task_dir).get("always_in_scope")
+    except Exception:  # noqa: BLE001 — policy is optional
+        always = None
+    if isinstance(always, list):
+        for f in always:
             _add(f)
     return entries
 

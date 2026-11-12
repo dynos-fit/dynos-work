@@ -40,7 +40,8 @@ def test_done_transitions_to_calibrated_and_failed():
 
 
 def test_calibrated_is_terminal():
-    assert ALLOWED_STAGE_TRANSITIONS["CALIBRATED"] == set()
+    # CALIBRATED's only exit is the receipt-gated reopen edge (`ctl reopen`).
+    assert ALLOWED_STAGE_TRANSITIONS["CALIBRATED"] == {"CHECKPOINT_AUDIT"}
 
 
 def test_allowed_transitions_keys_are_subset_of_stage_order():
@@ -58,6 +59,8 @@ def test_no_self_loops_in_transitions():
 
 
 def test_acyclic_via_no_back_transition_to_terminal():
-    # CALIBRATED, CANCELLED, FAILED must not appear as a source with non-empty dests
-    for terminal in ("CALIBRATED", "CANCELLED", "FAILED"):
-        assert ALLOWED_STAGE_TRANSITIONS.get(terminal, set()) == set()
+    # CANCELLED is final. CALIBRATED and FAILED leave only through the
+    # receipt-gated reopen edge to CHECKPOINT_AUDIT; no other way back.
+    assert ALLOWED_STAGE_TRANSITIONS.get("CANCELLED", set()) == set()
+    for terminal in ("CALIBRATED", "FAILED"):
+        assert ALLOWED_STAGE_TRANSITIONS.get(terminal, set()) == {"CHECKPOINT_AUDIT"}

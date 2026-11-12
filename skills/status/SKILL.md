@@ -54,6 +54,7 @@ Execution Progress:
   Completed: [seg-001-db, seg-002-backend]
 
 Acceptance Criteria: [N]/[total] covered
+Deferred Scope: [each bullet under spec.md "## Deferred Scope", or "none"]
 
 Churn (from ctl task-churn):
   Planner spawns: [N]   Approval receipts: [N]   Amendments: [N]
