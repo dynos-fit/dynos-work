@@ -200,14 +200,22 @@ ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
     "REPAIR_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
     "FINAL_AUDIT": {"CHECKPOINT_AUDIT", "DONE", "FAILED"},
     "EXECUTION_GRAPH_BUILD": {"PRE_EXECUTION_SNAPSHOT", "EXECUTION", "FAILED"},
-    "DONE": {"CALIBRATED", "FAILED"},
-    "CALIBRATED": set(),
+    # DONE / CALIBRATED / FAILED -> CHECKPOINT_AUDIT is the reopen edge. It is
+    # legal only with a ``reopen-{n}`` receipt written by ``ctl reopen`` (see
+    # the gate in _replay_gates_for_transition), so a defect found after
+    # completion can go back through audit + repair inside the same task.
+    "DONE": {"CALIBRATED", "FAILED", "CHECKPOINT_AUDIT"},
+    "CALIBRATED": {"CHECKPOINT_AUDIT"},
     "CANCELLED": set(),
-    "FAILED": set(),
+    "FAILED": {"CHECKPOINT_AUDIT"},
 }
 
-# CALIBRATED has no outgoing transitions and is reached after DONE; treat it
-# as terminal everywhere active-task state is derived.
+# Stages ``ctl reopen`` may move a task out of.
+REOPENABLE_STAGES: frozenset[str] = frozenset({"DONE", "CALIBRATED", "FAILED"})
+
+# CALIBRATED is reached after DONE; treat it as terminal everywhere
+# active-task state is derived. Terminal stages leave only through the
+# receipt-gated reopen edge.
 TERMINAL_STAGES: frozenset[str] = frozenset({
     "DONE", "FAILED", "CANCELLED", "CALIBRATED",
 })
@@ -1169,8 +1177,11 @@ def load_rule_waivers(task_dir: Path) -> dict[str, str]:
 
 ACCEPTED_FINDINGS_FILE = "accepted-findings.json"
 
-# Hard cap on repair attempts of one finding (retry_count 0..3). A finding a
-# re-audit rewords (same auditor, class and file) inherits the count.
+# Default cap on repair attempts of one finding (retry_count 0..3). A finding
+# a re-audit rewords (same auditor, class and file) inherits the count.
+# Overridable per project with ``max_repair_retries_per_finding`` in
+# ``~/.dynos/projects/{slug}/policy.json``; read it through
+# ``max_repair_retries(root)``, never this constant directly.
 MAX_REPAIR_RETRIES = 3
 
 # Hard cap on repair cycles one auditor may drive. A single auditor that
@@ -1180,20 +1191,39 @@ MAX_REPAIR_RETRIES = 3
 MAX_REPAIR_CYCLES_PER_AUDITOR = 3
 
 
-def max_repair_cycles_per_auditor(root: Path) -> int:
-    """The per-auditor repair-cycle cap: policy override, else the default.
+def _policy_positive_int(root: Path, key: str, default: int) -> int:
+    """A positive-int policy value, else ``default``.
 
     Reads policy.json without writing it. A missing, unreadable or
-    non-positive value falls back to ``MAX_REPAIR_CYCLES_PER_AUDITOR``.
+    non-positive value falls back to ``default``.
     """
     try:
         data = json.loads((_persistent_project_dir(root) / "policy.json").read_text())
     except (OSError, ValueError):
-        return MAX_REPAIR_CYCLES_PER_AUDITOR
-    value = data.get("max_repair_cycles_per_auditor") if isinstance(data, dict) else None
+        return default
+    value = data.get(key) if isinstance(data, dict) else None
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
-    return MAX_REPAIR_CYCLES_PER_AUDITOR
+    return default
+
+
+def max_repair_cycles_per_auditor(root: Path) -> int:
+    """The per-auditor repair-cycle cap: policy override, else the default."""
+    return _policy_positive_int(
+        root, "max_repair_cycles_per_auditor", MAX_REPAIR_CYCLES_PER_AUDITOR
+    )
+
+
+def max_repair_retries(root: Path) -> int:
+    """The per-finding repair-retry cap: policy override, else the default.
+
+    Policy key: ``max_repair_retries_per_finding``. Projects that raise
+    ``max_repair_cycles_per_auditor`` usually need this raised too, since
+    a single stubborn finding otherwise still stops the task at 3 retries.
+    """
+    return _policy_positive_int(
+        root, "max_repair_retries_per_finding", MAX_REPAIR_RETRIES
+    )
 
 
 def load_accepted_findings(task_dir: Path) -> list[dict]:
@@ -1338,7 +1368,7 @@ def _failing_test_results_err(task_dir: Path) -> str | None:
         status = load_json(path).get("status")
     except (OSError, ValueError, AttributeError):
         status = None
-    if status == "passed":
+    if status in ("passed", "passed_with_known_failures"):
         return None
     return (
         "test-results.json (last recorded test run did not pass — repair, "
@@ -1462,6 +1492,18 @@ def _compute_bypassed_gates_for_force(
             errs.append("receipt: plan-validated (plan was never validated)")
 
     # ---- CHECKPOINT_AUDIT gate — mirror the graph+routing segment check.
+    # Reopen: leaving a terminal stage requires the receipt `ctl reopen`
+    # writes for exactly the next reopen (reopen-{count+1}), so a stale or
+    # replayed receipt cannot reopen the task a second time.
+    if current_stage in REOPENABLE_STAGES and next_stage == "CHECKPOINT_AUDIT":
+        expected = reopen_receipt_step(manifest)
+        receipt = read_receipt(task_dir, expected)
+        if receipt is None or receipt.get("from_stage") != current_stage:
+            _refuse(
+                f"receipt: {expected} (reopening a {current_stage} task requires "
+                "`ctl reopen <task_dir> --reason <why>`)"
+            )
+
     if next_stage == "CHECKPOINT_AUDIT":
         routing_payload = read_receipt(task_dir, "executor-routing")
         if routing_payload is None:
@@ -1592,6 +1634,15 @@ def _compute_bypassed_gates_for_force(
         errs.append(f"Illegal stage transition: {current_stage} -> {next_stage}")
 
     return errs
+
+
+def reopen_receipt_step(manifest: dict) -> str:
+    """The receipt step name the next reopen of this task must carry."""
+    try:
+        count = int(manifest.get("reopen_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return f"reopen-{count + 1}"
 
 
 def _flush_retrospective_on_done(*, task_dir: Path, manifest: dict) -> None:
@@ -2286,6 +2337,18 @@ def _replay_gates_for_transition(
     # A tampered/truncated routing receipt can NOT drop segments off
     # the required-receipt list. We require executor-{seg_id} receipts
     # for the UNION of (graph segments ∪ routing segments).
+    # Reopen: leaving a terminal stage requires the receipt `ctl reopen`
+    # writes for exactly the next reopen (reopen-{count+1}), so a stale or
+    # replayed receipt cannot reopen the task a second time.
+    if current_stage in REOPENABLE_STAGES and next_stage == "CHECKPOINT_AUDIT":
+        expected = reopen_receipt_step(manifest)
+        receipt = read_receipt(task_dir, expected)
+        if receipt is None or receipt.get("from_stage") != current_stage:
+            _refuse(
+                f"receipt: {expected} (reopening a {current_stage} task requires "
+                "`ctl reopen <task_dir> --reason <why>`)"
+            )
+
     if next_stage == "CHECKPOINT_AUDIT":
         routing_payload = read_receipt(task_dir, "executor-routing")
         if routing_payload is None:
@@ -2327,10 +2390,11 @@ def _replay_gates_for_transition(
                     )
 
     # REPAIR_PLANNING requires no finding has exceeded max retries.
-    # This is the deterministic hard cap: the LLM cannot loop past 3
-    # repair attempts because the state machine itself refuses the
-    # transition. Code enforces; prompts advise.
+    # This is the deterministic hard cap: the LLM cannot loop past the
+    # policy's per-finding retry cap (default 3) because the state machine
+    # itself refuses the transition. Code enforces; prompts advise.
     if next_stage == "REPAIR_PLANNING" and current_stage == "REPAIR_EXECUTION":
+        retry_cap = max_repair_retries(task_dir.parent.parent)
         repair_log_path = task_dir / "repair-log.json"
         if repair_log_path.exists():
             try:
@@ -2358,11 +2422,12 @@ def _replay_gates_for_transition(
                             retries_int = int(retries)
                         except (TypeError, ValueError):
                             retries_int = 0
-                        if retries_int >= MAX_REPAIR_RETRIES:
+                        if retries_int >= retry_cap:
                             exhausted.append(f"{fid} (retry_count={retries_int})")
                 if exhausted:
                     gate_errors.append(
-                        f"repair cap exceeded (max {MAX_REPAIR_RETRIES} retries) "
+                        f"repair cap exceeded (max {retry_cap} retries; policy "
+                        f"max_repair_retries_per_finding) "
                         f"for finding(s): {', '.join(exhausted)}. "
                         f"Transition to FAILED instead — human review needed."
                     )

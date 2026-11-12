@@ -410,6 +410,33 @@ def extract_markdown_section(markdown: str, heading: str) -> str:
     return rest
 
 
+DEFERRED_SCOPE_HEADING = "Deferred Scope"
+DEFERRED_SCOPE_FILE = "deferred-scope.json"
+_NONE_MARKERS = {"none", "none.", "n/a", "-", "nothing"}
+
+
+def parse_deferred_scope(spec_text: str) -> list[str]:
+    """Bullet items under ``## Deferred Scope`` in a spec, in order.
+
+    The planner records here every piece of the request it cut to fit the
+    artifact ceilings (``max_acceptance_criteria`` etc.), one bullet per
+    item. Before this section existed the split survived only as prose in a
+    follow-ups note, so cut work (e.g. every screen of a feature) could be
+    lost. ``None.`` and an absent section both mean nothing was deferred.
+    """
+    body = extract_markdown_section(spec_text or "", DEFERRED_SCOPE_HEADING)
+    items: list[str] = []
+    for line in body.splitlines():
+        m = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*\S)\s*$", line)
+        if not m:
+            continue
+        text = m.group(1).strip()
+        if text.lower() in _NONE_MARKERS:
+            continue
+        items.append(text)
+    return items
+
+
 def _contains_file_reference(text: str) -> bool:
     return bool(re.search(r"`?[\w./-]+\.[A-Za-z0-9]{1,8}`?", text))
 

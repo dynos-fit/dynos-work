@@ -355,7 +355,15 @@ This command derives outcomes from `repair-log.json` plus the current blocking a
 
   Interpret the JSON result:
   - `status == "repair_retry_ready"`: another repair cycle is allowed. Re-run `run-audit-repair-cycle-plan` and continue with the returned queue.
-  - `status == "escalation_required"`: a repair cap blocked another loop. `cap_reasons` names which: the per-finding retry cap (a finding, or a reworded variant with the same auditor, category and file, was already repaired 4 times) or the per-auditor cycle cap (one auditor's findings already drove 3 repair cycles; a project may raise it with `max_repair_cycles_per_auditor` in its `policy.json`). Write `.dynos/task-{id}/escalation.md` naming each reason, transition to `FAILED`, and stop.
+  - `status == "escalation_required"`: a repair cap blocked another loop. `cap_reasons` names which: the per-finding retry cap (a finding, or a reworded variant with the same auditor, category and file, was already repaired more than `max_repair_retries_per_finding` times, default 3) or the per-auditor cycle cap (one auditor's findings already drove `max_repair_cycles_per_auditor` repair cycles, default 3). Both are set in the project's `policy.json`. Write `.dynos/task-{id}/escalation.md` naming each reason, transition to `FAILED`, and stop. A FAILED task is not a dead end: once a human raises a cap or accepts the finding, `ctl reopen` (below) returns it to audit.
+
+**Reopening a finished task.** When a defect in a DONE, CALIBRATED or FAILED task is found later (a merge gate's first end-to-end run, a reviewer, a raised repair cap), do not stop and do not edit outside the pipeline, and do not hand-build a new task. Reopen it, then run this skill again:
+
+```text
+"$DYNOS" ctl reopen .dynos/task-{id} --reason "{what failed and where}" [--details-file {path to failing output}] [--approver human|residual-auto]
+```
+
+It writes a `reopen-{n}` receipt, moves the task to `CHECKPOINT_AUDIT`, and every re-auditor's prompt carries the reason and details. If a test command exposed the defect, record it with `ctl run-tests` right after reopening (it is allowed at `CHECKPOINT_AUDIT`) so the failure reaches repair. Use `--approver residual-auto` only when the run is unattended under `auto_approve_gates`.
 
 **Accepting a finding instead of repairing it.** When a human decides a blocking finding is an acceptable trade-off (or out of scope), and another repair cycle would not change that, record the decision instead of looping:
 
@@ -455,13 +463,16 @@ Finalize completion through ctl:
 
 This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic. It refuses when an audit report is newer than `audit-summary.json`: re-run `ctl run-audit-summary` (and `run-audit-reflect`) and finish again.
 
-If it refuses with `outside the declared write scope`, files changed since the task snapshot are not covered by any segment's `files_expected`/`files_optional`, any repair cycle's `files_to_modify` or the TDD test files — typically a write made through an interpreter or subprocess that the write hook could not see. The refusal names the files. Revert each file that is not task work (`git checkout -- <path>`, or delete an untracked one). If a file IS task work, stop and ask the user; only on their explicit confirmation record it with `"$DYNOS" ctl acknowledge-out-of-scope .dynos/task-{id} --file <path> [--file <path> ...] --reason "<why it belongs to this task>"`, then re-run `run-audit-finish`. Never acknowledge on your own judgment, and never force past this gate. `run-audit-findings-gate` (and `run-execution-segment-done`) already list the same files as `out_of_scope_files`, so deal with them before the finish.
+If it refuses with `outside the declared write scope`, files changed since the task snapshot are not covered by any segment's `files_expected`/`files_optional`, any repair cycle's `files_to_modify` or the TDD test files — typically a write made through an interpreter or subprocess that the write hook could not see. The refusal names the files. Revert each file that is not task work (`git checkout -- <path>`, or delete an untracked one). If a file IS task work, stop and ask the user; only on their explicit confirmation record it with `"$DYNOS" ctl acknowledge-out-of-scope .dynos/task-{id} --file <path> [--file <path> ...] --reason "<why it belongs to this task>"`, then re-run `run-audit-finish`. Never acknowledge on your own judgment, and never force past this gate. Paths every task legitimately writes (for example `docs/follow-ups/`) belong in the project policy's `always_in_scope` list, which a human maintains; they are then never out of scope. `run-audit-findings-gate` (and `run-execution-segment-done`) already list the same files as `out_of_scope_files`, so deal with them before the finish.
 
-If it refuses on `test-results.json`, the last recorded test run did not pass. Re-run `ctl run-tests` with the same commands. If they still fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate.
+If it refuses on `test-results.json`, the last recorded test run did not pass. Re-run `ctl run-tests` with the same commands. If they still fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate. A failure the task does not own (a pre-existing or flaky repo-wide suite) is waived only by the project policy's `known_test_failures` list: entries of `{"command": "<exact --command string>", "reason": "<owner, ticket or cause>", "expires": "YYYY-MM-DD"}`. A waived command records `passed_with_known_failures`, which the DONE gate accepts; any other failing command still blocks. Agents never edit that policy; a human adds the entry.
 
 Print verbatim the contents of `.dynos/task-{id}/completion.json::user_summary`.
 Do NOT paraphrase, reorder, or add commentary. The orchestrator's user-facing
 final output for this skill is constrained to a literal echo of that text.
+The one addition: when the `run-audit-finish` JSON has a non-empty
+`deferred_scope`, follow the summary with a `Deferred scope (needs a follow-up
+task):` heading and its items verbatim, one per line.
 
 ---
 

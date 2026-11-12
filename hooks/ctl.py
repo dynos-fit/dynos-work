@@ -1265,6 +1265,7 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"amend-artifact: failed to write amendment receipt: {exc}", file=sys.stderr)
         return 1
+    _extend_chain_for_rewritten_receipt(task_dir, amend_receipt_path)
 
     # The artifact may already have been edited before this command records
     # the amendment. Extend the append-only chain now so its newest artifact
@@ -1314,6 +1315,7 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"amend-artifact: failed to update canonical receipt: {exc}", file=sys.stderr)
             return 1
+        _extend_chain_for_rewritten_receipt(task_dir, canonical_path)
 
     # Re-issue the human-approval receipt if one exists for this artifact.
     # Without this, transition_task continues to compare the live artifact
@@ -1411,6 +1413,7 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
             except Exception as exc:
                 print(f"amend-artifact: failed to refresh plan-validated.artifact_hashes: {exc}", file=sys.stderr)
                 return 1
+            _extend_chain_for_rewritten_receipt(task_dir, plan_validated_path)
 
     print(f"amended {artifact_name}: sha256={sha256_after}")
     print(f"amendment receipt: {amend_receipt_path}")
@@ -4133,6 +4136,35 @@ def cmd_write_execute_handoff(args: argparse.Namespace) -> int:
         return 1
 
 
+def _extend_chain_for_rewritten_receipt(task_dir: Path, receipt_path: Path) -> bool:
+    """Append a chain entry for a receipt rewritten outside write_receipt.
+
+    validate_chain checks the live bytes of every chained path against its
+    NEWEST entry, so a receipt replaced in place without a new entry fails
+    later as ``content_mismatch``. Returns False (and logs) on failure so
+    callers can warn instead of leaving a silent time bomb.
+    """
+    try:
+        from lib_chain import extend_chain_for_receipt
+        extend_chain_for_receipt(task_dir, receipt_path.stem, receipt_path)
+        return True
+    except Exception as exc:
+        try:
+            from lib_log import log_event
+            log_event(
+                task_dir.parent.parent,
+                "task_receipt_chain_extension_failed",
+                task=task_dir.name, file=str(receipt_path), error=str(exc),
+            )
+        except Exception:
+            pass
+        print(
+            f"warning: could not chain rewritten receipt {receipt_path.name}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def _try_extend_chain_for_artifact(task_dir: Path, file_path: Path) -> None:
     """Best-effort task-receipt-chain extension for an artifact write.
     Failures log task_receipt_chain_extension_failed and never propagate.
@@ -5628,12 +5660,6 @@ def _repair_scope_for_finding(
                     repo_files.append(resolved)
         return _dedupe(repo_files), _dedupe(pipeline_files)
 
-    repo_files, pipeline_files = _classified(
-        [part for raw in cited for part in _split_citation(raw)], keep_unknown=True,
-    )
-    if repo_files or pipeline_files:
-        return repo_files, pipeline_files, False
-
     # Paths in prose: first from the fields that say what to change (title,
     # fix, recommendation; the auditor's repair-task description), then from
     # the description of what is wrong. Evidence is never a source: a path
@@ -5647,11 +5673,34 @@ def _repair_scope_for_finding(
             if isinstance(source.get("_repair_task"), dict)
         ]
     )
+
+    def new_files_to_create() -> list[str]:
+        """Files the fix prose names that do not exist yet but whose directory
+        does: the repair is asked to create them (field report: a doc
+        finding's fix created docs/follow-ups/<task>.md, which the derived
+        scope left out, forcing a human scope acknowledgement)."""
+        created: list[str] = []
+        for m in _PROSE_PATH_RE.finditer(fix_prose):
+            kind, rel = _classify_repair_path(m.group(1), root, task_dir)
+            if kind != "repo" or not rel or "/" not in rel:
+                continue
+            candidate = root / rel
+            if not candidate.exists() and candidate.parent.is_dir():
+                created.append(rel)
+        return _dedupe(created)
+
+    repo_files, pipeline_files = _classified(
+        [part for raw in cited for part in _split_citation(raw)], keep_unknown=True,
+    )
+    if repo_files or pipeline_files:
+        return _dedupe(repo_files + new_files_to_create()), pipeline_files, False
     description_prose = "\n".join(_finding_prose(source, ("description",)) for source in sources)
     for text in (fix_prose, description_prose):
         repo_files, _ = _classified(
             [m.group(1) for m in _PROSE_PATH_RE.finditer(text)], keep_unknown=False,
         )
+        if text is fix_prose:
+            repo_files = _dedupe(repo_files + new_files_to_create())
         if repo_files:
             return repo_files, [], False
 
@@ -6265,7 +6314,7 @@ def cmd_run_execute_setup(args: argparse.Namespace) -> int:
             return 1
 
         _, updated = transition_task(task_dir, "EXECUTION")
-        plan = build_executor_plan(root, task_type, segments)
+        plan = build_executor_plan(root, task_type, segments, task_dir=task_dir)
         receipt_path = receipt_executor_routing(task_dir, plan.get("segments", []))
         manifest = updated if isinstance(updated, dict) else _load_manifest(task_dir)
         fast_track = bool(manifest.get("fast_track", False))
@@ -6655,6 +6704,112 @@ def cmd_waive_rule(args: argparse.Namespace) -> int:
     return 0
 
 
+_REOPEN_DETAILS_MAX_CHARS = 8000
+
+
+def cmd_reopen(args: argparse.Namespace) -> int:
+    """Reopen a DONE, CALIBRATED or FAILED task for another audit + repair pass.
+
+    A defect found after completion (a merge gate's first e2e run, a reviewer)
+    used to have no route back: the terminal stages had no outgoing edges, so
+    agents following the pipeline rules stopped and waited for a human. This
+    records a ``reopen-{n}`` receipt (reason, approver, source stage), moves
+    the task to CHECKPOINT_AUDIT through the receipt-gated reopen edge, and
+    stores the reason (plus optional details) in the manifest so every
+    re-auditor is told what to verify. From there the normal audit -> repair
+    -> DONE loop applies, including the repair caps.
+    """
+    import hashlib  # noqa: PLC0415
+
+    from lib_core import REOPENABLE_STAGES, reopen_receipt_step  # noqa: PLC0415
+    from lib_receipts import write_receipt  # noqa: PLC0415
+
+    task_dir = Path(args.task_dir).resolve()
+    reason = str(getattr(args, "reason", "") or "").strip()
+    approver = str(getattr(args, "approver", "") or "").strip() or "human"
+    if not reason:
+        print("reopen: --reason is required and must be non-empty", file=sys.stderr)
+        return 1
+    if not (task_dir / "manifest.json").exists():
+        print(f"reopen: not a task dir (no manifest.json): {task_dir}", file=sys.stderr)
+        return 1
+    details = ""
+    details_file = getattr(args, "details_file", None)
+    if details_file:
+        try:
+            details = Path(details_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            print(f"reopen: cannot read --details-file {details_file}: {exc}", file=sys.stderr)
+            return 1
+        details = details[:_REOPEN_DETAILS_MAX_CHARS]
+
+    manifest = _load_manifest(task_dir)
+    stage = str(manifest.get("stage") or "")
+    if stage not in REOPENABLE_STAGES:
+        print(json.dumps({
+            "status": "blocked",
+            "task_dir": str(task_dir),
+            "error": f"reopen: task is at {stage or '<unknown>'}; only "
+                     f"{', '.join(sorted(REOPENABLE_STAGES))} tasks can be reopened",
+        }, indent=2))
+        return 1
+
+    step = reopen_receipt_step(manifest)
+    reopened_at = now_iso()
+    try:
+        write_receipt(
+            task_dir, step,
+            from_stage=stage, reason=reason, approver=approver,
+            details_sha256=hashlib.sha256(details.encode("utf-8")).hexdigest() if details else None,
+        )
+        transition_task(task_dir, "CHECKPOINT_AUDIT")
+    except Exception as exc:
+        print(json.dumps({
+            "status": "blocked",
+            "task_dir": str(task_dir),
+            "error": f"reopen: {exc}",
+        }, indent=2))
+        return 1
+
+    manifest = _load_manifest(task_dir)
+    reopens = manifest.get("reopens")
+    if not isinstance(reopens, list):
+        reopens = []
+    reopens.append({
+        "n": len(reopens) + 1,
+        "receipt": step,
+        "from_stage": stage,
+        "reason": reason,
+        "details": details or None,
+        "approver": approver,
+        "reopened_at": reopened_at,
+    })
+    manifest["reopens"] = reopens
+    manifest["reopen_count"] = int(step.rsplit("-", 1)[1])
+    manifest.pop("blocked_reason", None)
+    _write_ctl_json(task_dir, task_dir / "manifest.json", manifest)
+
+    from lib_log import log_event  # noqa: PLC0415
+    log_event(
+        _root_for_task_dir(task_dir), "task_reopened", task=task_dir.name,
+        from_stage=stage, reason=reason, approver=approver, receipt=step,
+    )
+    append_execution_log(
+        task_dir, f"[REOPEN] {stage} → CHECKPOINT_AUDIT by {approver}: {reason}",
+    )
+    print(json.dumps({
+        "status": "reopened",
+        "task_dir": str(task_dir),
+        "from_stage": stage,
+        "stage": "CHECKPOINT_AUDIT",
+        "receipt": step,
+        "next_command": "/dynos-work:audit",
+        "hint": "re-run `ctl run-tests` with the commands that exposed the defect so the "
+                "failure is recorded; the audit then repairs it inside this task",
+    }, indent=2))
+    return 0
+
+
 def cmd_accept_finding(args: argparse.Namespace) -> int:
     """Record a human decision to accept one audit finding for this task.
 
@@ -7008,6 +7163,47 @@ _RUN_TESTS_STAGES: frozenset[str] = frozenset({
 })
 
 
+def _active_known_test_failures(task_dir: Path) -> tuple[dict[str, dict], list[str]]:
+    """Policy ``known_test_failures`` entries still in force, keyed by command.
+
+    Each entry is ``{"command": str, "reason": str, "expires": "YYYY-MM-DD"?}``.
+    ``command`` must match a ``run-tests --command`` string exactly; ``reason``
+    is required so a waiver always says why (owner, ticket, flake). An entry
+    past its ``expires`` date stops applying. Returns (active, notes) where
+    notes describe skipped or expired entries for the execution log.
+    """
+    from datetime import date as _date  # noqa: PLC0415
+    from lib_validate import load_project_policy  # noqa: PLC0415
+
+    raw = load_project_policy(task_dir).get("known_test_failures")
+    if not isinstance(raw, list):
+        return {}, []
+    active: dict[str, dict] = {}
+    notes: list[str] = []
+    today = _date.today()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        command = entry.get("command")
+        reason = entry.get("reason")
+        if not isinstance(command, str) or not command.strip():
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            notes.append(f"ignored known failure without a reason: {command}")
+            continue
+        expires = entry.get("expires")
+        if expires is not None:
+            try:
+                if _date.fromisoformat(str(expires)) < today:
+                    notes.append(f"known failure expired {expires}: {command}")
+                    continue
+            except ValueError:
+                notes.append(f"ignored known failure with invalid expires {expires!r}: {command}")
+                continue
+        active[command] = {"reason": reason.strip(), "expires": expires}
+    return active, notes
+
+
 def cmd_run_tests(args: argparse.Namespace) -> int:
     """Run the plan's test commands and record the outcome in test-results.json.
 
@@ -7019,6 +7215,12 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
     repair log can only cite audit-report findings, and none exist before the
     audit runs. The DONE gate refuses while the recorded status is not
     "passed", so the failure cannot be audited away without a passing re-run.
+
+    A failing command listed in the project policy's ``known_test_failures``
+    (exact command, a reason, optional expiry) is recorded as a known failure
+    and does not block: the run records ``passed_with_known_failures``. This
+    keeps a pre-existing or flaky repo-wide suite the task does not own from
+    consuming the task's repair budget.
     """
     import subprocess as _subprocess
     import time as _time
@@ -7077,15 +7279,37 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
                 "passed": exit_code == 0,
             })
 
-        passed = all(r["passed"] for r in records)
+        known, known_notes = _active_known_test_failures(task_dir)
+        for record in records:
+            if not record["passed"] and record["command"] in known:
+                record["known_failure"] = known[record["command"]]
+        failed_commands = [
+            r["command"] for r in records if not r["passed"] and "known_failure" not in r
+        ]
+        known_failed = [r["command"] for r in records if "known_failure" in r]
+        passed = not failed_commands
+        if not passed:
+            status = "failed"
+        elif known_failed:
+            status = "passed_with_known_failures"
+        else:
+            status = "passed"
         results_path = task_dir / "test-results.json"
         _write_ctl_json(task_dir, results_path, {
-            "status": "passed" if passed else "failed",
+            "status": status,
             "recorded_at": now_iso(),
             "stage": stage,
             "results": records,
+            "known_failures": known_failed,
         })
-        failed_commands = [r["command"] for r in records if not r["passed"]]
+        for note in known_notes:
+            append_execution_log(task_dir, f"[WARN] tests — {note}")
+        if known_failed:
+            append_execution_log(
+                task_dir,
+                f"[WARN] tests — known failures (policy known_test_failures, not blocking): "
+                f"{', '.join(known_failed)}",
+            )
         append_execution_log(
             task_dir,
             "[DONE] tests — passed" if passed
@@ -7101,6 +7325,7 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
             "stage": manifest.get("stage"),
             "results_path": str(results_path),
             "failed_commands": failed_commands,
+            "known_failures": known_failed,
             "next_command": "/dynos-work:audit" if stage == "TEST_EXECUTION" else None,
         }, indent=2))
         return 0
@@ -7760,24 +7985,27 @@ def _repair_convergence_cap_reasons(task_dir: Path, root: Path) -> list[str]:
     Two caps over the findings still blocking (accepted findings excluded):
 
     - per finding: a finding (or a reworded variant with the same auditor,
-      class and file) already repaired ``MAX_REPAIR_RETRIES + 1`` times;
+      class and file) already repaired ``max_repair_retries(root) + 1`` times
+      (policy ``max_repair_retries_per_finding``, default 3);
     - per auditor: an auditor whose findings already drove
       ``max_repair_cycles_per_auditor`` repair cycles, which catches an
       auditor that reports a new variant of the same issue every re-audit.
     """
-    from lib_core import MAX_REPAIR_RETRIES, max_repair_cycles_per_auditor  # noqa: PLC0415
+    from lib_core import max_repair_cycles_per_auditor, max_repair_retries  # noqa: PLC0415
 
     blocking = [f for f in collect_repair_findings(task_dir)["findings"] if finding_is_blocking(f)]
     if not blocking:
         return []
     _, by_id, by_class = _prior_repair_retry_index(task_dir)
+    retry_cap = max_repair_retries(root)
     reasons: list[str] = []
     for finding in blocking:
         previous = _inherited_retry_count(finding, by_id, by_class)
-        if previous is not None and previous >= MAX_REPAIR_RETRIES:
+        if previous is not None and previous >= retry_cap:
             reasons.append(
                 f"retry cap: {finding['_auditor']} {finding['id']} was already repaired "
-                f"{previous + 1} times (max {MAX_REPAIR_RETRIES} retries, counting reworded variants)"
+                f"{previous + 1} times (max {retry_cap} retries, counting reworded variants; "
+                "policy max_repair_retries_per_finding)"
             )
     cycle_cap = max_repair_cycles_per_auditor(root)
     history = _prior_auditor_repair_cycles(task_dir)
@@ -7932,6 +8160,37 @@ def _newer_audit_report(task_dir: Path, summary_path: Path) -> Path | None:
     return newest[1] if newest else None
 
 
+def _record_deferred_scope(task_dir: Path) -> list[str]:
+    """Persist the spec's ``## Deferred Scope`` items as deferred-scope.json.
+
+    Best-effort (never blocks DONE). Returns the items so the DONE output
+    can surface them; an empty list writes nothing.
+    """
+    from lib_validate import DEFERRED_SCOPE_FILE, parse_deferred_scope  # noqa: PLC0415
+
+    try:
+        items = parse_deferred_scope((task_dir / "spec.md").read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    if not items:
+        return []
+    try:
+        write_json(task_dir / DEFERRED_SCOPE_FILE, {
+            "task_id": task_dir.name,
+            "recorded_at": now_iso(),
+            "source": "spec.md ## Deferred Scope",
+            "items": items,
+        })
+        append_execution_log(
+            task_dir,
+            f"[DEFERRED] {len(items)} scope item(s) cut from this task need a follow-up task: "
+            + "; ".join(items),
+        )
+    except Exception as exc:  # noqa: BLE001 — must not block DONE
+        print(f"warning: could not record deferred scope: {exc}", file=sys.stderr)
+    return items
+
+
 def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -8045,6 +8304,8 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
                             file=sys.stderr,
                         )
 
+        deferred_scope = _record_deferred_scope(task_dir)
+
         _, updated = transition_task(task_dir, "DONE")
         # task-20260503-002: emit user_summary in stdout JSON (read verbatim from
         # the just-copied completion.json — no re-derivation).
@@ -8055,6 +8316,7 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
             "completion_path": str(completion_path),
             "completed_at": updated.get("completed_at"),
             "user_summary": completion.get("user_summary"),
+            "deferred_scope": deferred_scope,
         }, indent=2))
         return 0
     except Exception as exc:
@@ -9304,6 +9566,16 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
     waive_rule_parser.add_argument("rule_id")
     waive_rule_parser.add_argument("--reason", required=True)
     waive_rule_parser.set_defaults(func=cmd_waive_rule)
+
+    reopen_parser = subparsers.add_parser(
+        "reopen",
+        help="Reopen a DONE/CALIBRATED/FAILED task: record a reopen receipt and return it to CHECKPOINT_AUDIT",
+    )
+    reopen_parser.add_argument("task_dir")
+    reopen_parser.add_argument("--reason", required=True)
+    reopen_parser.add_argument("--approver", default="human")
+    reopen_parser.add_argument("--details-file", default=None, dest="details_file")
+    reopen_parser.set_defaults(func=cmd_reopen)
 
     accept_finding_parser = subparsers.add_parser(
         "accept-finding",

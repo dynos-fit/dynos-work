@@ -143,3 +143,61 @@ def test_failing_tests_block_goes_to_spec_completion_only(tmp_path: Path) -> Non
 
 def test_test_results_is_control_plane() -> None:
     assert "test-results.json" in _CONTROL_PLANE_EXACT
+
+
+def _write_policy(td: Path, policy: dict) -> None:
+    from lib_core import _persistent_project_dir
+
+    policy_dir = _persistent_project_dir(td.parent.parent)
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    (policy_dir / "policy.json").write_text(json.dumps(policy))
+
+
+FLAKY = "echo order-dependent failure; exit 1"
+
+
+def test_known_failure_from_policy_does_not_block(tmp_path: Path) -> None:
+    """Field report: a pre-existing, repo-wide flaky suite blocked DONE and ate
+    the task's repair budget. A policy known_test_failures entry waives it."""
+    td = _ready_task(tmp_path)
+    _write_policy(td, {"known_test_failures": [
+        {"command": FLAKY, "reason": "pre-existing order dependence, owner: db team", "expires": "2999-01-01"},
+    ]})
+    code, payload = _run_tests(td, "true", FLAKY)
+
+    assert code == 0, payload
+    assert payload["status"] == "tests_passed"
+    assert payload["failed_commands"] == []
+    assert payload["known_failures"] == [FLAKY]
+    results = json.loads((td / "test-results.json").read_text())
+    assert results["status"] == "passed_with_known_failures"
+    assert results["results"][1]["known_failure"]["reason"].startswith("pre-existing")
+    assert _failing_test_results_err(td) is None
+    assert _build_failing_tests_block(td, "spec-completion-auditor") == ""
+    assert "known failures" in (td / "execution-log.md").read_text()
+
+
+def test_known_failure_does_not_mask_other_failures(tmp_path: Path) -> None:
+    td = _ready_task(tmp_path)
+    _write_policy(td, {"known_test_failures": [{"command": FLAKY, "reason": "flaky"}]})
+    _, payload = _run_tests(td, FLAKY, "exit 2")
+
+    assert payload["status"] == "tests_failed"
+    assert payload["failed_commands"] == ["exit 2"]
+    assert json.loads((td / "test-results.json").read_text())["status"] == "failed"
+    assert _failing_test_results_err(td) is not None
+
+
+@pytest.mark.parametrize("entry", [
+    {"command": FLAKY, "reason": "flaky", "expires": "2000-01-01"},
+    {"command": FLAKY, "reason": ""},
+    {"command": FLAKY, "reason": "flaky", "expires": "not-a-date"},
+])
+def test_expired_or_unexplained_known_failure_still_blocks(tmp_path: Path, entry: dict) -> None:
+    td = _ready_task(tmp_path)
+    _write_policy(td, {"known_test_failures": [entry]})
+    _, payload = _run_tests(td, FLAKY)
+
+    assert payload["status"] == "tests_failed"
+    assert json.loads((td / "test-results.json").read_text())["status"] == "failed"
+    assert "[WARN] tests" in (td / "execution-log.md").read_text()

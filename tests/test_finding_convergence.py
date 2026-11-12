@@ -287,3 +287,40 @@ def test_cycle_cap_policy_override_and_accepted_findings(tmp_path: Path, env, mo
     assert accepted.returncode == 0, accepted.stderr
     payload = json.loads(_ctl(env, "run-repair-retry", str(td2)).stdout)
     assert payload["status"] == "repair_retry_ready", payload
+
+
+def test_retry_cap_follows_policy_max_repair_retries_per_finding(tmp_path: Path, env, monkeypatch):
+    """Field report: a project that raised max_repair_cycles_per_auditor to 10
+    still lost tasks at 3 retries of one finding, because the per-finding cap
+    was a hard-coded constant. It now follows max_repair_retries_per_finding."""
+    from lib_core import _persistent_project_dir, max_repair_retries
+
+    monkeypatch.setenv("DYNOS_HOME", env["DYNOS_HOME"])
+    td = _task(tmp_path, stage="REPAIR_EXECUTION")
+    _exhausted_cycles(td, [1], retry=3)
+    _report(td, [PERF_1])
+    root = td.parent.parent
+    assert max_repair_retries(root) == 3
+    assert json.loads(_ctl(env, "run-repair-retry", str(td)).stdout)["status"] == "escalation_required"
+
+    policy_dir = _persistent_project_dir(root)
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    (policy_dir / "policy.json").write_text(json.dumps({
+        "max_repair_cycles_per_auditor": 10, "max_repair_retries_per_finding": 6,
+    }))
+    assert max_repair_retries(root) == 6
+    payload = json.loads(_ctl(env, "run-repair-retry", str(td)).stdout)
+    assert payload["status"] == "repair_retry_ready", payload
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "5", None])
+def test_retry_cap_ignores_invalid_policy_values(tmp_path: Path, monkeypatch, bad):
+    from lib_core import MAX_REPAIR_RETRIES, _persistent_project_dir, max_repair_retries
+
+    monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "home"))
+    root = tmp_path / "project"
+    (root / ".dynos").mkdir(parents=True)
+    policy_dir = _persistent_project_dir(root)
+    policy_dir.mkdir(parents=True, exist_ok=True)
+    (policy_dir / "policy.json").write_text(json.dumps({"max_repair_retries_per_finding": bad}))
+    assert max_repair_retries(root) == MAX_REPAIR_RETRIES

@@ -39,6 +39,7 @@ For an acceptance criterion that requires RUNNING something (e.g. "ruff check sr
 2. `covered` requires a record with `exit_code: 0` for a command that actually proves the criterion. Cite it as evidence: `evidence/verification/{segment-id}.json — {command} — exit {exit_code}` or `test-results.json — {command} — exit {exit_code}`.
 3. A record with non-zero `exit_code` is proof of FAILURE — cite it the same way.
 4. If NO machine record covers the criterion, mark it `missing` exactly as before. Do NOT accept the executor's narrative claim, do NOT run the command yourself (you have no Bash), and do NOT downgrade to `partial` because "it probably passes." The absence of machine evidence is the finding.
+5. **A test that was written but never run proves nothing.** When a criterion's proof is a test (unit, integration, widget, end-to-end, device or simulator), the test file existing — even one that reads correctly, "was analyzed", or compiles — is NOT evidence. `covered` requires a verification record or `test-results.json` entry whose command actually executed that test, with `exit_code: 0`. If the evidence says the test was "written but not run", "not executed", "needs a device/simulator", or names no command, mark the criterion `missing` with a blocking finding titled "test-backed criterion never executed" that names the test file and the command that would run it. Never move this to follow-ups.
 
 ## Read Budget (HARD CAP)
 
@@ -79,6 +80,7 @@ Stop-condition: when within 3 tool uses of your budget limit, stop investigating
 - A function that exists but has a stub body is not evidence
 - Evidence must be: `file.ts:line — function/component name — what it does`
 - If the criterion is user-visible, evidence must include the actual rendering or interaction path, not just a helper function.
+- A user-visible feature must be **reachable**: cite the line that wires it into the running app (route or navigation registration, module/feature registry entry, menu item, DI/provider registration, exported entry point). A screen, module or component that is built — or flagged built (`isBuilt: true`, enabled in a manifest) — but registered nowhere a user can reach is `partial`, with a blocking finding naming the missing registration.
 - If the criterion is about failure handling, evidence must include the failing branch, not just the success path.
 
 ## Output

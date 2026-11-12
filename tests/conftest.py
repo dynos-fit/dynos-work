@@ -50,6 +50,22 @@ def _inject_postmortem_symbols():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dynos_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point DYNOS_HOME at a throwaway directory for EVERY test.
+
+    Without this, any test that touches the registry, a persistent project
+    dir, or policy.json without opting into ``dynos_home`` wrote into the
+    developer's real ``~/.dynos/projects`` (field report: 22,535 leaked
+    pytest-named project dirs). Tests that need a specific home still
+    override it with their own ``monkeypatch.setenv``; subprocesses inherit
+    it through ``os.environ``.
+    """
+    monkeypatch.setenv("DYNOS_HOME", str(tmp_path_factory.mktemp("dynos-home-auto")))
+
+
 @pytest.fixture
 def dynos_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     root = tmp_path / "project"

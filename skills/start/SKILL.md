@@ -47,7 +47,7 @@ JSON payloads (classification, execution-graph, repair-log) are piped to the ctl
 ## Scope Standard
 
 - Do not let ambiguity leak downstream; resolve it or name it.
-- Vague criteria and unbounded scope do not survive a phase gate — but neither does bloat. The validator enforces ceilings of 20 acceptance criteria, 2,500 spec words, and 4,000 plan words. A task that needs more is two tasks.
+- Vague criteria and unbounded scope do not survive a phase gate — but neither does bloat. The validator enforces ceilings of 20 acceptance criteria, 2,500 spec words, and 4,000 plan words. A task that needs more is two tasks: everything cut goes under the spec's `## Deferred Scope` section, one bullet per item, which DONE reports and records in `deferred-scope.json`.
 - Missing validation, error handling, auth, loading, empty, retry, and rollback behaviour belongs inside the criteria it affects, not as one extra criterion per state.
 - For judgment feedback, allow at most one Repair pass before showing the artifact again. Each post-approval amendment is counted; the default window is one per artifact.
 - Prefer a blocked gate over a rotten artifact, and a short artifact a human can actually read over a long one they rubber-stamp.
@@ -557,6 +557,7 @@ Foundry Ready to Execute.
 
 Task:   {task_id}
 Spec:   {N} acceptance criteria (human approved)
+Deferred: {M} item(s) under spec.md "## Deferred Scope" (omit this line when none)
 Plan:   approved, validated, and audited (mode: {standard|hierarchical})
 Memory: advisory only
 

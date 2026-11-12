@@ -954,6 +954,26 @@ def load_prevention_rules(root: Path) -> list[dict]:
     return data.get("rules", [])
 
 
+def task_prevention_rules(root: Path, task_dir: Path | None) -> list[dict]:
+    """Prevention rules as seen by one task: its pinned snapshot when it has
+    one, else the live shared file (legacy tasks, or no task context).
+
+    Every prompt-building path that serves a task reads rules through here,
+    matching the rules check and DONE drift gate, which already read the
+    snapshot.
+    """
+    if task_dir is not None:
+        try:
+            from lib_receipts import pinned_rules  # noqa: PLC0415
+
+            pinned = pinned_rules(Path(task_dir))
+        except Exception:  # noqa: BLE001 — fall back to the live file
+            pinned = None
+        if pinned is not None:
+            return [r for r in pinned if isinstance(r, dict)]
+    return load_prevention_rules(root)
+
+
 # Ensemble voting defaults — overridable via .dynos/config/policy.json
 ENSEMBLE_SAMPLE_RATE: float = 0.20
 _DEFAULT_ENSEMBLE_AUDITORS = {
@@ -1261,8 +1281,14 @@ def build_executor_plan(
     *,
     ctx: RouterContext | None = None,
     include_enforced: bool = False,
+    task_dir: Path | None = None,
 ) -> dict:
     """Build a complete, deterministic execution spawn plan.
+
+    ``task_dir``: when given, the task's pinned prevention-rules snapshot
+    (``rules-snapshot`` receipt) is used instead of the live shared file, so
+    a rule another task's postmortem adds mid-flight does not change what
+    this task's executors are told.
 
     Returns structured decisions for each segment's executor.
 
@@ -1286,7 +1312,7 @@ def build_executor_plan(
         so callers can prove the filter ran.
     """
     ctx = ctx or RouterContext(root)
-    all_rules = load_prevention_rules(root)
+    all_rules = task_prevention_rules(root, task_dir)
 
     plan = {
         "generated_at": now_iso(),
@@ -1306,12 +1332,14 @@ def build_executor_plan(
         # Step 1: filter to rules that target this executor (or all).
         # `auditor-only` rules (aggregate category-trend signals) are
         # excluded — executors cannot act on cross-task category warnings
-        # the way auditors reviewing code can.
+        # the way auditors reviewing code can. "all" is the wildcard the
+        # postmortem writes when a rule names no executor (agent_generator
+        # reads it the same way); missing executor is the legacy form.
         executor_scoped: list[dict] = [
             r for r in all_rules
             if isinstance(r, dict) and r.get("rule")
             and r.get("executor") != "auditor-only"
-            and (not r.get("executor") or r.get("executor") == executor)
+            and (not r.get("executor") or r.get("executor") in ("all", executor))
         ]
 
         # Step 2: AC 13 template filter. Advisory + missing-template
@@ -1697,6 +1725,7 @@ def cmd_executor_plan(args: argparse.Namespace) -> int:
             args.task_type,
             graph.get("segments", []),
             include_enforced=getattr(args, "include_enforced", False),
+            task_dir=graph_path.resolve().parent,
         )
     except (json.JSONDecodeError, OSError, ValueError) as exc:
         import sys as _sys
@@ -1923,6 +1952,7 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
                 args.task_type,
                 [target_seg],
                 include_enforced=getattr(args, "include_enforced", False),
+                task_dir=graph_path.resolve().parent,
             )
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             import sys as _sys
@@ -2297,6 +2327,37 @@ def _build_audit_budget_block(auditor_name: str, model: "str | None") -> str:
 _TEST_FAILURE_AUDITOR = "spec-completion-auditor"
 
 
+def _build_reopen_block(task_dir: Path) -> str:
+    """Why the task was reopened, for every auditor of a reopened task.
+
+    Empty unless ``ctl reopen`` ever reopened the task; the latest reopen is
+    the one the current audit pass answers.
+    """
+    try:
+        manifest = load_json(task_dir / "manifest.json")
+    except (OSError, ValueError):
+        return ""
+    reopens = manifest.get("reopens") if isinstance(manifest, dict) else None
+    if not isinstance(reopens, list) or not reopens:
+        return ""
+    latest = reopens[-1]
+    if not isinstance(latest, dict):
+        return ""
+    lines = [
+        "\n\n## Task Reopened (mandatory — injected)",
+        f"This task reached {latest.get('from_stage')} and was reopened by "
+        f"{latest.get('approver')} because a defect was found afterwards. Verify "
+        "the reported problem against the code. If it is real and in your "
+        "domain, report it as a **blocking** finding so it reaches repair; if "
+        "the code already handles it, say so with evidence.",
+        f"\nReason: {latest.get('reason')}",
+    ]
+    details = latest.get("details")
+    if isinstance(details, str) and details.strip():
+        lines.append(f"\nDetails:\n```\n{details.strip()}\n```")
+    return "\n".join(lines)
+
+
 def _build_failing_tests_block(task_dir: Path, auditor_name: str) -> str:
     """Known-defect block for a failed test run recorded in test-results.json.
 
@@ -2446,6 +2507,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
         + _build_ruthless_audit_brief(root, task_dir, plan, auditor_name, reaudit=_is_reaudit(task_dir))
         + _build_reaudit_context_block(task_dir, auditor_name)
         + _build_failing_tests_block(task_dir, auditor_name)
+        + _build_reopen_block(task_dir)
     )
 
     # Inject aggregate category-trend prevention rules (executor="auditor-only").
@@ -2453,7 +2515,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     # code; executors writing code cannot. They are excluded from every
     # executor prompt by build_executor_plan and surface here instead.
     aggregate_rules = [
-        r for r in load_prevention_rules(root)
+        r for r in task_prevention_rules(root, task_dir)
         if isinstance(r, dict) and r.get("rule")
         and r.get("executor") == "auditor-only"
     ]

@@ -50,6 +50,9 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     "finding_accepted",
     # Audit trail for `ctl acknowledge-out-of-scope` (write-scope.json).
     "out_of_scope_acknowledged",
+    # Audit trail for `ctl reopen`; the reopen itself lives in the
+    # reopen-{n} receipt and manifest.reopens.
+    "task_reopened",
     "repair_history_record_failed",
     "repair_cap_reached",
     "prevention_rules_healed",
