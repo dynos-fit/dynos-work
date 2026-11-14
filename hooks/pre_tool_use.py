@@ -15,7 +15,9 @@ Stderr on denial is prefixed with "write-policy: ".
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import io
 import json
 import os
 import re
@@ -1887,6 +1889,37 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if os.environ.get("CURSOR_PLUGIN_ROOT"):
+        # Cursor's permission hooks require a JSON response on stdout even
+        # when the tool is allowed. The shared Claude/Codex hook uses exit
+        # codes and stderr for its decision, so translate that protocol here.
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+        try:
+            with (
+                contextlib.redirect_stdout(stdout_buffer),
+                contextlib.redirect_stderr(stderr_buffer),
+            ):
+                result = main()
+        except SystemExit as exc:
+            result = int(exc.code or 0)
+        except Exception as exc:
+            print(f"pre-tool-use: internal error: {exc}", file=stderr_buffer)
+            result = 1
+
+        diagnostic = stderr_buffer.getvalue().strip() or stdout_buffer.getvalue().strip()
+        if result == 0:
+            response = {"permission": "allow"}
+        else:
+            if result == 2:
+                message = diagnostic or "Denied by dynos-work write/read policy."
+            else:
+                detail = f": {diagnostic}" if diagnostic else ""
+                message = f"dynos-work pre-tool-use hook failed (exit {result}){detail}"
+            response = {"permission": "deny", "user_message": message}
+        print(json.dumps(response))
+        sys.exit(0)
+
     try:
         sys.exit(main())
     except SystemExit:
