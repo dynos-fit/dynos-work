@@ -18,10 +18,13 @@ def detect_host() -> str:
     """Detect the current AI host from environment variables.
 
     Priority:
-      1. CODEX_PLUGIN_ROOT non-empty  → "codex"
-      2. CLAUDE_PLUGIN_ROOT non-empty → "claude"
-      3. fallback                     → "claude"
+      1. CURSOR_PLUGIN_ROOT non-empty → "cursor"
+      2. CODEX_PLUGIN_ROOT non-empty  → "codex"
+      3. CLAUDE_PLUGIN_ROOT non-empty → "claude"
+      4. fallback                     → "claude"
     """
+    if os.environ.get("CURSOR_PLUGIN_ROOT", ""):
+        return "cursor"
     if os.environ.get("CODEX_PLUGIN_ROOT", ""):
         return "codex"
     # CLAUDE_PLUGIN_ROOT or absent — safe default is "claude"

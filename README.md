@@ -6,7 +6,7 @@
 
 # dynos-work
 
-A Claude Code and Codex plugin that builds features, catches its own bugs, and gets better at your codebase over time.
+A Claude Code, Cursor, and Codex plugin that builds features, catches its own bugs, and gets better at your codebase over time.
 
 ## Install
 
@@ -16,6 +16,10 @@ A Claude Code and Codex plugin that builds features, catches its own bugs, and g
 claude plugin marketplace add dynos-fit/dynos-work
 claude plugin install dynos-work
 ```
+
+### Cursor
+
+This repo includes a Cursor plugin manifest at `.cursor-plugin/plugin.json` (skills, agents, and Cursor-native hooks). Install it from this repository through Cursor's plugin / marketplace flow, or add the repo as a local plugin marketplace via `.cursor-plugin/marketplace.json`.
 
 ### Codex
 
@@ -28,6 +32,10 @@ This repo also includes a Codex plugin manifest at `.codex-plugin/plugin.json`. 
 ```
 /dynos-work:start build a user settings page
 ```
+
+### Cursor
+
+Invoke the `start` skill with your task, for example: "Use dynos-work start to build a user settings page." Cursor uses the Task tool where Claude Code uses Agent, and Shell where Claude Code uses Bash — the hooks and skills accept both.
 
 ### Codex
 
@@ -62,7 +70,7 @@ After the task, it learns from what went wrong and builds prevention rules for n
 
 ## Requirements
 
-Claude Code or Codex, plus Python 3 for the local dynos-work control plane.
+Claude Code, Cursor, or Codex, plus Python 3 for the local dynos-work control plane.
 
 ## Running with permissions ON
 

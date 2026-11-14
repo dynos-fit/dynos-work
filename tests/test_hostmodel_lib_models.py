@@ -65,8 +65,9 @@ class TestLibModelsTierConstants:
         """AC-3: HOST_CLAUDE, HOST_CODEX, ALL_HOSTS must have correct values."""
         assert lib_models.HOST_CLAUDE == "claude"
         assert lib_models.HOST_CODEX == "codex"
+        assert lib_models.HOST_CURSOR == "cursor"
         assert isinstance(lib_models.ALL_HOSTS, frozenset)
-        assert lib_models.ALL_HOSTS == frozenset({"claude", "codex"})
+        assert lib_models.ALL_HOSTS == frozenset({"claude", "codex", "cursor"})
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,19 @@ class TestLibModelsCodexMappingNull:
             assert mapping["codex"][tier] is None, (
                 f"TIER_TO_MODEL['codex']['{tier}'] must be None, got {mapping['codex'][tier]!r}"
             )
+
+
+class TestLibModelsCursorUsesCursorPoolModels:
+    def test_cursor_tier_map_uses_composer_and_grok(self) -> None:
+        assert lib_models.resolve_model_for_tier("cursor", "fast") == "composer-2.5-fast"
+        assert lib_models.resolve_model_for_tier("cursor", "balanced") == "composer-2.5"
+        assert lib_models.resolve_model_for_tier("cursor", "deep") == "grok-4.7"
+        assert "claude" not in str(lib_models.TIER_TO_MODEL["cursor"])
+
+    def test_translate_claude_aliases_on_cursor_host(self) -> None:
+        assert lib_models.translate_model_for_host("sonnet", "cursor") == "composer-2.5"
+        assert lib_models.translate_model_for_host("opus", "cursor") == "grok-4.7"
+        assert lib_models.translate_model_for_host("sonnet", "claude") == "sonnet"
 
 
 # ---------------------------------------------------------------------------

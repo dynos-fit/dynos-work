@@ -23,12 +23,14 @@ PACKAGE_JSON = ROOT / "package.json"
 CLAUDE_PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 CLAUDE_MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
 CODEX_PLUGIN_JSON = ROOT / ".codex-plugin" / "plugin.json"
+CURSOR_PLUGIN_JSON = ROOT / ".cursor-plugin" / "plugin.json"
 CHANGELOG = ROOT / "CHANGELOG.md"
 VERSION_FILES = (
     PACKAGE_JSON,
     CLAUDE_PLUGIN_JSON,
     CLAUDE_MARKETPLACE_JSON,
     CODEX_PLUGIN_JSON,
+    CURSOR_PLUGIN_JSON,
 )
 
 

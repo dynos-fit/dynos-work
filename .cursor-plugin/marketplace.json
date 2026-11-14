@@ -1,0 +1,17 @@
+{
+  "name": "dynos-work",
+  "owner": {
+    "name": "dynos.fit",
+    "email": "hello@dynos.fit"
+  },
+  "metadata": {
+    "description": "dynos.fit marketplace for the dynos-work autonomous software foundry plugin."
+  },
+  "plugins": [
+    {
+      "name": "dynos-work",
+      "source": "./",
+      "description": "Autonomous Software Foundry. Human-directed, tool-grounded, self-improving. Plans, executes, audits, repairs — calibrates to your project over time."
+    }
+  ]
+}

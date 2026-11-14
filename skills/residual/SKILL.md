@@ -224,7 +224,7 @@ that case fall through to the normal human-approval path (the gates
 were not enabled, but the residual still runs).
 
 ```bash
-"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl set-auto-approve-gates \
+"${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}/bin/dynos" ctl set-auto-approve-gates \
   --task-dir .dynos/task-{new_id} \
   --from-residual-id {row["id"]}
 ```
@@ -245,7 +245,7 @@ Fall-through behavior:
 Recommended logging (through ctl; never append to `execution-log.md` directly):
 
 ```bash
-"${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}/bin/dynos" ctl log-append .dynos/{new_id} --tag GATE --message "set-auto-approve-gates residual={row.id} task={new_id} result={ok|refused: <reason>}"
+"${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}/bin/dynos" ctl log-append .dynos/{new_id} --tag GATE --message "set-auto-approve-gates residual={row.id} task={new_id} result={ok|refused: <reason>}"
 ```
 
 The auto-approval pathway is an opportunistic acceleration of

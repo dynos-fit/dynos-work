@@ -420,10 +420,18 @@ def main(argv: list[str]) -> int:
         print("agent-spawn-log: stdin payload must be a JSON object", file=sys.stderr)
         return 1
 
-    if payload.get("tool_name") != "Agent":
+    # Claude Code uses Agent; Cursor uses Task. Accept both and normalize the
+    # spawn-log `tool` field to Agent so receipt cross-checks stay stable.
+    raw_tool = payload.get("tool_name")
+    if raw_tool not in ("Agent", "Task"):
         return 0
 
-    cwd_str = payload.get("cwd") or os.getcwd()
+    cwd_str = (
+        payload.get("cwd")
+        or os.environ.get("CURSOR_PROJECT_DIR")
+        or os.environ.get("CLAUDE_PROJECT_DIR")
+        or os.getcwd()
+    )
     try:
         cwd = Path(cwd_str).resolve()
     except OSError:

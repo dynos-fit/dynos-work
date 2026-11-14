@@ -133,14 +133,14 @@ class TestEnsembleConfig:
             "ensemble_voting_models": ["haiku"],
             "ensemble_escalation_model": "sonnet",
         }
-        auditors, models, escalation = _load_ensemble_config(config)
+        auditors, models, escalation = _load_ensemble_config(config, "claude")
         assert auditors == {"security-auditor"}
         assert models == ["haiku"]
         assert escalation == "sonnet"
 
     def test_config_absent_uses_defaults(self):
         from router import _load_ensemble_config, _DEFAULT_ENSEMBLE_AUDITORS
-        auditors, models, escalation = _load_ensemble_config({})
+        auditors, models, escalation = _load_ensemble_config({}, "claude")
         assert auditors == _DEFAULT_ENSEMBLE_AUDITORS
         assert models == ["haiku", "sonnet"]
         # Escalation is the frontier tier: the voting arms decide the common
@@ -149,7 +149,9 @@ class TestEnsembleConfig:
 
     def test_partial_config_fills_defaults(self):
         from router import _load_ensemble_config
-        auditors, models, escalation = _load_ensemble_config({"ensemble_auditors": ["code-quality-auditor"]})
+        auditors, models, escalation = _load_ensemble_config(
+            {"ensemble_auditors": ["code-quality-auditor"]}, "claude"
+        )
         assert auditors == {"code-quality-auditor"}
         assert models == ["haiku", "sonnet"]  # default
         assert escalation == "fable"  # default (frontier tier)

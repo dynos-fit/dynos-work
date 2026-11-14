@@ -198,6 +198,7 @@ class TestEntryPathHostResolution:
         """cq-005: no control-plane.json + no env vars -> claude (pre-task behavior)."""
         import lib_tokens_hook
 
+        monkeypatch.delenv("CURSOR_PLUGIN_ROOT", raising=False)
         monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
         assert lib_tokens_hook._resolve_active_host(tmp_path) == "claude"
