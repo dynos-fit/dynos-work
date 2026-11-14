@@ -11,6 +11,11 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.9.1] - 2026-11-14
+
+### Fixed
+- **Cursor pre-tool hooks now return permission JSON.** Allowed calls emit an explicit `allow` response, and denials or hook errors return a readable `deny` response instead of an empty output that Cursor blocks as a hook failure.
+
 ## [7.9.0] - 2026-11-13
 Cursor plugin compatibility alongside the existing Claude Code and Codex packaging.
 
