@@ -4436,7 +4436,7 @@ def _resolve_task_host(task_dir: Path) -> tuple[str, str]:
     hook-written and ``write_policy`` denies it to every agent role, so an
     enforcement path can lean on it. The persistent project dir is the second
     candidate (``receipts/stage.py`` resolves host from there). Env detection
-    is last and reports source ``"env"`` — an agent can put CODEX_PLUGIN_ROOT
+    is last and reports source ``"env"`` — an agent can put CURSOR_PLUGIN_ROOT / CODEX_PLUGIN_ROOT
     in front of a Bash invocation, so nothing relaxes silently on that signal.
     """
     root = _root_for_task_dir(task_dir)

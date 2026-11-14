@@ -1,0 +1,28 @@
+{
+  "name": "dynos-work",
+  "displayName": "dynos-work",
+  "description": "Autonomous Software Foundry. Human-directed, tool-grounded, self-improving. Plans, executes, audits, repairs — calibrates to your project over time.",
+  "version": "7.9.0",
+  "author": {
+    "name": "dynos.fit",
+    "email": "hello@dynos.fit"
+  },
+  "homepage": "https://dynos.fit",
+  "repository": "https://github.com/dynos-fit/dynos-work",
+  "license": "MIT",
+  "keywords": [
+    "audit",
+    "autonomous",
+    "engineering",
+    "agents",
+    "planning",
+    "repair",
+    "self-learning",
+    "foundry",
+    "human-in-the-loop"
+  ],
+  "logo": "dynos-logo-dark.svg",
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "hooks": "./hooks-cursor.json"
+}

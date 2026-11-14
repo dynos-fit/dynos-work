@@ -129,7 +129,7 @@ Every criterion must be falsifiable by a named test, and every executor must be 
 
 ## Phase: Spec + Plan (combined planning path)
 
-When given this phase, produce BOTH `spec.md` AND `plan.md` AND an execution-graph payload in a single pass. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -`, piping the payload over stdin with a heredoc. This phase is the default (`planning_path == "combined"`): everything except migrations, critical-risk tasks, and high-risk tasks that touch `db` or `security`.
+When given this phase, produce BOTH `spec.md` AND `plan.md` AND an execution-graph payload in a single pass. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `"${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -`, piping the payload over stdin with a heredoc. This phase is the default (`planning_path == "combined"`): everything except migrations, critical-risk tasks, and high-risk tasks that touch `db` or `security`.
 
 Read `raw-input.md`, `discovery-notes.md`, `design-decisions.md`, AND the actual implementation files referenced in the task. Verify runtime semantics directly — do not assume.
 
@@ -152,7 +152,7 @@ Before classifying or writing anything, answer these silently:
 
 ### Step 2 — Classify
 
-Produce a JSON classification payload with this shape and persist the final normalized classification ONLY through the ctl wrapper, piping the payload over stdin with a heredoc (`"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl write-classification .dynos/task-{id} --from - <<'JSON' ... JSON`) — never stage it at /tmp or any raw path:
+Produce a JSON classification payload with this shape and persist the final normalized classification ONLY through the ctl wrapper, piping the payload over stdin with a heredoc (`"${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}/bin/dynos" ctl write-classification .dynos/task-{id} --from - <<'JSON' ... JSON`) — never stage it at /tmp or any raw path:
 
 ```json
 {
@@ -224,7 +224,7 @@ Inputs are the existing artifact(s) named by the structured JSON error list. Edi
 
 ## Phase: Implementation Planning (+ Execution Graph)
 
-When given this phase, generate BOTH the implementation plan (`plan.md`) AND the execution graph payload. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -` (payload over stdin via heredoc). This eliminates the need for a separate execution-coordinator spawn.
+When given this phase, generate BOTH the implementation plan (`plan.md`) AND the execution graph payload. Persist `plan.md` directly, but persist the final `execution-graph.json` ONLY through `"${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -` (payload over stdin via heredoc). This eliminates the need for a separate execution-coordinator spawn.
 
 If `.dynos/task-{id}/design-doc.md` exists, its §11 lists the intended segments — your execution graph MUST match that segment shape (count, executor type, depends_on edges). If you must diverge, justify the divergence in `plan.md` under Open Questions; the plan-audit will flag silent drift.
 
@@ -307,7 +307,7 @@ For ORMs: name the model class and its location. For raw SQL: name the migration
 [Any unresolved decisions executor subagents should be aware of. For each: state the question, the options considered, and a recommended default if the executor needs to proceed without an answer.]
 ```
 
-Build the execution graph payload with this shape and persist it by piping it to `"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -` over stdin with a heredoc:
+Build the execution graph payload with this shape and persist it by piping it to `"${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}/bin/dynos" ctl write-execution-graph .dynos/task-{id} --from -` over stdin with a heredoc:
 
 ```json
 {

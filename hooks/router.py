@@ -48,11 +48,13 @@ from lib_models import (
     valid_models_for_host as _valid_models_for_host,
     ALL_TIERS as _ALL_TIERS,
     HOST_CLAUDE as _HOST_CLAUDE,
+    HOST_CURSOR as _HOST_CURSOR,
     TIER_FRONTIER as _TIER_FRONTIER,
     clamp_model_to_role_ceiling as _clamp_model_to_role_ceiling,
     max_tier_for_role as _max_tier_for_role,
     model_rank as _model_rank,
     tier_rank as _tier_rank,
+    translate_model_for_host as _translate_model_for_host,
 )
 from lib_host import detect_host as _detect_host
 import lib_ensemble as _lib_ensemble
@@ -205,11 +207,11 @@ def _explorable_models_for_role(role: str, host: str = _HOST_CLAUDE) -> list[str
     ``random.choice`` over a set iteration order is not reproducible.
     """
     ceiling_rank = _tier_rank(_max_tier_for_role(role))
-    floor_model = _resolve_model_for_tier(_HOST_CLAUDE, _TIER_DEEP)
+    floor_model = _resolve_model_for_tier(host, _TIER_DEEP)
     return sorted(
         m
         for m in _valid_models_for_host(host)
-        if m != floor_model and _model_rank(m) <= ceiling_rank
+        if m != floor_model and _model_rank(m, host=host) <= ceiling_rank
     )
 
 
@@ -331,7 +333,7 @@ def _parse_effectiveness_scores_from_text(
 
 
 def _filter_effectiveness_scores(
-    scores: list[dict], role: str, task_type: str,
+    scores: list[dict], role: str, task_type: str, host: str | None = None,
 ) -> list[dict]:
     """Filter and aggregate effectiveness scores for a given role and task_type.
 
@@ -343,8 +345,13 @@ def _filter_effectiveness_scores(
         if entry.get("role") != role or entry.get("task_type") != task_type:
             continue
         m = entry.get("model", "")
-        if not m or m not in _valid_models_for_host(_HOST_CLAUDE):
+        if not m:
             continue
+        _host = host or _HOST_CLAUDE
+        _translated = _translate_model_for_host(m, _host) or m
+        if _translated not in _valid_models_for_host(_host):
+            continue
+        m = _translated
         try:
             quality = float(entry.get("quality_ema", 0))
             cost = float(entry.get("cost_ema", 0))
@@ -567,6 +574,7 @@ def _resolve_model_uncapped(
     model_overrides = policy.get("model_overrides", {})
     model = model_overrides.get(key) or model_overrides.get(role)
     if model:
+        model = _translate_model_for_host(model, host)
         result = {"model": model, "source": "explicit_policy"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
@@ -575,7 +583,7 @@ def _resolve_model_uncapped(
     # to feed the UCB1 bandit with multi-arm data. Fires AFTER explicit
     # policy (user config always wins) but BEFORE learned data tiers.
     epsilon = float(policy.get("exploration_epsilon", DEFAULT_EPSILON))
-    _security_floor_model = _resolve_model_for_tier(_HOST_CLAUDE, _TIER_DEEP)
+    _security_floor_model = _resolve_model_for_tier(host, _TIER_DEEP)
     if (
         epsilon > 0
         and role != "security-auditor"
@@ -585,17 +593,22 @@ def _resolve_model_uncapped(
         # Exploration arms are bounded by the role's tier ceiling. Drawing an
         # above-ceiling arm and clamping it afterwards would burn the draw and
         # write a duplicate observation for the ceiling model instead.
-        _arms = _explorable_models_for_role(role)
+        _arms = _explorable_models_for_role(role, host)
         if not _arms:
-            _arms = [m for m in VALID_MODELS if m != _security_floor_model]
-        model = random.choice(_arms)
-        result = {"model": model, "source": "exploration", "epsilon": epsilon}
-        log_event(root, "router_model_decision", role=role, task_type=task_type, model=model, source="exploration")
-        return result
+            host_models = list(_valid_models_for_host(host))
+            _arms = [m for m in host_models if m != _security_floor_model]
+        if _arms:
+            model = _translate_model_for_host(random.choice(_arms), host)
+            result = {"model": model, "source": "exploration", "epsilon": epsilon}
+            log_event(
+                root, "router_model_decision", role=role, task_type=task_type,
+                model=model, source="exploration",
+            )
+            return result
 
     # Steps 2-4 use learned data — skip when learning is disabled.
     if not (ctx.learning_enabled if ctx else is_learning_enabled(root)):
-        result = {"model": _default_model_for_role(role, _HOST_CLAUDE), "source": "default"}
+        result = {"model": _default_model_for_role(role, host), "source": "default"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source="default (learning_enabled=false)")
         return result
 
@@ -614,22 +627,24 @@ def _resolve_model_uncapped(
     # classify the frontier model as below-floor and downgrade
     # security-auditor from frontier back to deep.
     _floor_rank = _tier_rank(_TIER_DEEP)
-    _non_floor_claude_models = {
-        m for m in _valid_models_for_host(_HOST_CLAUDE) if _model_rank(m) < _floor_rank
+    _non_floor_models = {
+        m
+        for m in _valid_models_for_host(host)
+        if _model_rank(m, host=host) < _floor_rank
     }
     if all_scores:
-        candidates = _filter_effectiveness_scores(all_scores, role, task_type)
+        candidates = _filter_effectiveness_scores(all_scores, role, task_type, host=host)
         if candidates:
             exploration_c = float(policy.get("ucb_exploration_constant", DEFAULT_UCB_C))
             winner = _ucb_select_model(candidates, exploration_c)
             if winner:
-                model = winner["model"]
+                model = _translate_model_for_host(winner["model"], host)
                 source = "ucb"
                 result = {"model": model, "source": source,
                           "ucb_score": winner["ucb_score"],
                           "exploration_bonus": winner["exploration_bonus"]}
                 # Security floor: security-auditor never below deep-tier model
-                if role == "security-auditor" and model in _non_floor_claude_models:
+                if role == "security-auditor" and model in _non_floor_models:
                     result["model"] = _security_floor_model
                     result["source"] = "security_floor"
                 log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
@@ -638,12 +653,12 @@ def _resolve_model_uncapped(
     # 2b. Benchmark model performance — learned agent benchmark runs grouped by model
     benchmark_result = _benchmark_model_for_agent(root, role, task_type, ctx=ctx)
     if benchmark_result:
-        model = benchmark_result["model"]
+        model = _translate_model_for_host(benchmark_result["model"], host)
         result = {"model": model, "source": "benchmark_model",
                   "mean_composite": benchmark_result["mean_composite"],
                   "sample_count": benchmark_result["sample_count"]}
         # Security floor: security-auditor never below deep-tier model
-        if role == "security-auditor" and model in _non_floor_claude_models:
+        if role == "security-auditor" and model in _non_floor_models:
             result["model"] = _security_floor_model
             result["source"] = "security_floor"
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
@@ -652,9 +667,9 @@ def _resolve_model_uncapped(
     # 3. model-policy.json fallback (backward compat for pre-UCB projects)
     entry = _read_policy_json(root, "model-policy.json", key)
     if entry and isinstance(entry, dict) and entry.get("model"):
-        model = entry["model"]
+        model = _translate_model_for_host(entry["model"], host)
         # Security floor
-        if role == "security-auditor" and model in _non_floor_claude_models:
+        if role == "security-auditor" and model in _non_floor_models:
             result = {"model": _security_floor_model, "source": "security_floor"}
             log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
             return result
@@ -668,7 +683,7 @@ def _resolve_model_uncapped(
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
 
-    result = {"model": _default_model_for_role(role, _HOST_CLAUDE), "source": "default"}
+    result = {"model": _default_model_for_role(role, host), "source": "default"}
     log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
     return result
 
@@ -693,12 +708,14 @@ def resolve_model(
     pre-clamp value is preserved on ``uncapped_model`` so receipts still show
     what the selector actually wanted.
     """
+    if host is None:
+        host = _detect_host()
     result = _resolve_model_uncapped(root, role, task_type, ctx=ctx, host=host)
     if not isinstance(result, dict):
         return result
 
     selected = result.get("model")
-    capped = _clamp_model_to_role_ceiling(role, selected, _HOST_CLAUDE)
+    capped = _clamp_model_to_role_ceiling(role, selected, host)
     if capped == selected:
         return result
 
@@ -993,20 +1010,22 @@ _DEFAULT_ENSEMBLE_AUDITORS = {
 _DETERMINISTIC_FIRST_AUDITORS: frozenset[str] = frozenset({
     "claude-md-auditor",
 })
-_DEFAULT_ENSEMBLE_VOTING_MODELS = [
-    _resolve_model_for_tier(_HOST_CLAUDE, "fast"),
-    _resolve_model_for_tier(_HOST_CLAUDE, "balanced"),
-]
-# Ensemble escalation is the one path that puts the frontier tier in front of
-# auditors: the fast/balanced arms vote first, and only a disagreement spends a
-# frontier spawn to break the tie. Auditors keep their ROLE_DEFAULT_TIERS
-# defaults, so a clean first pass never pays for it. Falls back to the deep
-# tier on hosts with no frontier mapping (e.g. codex resolves both to None,
-# which _build_escalation_result already reports as escalation_unavailable).
-_DEFAULT_ENSEMBLE_ESCALATION_MODEL = (
-    _resolve_model_for_tier(_HOST_CLAUDE, _TIER_FRONTIER)
-    or _resolve_model_for_tier(_HOST_CLAUDE, _TIER_DEEP)
-)
+def _default_ensemble_voting_models(host: str) -> list[str]:
+    models = [
+        _resolve_model_for_tier(host, "fast"),
+        _resolve_model_for_tier(host, "balanced"),
+    ]
+    return [m for m in models if m]
+
+
+def _default_ensemble_escalation_model(host: str) -> str | None:
+    # Ensemble escalation is the one path that puts the frontier tier in front of
+    # auditors: the fast/balanced arms vote first, and only a disagreement spends a
+    # frontier spawn to break the tie.
+    return (
+        _resolve_model_for_tier(host, _TIER_FRONTIER)
+        or _resolve_model_for_tier(host, _TIER_DEEP)
+    )
 
 # Default auditor registry — overridable via .dynos/config/auditors.json
 _DEFAULT_AUDITOR_REGISTRY = {
@@ -1063,11 +1082,19 @@ def _load_auditor_registry(root: Path) -> dict:
     return _DEFAULT_AUDITOR_REGISTRY
 
 
-def _load_ensemble_config(config: dict) -> tuple[set[str], list[str], str]:
+def _load_ensemble_config(config: dict, host: str) -> tuple[set[str], list[str], str | None]:
     """Load ensemble voting config from .dynos/config/policy.json with fallback to defaults."""
     auditors = set(config.get("ensemble_auditors", _DEFAULT_ENSEMBLE_AUDITORS))
-    models = config.get("ensemble_voting_models", _DEFAULT_ENSEMBLE_VOTING_MODELS)
-    escalation = config.get("ensemble_escalation_model", _DEFAULT_ENSEMBLE_ESCALATION_MODEL)
+    default_vote = _default_ensemble_voting_models(host)
+    default_esc = _default_ensemble_escalation_model(host)
+    models = config.get("ensemble_voting_models", default_vote)
+    escalation = config.get("ensemble_escalation_model", default_esc)
+    if host == _HOST_CURSOR or host == "cursor":
+        models = [
+            _translate_model_for_host(m, host) for m in models
+            if _translate_model_for_host(m, host)
+        ] or default_vote
+        escalation = _translate_model_for_host(escalation, host) or default_esc
     return auditors, models, escalation
 
 
@@ -1135,7 +1162,10 @@ def build_audit_plan(
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         user_config = {}
 
-    ensemble_auditors, ensemble_models, ensemble_escalation = _load_ensemble_config(user_config)
+    active_host = _detect_host()
+    ensemble_auditors, ensemble_models, ensemble_escalation = _load_ensemble_config(
+        user_config, active_host
+    )
 
     plan = {
         "generated_at": now_iso(),
@@ -1190,10 +1220,13 @@ def build_audit_plan(
 
         # Fast-track model override: fast-tier for spec-completion
         if fast_track and auditor == "spec-completion-auditor" and model_decision["source"] == "default":
-            model_decision = {"model": _resolve_model_for_tier(_HOST_CLAUDE, "fast"), "source": "fast_track_override"}
+            model_decision = {
+                "model": _resolve_model_for_tier(active_host, "fast"),
+                "source": "fast_track_override",
+            }
         if auditor in _DETERMINISTIC_FIRST_AUDITORS and model_decision["source"] != "explicit_policy":
             model_decision = {
-                "model": _default_model_for_role(auditor, _HOST_CLAUDE),
+                "model": _default_model_for_role(auditor, active_host),
                 "source": "deterministic_default",
             }
 
@@ -1242,7 +1275,6 @@ def build_audit_plan(
         # to False and set reason to host_null_mapping (binding decision 5).
         # Resolve host internally so callers don't need to pass it — same
         # pattern as resolve_model which also detects internally.
-        active_host = _detect_host()
         ensemble_ctx = _build_ensemble_context(active_host)
         if not ensemble_ctx.get("ensemble", True):
             entry["ensemble"] = False

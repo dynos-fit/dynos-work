@@ -12,20 +12,22 @@ Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
 
 ```bash
-PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+PLUGIN_ROOT="${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}"
 if [ -z "$PLUGIN_ROOT" ]; then
   # Some sessions leave both unset. The plugin root is two levels above this
   # skill's base directory (printed when the skill loads); substitute it here.
   PLUGIN_ROOT="$(cd "{skill_base_dir}/../.." && pwd)"
 fi
 if [ ! -x "$PLUGIN_ROOT/bin/dynos" ]; then
-  echo "Cannot locate the dynos-work plugin root; set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT." >&2
+  echo "Cannot locate the dynos-work plugin root; set CURSOR_PLUGIN_ROOT, CODEX_PLUGIN_ROOT, or CLAUDE_PLUGIN_ROOT." >&2
   exit 2
 fi
 DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
 ```
 
 `"$DYNOS" ctl <subcommand>` wraps `hooks/ctl.py`; `"$DYNOS" hook <script> ...` wraps helper scripts (router, lib_tokens, build_prompt_context, ...) with PYTHONPATH handled internally. A permissions-ON user can allow the single `<plugin-root>/bin/dynos` prefix once instead of approving every call.
+
+**Host note:** On Cursor, spawn auditors with the Task tool, use Shell for Bash, and pass only router/ensemble model IDs from the audit plan (Composer/Grok on Cursor — not Claude aliases).
 
 JSON payloads (classification, execution-graph, repair-log) are piped to the ctl wrapper over stdin with `--from -` and a heredoc — NEVER staged at `/tmp` or any raw filesystem path (the write policy denies those, by design). Temp files, when genuinely needed, belong in `.dynos/task-{id}/_scratch/`.
 

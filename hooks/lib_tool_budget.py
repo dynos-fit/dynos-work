@@ -55,7 +55,15 @@ PLANNER_WRITE_TURNS: int = 6
 
 # Static per-model floor (minimum budget) keyed by model family name.
 # An unknown model falls back to 15 (the haiku floor) — see compute_segment_budget.  # noqa: model-literal
-STATIC_CAPS_BY_MODEL: dict[str, int] = {"haiku": 15, "sonnet": 20, "opus": 25}  # noqa: model-literal
+STATIC_CAPS_BY_MODEL: dict[str, int] = {
+    "haiku": 15,
+    "sonnet": 20,
+    "opus": 25,
+    "composer-2.5-fast": 15,
+    "composer-2.5": 20,
+    "grok-4.7": 25,
+    "grok-4.7-high-fast": 25,
+}  # noqa: model-literal
 
 # Static per-tier floor (minimum budget) keyed by tier name.
 # Maps tier names (fast/balanced/deep) to their respective floor values.

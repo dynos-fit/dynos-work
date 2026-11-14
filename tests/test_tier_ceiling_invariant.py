@@ -277,13 +277,12 @@ class TestSecurityFloorIsAFloorNotAPin:
 class TestEnsembleEscalationUsesFrontier:
     def test_escalation_model_is_the_frontier_tier(self) -> None:
         router = importlib.import_module("router")
-        assert router._DEFAULT_ENSEMBLE_ESCALATION_MODEL == FRONTIER_MODEL
+        assert router._default_ensemble_escalation_model("claude") == FRONTIER_MODEL
 
     def test_voting_arms_stay_below_the_escalation_tier(self) -> None:
         """Voting must be cheaper than escalation or the ladder is pointless."""
         router = importlib.import_module("router")
-        escalation_rank = lib_models.model_rank(
-            router._DEFAULT_ENSEMBLE_ESCALATION_MODEL
-        )
-        for model in router._DEFAULT_ENSEMBLE_VOTING_MODELS:
+        escalation = router._default_ensemble_escalation_model("claude")
+        escalation_rank = lib_models.model_rank(escalation)
+        for model in router._default_ensemble_voting_models("claude"):
             assert lib_models.model_rank(model) < escalation_rank

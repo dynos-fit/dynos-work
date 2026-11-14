@@ -11,6 +11,25 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.9.0] - 2026-11-13
+Cursor plugin compatibility alongside the existing Claude Code and Codex packaging.
+
+### Added
+- **Cursor plugin packaging** at `.cursor-plugin/plugin.json` and `.cursor-plugin/marketplace.json`, pointing at the shared `skills/` and `agents/` trees plus a Cursor-native `hooks-cursor.json` (preToolUse/postToolUse/sessionStart/stop/subagentStop with Shell/Write/StrReplace/Task matchers and `${CURSOR_PLUGIN_ROOT}`).
+- **Host detection for Cursor.** `lib_host.detect_host()` recognizes `CURSOR_PLUGIN_ROOT` (ahead of Codex/Claude).
+- **Cursor-only model routing.** On `host=cursor`, `lib_models` maps tiers to Composer/Grok pool IDs (`composer-2.5-fast`, `composer-2.5`, `grok-4.7`, `grok-4.7-high-fast`). `translate_model_for_host()` rewrites legacy `haiku`/`sonnet`/`opus`/`fable` policy and learned picks before spawn; Claude Code keeps Anthropic aliases unchanged.
+- **Cursor tool-name aliases in hooks.** `pre_tool_use` canonicalizes `Shell→Bash`, `StrReplace→Edit`, and `Task→Agent`, and resolves cwd from `CURSOR_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` / `workspace_roots` when the payload cwd is empty. `agent-spawn-log` accepts Task spawns and still records `tool: Agent` for receipt cross-checks. `session-start` prefers `CURSOR_PROJECT_DIR`.
+
+### Changed
+- Skill and Claude/Codex hook command funnels resolve the plugin root as `CURSOR_PLUGIN_ROOT` → `CODEX_PLUGIN_ROOT` → `CLAUDE_PLUGIN_ROOT`.
+- Write-policy self-modification guard also protects `~/.cursor/plugins` and `~/.cursor/hooks.json`.
+- Release hygiene (`scripts/bump_version.py`, `scripts/check_release_hygiene.py`) includes `.cursor-plugin/plugin.json`.
+
+### Plugin / Distribution
+- Claude Code and Codex manifests are unchanged in shape; Cursor is an additive host path.
+
+---
+
 ## [7.8.0] - 2026-11-12
 Fixes from a field report on unattended runs (about 140 tasks over two days, around 10 in parallel, on 7.7.1 and 7.7.4).
 

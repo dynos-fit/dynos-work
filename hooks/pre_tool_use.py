@@ -44,6 +44,47 @@ except Exception:  # pragma: no cover - defensive import fallback
         except Exception:
             return False
 
+# Cursor (and Claude-import payloads under Cursor) use different tool names
+# than Claude Code. Canonicalize before policy checks so write/read gates do
+# not fail open on Shell/Task/StrReplace.
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "Shell": "Bash",
+    "Task": "Agent",
+    "StrReplace": "Edit",
+}
+
+
+def _canonical_tool_name(tool_name: object) -> str:
+    if not isinstance(tool_name, str):
+        return str(tool_name)
+    return _TOOL_NAME_ALIASES.get(tool_name, tool_name)
+
+
+def _resolve_hook_cwd(payload: dict) -> Path:
+    """Resolve cwd from the hook payload, falling back to host project dirs.
+
+    Cursor plugin hooks sometimes omit ``cwd`` or point it at the plugin
+    install directory. Prefer an explicit payload cwd, then CURSOR/CLAUDE
+    project-dir env vars, then process cwd.
+    """
+    raw = payload.get("cwd")
+    candidates: list[object] = [raw]
+    candidates.append(os.environ.get("CURSOR_PROJECT_DIR"))
+    candidates.append(os.environ.get("CLAUDE_PROJECT_DIR"))
+    roots = payload.get("workspace_roots")
+    if isinstance(roots, list) and roots:
+        candidates.append(roots[0])
+    candidates.append(os.getcwd())
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        try:
+            return Path(candidate).expanduser().resolve()
+        except OSError:
+            continue
+    return Path.cwd().resolve()
+
+
 # Allowlist of valid executor role names that may appear in active-segment-role.
 # Privileged internal roles (ctl, receipt-writer, eventbus, scheduler, system)
 # are intentionally excluded to prevent role-file injection attacks.
@@ -1158,10 +1199,9 @@ def main() -> int:
 
     # Extract required fields -- missing fields are an internal error (exit 1)
     try:
-        tool_name = payload["tool_name"]
+        tool_name = _canonical_tool_name(payload["tool_name"])
         tool_input = payload["tool_input"]
-        cwd_str = payload.get("cwd", os.getcwd())
-        cwd = Path(cwd_str).resolve()
+        cwd = _resolve_hook_cwd(payload if isinstance(payload, dict) else {})
     except KeyError as exc:
         print(f"pre-tool-use: missing required field in payload: {exc}", file=sys.stderr)
         return 1

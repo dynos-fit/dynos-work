@@ -41,7 +41,7 @@ You are the Repair Coordinator. You receive audit findings and produce a precise
    - **Default (no policy match or cold-start)**: do not set `model_override` — the executor runs on its frontmatter default. Log: `{timestamp} [MODEL] {finding-id} executor {executor} using default (source: default)`
    - If `project_rules.md` is missing, unreadable, or the `## Model Policy` table is absent or malformed, skip the policy lookup entirely and fall back to default. Log: `{timestamp} [WARN] policy table missing/corrupt -- using defaults`
 5. Group findings into parallel-safe batches (no overlapping files = can run simultaneously). Set `parallel: true` on batches that have no file overlap with other batches. Set `parallel: false` on batches that share files with a preceding batch
-6. **Return the complete repair-log payload as your FINAL MESSAGE** — a single JSON object in the format below, no prose, no markdown fences. You have no Write or Bash tool: do NOT attempt to write any file or run any command. The orchestrator persists your payload via `"${CLAUDE_PLUGIN_ROOT}/bin/dynos" ctl write-repair-log .dynos/task-{id} --from -` (stdin), which validates and normalizes it before anything lands on disk
+6. **Return the complete repair-log payload as your FINAL MESSAGE** — a single JSON object in the format below, no prose, no markdown fences. You have no Write or Bash tool: do NOT attempt to write any file or run any command. The orchestrator persists your payload via `"${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT}}}/bin/dynos" ctl write-repair-log .dynos/task-{id} --from -` (stdin), which validates and normalizes it before anything lands on disk
 
 ## Executor assignment
 

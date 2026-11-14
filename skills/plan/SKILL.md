@@ -11,14 +11,14 @@ description: "Internal dynos-work skill. Re-run planning on an existing task —
 Every deterministic step below runs through the plugin CLI. Resolve it once at the start of the skill and substitute the ABSOLUTE path literally into each command you run (permission prefix-matching operates on literal command text):
 
 ```bash
-PLUGIN_ROOT="${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}"
+PLUGIN_ROOT="${CURSOR_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}"
 if [ -z "$PLUGIN_ROOT" ]; then
   # Some sessions leave both unset. The plugin root is two levels above this
   # skill's base directory (printed when the skill loads); substitute it here.
   PLUGIN_ROOT="$(cd "{skill_base_dir}/../.." && pwd)"
 fi
 if [ ! -x "$PLUGIN_ROOT/bin/dynos" ]; then
-  echo "Cannot locate the dynos-work plugin root; set CODEX_PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT." >&2
+  echo "Cannot locate the dynos-work plugin root; set CURSOR_PLUGIN_ROOT, CODEX_PLUGIN_ROOT, or CLAUDE_PLUGIN_ROOT." >&2
   exit 2
 fi
 DYNOS="${PLUGIN_ROOT}/bin/dynos"   # resolve once; use the absolute path in every command
