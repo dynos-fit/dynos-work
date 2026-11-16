@@ -11,6 +11,15 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.11.0] - 2026-11-16
+### Changed
+- feat: rendered UI evidence and single-owner accessibility audit for the UI agents
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.11.0`.
+
+---
+
 ## [7.10.0] - 2026-11-16
 The UI agents now judge rendered pages, not only source, and stop duplicating each other.
 
