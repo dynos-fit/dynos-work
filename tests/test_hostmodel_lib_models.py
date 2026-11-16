@@ -207,7 +207,7 @@ _EXPECTED_ROLE_TIERS = {
     "dead-code-auditor": "fast",
     "performance-auditor": "fast",
     "db-schema-auditor": "fast",
-    "ui-auditor": "fast",
+    "ui-auditor": "balanced",
     "claude-md-auditor": "balanced",
     "security-auditor": "deep",
     "architecture-auditor": "balanced",
@@ -241,7 +241,7 @@ _ORIGINAL_ROLE_DEFAULT_MODELS = {
     "dead-code-auditor": "haiku",
     "performance-auditor": "haiku",
     "db-schema-auditor": "haiku",
-    "ui-auditor": "haiku",
+    "ui-auditor": "sonnet",
     "claude-md-auditor": "sonnet",
 }
 

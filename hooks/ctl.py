@@ -60,6 +60,7 @@ from lib_validate import apply_fast_track, check_segment_ownership, collect_repa
 from lib_models import TIER_DEEP, resolve_model_for_tier
 from lib_host import detect_host, host_emits_web_tool_telemetry, resolve_host
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
+from lib_ui_render import UI_RENDER_REL_DIR, UI_RENDER_REPORT, capture as capture_ui_render, normalize_ui_render
 
 # task-20260504-007: residuals queue producer + run-next consumer.
 # Imported as a module (not `from lib_residuals import ...`) so tests
@@ -435,7 +436,23 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
         if verify_commands:
             normalized["verify_commands"] = verify_commands
         normalized_segments.append(normalized)
-    return {"task_id": task_dir.name, "segments": normalized_segments}
+    graph: dict = {"task_id": task_dir.name, "segments": normalized_segments}
+    # ui_render: what `ctl run-ui-render-evidence` renders for the UI
+    # auditors. Validated here so a malformed declaration is refused at the
+    # plan gate instead of surfacing mid-audit.
+    # A rewrite that does not mention ui_render (a repaired or re-merged
+    # graph) keeps the approved declaration; `"ui_render": null` removes it.
+    raw_ui_render = payload.get("ui_render")
+    if "ui_render" not in payload:
+        try:
+            existing = load_json(task_dir / "execution-graph.json")
+        except Exception:
+            existing = None
+        raw_ui_render = existing.get("ui_render") if isinstance(existing, dict) else None
+    ui_render = normalize_ui_render(raw_ui_render)
+    if ui_render is not None:
+        graph["ui_render"] = ui_render
+    return graph
 
 
 def _validate_execution_graph_payload(task_dir: Path, payload: dict) -> None:
@@ -1438,6 +1455,9 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
 # specific message, so a security-auditor row is rejected even though the
 # enclosing allowlist set would also reject it.
 _AUTO_APPROVE_ALLOWED_AUDITORS: frozenset[str] = frozenset({
+    # Accessibility findings were ui-auditor's until accessibility-auditor
+    # became their only owner; they keep the eligibility they had.
+    "accessibility-auditor",
     "code-quality-auditor",
     "dead-code-auditor",
     "performance-auditor",
@@ -7741,6 +7761,78 @@ def cmd_run_verification_evidence(args: argparse.Namespace) -> int:
     return 1 if any_failed else 0
 
 
+def cmd_run_ui_render_evidence(args: argparse.Namespace) -> int:
+    """Render the plan-declared UI targets and capture measured evidence.
+
+    Reads `ui_render` from execution-graph.json (wrapper-written,
+    human-approved at the plan gate), renders every target at 320, 768 and
+    1440 px wide, and writes screenshots plus measurements (horizontal
+    overflow, target sizes, text contrast, unnamed controls, missing alt
+    text, broken images, console errors) to the ctl-owned
+    `evidence/ui-render/`. The UI auditors read `report.json` there instead
+    of estimating rendered behavior from a diff.
+
+    Evidence only, never a gate: `skipped` (nothing declared, or no node /
+    browser driver on this machine) exits 0; `failed` (declared but the
+    server or every target could not be loaded) exits 1 so the orchestrator
+    sees it, and the audit still proceeds on source evidence.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
+
+    # Every exit path below writes report.json, so a report left by an
+    # earlier capture is never mistaken for this one.
+    out_dir = task_dir / UI_RENDER_REL_DIR
+    refusal: str | None = None
+    declaration = None
+    try:
+        graph = load_json(task_dir / "execution-graph.json")
+        declaration = normalize_ui_render(graph.get("ui_render") if isinstance(graph, dict) else None)
+    except ValueError as exc:
+        refusal = f"invalid ui_render declaration: {exc}"
+    except Exception as exc:
+        refusal = f"cannot read execution-graph.json: {exc}"
+    if out_dir.is_symlink() or (task_dir / "evidence").is_symlink():
+        print("run-ui-render-evidence: evidence/ui-render must be a real directory, not a symlink", file=sys.stderr)
+        return 1
+    # Screenshots from an earlier capture never sit beside a newer report.
+    if out_dir.is_dir():
+        for stale in out_dir.glob("*.png"):
+            stale.unlink()
+    if refusal is not None:
+        print(f"run-ui-render-evidence: {refusal}", file=sys.stderr)
+        report = {"schema": 1, "status": "failed", "reason": refusal, "targets": []}
+    else:
+        try:
+            report = capture_ui_render(root, out_dir, declaration, probe_timeout_s=max(1, int(args.timeout)))
+        except Exception as exc:  # noqa: BLE001 - evidence capture must always leave a report
+            report = {"schema": 1, "status": "failed", "reason": f"capture crashed: {exc}", "targets": []}
+    report = {"task_id": task_dir.name, "captured_at": now_iso(), **report}
+    report_path = out_dir / UI_RENDER_REPORT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_ctl_json(task_dir, report_path, report)
+    report_sha = hash_file(report_path)
+    write_receipt(
+        task_dir,
+        "ui-render-evidence",
+        artifact_sha256=report_sha,
+        status=report["status"],
+        target_count=len(report.get("targets", [])),
+    )
+    print(json.dumps({
+        "status": f"ui_render_{report['status']}",
+        "task_dir": str(task_dir),
+        "reason": report.get("reason"),
+        "report": str(report_path),
+        "report_sha256": report_sha,
+        "totals": report.get("totals"),
+    }, indent=2))
+    return 1 if report["status"] == "failed" else 0
+
+
 def cmd_run_repair_execution_ready(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -9413,6 +9505,14 @@ def register_execution_parsers(subparsers: argparse._SubParsersAction) -> None:
     run_verification_parser.add_argument("--segment", help="Limit to one segment id")
     run_verification_parser.add_argument("--timeout", type=int, default=None, help="Per-command timeout in seconds for commands that declare none (default: policy.json verification_timeout_s, else 3600)")
     run_verification_parser.set_defaults(func=cmd_run_verification_evidence)
+
+    run_ui_render_parser = subparsers.add_parser(
+        "run-ui-render-evidence",
+        help="Render plan-declared UI targets at fixed widths and capture screenshots + measurements into ctl-owned evidence",
+    )
+    run_ui_render_parser.add_argument("task_dir")
+    run_ui_render_parser.add_argument("--timeout", type=int, default=600, help="Time limit in seconds for the render probe (default: 600)")
+    run_ui_render_parser.set_defaults(func=cmd_run_ui_render_evidence)
 
     ownership_parser = subparsers.add_parser("check-ownership", help="Check that files belong to a segment")
     ownership_parser.add_argument("task_dir")

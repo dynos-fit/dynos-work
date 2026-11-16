@@ -37,7 +37,7 @@ from lib_receipts import (
 
 from lib_models import valid_models_for_host as _valid_models_for_host, HOST_CLAUDE as _HOST_CLAUDE, ALL_TIERS as _ALL_TIERS
 
-VALID_CATEGORIES = {"sec", "cq", "dc", "perf", "comp", "ui", "db", "test", "process", "unknown"}
+VALID_CATEGORIES = {"sec", "cq", "dc", "perf", "comp", "ui", "a11y", "db", "test", "process", "unknown"}
 VALID_SEVERITIES = {"high", "medium", "low"}
 # Dual-accept: old Claude model literals + new tier names (IR-1, AC-20).
 VALID_MODELS: frozenset = _valid_models_for_host(_HOST_CLAUDE) | frozenset(_ALL_TIERS)

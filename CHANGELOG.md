@@ -11,6 +11,27 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.10.0] - 2026-11-16
+The UI agents now judge rendered pages, not only source, and stop duplicating each other.
+
+### Added
+- **Rendered UI evidence.** A UI plan can declare `ui_render` in the execution graph: up to 12 targets (a loopback `url` or a repo-relative HTML `file`), with an optional `start_command` for the dev server. `ctl run-ui-render-evidence` starts the server (or reuses one already answering), renders each target at 320, 768 and 1440 px wide through Playwright, and writes screenshots plus `report.json` to `evidence/ui-render/`. Measured per viewport: horizontal overflow, interactive targets under 24 px that also fail the WCAG 2.5.8 spacing test, text contrast against solid backgrounds (disabled controls excluded), controls with no accessible name, images with no `alt`, broken images, and console errors. Needs `node` and a Playwright driver installed in the project or beside the plugin; without them the capture is recorded as skipped and the audit proceeds from source. It is evidence only and never blocks the audit.
+- **`evidence/ui-render/` is ctl-owned.** Agent roles, executors and auditors included, cannot write there, and the router presents a report to auditors only when it matches the hash in ctl's receipt, so the measurements cannot be doctored. The capture stays on this machine: requests a page makes to other hosts are aborted and listed, `file` targets must be `.html` files outside `.dynos/`, and the dev server's whole process group is stopped afterwards. `write-execution-graph` refuses a `ui_render` declaration that points off the machine, escapes the workspace, or is malformed, and a rewritten graph that does not mention `ui_render` keeps the approved declaration (`"ui_render": null` removes it).
+- **Auditors are told what evidence exists.** `router.py audit-inject-prompt` adds a `## Rendered Evidence` block to `ui-auditor` and `accessibility-auditor` prompts, built from `report.json`: where the report is and its totals, or that nothing was captured and unprovable claims must be marked unverified, never passing. A capture older than the latest repair is treated as missing.
+- **Planner guidance for UI tasks.** Acceptance criteria name the states each screen must render; the plan names the tokens file and a sibling component as reference code and repeats them in each `ui-executor` segment's description; a `## Design Direction` section covers projects with no design system; and the execution graph declares `ui_render` targets.
+- **`ui-executor` interaction contract.** Control states, form behavior, overlays, destructive actions, loading and empty states, narrow-screen layout and visual checks, plus what to do when there is no design system to match. Parts are adapted from Hallmark (MIT) and Impeccable (Apache 2.0); see `THIRD_PARTY_NOTICES.md` and `LICENSES/Apache-2.0.txt`.
+
+### Changed
+- **Accessibility has one owner.** `accessibility-auditor` owns keyboard, focus, names, ARIA, contrast, target size and motion, with thresholds and blocking criteria; `ui-auditor` no longer reports them and keeps states, spec coverage, layout and edge cases. When `accessibility-auditor` is not spawned in an audit, or not re-run in a re-audit, the router tells `ui-auditor` to cover accessibility. Accessibility findings use the prefix `a11y-`, now a known category for learned rules, and `accessibility-auditor` joins the residual and auto-approve allowlists so those findings keep the eligibility they had under `ui-auditor`.
+- **`accessibility-auditor` is diff-scoped.** It now carries the same inputs, read budget and hard rules as `ui-auditor`.
+- **`ui-auditor` runs on the balanced tier** (was fast), the same as `accessibility-auditor`, since it now reads rendered evidence and screenshots. This raises the cost of that auditor on every UI audit.
+- **`ui-auditor` blocks on false feedback.** A success message with no request or state change behind it, and an error state that shows a raw exception or status code, are blocking findings.
+- **The audit skill's "Visual Audit Pass" is replaced** by the render-evidence step. The old paragraph asked the orchestrator to start a server and screenshot by hand, and named an outdated model.
+
+### Fixed
+- **Write guard on ctl-captured evidence directories.** `evidence/verification` was protected only for paths under it; a write aimed at the directory itself (`cp forged.json .dynos/task-X/evidence/verification`), or at a differently-cased spelling, was allowed for executors. Both it and the new `evidence/ui-render` now match the directory and ignore case.
+- **`ui-executor` build order.** Step 2 listed two items numbered 2 and ran the boundary-state pass before the happy path existed; the boundary pass now comes last and includes a 320 px screen. The final checklist now covers disabled states, keyboard operation and narrow screens, which the rest of the prompt already required.
+
 ## [7.9.1] - 2026-11-14
 
 ### Fixed

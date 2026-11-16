@@ -106,7 +106,9 @@ AUDIT (/dynos-work:audit)
   step 2   determine diff scope
   step 3   run conditional auditors
              always: spec-completion-auditor, security-auditor
-             conditional on ui domain: ui-auditor, code-quality-auditor
+             conditional on ui domain: ui-auditor, accessibility-auditor, code-quality-auditor
+               (before these spawn: `ctl run-ui-render-evidence` renders the plan's `ui_render`
+                targets at 320/768/1440 px into `evidence/ui-render/`; evidence only, never a gate)
              conditional on db domain: db-schema-auditor, performance-auditor, dead-code-auditor, code-quality-auditor
              conditional on backend domain: performance-auditor, dead-code-auditor, code-quality-auditor
              conditional on ml/testing domain: code-quality-auditor
@@ -147,7 +149,7 @@ Each stage validates its required inputs before proceeding. The runtime (`ctl.py
 | Execution | `ui-executor`, `backend-executor`, `db-executor`, `ml-executor`, `integration-executor`, `refactor-executor`, `testing-executor` | single — sonnet |
 | Execution | `docs-executor` | single — haiku |
 | Audit | `security-auditor`, `db-schema-auditor` | **ensemble** — haiku first; if zero findings → sonnet; if sonnet finds issues → opus; if haiku finds issues → skip sonnet, go directly to opus |
-| Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor` | single — sonnet (may be sampled into ensemble) |
+| Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor`, `accessibility-auditor` | single — sonnet (may be sampled into ensemble) |
 | Repair | `repair-coordinator` | single — sonnet |
 | Investigation | `investigator` | single — sonnet |
 
