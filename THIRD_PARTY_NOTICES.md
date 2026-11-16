@@ -6,13 +6,14 @@ included, and neither project is required to use dynos-work.
 
 ## Hallmark
 
-- Source: https://github.com/Nutlope/hallmark (`skills/hallmark/references/interaction-and-states.md`, `references/gates.md`)
+- Source: https://github.com/Nutlope/hallmark (`skills/hallmark/references/interaction-and-states.md`, `skills/hallmark/references/gates.md`)
 - License: MIT. Copyright (c) 2026 Hallmark contributors.
 - Used in: `agents/ui-executor.md` (the Interaction Contract: control states,
   form behavior, overlays, undo over confirm, loading and empty states) and
   `agents/ui-auditor.md` (success feedback with no request behind it).
 - Changes: condensed, rewritten for dynos-work's executor and auditor
-  contracts, and stripped of Hallmark's theme tokens and gate numbers.
+  contracts, and stripped of Hallmark's theme tokens and gate numbers; each
+  adapted file ends with a comment pointing here.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -34,10 +35,13 @@ SOFTWARE.
 
 ## Impeccable
 
-- Source: https://github.com/pbakaus/impeccable (`reference/audit.md`, `reference/craft-floor.md`)
-- License: Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). Created by Paul Bakaus.
+- Source: https://github.com/pbakaus/impeccable (`skill/reference/audit.md`, `skill/reference/craft-floor.md`)
+- License: Apache License, Version 2.0. Copyright 2025 Paul Bakaus. A copy of
+  the license is in `LICENSES/Apache-2.0.txt`.
 - Used in: `agents/accessibility-auditor.md` (target-size exceptions, reduced
-  motion) and `agents/ui-executor.md` (the visual checks and the list of stock
-  defaults to avoid when no design system exists).
+  motion) and `agents/ui-executor.md` (the color and motion checks).
 - Changes: condensed and rewritten for dynos-work's executor and auditor
-  contracts; Impeccable's commands, scoring and detector are not used.
+  contracts; each adapted file ends with a comment pointing here.
+  Impeccable's commands, scoring and detector are not used. Impeccable's own
+  `NOTICE.md` covers only its iOS and Android references, which are not used
+  here.

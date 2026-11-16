@@ -192,7 +192,9 @@ def summarize(targets: list[dict]) -> dict:
             totals["contrast_unmeasured"] += int(vp.get("contrast_unmeasured") or 0)
             totals["targets_under_44"] += int(vp.get("targets_under_44") or 0)
             for key in _LIST_KEYS:
-                totals[key] += len(vp.get(key) or [])
+                # Lists are capped per viewport; `<key>_total` has the real count.
+                exact = vp.get(f"{key}_total")
+                totals[key] += exact if isinstance(exact, int) and not isinstance(exact, bool) else len(vp.get(key) or [])
     return totals
 
 
@@ -212,7 +214,10 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
     if node is None:
         return {**base, "status": "skipped", "reason": "node is not installed, so the render probe cannot run"}
 
+    # A target whose file is missing is recorded on that target; the rest
+    # of the capture still runs.
     spec_targets: list[dict] = []
+    unloadable: dict[str, str] = {}
     for target in declaration.get("targets", []):
         entry = {"id": target["id"]}
         if "url" in target:
@@ -222,13 +227,28 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
             try:
                 file_path.relative_to(root.resolve())
             except ValueError:
-                return {**base, "status": "failed", "reason": f"target {target['id']}: file escapes the workspace"}
+                unloadable[target["id"]] = "file escapes the workspace"
+                continue
             if not file_path.is_file():
-                return {**base, "status": "failed", "reason": f"target {target['id']}: file not found: {target['file']}"}
+                unloadable[target["id"]] = f"file not found: {target['file']}"
+                continue
             entry["url"] = file_path.as_uri()
         if target.get("wait_for"):
             entry["wait_for"] = target["wait_for"]
         spec_targets.append(entry)
+
+    def _unloadable_targets() -> list[dict]:
+        by_id = {t["id"]: t for t in declaration.get("targets", [])}
+        return [
+            {"id": tid, "file": by_id[tid].get("file"), "load_error": why, "viewports": []}
+            for tid, why in unloadable.items()
+        ]
+
+    if not spec_targets:
+        return {
+            **base, "status": "failed", "targets": _unloadable_targets(),
+            "reason": "no target could be loaded: " + "; ".join(f"{tid}: {why}" for tid, why in unloadable.items()),
+        }
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("*.png"):
@@ -307,7 +327,9 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
         for vp in target.get("viewports", []) or []:
             if vp.get("screenshot"):
                 vp["screenshot"] = f"{UI_RENDER_REL_DIR}/{vp['screenshot']}"
+    targets.extend(_unloadable_targets())
     totals = summarize(targets)
+    totals["load_errors"] += len(unloadable)
     report = {**base, "status": "captured", "driver": result.get("driver"), "totals": totals, "targets": targets}
     if start_command:
         report["server"] = "reused a server already answering at ready_url" if server_reused else "started by start_command"

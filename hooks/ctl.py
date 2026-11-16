@@ -440,7 +440,16 @@ def _normalize_execution_graph_payload(task_dir: Path, payload: dict) -> dict:
     # ui_render: what `ctl run-ui-render-evidence` renders for the UI
     # auditors. Validated here so a malformed declaration is refused at the
     # plan gate instead of surfacing mid-audit.
-    ui_render = normalize_ui_render(payload.get("ui_render"))
+    # A rewrite that does not mention ui_render (a repaired or re-merged
+    # graph) keeps the approved declaration; `"ui_render": null` removes it.
+    raw_ui_render = payload.get("ui_render")
+    if "ui_render" not in payload:
+        try:
+            existing = load_json(task_dir / "execution-graph.json")
+        except Exception:
+            existing = None
+        raw_ui_render = existing.get("ui_render") if isinstance(existing, dict) else None
+    ui_render = normalize_ui_render(raw_ui_render)
     if ui_render is not None:
         graph["ui_render"] = ui_render
     return graph
@@ -1446,6 +1455,9 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
 # specific message, so a security-auditor row is rejected even though the
 # enclosing allowlist set would also reject it.
 _AUTO_APPROVE_ALLOWED_AUDITORS: frozenset[str] = frozenset({
+    # Accessibility findings were ui-auditor's until accessibility-auditor
+    # became their only owner; they keep the eligibility they had.
+    "accessibility-auditor",
     "code-quality-auditor",
     "dead-code-auditor",
     "performance-auditor",
@@ -7771,19 +7783,26 @@ def cmd_run_ui_render_evidence(args: argparse.Namespace) -> int:
     if blocked is not None:
         return blocked
 
+    # Every exit path below writes report.json, so a report left by an
+    # earlier capture is never mistaken for this one.
+    out_dir = task_dir / UI_RENDER_REL_DIR
+    refusal: str | None = None
+    declaration = None
     try:
         graph = load_json(task_dir / "execution-graph.json")
-    except Exception as exc:
-        print(f"run-ui-render-evidence: cannot read execution-graph.json: {exc}", file=sys.stderr)
-        return 1
-    try:
         declaration = normalize_ui_render(graph.get("ui_render") if isinstance(graph, dict) else None)
     except ValueError as exc:
-        print(f"run-ui-render-evidence: invalid ui_render declaration: {exc}", file=sys.stderr)
-        return 1
-
-    out_dir = task_dir / UI_RENDER_REL_DIR
-    report = capture_ui_render(root, out_dir, declaration, probe_timeout_s=int(args.timeout))
+        refusal = f"invalid ui_render declaration: {exc}"
+    except Exception as exc:
+        refusal = f"cannot read execution-graph.json: {exc}"
+    if refusal is not None:
+        print(f"run-ui-render-evidence: {refusal}", file=sys.stderr)
+        if out_dir.is_dir():
+            for stale in out_dir.glob("*.png"):
+                stale.unlink()
+        report = {"schema": 1, "status": "failed", "reason": refusal, "targets": []}
+    else:
+        report = capture_ui_render(root, out_dir, declaration, probe_timeout_s=int(args.timeout))
     report = {"task_id": task_dir.name, "captured_at": now_iso(), **report}
     report_path = out_dir / UI_RENDER_REPORT
     out_dir.mkdir(parents=True, exist_ok=True)

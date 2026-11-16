@@ -108,7 +108,7 @@ It reads the `ui_render` declaration from the approved execution graph, starts t
 
 - `ui_render_captured` — the auditors are pointed at the report and its screenshots.
 - `ui_render_skipped` (exit 0) — nothing was declared, or this machine has no `node` or Playwright driver. The auditors are told to judge from source and to mark what they cannot prove as unverified.
-- `ui_render_failed` (exit 1) — the declared server or targets could not be loaded. Print the `reason` to the user and continue the audit; the auditors are told the same as for a skip. This step never blocks the audit.
+- `ui_render_failed` (exit 1) — the declaration is invalid, or the declared server or every target could not be loaded. Print the `reason` to the user and continue the audit; the auditors are told the same as for a skip. This step never blocks the audit.
 
 Re-run the command before each re-audit batch that includes either auditor, so they judge the repaired UI and not the earlier capture. The capture is evidence, not an auditor: it produces no findings and nothing gates on it.
 
@@ -352,6 +352,8 @@ Use its JSON output as authoritative:
 - `scoped_auditors` receive only `modified_files`
 
 Do NOT hand-compute repair-modified files or choose the re-audit auditor set in prompt logic.
+
+When the re-audit set includes `ui-auditor` or `accessibility-auditor`, run `"$DYNOS" ctl run-ui-render-evidence .dynos/task-{id}` again before building their prompts. A capture older than the repair is treated as missing: `audit-inject-prompt` tells the auditors no rendered evidence is available.
 
 After re-audit, run `run-audit-findings-gate` again.
 

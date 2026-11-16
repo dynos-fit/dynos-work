@@ -149,7 +149,7 @@ Each stage validates its required inputs before proceeding. The runtime (`ctl.py
 | Execution | `ui-executor`, `backend-executor`, `db-executor`, `ml-executor`, `integration-executor`, `refactor-executor`, `testing-executor` | single — sonnet |
 | Execution | `docs-executor` | single — haiku |
 | Audit | `security-auditor`, `db-schema-auditor` | **ensemble** — haiku first; if zero findings → sonnet; if sonnet finds issues → opus; if haiku finds issues → skip sonnet, go directly to opus |
-| Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor` | single — sonnet (may be sampled into ensemble) |
+| Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor`, `accessibility-auditor` | single — sonnet (may be sampled into ensemble) |
 | Repair | `repair-coordinator` | single — sonnet |
 | Investigation | `investigator` | single — sonnet |
 

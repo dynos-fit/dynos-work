@@ -62,7 +62,13 @@ function measure(maxItems) {
     const cs = getComputedStyle(el);
     return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) !== 0;
   };
-  const push = (list, item) => { if (list.length < maxItems) list.push(item); };
+  // Lists are capped; `counts` keeps the real totals.
+  const counts = new Map();
+  const push = (list, item) => {
+    counts.set(list, (counts.get(list) || 0) + 1);
+    if (list.length < maxItems) list.push(item);
+  };
+  const total = (list) => counts.get(list) || 0;
 
   // Horizontal overflow.
   const doc = document.documentElement;
@@ -82,6 +88,7 @@ function measure(maxItems) {
   const smallTargets = [];
   const unnamed = [];
   let under44 = 0;
+  let spacedSmall = 0;
   let interactiveCount = 0;
   const nameOf = (el) => {
     const labelled = el.getAttribute('aria-labelledby');
@@ -109,21 +116,45 @@ function measure(maxItems) {
     if (svgTitle && svgTitle.textContent.trim()) return svgTitle.textContent.trim();
     return (el.getAttribute('title') || '').trim();
   };
+  const candidates = [];
   for (const el of document.querySelectorAll(interactiveSel)) {
     if (!visible(el) || el.disabled || el.getAttribute('aria-hidden') === 'true') continue;
     interactiveCount += 1;
-    const r = el.getBoundingClientRect();
     const tag = el.tagName.toLowerCase();
     // WCAG 2.5.8 exempts links inline in a sentence; skip them.
     const inlineLink = tag === 'a' && getComputedStyle(el).display === 'inline'
       && el.parentElement && (el.parentElement.textContent || '').trim().length > (el.textContent || '').trim().length;
-    if (!inlineLink) {
-      const w = Math.round(r.width);
-      const h = Math.round(r.height);
-      if (w < 24 || h < 24) push(smallTargets, { element: describe(el), width: w, height: h });
-      else if (w < 44 || h < 44) under44 += 1;
-    }
+    if (!inlineLink) candidates.push({ el, rect: el.getBoundingClientRect() });
     if (!nameOf(el)) push(unnamed, { element: describe(el) });
+  }
+  // WCAG 2.5.8 spacing exception: an undersized target passes when a 24px
+  // circle centred on it overlaps no other target and no other undersized
+  // target's circle.
+  const undersized = (r) => r.width < 24 || r.height < 24;
+  const centre = (r) => ({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  const circleHitsRect = (c, r) => {
+    const dx = c.x - Math.max(r.left, Math.min(c.x, r.right));
+    const dy = c.y - Math.max(r.top, Math.min(c.y, r.bottom));
+    return dx * dx + dy * dy < 12 * 12;
+  };
+  for (const item of candidates) {
+    const w = Math.round(item.rect.width);
+    const h = Math.round(item.rect.height);
+    if (!undersized(item.rect)) {
+      if (w < 44 || h < 44) under44 += 1;
+      continue;
+    }
+    const c = centre(item.rect);
+    const crowded = candidates.some((other) => {
+      if (other === item || other.el.contains(item.el) || item.el.contains(other.el)) return false;
+      if (undersized(other.rect)) {
+        const o = centre(other.rect);
+        return Math.hypot(c.x - o.x, c.y - o.y) < 24;
+      }
+      return circleHitsRect(c, other.rect);
+    });
+    if (crowded) push(smallTargets, { element: describe(item.el), width: w, height: h });
+    else spacedSmall += 1;
   }
 
   // Images.
@@ -181,6 +212,8 @@ function measure(maxItems) {
     const el = node.parentElement;
     if (!el || seen.has(el) || !visible(el)) continue;
     if (['script', 'style', 'noscript', 'option'].includes(el.tagName.toLowerCase())) continue;
+    // SC 1.4.3 exempts inactive controls.
+    if (el.closest(':disabled, [aria-disabled="true"]')) continue;
     seen.add(el);
     const cs = getComputedStyle(el);
     const fg = parse(cs.color);
@@ -208,11 +241,17 @@ function measure(maxItems) {
     horizontal_overflow: overflow,
     interactive_count: interactiveCount,
     small_targets: smallTargets,
+    small_targets_total: total(smallTargets),
+    small_targets_passing_by_spacing: spacedSmall,
     targets_under_44: under44,
     unnamed_controls: unnamed,
+    unnamed_controls_total: total(unnamed),
     images_missing_alt: missingAlt,
+    images_missing_alt_total: total(missingAlt),
     broken_images: broken,
+    broken_images_total: total(broken),
     low_contrast: lowContrast,
+    low_contrast_total: total(lowContrast),
     contrast_checked: contrastChecked,
     contrast_unmeasured: contrastUnmeasured,
   };

@@ -354,7 +354,7 @@ Do NOT re-derive fast-track, risk-based escalation, or acceptance-criteria thres
 Hierarchical flow:
 1. Spawn Master Planner using the default planning model for this repo.
 2. Spawn Worker Planners in parallel for non-overlapping subsystems.
-3. Merge outputs into final `plan.md` and an execution-graph payload, then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path).
+3. Merge outputs into final `plan.md` and an execution-graph payload, then persist the final graph ONLY via `"$DYNOS" ctl write-execution-graph .dynos/task-{id} --from -` (pipe the payload over stdin with a heredoc — never stage it at /tmp or any raw path). Copy the skeleton's top-level `ui_render` declaration, when it has one, into the merged payload unchanged.
 
 Combined flow (when `planning_path == "combined"`):
 1. **Stage precondition:** the manifest is still at `SPEC_NORMALIZATION` (Step 3 deferred the walk). Do NOT advance yet.

@@ -51,7 +51,9 @@ body { margin: 0; background: #ffffff; font: 16px sans-serif; }
 <h1>Settings</h1>
 <p class="faint">Barely readable helper text</p>
 <div class="wide">fixed width block</div>
-<button class="tiny"></button>
+<button class="tiny"></button><button class="tiny"></button>
+<p style="margin-top:80px"><button class="tiny" aria-label="Alone"></button></p>
+<button disabled style="color:#cccccc;background:#ffffff;min-width:60px;min-height:48px">Disabled faint</button>
 <img src="missing.png">
 </body></html>
 """
@@ -143,6 +145,24 @@ def test_write_execution_graph_keeps_valid_and_refuses_invalid_ui_render(tmp_pat
     assert json.loads((task_dir / "execution-graph.json").read_text()) == written
 
 
+def test_rewriting_the_graph_keeps_ui_render_unless_removed(tmp_path: Path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    graph = json.loads((task_dir / "execution-graph.json").read_text())
+    declared = {"targets": [{"id": "home", "url": "http://localhost:3000/"}]}
+    payload = tmp_path / "graph.json"
+
+    payload.write_text(json.dumps({**graph, "ui_render": declared}))
+    assert _run_ctl("write-execution-graph", str(task_dir), "--from", str(payload)).returncode == 0
+    # A repaired graph that does not mention ui_render keeps the declaration.
+    payload.write_text(json.dumps(graph))
+    assert _run_ctl("write-execution-graph", str(task_dir), "--from", str(payload)).returncode == 0
+    assert json.loads((task_dir / "execution-graph.json").read_text())["ui_render"] == declared
+    # An explicit null removes it.
+    payload.write_text(json.dumps({**graph, "ui_render": None}))
+    assert _run_ctl("write-execution-graph", str(task_dir), "--from", str(payload)).returncode == 0
+    assert "ui_render" not in json.loads((task_dir / "execution-graph.json").read_text())
+
+
 def test_graph_without_ui_render_is_unchanged(tmp_path: Path) -> None:
     task_dir = _setup_task_dir(tmp_path)
     graph = json.loads((task_dir / "execution-graph.json").read_text())
@@ -189,7 +209,9 @@ def test_hand_edited_invalid_declaration_is_refused(tmp_path: Path) -> None:
     result = _run_ctl("run-ui-render-evidence", str(task_dir))
     assert result.returncode == 1
     assert "invalid ui_render declaration" in result.stderr
-    assert not (task_dir / "evidence" / "ui-render" / "report.json").exists()
+    # A failed report replaces whatever an earlier capture left behind.
+    report = json.loads((task_dir / "evidence" / "ui-render" / "report.json").read_text())
+    assert report["status"] == "failed" and "invalid ui_render declaration" in report["reason"]
 
 
 def test_capture_skips_without_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -230,6 +252,9 @@ def test_summarize_counts_across_viewports() -> None:
     assert totals["console_errors"] == 1
     assert totals["contrast_unmeasured"] == 3
     assert totals["targets_under_44"] == 2
+    # Lists are capped per viewport; the *_total field carries the real count.
+    capped = summarize([{"viewports": [{"low_contrast": [{}] * 20, "low_contrast_total": 57}]}])
+    assert capped["low_contrast"] == 57
 
 
 # --- write boundary ----------------------------------------------------------
@@ -288,7 +313,14 @@ def test_capture_measures_a_broken_static_page(tmp_path: Path) -> None:
     assert any("div.wide" in o["element"] for o in by_width[320]["horizontal_overflow"]["offenders"])
 
     narrow = by_width[320]
-    assert any(item["width"] == 12 and item["height"] == 12 for item in narrow["small_targets"])
+    # Two adjacent 12px buttons crowd each other; the isolated one passes
+    # the WCAG 2.5.8 spacing exception and is not reported.
+    assert [(i["width"], i["height"]) for i in narrow["small_targets"]] == [(12, 12), (12, 12)]
+    assert narrow["small_targets_total"] == 2
+    assert narrow["small_targets_passing_by_spacing"] == 1
+    assert not any("Alone" in item["element"] for item in narrow["small_targets"])
+    # Disabled controls are exempt from the contrast requirement.
+    assert not any("Disabled faint" in item["element"] for item in narrow["low_contrast"])
     assert any("button.tiny" in item["element"] for item in narrow["unnamed_controls"])
     assert len(narrow["images_missing_alt"]) == 1
     assert len(narrow["broken_images"]) == 1
@@ -301,6 +333,26 @@ def test_capture_measures_a_broken_static_page(tmp_path: Path) -> None:
         assert shot.is_file() and shot.read_bytes()[:4] == b"\x89PNG"
     assert not stale.exists(), "a screenshot from an earlier capture survived"
     assert report["totals"]["viewports_with_overflow"] == 2
+
+
+@needs_browser
+def test_one_missing_file_does_not_discard_the_other_targets(tmp_path: Path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    root = task_dir.parent.parent
+    (root / "out").mkdir()
+    (root / "out" / "good.html").write_text(GOOD_PAGE)
+    _declare(task_dir, {"targets": [
+        {"id": "good", "file": "out/good.html"},
+        {"id": "gone", "file": "out/gone.html"},
+    ]})
+    result = _run_ctl("run-ui-render-evidence", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((task_dir / "evidence" / "ui-render" / "report.json").read_text())
+    assert report["status"] == "captured"
+    by_id = {t["id"]: t for t in report["targets"]}
+    assert len(by_id["good"]["viewports"]) == 3
+    assert by_id["gone"]["viewports"] == [] and "file not found" in by_id["gone"]["load_error"]
+    assert report["totals"]["load_errors"] == 1
 
 
 @needs_browser
@@ -403,3 +455,68 @@ def test_ui_auditor_covers_accessibility_when_its_partner_is_not_spawned(tmp_pat
 def test_other_auditors_get_no_render_block(tmp_path: Path) -> None:
     prompt = _inject(tmp_path, "security-auditor", auditors=_BOTH, report={"status": "captured", "targets": []})
     assert "Rendered Evidence" not in prompt
+
+
+def test_a_capture_older_than_the_latest_repair_is_not_presented(tmp_path: Path) -> None:
+    import os
+
+    report = {"status": "captured", "widths": [320], "targets": [{"id": "home"}], "totals": {}}
+    prompt = _inject(tmp_path / "fresh", "ui-auditor", auditors=_BOTH, report=report)
+    assert "evidence/ui-render/report.json" in prompt
+
+    project = tmp_path / "stale" / "project"
+    td = project / ".dynos" / "task-20261116-002"
+    (td / "evidence" / "ui-render").mkdir(parents=True)
+    report_path = td / "evidence" / "ui-render" / "report.json"
+    report_path.write_text(json.dumps(report))
+    (td / "repair-log.json").write_text(json.dumps({"batches": []}))
+    os.utime(report_path, (1_000_000, 1_000_000))
+    (td / "audit-plan.json").write_text(json.dumps({"auditors": _BOTH}))
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "hooks" / "router.py"), "audit-inject-prompt",
+         "--root", str(project), "--task-type", "feature", "--audit-plan", str(td / "audit-plan.json"),
+         "--auditor-name", "accessibility-auditor"],
+        input="base", text=True, capture_output=True, check=False, cwd=str(ROOT),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "predates the latest repair" in result.stdout
+    assert "evidence/ui-render/report.json" not in result.stdout
+
+
+def test_reaudit_tells_ui_auditor_when_its_partner_is_not_rerun(tmp_path: Path) -> None:
+    def run(case: str, a11y_finding_id: str) -> str:
+        project = tmp_path / case / "project"
+        td = project / ".dynos" / "task-20261116-002"
+        (td / "audit-reports").mkdir(parents=True)
+        (td / "audit-plan.json").write_text(json.dumps({"auditors": _BOTH}))
+        (td / "repair-log.json").write_text(json.dumps(
+            {"batches": [{"tasks": [{"finding_id": "ui-003", "merged_findings": [{"id": "a11y-009"}]}]}]}
+        ))
+        (td / "audit-reports" / "ui-auditor-x-attempt-1.json").write_text(json.dumps(
+            {"auditor_name": "ui-auditor", "findings": [{"id": "ui-003"}]}
+        ))
+        (td / "audit-reports" / "accessibility-auditor-x-attempt-1.json").write_text(json.dumps(
+            {"auditor_name": "accessibility-auditor", "findings": [{"id": a11y_finding_id}]}
+        ))
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "router.py"), "audit-inject-prompt",
+             "--root", str(project), "--task-type", "feature", "--audit-plan", str(td / "audit-plan.json"),
+             "--auditor-name", "ui-auditor"],
+            input="base", text=True, capture_output=True, check=False, cwd=str(ROOT),
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    # Its findings were not repaired, so it is not re-run: ui-auditor covers.
+    assert "`accessibility-auditor` is not running in this audit" in run("not-rerun", "a11y-001")
+    # One of its findings was repaired, so it is re-run: no cover needed.
+    assert "is not running in this audit" not in run("rerun", "a11y-009")
+
+
+def test_malformed_report_does_not_break_prompt_injection(tmp_path: Path) -> None:
+    report = {"status": "captured", "widths": 320, "targets": "nope", "totals": []}
+    prompt = _inject(tmp_path / "shape", "ui-auditor", auditors=_BOTH, report=report)
+    assert "## Rendered Evidence (injected)" in prompt
+    long_reason = {"status": "failed", "reason": "boom\n" + "x" * 5000}
+    prompt = _inject(tmp_path / "reason", "ui-auditor", auditors=_BOTH, report=long_reason)
+    assert "capture failed: boom x" in prompt and "x" * 400 not in prompt

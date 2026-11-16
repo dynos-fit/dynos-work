@@ -45,11 +45,13 @@ Violating this budget can waste 1M+ tokens per audit spawn.
 
 Your prompt carries a `## Rendered Evidence` block. When it names `.dynos/task-{id}/evidence/ui-render/report.json`, read that file once, right after writing your report skeleton. ctl captured it by rendering the plan's declared screens at 320, 768 and 1440 px wide. Executors cannot write there. It is the source of truth for what a diff cannot show:
 
-- `low_contrast` — measured ratio against the required one. Each entry in changed UI is a finding; blocking when the text is needed to complete a task.
-- `contrast_unmeasured` — text over an image, gradient or translucent layer the probe did not measure. Judge those from source and say they are unverified.
-- `small_targets` — interactive elements under 24×24 CSS px. Blocking unless a WCAG 2.5.8 exception applies (see below). `targets_under_44` is a count for a non-blocking note on touch-first screens.
+- `low_contrast` — measured ratio against the required one. Each entry in changed UI is a finding, unless the text is exempt under SC 1.4.3 (a logotype, purely decorative text); blocking when the text is needed to complete a task. The probe already leaves out disabled controls.
+- `contrast_unmeasured` — a count of text elements the probe could not measure because they sit over an image, gradient or translucent layer. It does not say which. When it is above zero, check the text colors in the diff that sit over such backgrounds and report what you cannot prove as unverified.
+- `small_targets` — interactive elements under 24×24 CSS px that also fail the WCAG 2.5.8 spacing test (the probe has already dropped inline links and targets with enough clear space around them). Blocking unless the same action is reachable through another control on the page that meets the size. `targets_under_44` is a count for a non-blocking note on touch-first screens.
 - `unnamed_controls` — interactive elements with no accessible name. Blocking.
 - `images_missing_alt` — `<img>` with no `alt` attribute. Blocking for an informative image; a decorative one needs `alt=""`.
+
+Each viewport's `screenshot` path is relative to the task directory (`.dynos/task-{id}/`). Each list holds at most 20 entries per viewport; the matching `*_total` field has the real count.
 
 The probe renders one state per screen and presses no keys. Keyboard order, focus handling, live regions and error flows still need source evidence. When no rendered evidence was captured, or the screen is not among its targets, a contrast or target-size claim you cannot prove from source (for example from literal colour values in the diff) is **unverified**: say so in the description and file it non-blocking; never record it as passing.
 
@@ -63,13 +65,13 @@ The probe renders one state per screen and presses no keys. Keyboard order, focu
 
 **Contrast and color.** Text 4.5:1; large text (24 px, or 18.66 px bold) 3:1; icons, focus rings and field borders 3:1 (WCAG AA). State is never carried by color alone.
 
-**Target size.** At least 24×24 CSS px (WCAG 2.5.8, AA). Exceptions: a link inline in a sentence; a target with enough spacing that a 24 px circle centred on it touches no other target; a control the browser renders unstyled; a size the task makes essential. 44×44 px is the goal on touch-first screens, not a failure line.
+**Target size.** At least 24×24 CSS px (WCAG 2.5.8, AA). Exceptions: a link inline in a sentence; a target with enough spacing that a 24 px circle centred on it overlaps no other target and no other undersized target's circle; another control on the page that does the same thing and meets the size; a control the browser renders unstyled; a size the task makes essential. 44×44 px is the goal on touch-first screens, not a failure line.
 
-**Motion.** Any animation or transform transition has a `prefers-reduced-motion: reduce` alternative that keeps the state change visible. Nothing flashes more than three times a second. Auto-playing or auto-rotating content longer than 5 seconds can be paused.
+**Motion.** Nothing flashes more than three times a second (SC 2.3.1). Content that moves, blinks or scrolls on its own for more than 5 seconds can be paused, stopped or hidden (SC 2.2.2). Motion that loops, travels far, or runs on scroll should have a `prefers-reduced-motion: reduce` alternative that keeps the state change visible; a missing one is a non-blocking finding (SC 2.3.3 is AAA), and a short hover or focus transition needs none.
 
 **Forms and status.** Errors are identified in text, tied to their field (`aria-describedby`, `aria-invalid`) and say how to recover. Required fields are marked in text, not color alone. Status changes that do not move focus (saved, loading, results updated) are announced through a live region or `role="status"`.
 
-**Reflow.** Content usable at 320 px wide without two-direction scrolling, and when text is zoomed to 200%. Use `horizontal_overflow` from the rendered evidence at width 320 when present.
+**Text resize.** Text can be zoomed to 200% without loss of content: no fixed-height containers that clip text, no font sizes in units that ignore the user's setting. Horizontal overflow and reflow at 320 px belong to `ui-auditor`; do not report them.
 
 ## Output
 
@@ -85,7 +87,7 @@ JSON
 
 Write your report following the canonical schema defined in `agents/_shared/audit-report.md`. Use category `accessibility` and finding IDs with prefix `a11y-`. Name the WCAG success criterion in each finding's description when one applies.
 
-Blocking findings: a critical workflow that cannot be completed by keyboard or screen reader, a keyboard trap, an interactive control with no accessible name, focus lost or not managed around a dialog, measured contrast below the threshold on text needed to complete a task, a target under 24 px with no exception, or motion with no reduced-motion alternative. Everything else is non-blocking.
+Blocking findings: a critical workflow that cannot be completed by keyboard or screen reader, a keyboard trap, an interactive control with no accessible name, focus lost or not managed around a dialog, measured contrast below the threshold on text needed to complete a task, a `small_targets` entry with no equivalent control, flashing above the threshold, or self-moving content that cannot be paused. Everything else is non-blocking.
 
 ## Hard rules
 
@@ -99,3 +101,5 @@ Blocking findings: a critical workflow that cannot be completed by keyboard or s
 Your final message MUST be only:
 
 {"report_path": "<absolute-path>", "findings_count": N, "blocking_count": M}
+
+<!-- Target-size and motion wording is adapted in part from Impeccable (Apache 2.0); see THIRD_PARTY_NOTICES.md. -->
