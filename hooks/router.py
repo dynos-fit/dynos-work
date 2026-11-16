@@ -2420,6 +2420,83 @@ def _build_failing_tests_block(task_dir: Path, auditor_name: str) -> str:
     return "\n".join(lines)
 
 
+_UI_RENDER_AUDITORS = ("ui-auditor", "accessibility-auditor")
+
+
+def _build_ui_evidence_block(task_dir: Path, plan: dict, auditor_name: str) -> str:
+    """Tell the UI auditors what rendered evidence exists for this task.
+
+    `ctl run-ui-render-evidence` writes `evidence/ui-render/report.json`.
+    The block is built from that file, not from prompt logic, so an auditor
+    is never told evidence exists when the capture was skipped or failed.
+
+    Also covers the accessibility split: `ui-auditor` leaves accessibility to
+    `accessibility-auditor`, so when that auditor is not being spawned in
+    this audit (skip policy, fast track, a custom registry) `ui-auditor` is
+    told to cover it.
+    """
+    if auditor_name not in _UI_RENDER_AUDITORS:
+        return ""
+    rel = f".dynos/{task_dir.name}/evidence/ui-render/report.json"
+    try:
+        report = load_json(task_dir / "evidence" / "ui-render" / "report.json")
+    except (OSError, ValueError):
+        report = None
+    lines = ["\n\n## Rendered Evidence (injected)"]
+    if isinstance(report, dict) and report.get("status") == "captured":
+        totals = report.get("totals") if isinstance(report.get("totals"), dict) else {}
+        target_ids = ", ".join(
+            str(t.get("id")) for t in report.get("targets", []) or [] if isinstance(t, dict)
+        ) or "none"
+        lines.append(
+            f"ctl rendered this task's declared screens ({target_ids}) at "
+            f"{', '.join(str(w) for w in report.get('widths', []) or [])} px wide. "
+            f"The measurements are in `{rel}` and the screenshots sit beside it. "
+            "Read the report once; it is the source of truth for contrast, target "
+            "size, horizontal overflow and narrow-width layout on those screens."
+        )
+        summary = ", ".join(
+            f"{totals.get(key, 0)} {label}" for key, label in (
+                ("viewports_with_overflow", "viewport(s) with horizontal overflow"),
+                ("low_contrast", "low-contrast text element(s)"),
+                ("small_targets", "target(s) under 24px"),
+                ("unnamed_controls", "unnamed control(s)"),
+                ("images_missing_alt", "image(s) without alt"),
+                ("broken_images", "broken image(s)"),
+                ("console_errors", "console error(s)"),
+                ("load_errors", "load error(s)"),
+            )
+        )
+        lines.append(f"Totals across all viewports: {summary}.")
+    else:
+        if isinstance(report, dict):
+            reason = f"capture {report.get('status', 'unknown')}: {report.get('reason') or 'no reason recorded'}"
+        else:
+            reason = "`ctl run-ui-render-evidence` has not been run for this task"
+        lines.append(
+            f"No rendered evidence is available ({reason}). Judge from source "
+            "only. A contrast, target-size or viewport claim you cannot prove "
+            "from source is unverified: say so and file it non-blocking; never "
+            "record it as passing."
+        )
+    if auditor_name == "ui-auditor":
+        partner_spawned = any(
+            isinstance(entry, dict)
+            and entry.get("name") == "accessibility-auditor"
+            and entry.get("action") == "spawn"
+            for entry in plan.get("auditors", []) or []
+        )
+        if not partner_spawned:
+            lines.append(
+                "`accessibility-auditor` is not running in this audit, so you "
+                "also own accessibility here: accessible names and labels, "
+                "keyboard reach and focus visibility, contrast (WCAG AA 4.5:1 "
+                "text, 3:1 large text) and target size (24px minimum). Use "
+                "category `accessibility` for those findings."
+            )
+    return "\n".join(lines)
+
+
 def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
     """Inject learned-auditor instructions into a base auditor prompt.
 
@@ -2539,6 +2616,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
         + _build_ruthless_audit_brief(root, task_dir, plan, auditor_name, reaudit=_is_reaudit(task_dir))
         + _build_reaudit_context_block(task_dir, auditor_name)
         + _build_failing_tests_block(task_dir, auditor_name)
+        + _build_ui_evidence_block(task_dir, plan, auditor_name)
         + _build_reopen_block(task_dir)
     )
 

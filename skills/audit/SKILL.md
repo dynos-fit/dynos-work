@@ -95,6 +95,23 @@ For each auditor in the plan:
 - For the plan-auditor: For each AC in spec.md naming a function signature, verify plan.md's Component section names the same signature. Mismatch is a partial finding.
 - If `plan-audit-gap-warnings.json` exists with `advisory: true` (also recorded as `gap_warnings` in the `plan-audit-check` receipt), give its `warnings` to the plan-auditor and spec-completion auditor: each names a plan endpoint or model the gap scanner could not find. Verify each against the final code; one that still does not exist and is not created by the diff is a finding.
 
+**UI render evidence (deterministic — run before spawning `ui-auditor` or `accessibility-auditor`):** When either auditor is in the plan with `action: "spawn"`, capture rendered evidence first:
+
+```bash
+"$DYNOS" ctl run-ui-render-evidence .dynos/task-{id}
+"$DYNOS" ctl log-append .dynos/task-{id} --tag VISION --message "ui render evidence: {status} — {reason or totals}"
+```
+
+It reads the `ui_render` declaration from the approved execution graph, starts the declared dev server if one is named (and stops it afterwards), renders every target at 320, 768 and 1440 px wide, and writes screenshots plus measurements to `.dynos/task-{id}/evidence/ui-render/` (`report.json` is the index). Measured per viewport: horizontal overflow, interactive targets under 24 px (and a count under 44 px), text contrast against solid backgrounds, controls with no accessible name, images with no `alt`, images that failed to load, and console errors. Do not start a server, take screenshots, or measure any of this by hand, and do not spawn a subagent to do it.
+
+`router.py audit-inject-prompt` reads the resulting `report.json` and tells both auditors what exists, so do not describe the capture in their base prompts. The output `status` is one of:
+
+- `ui_render_captured` — the auditors are pointed at the report and its screenshots.
+- `ui_render_skipped` (exit 0) — nothing was declared, or this machine has no `node` or Playwright driver. The auditors are told to judge from source and to mark what they cannot prove as unverified.
+- `ui_render_failed` (exit 1) — the declared server or targets could not be loaded. Print the `reason` to the user and continue the audit; the auditors are told the same as for a skip. This step never blocks the audit.
+
+Re-run the command before each re-audit batch that includes either auditor, so they judge the repaired UI and not the earlier capture. The capture is evidence, not an auditor: it produces no findings and nothing gates on it.
+
 **Pre-load diff context (run once, write to sidecar, reference by path):** Using `diff_base` from the audit plan output, write the context ONCE to a sidecar file and reference its path in each auditor's base prompt. Do NOT capture the full content into a shell variable and append it to every prompt — that pattern multiplies (auditors × cascade-models × context-size) input tokens, which is exactly the regression the 2026-04-30 latency investigation flagged in CG-013 (the mislabeled "perf:" commit).
 
 ```bash
@@ -173,8 +190,6 @@ The audit batch is a loop. In the first batch, spawn every auditor whose status 
 **Re-audit (after a repair cycle):** the cascade does not restart. Each ensemble auditor in the re-audit set is spawned **once** at its escalation model, and that deep-tier verdict is binding. `run-audit-reaudit-plan` returns the exact `model` and `shard_step_name` per auditor under `spawns`. While `repair-log.json` exists, `ensemble-next` reports `reaudit_model` and `reaudit_done` for every ensemble auditor, and `audit-inject-prompt` and `audit-receipt` refuse any other tier (no fast or balanced restart). The receipt written for that spawn records the repair cycle, which is what marks the re-audit done.
 
 **Enforcement (there is no shortcut):** `router.py audit-inject-prompt` refuses to build a prompt for an ensemble auditor at any model other than the one `ensemble-next` returns; `audit-receipt` refuses a shard receipt written out of cascade order; `run-audit-summary` and the DONE gate refuse while any cascade is incomplete. On a first audit a single deep-tier spawn does not satisfy an ensemble auditor. On null-model hosts the router sets `"ensemble": false` and the auditor spawns once at the plan model.
-
-**Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag VISION --message "UI audit complete -- {N} visual bugs found"`.
 
 **Alongside mode deduplication:** When generic and learned auditors both produce findings for the same role, deduplicate by key `{file}:{line}:{category}`. Count duplicates once, preferring the learned version. The deduplicated set feeds into repair and retrospective counts. Track whether learned findings are a superset of generic findings (for promotion decisions by the learn step).
 

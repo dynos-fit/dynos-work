@@ -165,15 +165,20 @@ def _owning_task_dir(path: Path) -> Path | None:
     return None
 
 
+# Evidence that ctl captures by machine; no agent role may write it.
+_CTL_CAPTURED_EVIDENCE = ("evidence/verification/", "evidence/ui-render/")
+
+
 def is_executor_evidence(rel_posix: str) -> bool:
     """Return True iff a task-dir-relative path is executor-owned evidence.
 
     Executors write ``evidence/`` (their segment write-ups); only
-    ``evidence/verification/`` is machine-captured by ctl. The repair-log
+    ``evidence/verification/`` and ``evidence/ui-render/`` are
+    machine-captured by ctl. The repair-log
     builder uses this too, so it never escalates a finding an executor
     is allowed to repair.
     """
-    return rel_posix.startswith("evidence/") and not rel_posix.startswith("evidence/verification/")
+    return rel_posix.startswith("evidence/") and not rel_posix.startswith(_CTL_CAPTURED_EVIDENCE)
 
 
 def _is_cross_task_control_plane(rel_posix: str) -> bool:
@@ -203,7 +208,7 @@ def _is_cross_task_control_plane(rel_posix: str) -> bool:
         return True
     if r.startswith("audit-reports/"):
         return True
-    if r.startswith("evidence/verification/"):
+    if r.startswith(_CTL_CAPTURED_EVIDENCE):
         return True
     if r.startswith("handoff-") and r.endswith(".json"):
         return True
@@ -746,6 +751,19 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             False,
             "evidence/verification/ is machine-captured by "
             "`ctl.py run-verification-evidence`; agent roles may not write it",
+            "deny",
+        )
+
+    if rel_posix is not None and rel_posix.startswith("evidence/ui-render/"):
+        # Machine-captured render evidence: written ONLY by
+        # `ctl run-ui-render-evidence`. An executor that could write here
+        # could hand the UI auditors doctored measurements.
+        if attempt.role == "ctl":
+            return WriteDecision(True, "ui render evidence is ctl-captured", "direct")
+        return WriteDecision(
+            False,
+            "evidence/ui-render/ is machine-captured by "
+            "`ctl.py run-ui-render-evidence`; agent roles may not write it",
             "deny",
         )
 

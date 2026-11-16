@@ -50,7 +50,7 @@ _CLAUDE_EXPECTED_MODELS = [
     ("dead-code-auditor", "haiku"),
     ("performance-auditor", "haiku"),
     ("db-schema-auditor", "haiku"),
-    ("ui-auditor", "haiku"),
+    ("ui-auditor", "sonnet"),
     ("claude-md-auditor", "sonnet"),
     ("security-auditor", "opus"),
 ]

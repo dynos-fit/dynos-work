@@ -717,6 +717,13 @@ control-plane) is denied with a self-explaining message.
   `ctl run-verification-evidence`, hash-bound by a receipt, consumed by
   the spec-completion auditor as machine evidence for execution-based
   acceptance criteria.
+- `evidence/ui-render/**` — ctl-captured render evidence (screenshots and
+  `report.json` with measured overflow, contrast, target sizes, unnamed
+  controls and missing alt text); agent roles, including executors and
+  auditors, are denied. Written only by `ctl run-ui-render-evidence` from
+  the `ui_render` declaration in the approved execution graph, hash-bound
+  by the `ui-render-evidence` receipt, read by `ui-auditor` and
+  `accessibility-auditor`. Evidence only: no gate reads it.
 
 ### Self-modification guard (H1)
 

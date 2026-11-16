@@ -212,7 +212,7 @@ Write to `.dynos/task-{id}/spec.md`:
 - Every acceptance criterion must be concrete and testable — not vague.
 - "The user can log in" is too vague. "A user with valid email+password credentials receives a JWT and is redirected to /dashboard within 2 seconds" is correct.
 - Do not invent requirements. Surface implicit ones, but flag them as surfaced, not stated.
-- For UI tasks: loading, empty, error, and disabled states are always implicit acceptance criteria unless the spec explicitly excludes them.
+- For UI tasks: loading, empty, error, and disabled states are always implicit acceptance criteria unless the spec explicitly excludes them. Name them per screen: one criterion for each screen or component that fetches or mutates data, listing the states it must render and what the user sees in each ("The orders list shows a skeleton while loading, an empty state with a 'Create order' action at zero orders, and a retry action when the fetch fails"). The UI auditor checks exactly the states the criteria name, so a state left unnamed is a state nobody verifies. Keep it to one criterion per screen to stay inside the 20-criterion ceiling.
 - For data mutation tasks: validation rules, conflict resolution, and rollback behavior are always implicit.
 - Write acceptance criteria from the user's perspective when possible — "the user sees X when Y" rather than "the component renders X."
 - Ban adjectives without mechanics. Words like "clean", "intuitive", "robust", "fast", and "secure" are worthless unless converted into observable behavior or measurable constraints.
@@ -255,7 +255,14 @@ Write to `.dynos/task-{id}/plan.md`:
 Each ADR is a constraint that downstream executors must follow. If an executor encounters a gray area not covered by an ADR, they should stop and ask rather than guess.]
 
 ## Reference Code
-[List 2-5 existing files in the codebase that executors should read before implementing, with a one-sentence note on what pattern each demonstrates. This prevents executors from inventing new patterns when existing ones work.]
+[List 2-5 existing files in the codebase that executors should read before implementing, with a one-sentence note on what pattern each demonstrates. This prevents executors from inventing new patterns when existing ones work.
+
+For UI tasks, two of these must be the file that defines the design tokens or theme (colors, spacing, type) and the closest existing sibling component or screen. A UI executor reads at most two reference files and never sees this plan, so repeat both paths in each `ui-executor` segment's `description` (see the execution graph rules).]
+
+## Design Direction
+*(UI tasks only, and only when the codebase has no design system to match — no tokens or theme file, no comparable screen. Otherwise omit the section; the existing system is the direction.)*
+
+[The decisions an executor would otherwise make by default: the typeface, the palette (neutrals plus one accent, with the values), the spacing scale, light or dark and why for this user and setting, and which file the tokens are defined in. Take it from a wireframe, brand asset or discovery answer when one exists; where you chose it yourself, say so and flag it in Open Questions for the human to confirm at the plan gate. Three to six lines. Repeat it in each `ui-executor` segment's `description`.]
 
 ## Components / Modules
 ### Component: [Name]
@@ -326,7 +333,16 @@ Build the execution graph payload with this shape and persist it by piping it to
         {"id": "e2e", "command": "npx playwright test", "criteria_ids": [3], "timeout": 1800}
       ]
     }
-  ]
+  ],
+  "ui_render": {
+    "start_command": "npm run dev -- --port 4173",
+    "ready_url": "http://localhost:4173/",
+    "ready_timeout": 120,
+    "targets": [
+      {"id": "orders", "url": "http://localhost:4173/orders", "wait_for": "main"},
+      {"id": "report", "file": "out/report.html"}
+    ]
+  }
 }
 ```
 
@@ -341,6 +357,11 @@ Build the execution graph payload with this shape and persist it by piping it to
 - Segments with empty `depends_on` and `parallelizable: true` can run simultaneously
 - The dependency graph must be acyclic
 - Every file path must be repo-relative and must not escape the workspace
+- A `ui-executor` segment's `description` is all the plan that executor sees. It must name the two reference files (the tokens or theme file and the sibling component) by path, and carry the Design Direction when the plan has one
+- `ui_render` (top level, UI tasks only) declares the screens the audit renders. ctl opens each target at 320, 768 and 1440 px wide and measures overflow, contrast, target sizes, unnamed controls and missing alt text, and the UI auditors judge from those measurements. Declare it whenever the task changes something a browser can open; omit it for native or non-web UI, and when a screen cannot be reached without credentials or data the task does not provide (say which in Open Questions). Without it the auditors can only mark those checks unverified
+  - `targets` (1–12): one per screen or page the task adds or visibly changes. Each has an `id` (lowercase letters, digits, hyphens) and exactly one of `url` (http(s) on `localhost`, `127.0.0.1` or `[::1]` only) or `file` (a repo-relative HTML file, for generated static output). `wait_for` is an optional CSS selector that must be visible before measuring
+  - `start_command` starts the dev server from the repo root when the targets need one; take it from the project's own scripts and pin the port the URLs use. ctl waits for `ready_url` (default: the first `url` target) for `ready_timeout` seconds (default 120), captures, and stops the server. Omit it for `file` targets
+  - A target renders in whatever state its URL loads in. To put an empty or error state in front of the auditors, give it its own target only if the app already has a URL that shows it (a fixture route, a query parameter); do not ask an executor to add one just for the audit
 
 ## Phase: Strategic Implementation Planning (Master)
 
