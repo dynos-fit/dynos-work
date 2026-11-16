@@ -64,9 +64,15 @@ def _repo_file(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"ui_render {field} must be a non-empty string")
     rel = value.strip()
+    if any(ord(ch) < 32 for ch in rel):
+        raise ValueError(f"ui_render {field} must not contain control characters")
     path = Path(rel)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"ui_render {field} must be a repo-relative path inside the workspace, got {rel!r}")
+    if path.suffix.lower() not in {".html", ".htm"}:
+        raise ValueError(f"ui_render {field} must be an .html or .htm file, got {rel!r}")
+    if path.parts and path.parts[0] == ".dynos":
+        raise ValueError(f"ui_render {field} must not point into .dynos/")
     return path.as_posix()
 
 
@@ -129,7 +135,7 @@ def normalize_ui_render(raw: object) -> dict | None:
     if ready_timeout is not None:
         try:
             ready_timeout_s = int(ready_timeout)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ValueError("ui_render.ready_timeout must be an integer of seconds") from None
         if isinstance(ready_timeout, bool) or not 0 < ready_timeout_s <= MAX_READY_TIMEOUT_S:
             raise ValueError(f"ui_render.ready_timeout must be between 1 and {MAX_READY_TIMEOUT_S} seconds")
@@ -150,10 +156,20 @@ def _tail(path: Path) -> str:
     return data[-_TAIL_BYTES:].decode("utf-8", errors="replace")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+
+# Straight to the loopback address: no proxy from the environment (a proxy
+# answering 502 would make a dead port look alive) and no redirects.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
 def _url_ready(url: str) -> bool:
     """True once the server answers at all; an HTTP error status still means it is up."""
     try:
-        with urllib.request.urlopen(url, timeout=3):  # noqa: S310 - loopback only, validated at plan time
+        with _OPENER.open(url, timeout=3):  # noqa: S310 - loopback only, validated at plan time
             return True
     except urllib.error.HTTPError:
         return True
@@ -162,26 +178,43 @@ def _url_ready(url: str) -> bool:
 
 
 def _stop(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
-        proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
+    """Stop the server and everything it started.
+
+    The whole process group is signalled even when the shell itself has
+    already exited: a start_command that backgrounds its server leaves the
+    server running in the group after bash returns.
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(proc.pid, sig)
         except (ProcessLookupError, PermissionError, OSError):
-            proc.kill()
-        proc.wait(timeout=10)
+            if proc.poll() is None:
+                proc.terminate() if sig == signal.SIGTERM else proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            continue
+        # The shell is gone; give the rest of the group a moment to follow.
+        for _ in range(20):
+            try:
+                os.killpg(proc.pid, 0)
+            except (ProcessLookupError, PermissionError, OSError):
+                return
+            time.sleep(0.1)
+
+
+class _Terminated(Exception):
+    """Raised from the SIGTERM handler so `finally` blocks still run."""
+
+
+def _raise_terminated(signum, frame):  # noqa: ANN001, ARG001
+    raise _Terminated()
 
 
 def summarize(targets: list[dict]) -> dict:
     """Totals across every target and viewport, for the report header."""
     totals = {key: 0 for key in _LIST_KEYS}
-    totals.update({"viewports": 0, "viewports_with_overflow": 0, "load_errors": 0, "contrast_unmeasured": 0, "targets_under_44": 0})
+    totals.update({"viewports": 0, "viewports_with_overflow": 0, "load_errors": 0, "contrast_unmeasured": 0, "targets_under_44": 0, "blocked_requests": 0})
     for target in targets:
         for vp in target.get("viewports", []) or []:
             totals["viewports"] += 1
@@ -191,6 +224,7 @@ def summarize(targets: list[dict]) -> dict:
                 totals["viewports_with_overflow"] += 1
             totals["contrast_unmeasured"] += int(vp.get("contrast_unmeasured") or 0)
             totals["targets_under_44"] += int(vp.get("targets_under_44") or 0)
+            totals["blocked_requests"] += len(vp.get("blocked_requests") or [])
             for key in _LIST_KEYS:
                 # Lists are capped per viewport; `<key>_total` has the real count.
                 exact = vp.get(f"{key}_total")
@@ -223,10 +257,10 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
         if "url" in target:
             entry["url"] = target["url"]
         else:
-            file_path = (root / target["file"]).resolve()
             try:
+                file_path = (root / target["file"]).resolve()
                 file_path.relative_to(root.resolve())
-            except ValueError:
+            except (ValueError, OSError):
                 unloadable[target["id"]] = "file escapes the workspace"
                 continue
             if not file_path.is_file():
@@ -251,9 +285,14 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
         }
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    for stale in out_dir.glob("*.png"):
-        stale.unlink()
 
+    # ctl being terminated must not leave the server (its own session) or
+    # the temp dir behind.
+    previous_handler = None
+    try:
+        previous_handler = signal.signal(signal.SIGTERM, _raise_terminated)
+    except ValueError:  # not the main thread
+        previous_handler = None
     server: subprocess.Popen | None = None
     server_log: Path | None = None
     server_reused = False
@@ -275,7 +314,9 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
                     )
                 deadline = time.monotonic() + int(declaration.get("ready_timeout") or DEFAULT_READY_TIMEOUT_S)
                 while not _url_ready(ready_url):
-                    if server.poll() is not None:
+                    # Exit code 0 can be a command that put its server in the
+                    # background; keep waiting for the URL in that case.
+                    if server.poll() not in (None, 0):
                         return {
                             **base, "status": "failed",
                             "reason": f"start_command exited with code {server.returncode} before {ready_url} answered",
@@ -292,6 +333,7 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
             spec_path = tmp_dir / "spec.json"
             spec_path.write_text(json.dumps({
                 "targets": spec_targets, "widths": list(UI_RENDER_WIDTHS), "height": UI_RENDER_HEIGHT,
+                "root": str(root.resolve()),
                 "nav_timeout_ms": DEFAULT_NAV_TIMEOUT_MS,
             }))
             probe = Path(__file__).resolve().parent / "ui_render_probe.mjs"
@@ -310,9 +352,13 @@ def capture(root: Path, out_dir: Path, declaration: dict | None, *, probe_timeou
                     "reason": f"render probe produced no result (exit {proc.returncode})",
                     "probe_output_tail": (proc.stderr or proc.stdout)[-_TAIL_BYTES:],
                 }
+        except _Terminated:
+            return {**base, "status": "failed", "reason": "the capture was terminated before it finished"}
         finally:
             if server is not None:
                 _stop(server)
+            if previous_handler is not None:
+                signal.signal(signal.SIGTERM, previous_handler)
 
     status = result.get("status")
     if status != "captured":

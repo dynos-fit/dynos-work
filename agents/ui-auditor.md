@@ -52,6 +52,7 @@ Your prompt carries a `## Rendered Evidence` block. When it names `.dynos/task-{
 - A `load_error`, a `broken_images` entry, or a `console_errors` entry caused by the changed files is a finding; blocking when it stops a screen from rendering.
 - Each viewport's `screenshot` path is relative to the task directory (`.dynos/task-{id}/`). Each list in the report holds at most 20 entries per viewport; the matching `*_total` field has the real count.
 - Open a screenshot only to settle a specific question (clipped text, overlapping elements, a broken narrow layout). Three or four is normally enough; do not page through all of them.
+- `blocked_requests` lists requests to other machines that the capture refused; a screen that looks broken only because of them is not a finding against the task.
 - The capture shows each screen in the one state the URL loads in. It proves nothing about loading, empty or error states: those still need file evidence.
 - When no rendered evidence was captured, or the screen you are judging is not among its targets, a layout claim you cannot prove from source is **unverified**. Say so in the finding's description and file it non-blocking; never record it as passing.
 

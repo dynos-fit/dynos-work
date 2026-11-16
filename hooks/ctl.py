@@ -7795,14 +7795,21 @@ def cmd_run_ui_render_evidence(args: argparse.Namespace) -> int:
         refusal = f"invalid ui_render declaration: {exc}"
     except Exception as exc:
         refusal = f"cannot read execution-graph.json: {exc}"
+    if out_dir.is_symlink() or (task_dir / "evidence").is_symlink():
+        print("run-ui-render-evidence: evidence/ui-render must be a real directory, not a symlink", file=sys.stderr)
+        return 1
+    # Screenshots from an earlier capture never sit beside a newer report.
+    if out_dir.is_dir():
+        for stale in out_dir.glob("*.png"):
+            stale.unlink()
     if refusal is not None:
         print(f"run-ui-render-evidence: {refusal}", file=sys.stderr)
-        if out_dir.is_dir():
-            for stale in out_dir.glob("*.png"):
-                stale.unlink()
         report = {"schema": 1, "status": "failed", "reason": refusal, "targets": []}
     else:
-        report = capture_ui_render(root, out_dir, declaration, probe_timeout_s=int(args.timeout))
+        try:
+            report = capture_ui_render(root, out_dir, declaration, probe_timeout_s=max(1, int(args.timeout)))
+        except Exception as exc:  # noqa: BLE001 - evidence capture must always leave a report
+            report = {"schema": 1, "status": "failed", "reason": f"capture crashed: {exc}", "targets": []}
     report = {"task_id": task_dir.name, "captured_at": now_iso(), **report}
     report_path = out_dir / UI_RENDER_REPORT
     out_dir.mkdir(parents=True, exist_ok=True)

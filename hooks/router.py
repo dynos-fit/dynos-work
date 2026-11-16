@@ -2497,6 +2497,14 @@ def _ui_render_report(task_dir: Path) -> tuple[dict | None, str]:
         return None, "the render report is unreadable"
     if report.get("status") != "captured":
         return None, f"capture {_one_line(report.get('status', 'unknown'), 40)}: {_one_line(report.get('reason') or 'no reason recorded')}"
+    # Only the report ctl wrote counts: its hash is in the receipt.
+    try:
+        receipt = load_json(task_dir / "receipts" / "ui-render-evidence.json")
+        recorded = receipt.get("artifact_sha256") if isinstance(receipt, dict) else None
+    except (OSError, ValueError):
+        recorded = None
+    if not recorded or recorded != hashlib.sha256(report_path.read_bytes()).hexdigest():
+        return None, "the render report does not match its ctl receipt"
     # A capture older than the latest repair shows the UI before the fix.
     try:
         if (task_dir / "repair-log.json").stat().st_mtime > report_path.stat().st_mtime:

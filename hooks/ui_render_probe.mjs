@@ -5,7 +5,7 @@
 // screenshot and measures what an auditor cannot read off a diff: horizontal
 // overflow, undersized touch targets, text contrast, unnamed controls, images
 // without alt text, broken images and console errors. No LLM, no network
-// beyond the declared loopback / file targets.
+// beyond this machine: requests to other hosts are aborted.
 //
 // usage: node ui_render_probe.mjs --spec <spec.json> --out <dir>
 // spec:  {"targets": [{"id", "url", "wait_for"?}], "widths": [320, 768, 1440],
@@ -14,8 +14,9 @@
 // findings), 3 when no browser driver is available, 2 on a usage error.
 
 import { createRequire } from 'node:module';
-import { readFileSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const MAX_ITEMS = 20;
 
@@ -45,6 +46,24 @@ function loadChromium() {
   return null;
 }
 
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+function allowedUrl(raw, root) {
+  let url;
+  try { url = new URL(raw); } catch { return false; }
+  if (url.protocol === 'data:' || url.protocol === 'blob:' || url.protocol === 'about:') return true;
+  if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'ws:' || url.protocol === 'wss:') {
+    return LOOPBACK.has(url.hostname.toLowerCase());
+  }
+  if (url.protocol === 'file:' && root) {
+    let path;
+    try { path = realpathSync(fileURLToPath(url)); } catch { return false; }
+    const base = root.endsWith(sep) ? root : root + sep;
+    return path.startsWith(base);
+  }
+  return false;
+}
+
 // Runs inside the page. Must stay self-contained (no closure references).
 function measure(maxItems) {
   const vw = window.innerWidth;
@@ -56,11 +75,42 @@ function measure(maxItems) {
     const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim().replace(/\s+/g, ' ').slice(0, 40);
     return text ? `${s} "${text}"` : s;
   };
+  // Visible to a sighted user: rendered, not transparent or hidden through
+  // any ancestor, not parked off-screen, not clipped away, not inert.
   const visible = (el) => {
     const r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return false;
-    const cs = getComputedStyle(el);
-    return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) !== 0;
+    if (r.right <= 0 || r.bottom <= 0) return false;
+    if (el.closest('[aria-hidden="true"], [inert]')) return false;
+    if (typeof el.checkVisibility === 'function') {
+      if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })) return false;
+    } else {
+      const cs = getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.display === 'none' || Number(cs.opacity) === 0) return false;
+    }
+    for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+      const box = node.getBoundingClientRect();
+      if (box.width <= 1 || box.height <= 1) return false;
+    }
+    return true;
+  };
+  // Text a user can perceive inside el: skips hidden and aria-hidden subtrees.
+  const perceivedText = (el) => {
+    let out = '';
+    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+      const parent = n.parentElement;
+      if (!parent || !n.nodeValue.trim()) continue;
+      const hidden = parent.closest('[aria-hidden="true"]');
+      if (hidden && el.contains(hidden)) continue;
+      const cs = getComputedStyle(parent);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      if (typeof parent.checkVisibility === 'function' && !parent.checkVisibility()) continue;
+      out += ` ${n.nodeValue}`;
+    }
+    return out.trim();
   };
   // Lists are capped; `counts` keeps the real totals.
   const counts = new Map();
@@ -80,6 +130,18 @@ function measure(maxItems) {
       const r = el.getBoundingClientRect();
       if (r.right > vw + 1 && r.width <= scrollWidth) push(overflow.offenders, { element: describe(el), right: Math.round(r.right) });
       if (overflow.offenders.length >= 5) break;
+    }
+  } else {
+    // A fixed element wider than the viewport does not grow the scroll
+    // width, but its content is still cut off.
+    for (const el of document.body ? document.body.querySelectorAll('*') : []) {
+      if (getComputedStyle(el).position !== 'fixed' || !visible(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.right > vw + 1 || r.left < -1) {
+        overflow.overflows = true;
+        overflow.fixed_element_cut_off = true;
+        if (overflow.offenders.length < 5) overflow.offenders.push({ element: describe(el), right: Math.round(r.right) });
+      }
     }
   }
 
@@ -108,7 +170,7 @@ function measure(maxItems) {
       if (['submit', 'button', 'reset'].includes(type)) return (el.value || type).trim();
       if (type === 'image') return (el.getAttribute('alt') || '').trim();
     }
-    const text = (el.textContent || '').trim();
+    const text = perceivedText(el);
     if (text) return text;
     const img = el.querySelector('img[alt], svg[aria-label], [aria-label]');
     if (img) return (img.getAttribute('alt') || img.getAttribute('aria-label') || '').trim();
@@ -122,8 +184,9 @@ function measure(maxItems) {
     interactiveCount += 1;
     const tag = el.tagName.toLowerCase();
     // WCAG 2.5.8 exempts links inline in a sentence; skip them.
-    const inlineLink = tag === 'a' && getComputedStyle(el).display === 'inline'
-      && el.parentElement && (el.parentElement.textContent || '').trim().length > (el.textContent || '').trim().length;
+    // "Inline" means running text sits beside the link in the same parent.
+    const inlineLink = tag === 'a' && getComputedStyle(el).display === 'inline' && el.parentElement
+      && Array.from(el.parentElement.childNodes).some((n) => n.nodeType === 3 && /[^\s|·•,/]/.test(n.nodeValue || ''));
     if (!inlineLink) candidates.push({ el, rect: el.getBoundingClientRect() });
     if (!nameOf(el)) push(unnamed, { element: describe(el) });
   }
@@ -202,6 +265,24 @@ function measure(maxItems) {
     for (let i = layers.length - 1; i >= 0; i -= 1) base = over(layers[i], base);
     return base;
   };
+  // True when something that is not an ancestor is painted behind the text
+  // (an overlay, a positioned sibling), so the ancestor walk would be wrong.
+  const paintedOver = (el) => {
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+    const stack = document.elementsFromPoint(x, y);
+    const at = stack.indexOf(el);
+    if (at === -1) return stack.some((other) => !other.contains(el) && !el.contains(other));
+    for (const other of stack.slice(at + 1)) {
+      if (other.contains(el)) continue;
+      const ocs = getComputedStyle(other);
+      const obg = parse(ocs.backgroundColor);
+      if ((obg && obg.a > 0) || (ocs.backgroundImage && ocs.backgroundImage !== 'none')) return true;
+    }
+    return false;
+  };
   const lowContrast = [];
   let contrastChecked = 0;
   let contrastUnmeasured = 0;
@@ -216,9 +297,23 @@ function measure(maxItems) {
     if (el.closest(':disabled, [aria-disabled="true"]')) continue;
     seen.add(el);
     const cs = getComputedStyle(el);
-    const fg = parse(cs.color);
+    if (el instanceof SVGElement || paintedOver(el)) { contrastUnmeasured += 1; continue; }
+    judge(el, cs, cs.color);
+  }
+  // Text typed into a field and its placeholder are not text nodes.
+  for (const el of document.querySelectorAll('input:not([type="hidden"]), textarea')) {
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (['checkbox', 'radio', 'range', 'color', 'file', 'image'].includes(type)) continue;
+    if (!visible(el) || el.closest(':disabled, [aria-disabled="true"]')) continue;
+    const cs = getComputedStyle(el);
+    if (el.value) judge(el, cs, cs.color, 'value');
+    else if (el.getAttribute('placeholder')) judge(el, cs, getComputedStyle(el, '::placeholder').color, 'placeholder');
+  }
+
+  function judge(el, cs, color, part) {
+    const fg = parse(color);
     const bg = backgroundOf(el);
-    if (!fg || !bg) { contrastUnmeasured += 1; continue; }
+    if (!fg || !bg) { contrastUnmeasured += 1; return; }
     contrastChecked += 1;
     const text = over(fg, bg);
     const l1 = lum(text);
@@ -230,8 +325,8 @@ function measure(maxItems) {
     const required = large ? 3 : 4.5;
     if (ratio + 0.005 < required) {
       push(lowContrast, {
-        element: describe(el), ratio: Math.round(ratio * 100) / 100, required,
-        color: cs.color, background: `rgb(${Math.round(bg.r)}, ${Math.round(bg.g)}, ${Math.round(bg.b)})`,
+        element: part ? `${describe(el)} (${part})` : describe(el), ratio: Math.round(ratio * 100) / 100, required,
+        color, background: `rgb(${Math.round(bg.r)}, ${Math.round(bg.g)}, ${Math.round(bg.b)})`,
         font_size_px: Math.round(size * 10) / 10,
       });
     }
@@ -291,10 +386,19 @@ async function main() {
       for (const width of widths) {
         const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
         const page = await context.newPage();
+        // Nothing leaves this machine: requests to non-loopback hosts, and
+        // file: URLs outside the workspace, are aborted.
+        const blocked = [];
+        await page.route('**/*', (route) => {
+          const url = route.request().url();
+          if (allowedUrl(url, spec.root)) return route.continue();
+          if (blocked.length < MAX_ITEMS) blocked.push(url.slice(0, 200));
+          return route.abort('blockedbyclient');
+        });
         const consoleErrors = [];
         page.on('console', (msg) => { if (msg.type() === 'error' && consoleErrors.length < MAX_ITEMS) consoleErrors.push(msg.text().slice(0, 300)); });
         page.on('pageerror', (err) => { if (consoleErrors.length < MAX_ITEMS) consoleErrors.push(`uncaught: ${String(err.message || err).slice(0, 300)}`); });
-        const entry = { width, height, screenshot: null, load_error: null, console_errors: consoleErrors };
+        const entry = { width, height, screenshot: null, load_error: null, console_errors: consoleErrors, blocked_requests: blocked };
         try {
           const response = await page.goto(target.url, { waitUntil: 'load', timeout: navTimeout });
           if (response && response.status() >= 400) entry.load_error = `HTTP ${response.status()}`;

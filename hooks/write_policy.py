@@ -169,6 +169,21 @@ def _owning_task_dir(path: Path) -> Path | None:
 _CTL_CAPTURED_EVIDENCE = ("evidence/verification/", "evidence/ui-render/")
 
 
+def _ctl_captured_evidence_dir(rel_posix: str) -> str | None:
+    """The ctl-captured evidence directory rel_posix names or lies in, if any.
+
+    Matches the directory itself as well as anything under it — a `cp` or
+    `rm -rf` aimed at the directory is a write to its contents — and ignores
+    case, since a case-insensitive filesystem resolves `evidence/UI-render`
+    to the same place.
+    """
+    folded = rel_posix.lower().rstrip("/") + "/"
+    for prefix in _CTL_CAPTURED_EVIDENCE:
+        if folded.startswith(prefix):
+            return prefix
+    return None
+
+
 def is_executor_evidence(rel_posix: str) -> bool:
     """Return True iff a task-dir-relative path is executor-owned evidence.
 
@@ -178,7 +193,7 @@ def is_executor_evidence(rel_posix: str) -> bool:
     builder uses this too, so it never escalates a finding an executor
     is allowed to repair.
     """
-    return rel_posix.startswith("evidence/") and not rel_posix.startswith(_CTL_CAPTURED_EVIDENCE)
+    return rel_posix.startswith("evidence/") and _ctl_captured_evidence_dir(rel_posix) is None
 
 
 def _is_cross_task_control_plane(rel_posix: str) -> bool:
@@ -208,7 +223,7 @@ def _is_cross_task_control_plane(rel_posix: str) -> bool:
         return True
     if r.startswith("audit-reports/"):
         return True
-    if r.startswith(_CTL_CAPTURED_EVIDENCE):
+    if _ctl_captured_evidence_dir(r) is not None:
         return True
     if r.startswith("handoff-") and r.endswith(".json"):
         return True
@@ -740,7 +755,7 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             return WriteDecision(True, "audit report is auditor-owned evidence", "direct")
         return WriteDecision(False, "audit reports are reserved for auditor roles", "deny")
 
-    if rel_posix is not None and rel_posix.startswith("evidence/verification/"):
+    if rel_posix is not None and _ctl_captured_evidence_dir(rel_posix) == "evidence/verification/":
         # Machine-captured verification evidence (D6): written ONLY by
         # `ctl run-verification-evidence`. If executors could write here
         # they could doctor the captured exit codes — the exact narrative-
@@ -754,7 +769,7 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             "deny",
         )
 
-    if rel_posix is not None and rel_posix.startswith("evidence/ui-render/"):
+    if rel_posix is not None and _ctl_captured_evidence_dir(rel_posix) == "evidence/ui-render/":
         # Machine-captured render evidence: written ONLY by
         # `ctl run-ui-render-evidence`. An executor that could write here
         # could hand the UI auditors doctored measurements.

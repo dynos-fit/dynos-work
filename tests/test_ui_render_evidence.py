@@ -108,6 +108,10 @@ def test_normalize_accepts_url_and_file_targets() -> None:
     ({"targets": [{"id": "a", "url": "file:///etc/passwd"}]}, "http(s) URL"),
     ({"targets": [{"id": "a", "file": "../outside.html"}]}, "inside the workspace"),
     ({"targets": [{"id": "a", "file": "/etc/passwd"}]}, "inside the workspace"),
+    ({"targets": [{"id": "a", "file": ".env"}]}, ".html or .htm"),
+    ({"targets": [{"id": "a", "file": ".dynos/task-1/x.html"}]}, "must not point into .dynos"),
+    ({"targets": [{"id": "a", "file": "a\x00b.html"}]}, "control characters"),
+    ({"ready_timeout": float("inf"), "targets": [{"id": "a", "url": "http://localhost/"}]}, "ready_timeout"),
     ({"targets": [{"id": "a"}]}, "exactly one of"),
     ({"targets": [{"id": "a", "url": "http://localhost/", "file": "x.html"}]}, "exactly one of"),
     ({"targets": [{"id": "Bad Id", "url": "http://localhost/"}]}, "lowercase"),
@@ -275,6 +279,18 @@ def test_agent_roles_cannot_write_ui_render_evidence(tmp_path: Path) -> None:
             WriteAttempt(role="ctl", task_dir=task_dir, path=target, operation="create", source="ctl")
         )
         assert ctl_decision.allowed is True
+    # The directory itself (a `cp x evidence/ui-render` or `rm -rf` target)
+    # and a differently-cased spelling are the same place.
+    for evidence_dir in ("ui-render", "verification"):
+        for spelling in (evidence_dir, evidence_dir + "/", evidence_dir.upper() + "/report.json"):
+            for operation in ("create", "modify", "delete"):
+                decision = decide_write(WriteAttempt(
+                    role="ui-executor", task_dir=task_dir, path=task_dir / "evidence" / spelling,
+                    operation=operation, source="agent",
+                ))
+                assert decision.allowed is False, f"ui-executor could {operation} evidence/{spelling}"
+    assert is_executor_evidence("evidence/ui-render") is False
+    assert is_executor_evidence("evidence/UI-Render/report.json") is False
     assert is_executor_evidence("evidence/seg-1.md") is True
     assert is_executor_evidence("evidence/ui-render/report.json") is False
     assert is_executor_evidence("evidence/verification/seg-1.json") is False
@@ -394,9 +410,7 @@ def _inject(tmp_path: Path, auditor: str, *, auditors: list[dict], report: dict 
     plan_path = td / "audit-plan.json"
     plan_path.write_text(json.dumps({"auditors": auditors}))
     if report is not None:
-        out = td / "evidence" / "ui-render"
-        out.mkdir(parents=True)
-        (out / "report.json").write_text(json.dumps(report))
+        _write_report(td, report)
     result = subprocess.run(
         [sys.executable, str(ROOT / "hooks" / "router.py"), "audit-inject-prompt",
          "--root", str(project), "--task-type", "feature", "--audit-plan", str(plan_path),
@@ -405,6 +419,22 @@ def _inject(tmp_path: Path, auditor: str, *, auditors: list[dict], report: dict 
     )
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def _write_report(td: Path, report: dict, *, receipt: bool = True) -> Path:
+    """A report.json as ctl leaves it: with a receipt recording its hash."""
+    import hashlib
+
+    out = td / "evidence" / "ui-render"
+    out.mkdir(parents=True, exist_ok=True)
+    report_path = out / "report.json"
+    report_path.write_text(json.dumps(report))
+    if receipt:
+        (td / "receipts").mkdir(exist_ok=True)
+        (td / "receipts" / "ui-render-evidence.json").write_text(json.dumps(
+            {"artifact_sha256": hashlib.sha256(report_path.read_bytes()).hexdigest()}
+        ))
+    return report_path
 
 
 _BOTH = [
@@ -466,9 +496,8 @@ def test_a_capture_older_than_the_latest_repair_is_not_presented(tmp_path: Path)
 
     project = tmp_path / "stale" / "project"
     td = project / ".dynos" / "task-20261116-002"
-    (td / "evidence" / "ui-render").mkdir(parents=True)
-    report_path = td / "evidence" / "ui-render" / "report.json"
-    report_path.write_text(json.dumps(report))
+    td.mkdir(parents=True)
+    report_path = _write_report(td, report)
     (td / "repair-log.json").write_text(json.dumps({"batches": []}))
     os.utime(report_path, (1_000_000, 1_000_000))
     (td / "audit-plan.json").write_text(json.dumps({"auditors": _BOTH}))
@@ -520,3 +549,126 @@ def test_malformed_report_does_not_break_prompt_injection(tmp_path: Path) -> Non
     long_reason = {"status": "failed", "reason": "boom\n" + "x" * 5000}
     prompt = _inject(tmp_path / "reason", "ui-auditor", auditors=_BOTH, report=long_reason)
     assert "capture failed: boom x" in prompt and "x" * 400 not in prompt
+
+
+def test_a_report_ctl_did_not_write_is_not_presented(tmp_path: Path) -> None:
+    report = {"status": "captured", "widths": [320], "targets": [{"id": "home"}], "totals": {}}
+    project = tmp_path / "project"
+    td = project / ".dynos" / "task-20261116-002"
+    td.mkdir(parents=True)
+    (td / "audit-plan.json").write_text(json.dumps({"auditors": _BOTH}))
+
+    def run() -> str:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "router.py"), "audit-inject-prompt",
+             "--root", str(project), "--task-type", "feature", "--audit-plan", str(td / "audit-plan.json"),
+             "--auditor-name", "ui-auditor"],
+            input="base", text=True, capture_output=True, check=False, cwd=str(ROOT),
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    _write_report(td, report, receipt=False)
+    assert "does not match its ctl receipt" in run()
+    report_path = _write_report(td, report)
+    assert "evidence/ui-render/report.json" in run()
+    # Edited after ctl recorded it.
+    report_path.write_text(json.dumps({**report, "totals": {"low_contrast": 0}, "note": "all good"}))
+    out = run()
+    assert "does not match its ctl receipt" in out and "evidence/ui-render/report.json" not in out
+
+
+HIDDEN_PAGE = """<!doctype html><html><head><style>
+body { margin: 0; background: #fff; color: #111; font: 16px sans-serif; }
+.tiny { width: 10px; height: 10px; padding: 0; border: 0; }
+nav a { font-size: 10px; }
+.hero { position: relative; height: 120px; }
+.hero .shade { position: absolute; inset: 0; background: #000; }
+.hero h2 { position: relative; color: #fff; margin: 0; }
+.bar { position: fixed; top: 300px; left: 0; width: 900px; height: 20px; background: #eee; }
+</style></head><body>
+<div style="opacity:0"><button class="tiny"></button><button class="tiny"></button></div>
+<div aria-hidden="true"><button class="tiny"></button><button class="tiny"></button></div>
+<div style="height:0;overflow:hidden"><p style="color:#eee">clipped faint text</p></div>
+<p style="position:absolute;left:-9999px;color:#eee">offscreen faint text</p>
+<nav><a href="#a">Hi</a><a href="#b">Go</a></nav>
+<p>Read the <a href="#c">docs</a> first.</p>
+<button id="x" style="min-width:48px;min-height:48px"><span aria-hidden="true">×</span></button>
+<button id="y" style="min-width:48px;min-height:48px"><span style="display:none">Close</span></button>
+<div class="hero"><div class="shade"></div><h2>White on a positioned overlay</h2></div>
+<input aria-label="Name" style="color:#cccccc;background:#fff;height:48px" value="faint value">
+<img src="http://127.0.0.2:9/off-machine.png" alt="x">
+<div class="bar">fixed bar</div>
+</body></html>
+"""
+
+
+@needs_browser
+def test_probe_ignores_hidden_content_and_stays_on_this_machine(tmp_path: Path) -> None:
+    (tmp_path / "page.html").write_text(HIDDEN_PAGE)
+    declaration = normalize_ui_render({"targets": [{"id": "page", "file": "page.html"}]})
+    report = capture(tmp_path, tmp_path / "out", declaration)
+    assert report["status"] == "captured", report
+    by_width = {vp["width"]: vp for vp in report["targets"][0]["viewports"]}
+    vp = by_width[1440]
+
+    # Nothing inside an opacity:0 or aria-hidden subtree is reported; the two
+    # short 10px nav links are (not inline in a sentence, and crowding each other).
+    assert sorted(i["element"] for i in vp["small_targets"]) == ['a "Go"', 'a "Hi"']
+    # Hidden glyphs and display:none text do not name a button.
+    assert sorted(i["element"].split(" ")[0] for i in vp["unnamed_controls"]) == ["button#x", "button#y"]
+    low = [i["element"] for i in vp["low_contrast"]]
+    assert not any("clipped" in e or "offscreen" in e for e in low)
+    # White text over a positioned black sibling is not guessed at.
+    assert not any("White on a positioned overlay" in e for e in low)
+    assert vp["contrast_unmeasured"] >= 1
+    assert any("(value)" in e for e in low)
+    # The off-machine image request was aborted.
+    assert any("127.0.0.2" in url for url in vp["blocked_requests"])
+    # A fixed bar wider than the viewport is cut off at 320 even though the
+    # page does not scroll.
+    assert by_width[320]["horizontal_overflow"]["overflows"] is True
+    assert by_width[320]["horizontal_overflow"].get("fixed_element_cut_off") is True
+    assert by_width[1440]["horizontal_overflow"]["overflows"] is False
+
+
+@needs_browser
+def test_backgrounded_server_is_awaited_and_stopped(tmp_path: Path) -> None:
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "index.html").write_text(GOOD_PAGE)
+    port = _free_port()
+    declaration = normalize_ui_render({
+        "start_command": f"(sleep 1; exec {sys.executable} -m http.server {port} --bind 127.0.0.1 --directory site) &",
+        "ready_timeout": 60,
+        "targets": [{"id": "home", "url": f"http://127.0.0.1:{port}/"}],
+    })
+    report = capture(tmp_path, tmp_path / "out", declaration)
+    assert report["status"] == "captured", report
+    with socket.socket() as sock:
+        sock.settimeout(1)
+        assert sock.connect_ex(("127.0.0.1", port)) != 0, "the backgrounded server was left running"
+
+
+def test_ready_check_ignores_proxy_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import lib_ui_render
+
+    # A proxy that answers for a dead port must not make it look alive.
+    proxy_port = _free_port()
+    proxy = subprocess.Popen([sys.executable, "-m", "http.server", str(proxy_port), "--bind", "127.0.0.1"],
+                             cwd=str(tmp_path), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            with socket.socket() as sock:
+                if sock.connect_ex(("127.0.0.1", proxy_port)) == 0:
+                    break
+            import time
+            time.sleep(0.1)
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy_port}")
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy_port}")
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        assert lib_ui_render._url_ready(f"http://127.0.0.1:{_free_port()}/") is False
+        assert lib_ui_render._url_ready(f"http://127.0.0.1:{proxy_port}/") is True
+    finally:
+        proxy.kill()
+        proxy.wait()

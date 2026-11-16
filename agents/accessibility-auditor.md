@@ -53,7 +53,7 @@ Your prompt carries a `## Rendered Evidence` block. When it names `.dynos/task-{
 
 Each viewport's `screenshot` path is relative to the task directory (`.dynos/task-{id}/`). Each list holds at most 20 entries per viewport; the matching `*_total` field has the real count.
 
-The probe renders one state per screen and presses no keys. Keyboard order, focus handling, live regions and error flows still need source evidence. When no rendered evidence was captured, or the screen is not among its targets, a contrast or target-size claim you cannot prove from source (for example from literal colour values in the diff) is **unverified**: say so in the description and file it non-blocking; never record it as passing.
+The probe renders one state per screen, presses no keys, and does not look inside shadow DOM. Keyboard order, focus handling, live regions and error flows still need source evidence. When no rendered evidence was captured, or the screen is not among its targets, a contrast or target-size claim you cannot prove from source (for example from literal colour values in the diff) is **unverified**: say so in the description and file it non-blocking; never record it as passing.
 
 ## Inspect
 
