@@ -44,7 +44,6 @@ _SKIP_DIR = re.compile(
 _NOT_OURS = re.compile(r"(^|/)(node_modules|\.git|\.dynos|dist|build|out|vendor|venv|\.venv|__pycache__|\.next|target)(/|$)")
 _SKIP_FILE = re.compile(r"(^|/)(test_[^/]*|[^/]*(_test|\.test|\.spec|\.gen|\.min|\.d)\.[a-z]+)$")
 _SHARED = re.compile(r"(util|helper|lib|common|shared|service|component|hook|core|model|schema|api)", re.I)
-_SAFE_PATH = re.compile(r"^[\w.@+$()\[\]/ -]+$")
 _EXPORT_NAME = re.compile(r"^(?:type\s+)?(?:[\w$]+\s+as\s+)?([A-Za-z_$][\w$]*)$")
 
 _M = re.MULTILINE
@@ -52,20 +51,26 @@ _PATTERNS: dict[str, list[re.Pattern[str]]] = {
     "py": [re.compile(r"^(?:async\s+)?def\s+([A-Za-z_]\w*)", _M), re.compile(r"^class\s+([A-Za-z_]\w*)", _M)],
     "js": [
         re.compile(
-            r"^export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|class|const|let|var|interface|type|enum)"
-            r"\s+([A-Za-z_$][\w$]*)", _M,
+            r"^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?"
+            r"(?:function\*?|class|const\s+enum|const|let|var|interface|type|enum)\s+([A-Za-z_$][\w$]*)", _M,
         ),
-        re.compile(r"^(?:async\s+)?function\*?\s+([A-Za-z_$][\w$]*)", _M),
         re.compile(r"^export\s*\{([^}]*)\}", _M),
     ],
     "go": [re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z]\w*)", _M), re.compile(r"^type\s+([A-Za-z]\w*)", _M)],
-    "rs": [re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait|type)\s+(\w+)", _M)],
-    "rb": [re.compile(r"^\s*(?:def|class|module)\s+(?:self\.)?([A-Za-z][\w]*[?!]?)", _M)],
+    "rs": [
+        re.compile(
+            r"^(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const|extern(?:\s+\"[^\"]*\")?)\s+)*"
+            r"(?:fn|struct|enum|trait|type)\s+(\w+)", _M,
+        )
+    ],
+    "rb": [re.compile(r"^\s*(?:def|class|module)\s+(?:self\.)?([A-Za-z]\w*)", _M)],
     "jvm": [
         re.compile(
-            r"^\s*(?:(?:public|internal|open|final|abstract|static|sealed|data)\s+)*"
-            r"(?:class|interface|enum|record|struct|object)\s+(\w+)", _M,
-        )
+            r"^\s*(?:(?:public|private|protected|internal|open|final|abstract|static|sealed|data|partial|enum)\s+)*"
+            r"(?:class|interface|enum|record|struct|object|protocol|actor|trait)\s+(\w+)", _M,
+        ),
+        # Kotlin, Swift and PHP top-level functions.
+        re.compile(r"^(?:(?:public|private|internal|open|static|suspend|inline)\s+)*(?:fun|func|function)\s+(\w+)", _M),
     ],
 }
 _LANG = {
@@ -109,7 +114,9 @@ def _git(root: Path, *args: str) -> str | None:
         return None
     try:
         proc = subprocess.run(  # noqa: S603
-            [_GIT, *args], cwd=str(root), capture_output=True, text=True, timeout=_GIT_TIMEOUT_S, check=False,
+            [_GIT, *args], cwd=str(root), capture_output=True, timeout=_GIT_TIMEOUT_S, check=False,
+            # One stray latin-1 byte must not discard the whole answer.
+            text=True, encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -118,9 +125,9 @@ def _git(root: Path, *args: str) -> str | None:
 
 def list_files(root: Path) -> list[str]:
     """Repo-relative files: tracked plus untracked-but-not-ignored, else a short walk."""
-    out = _git(root, "ls-files", "--cached", "--others", "--exclude-standard")
+    out = _git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     if out:
-        files = [line for line in out.split("\n") if line]
+        files = [name for name in out.split("\0") if name]
         if files:
             return files[: MAX_FILES * 5]
     found: list[str] = []
@@ -158,7 +165,7 @@ def _read(root: Path, rel: str) -> str | None:
 
 
 def _source_files(root: Path) -> list[str]:
-    files = [f for f in list_files(root) if _SAFE_PATH.match(f) and is_source(f)]
+    files = [f for f in list_files(root) if is_source(f)]
     return files[:MAX_FILES]
 
 
@@ -222,8 +229,12 @@ def build_slice(root: Path, files_expected: list[str], max_chars: int = DEFAULT_
     contents. Within a folder, files that look shared (lib, util, helper...)
     come first, since those are the ones worth reusing.
     """
-    expected = {f for f in files_expected if isinstance(f, str) and f}
-    own = {_folder(f) for f in expected}
+    expected = {
+        f for f in files_expected
+        if isinstance(f, str) and f and not PurePosixPath(f).is_absolute() and ".." not in PurePosixPath(f).parts
+    }
+    # A segment that writes no code (docs, config) has nothing to reuse here.
+    own = {_folder(f) for f in expected if _SRC.search(f)}
     if not own:
         return ""
     near = own | {PurePosixPath(folder).parent.as_posix() for folder in own if folder != "."}
@@ -261,44 +272,93 @@ def build_slice(root: Path, files_expected: list[str], max_chars: int = DEFAULT_
     return "\n".join(lines) + tail
 
 
+MAX_CHANGED_FILES = 200
+MAX_REMOVED_NAMES = 40
+_REF = re.compile(r"^[A-Za-z0-9][\w./@^~-]*$")
+# Files a caller can live in: source, plus templates that call into it.
+_CALLER = re.compile(r"\.(py|js|jsx|mjs|cjs|ts|tsx|go|rs|rb|java|kt|php|swift|cs|vue|svelte|astro|html)$")
+
+
 def _changed_files(root: Path, base: str) -> list[str] | None:
-    tracked = _git(root, "diff", "--name-only", base, "--")
-    untracked = _git(root, "ls-files", "--others", "--exclude-standard")
+    """Files that differ from *base*, plus untracked ones. None when git cannot say."""
+    if not _REF.match(base):  # never let a manifest value be read as an option
+        return None
+    tracked = _git(root, "diff", "--relative", "--name-only", "-z", base, "--")
     if tracked is None:
         return None
-    names = [line for line in (tracked + "\n" + (untracked or "")).split("\n") if line]
-    return sorted(set(names))
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z") or ""
+    return sorted({name for name in (tracked + untracked).split("\0") if name})
 
 
 def _show(root: Path, base: str, rel: str) -> str:
-    out = _git(root, "show", f"{base}:{rel}")
+    out = _git(root, "show", f"{base}:./{rel}")
     return (out or "")[:MAX_FILE_BYTES]
 
 
-def _added_lines(root: Path, base: str, rel: str, new_text: str, existed: bool) -> str:
-    if not existed:
-        return new_text
-    diff = _git(root, "diff", "--unified=0", base, "--", rel) or ""
-    return "\n".join(
-        line[1:] for line in diff.split("\n") if line.startswith("+") and not line.startswith("+++")
-    )
-
-
-def _word(name: str) -> re.Pattern[str]:
-    return re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])")
+def _added_by_file(root: Path, base: str) -> dict[str, str]:
+    """Added lines per changed tracked file, from one `git diff`."""
+    diff = _git(root, "diff", "--relative", "--unified=0", "--no-color", base, "--") or ""
+    added: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in diff.split("\n"):
+        if line.startswith("+++ "):
+            name = line[4:].strip().strip('"')
+            current = added.setdefault(name[2:] if name.startswith("b/") else name, [])
+        elif line.startswith("+") and current is not None:
+            current.append(line[1:])
+        elif line.startswith("diff --git"):
+            current = None
+    return {rel: "\n".join(lines) for rel, lines in added.items()}
 
 
 def _use(name: str) -> re.Pattern[str]:
-    """A call, a JSX element or an import of *name*; a mention in a comment is not a use."""
+    """A call, a JSX element or an import of *name*; a bare mention is not a use."""
     escaped = re.escape(name)
     return re.compile(
-        rf"(?<![\w$]){escaped}\s*\(|<{escaped}[\s/>]|^\s*(?:from|import|export)\b.*(?<![\w$]){escaped}(?![\w$])",
+        rf"(?<![\w$.]){escaped}\s*\(|<{escaped}[\s/>]|^\s*(?:from|import|export)\b.*(?<![\w$]){escaped}(?![\w$])",
         re.MULTILINE,
     )
 
 
-def _is_definition_line(rel: str, line: str, name: str) -> bool:
-    return name in definitions(rel, line)
+def _defines(name: str) -> re.Pattern[str]:
+    """A line that defines *name* at any depth, or binds it by assignment.
+
+    Wider than `definitions()` on purpose: a method, a nested def, an arrow
+    function assigned to a const, or `name = partial(...)` all mean the name
+    still exists, so a "removed" report for it would be noise.
+    """
+    escaped = re.escape(name)
+    return re.compile(
+        rf"^\s*(?:(?:export|default|public|private|protected|internal|static|async|pub|open|final|abstract|suspend)\s+)*"
+        rf"(?:def|class|function\*?|func|fun|fn|const|let|var|type|interface|enum|struct|trait|module)\s+(?:self\.)?{escaped}(?![\w$])"
+        rf"|^\s*(?:self\.|this\.)?{escaped}\s*(?::[^=]+)?=(?!=)"
+        rf"|^func\s+\([^)]*\)\s*{escaped}\("
+    )
+
+
+def code_fingerprint(root: Path, base: str) -> str | None:
+    """A hash of every code file that differs from *base*, as it is on disk now.
+
+    Two calls return the same value only when no code changed in between, so
+    a recorded test run can be tied to the exact code it ran against. It does
+    not depend on HEAD, so committing the work does not change it.
+    """
+    import hashlib  # noqa: PLC0415
+
+    changed = _changed_files(root, base)
+    if changed is None:
+        return None
+    digest = hashlib.sha256()
+    for rel in changed:
+        if not _CALLER.search(rel) or _NOT_OURS.search(rel):
+            continue
+        digest.update(rel.encode("utf-8", "replace") + b"\0")
+        path = root / rel
+        try:
+            digest.update(hashlib.sha256(path.read_bytes()).digest() if path.is_file() else b"<absent>")
+        except OSError:
+            digest.update(b"<unreadable>")
+    return digest.hexdigest()
 
 
 def analyze_changes(root: Path, base: str) -> dict | None:
@@ -306,27 +366,32 @@ def analyze_changes(root: Path, base: str) -> dict | None:
 
     Returns None when git cannot answer. Otherwise:
       created       definitions added to non-test source files
-      reused        existing project definitions the added lines refer to
-      open_callers  definitions removed (or renamed) and defined nowhere now,
-                    that other code still refers to, with each call site and
-                    the text of its line (an auditor cannot open files outside
-                    the diff, so the line itself is the evidence)
+      reused        existing project definitions the added lines call or import
+      open_callers  top-level definitions removed (or renamed) that no line
+                    defines or assigns any more, yet some line still calls or
+                    imports, with each call site and the text of its line (an
+                    auditor cannot open files outside the diff, so the line
+                    itself is the evidence)
+
+    Bounded: at most MAX_CHANGED_FILES changed files are compared and
+    MAX_REMOVED_NAMES removed names searched for, in one `git grep`;
+    `truncated` says when a cap was hit.
     """
     changed = _changed_files(root, base)
     if changed is None:
         return None
-    code = [f for f in changed if _SAFE_PATH.match(f) and _SRC.search(f) and not _SKIP_DIR.search(f)]
+    all_code = [f for f in changed if _SRC.search(f) and not _NOT_OURS.search(f)]
+    code = all_code[:MAX_CHANGED_FILES]
+    added_by_file = _added_by_file(root, base)
 
     created: list[str] = []
     removed: dict[str, str] = {}
     added_text: list[str] = []
-    new_defs_all: set[str] = set()
     for rel in code:
         old_text = _show(root, base, rel)
         new_text = _read(root, rel) or ""
         old_defs = definitions(rel, old_text)
         new_defs = definitions(rel, new_text)
-        new_defs_all.update(new_defs)
         for name in old_defs:
             if name not in new_defs:
                 removed.setdefault(name, rel)
@@ -334,7 +399,7 @@ def analyze_changes(root: Path, base: str) -> dict | None:
             for name in new_defs:
                 if name not in old_defs and name not in created:
                     created.append(name)
-            added_text.append(_added_lines(root, base, rel, new_text, bool(old_text)))
+            added_text.append(added_by_file.get(rel, "") if old_text else new_text)
 
     # Existing definitions = everything the project defines now, minus what this diff created.
     known: set[str] = set()
@@ -349,37 +414,40 @@ def analyze_changes(root: Path, base: str) -> dict | None:
         if len(name) > 3 and name not in _GENERIC and name in added and _use(name).search(added)
     )
 
-    open_callers: list[dict] = []
-    for name, removed_from in sorted(removed.items()):
-        if len(open_callers) >= MAX_OPEN_CALLERS:
-            break
-        if len(name) <= 3 or name in _GENERIC or name in new_defs_all:
-            continue
-        hits = _git(root, "grep", "-n", "-w", "-F", "--untracked", "-e", name, "--", ".") or ""
-        sites: list[dict] = []
-        redefined = False
-        pattern = _word(name)
+    candidates = [name for name in sorted(removed) if len(name) > 3 and name not in _GENERIC]
+    names = candidates[:MAX_REMOVED_NAMES]
+    sites: dict[str, list[dict]] = {name: [] for name in names}
+    still_defined: set[str] = set()
+    if names:
+        patterns: list[str] = []
+        for name in names:
+            patterns += ["-e", name]
+        hits = _git(root, "grep", "-n", "-w", "-F", "--untracked", "-z", *patterns, "--", ".") or ""
+        uses = {name: _use(name) for name in names}
+        defines = {name: _defines(name) for name in names}
         for row in hits.split("\n"):
-            match = re.match(r"^(.+?):(\d+):(.*)$", row)
-            if not match:
+            # With -z: "<path>\0<line>\0<text>".
+            parts = row.split("\0", 2)
+            if len(parts) != 3:
                 continue
-            rel, line_no, text = match.group(1), match.group(2), match.group(3)
-            # Tests count as callers; vendored and build output do not.
-            if not _SRC.search(rel) or _NOT_OURS.search(rel):
-                continue
-            if not pattern.search(text):
+            rel, line_no, text = parts
+            if not _CALLER.search(rel) or _NOT_OURS.search(rel):
                 continue
             stripped = text.lstrip()
-            if stripped.startswith(("#", "//", "*", "/*")):
-                continue
-            if _is_definition_line(rel, text, name):
-                redefined = True
-                break
-            if len(sites) < MAX_CALL_SITES:
-                sites.append({"site": f"{rel}:{line_no}", "text": " ".join(text.split())[:160]})
-        if redefined or not sites:
-            continue
-        open_callers.append({"name": name, "removed_from": removed_from, "call_sites": sites})
+            comment = stripped.startswith(("#", "//", "*", "/*", "<!--"))
+            for name in names:
+                if name not in text:
+                    continue
+                if not comment and defines[name].search(text):
+                    still_defined.add(name)
+                elif not comment and uses[name].search(text) and len(sites[name]) < MAX_CALL_SITES:
+                    sites[name].append({"site": f"{rel}:{line_no}", "text": " ".join(text.split())[:160]})
+
+    open_callers = [
+        {"name": name, "removed_from": removed[name], "call_sites": sites[name]}
+        for name in names
+        if name not in still_defined and sites[name]
+    ][:MAX_OPEN_CALLERS]
 
     return {
         "base": base,
@@ -387,4 +455,5 @@ def analyze_changes(root: Path, base: str) -> dict | None:
         "reused": reused,
         "open_callers": open_callers,
         "reuse_ratio": round(len(reused) / (len(reused) + len(created)), 2) if (reused or created) else None,
+        "truncated": len(all_code) > MAX_CHANGED_FILES or len(candidates) > MAX_REMOVED_NAMES,
     }

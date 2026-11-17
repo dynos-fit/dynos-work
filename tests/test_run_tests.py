@@ -203,25 +203,67 @@ def test_expired_or_unexplained_known_failure_still_blocks(tmp_path: Path, entry
     assert "[WARN] tests" in (td / "execution-log.md").read_text()
 
 
-def test_pass_recorded_before_the_latest_repair_is_stale(tmp_path: Path) -> None:
-    """A repair can break a test that passed before it. The DONE gate
-    refuses a pass older than repair-log.json until the suite is re-run."""
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false", *args],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def test_pass_is_stale_once_the_code_changes(tmp_path: Path) -> None:
+    """A repair can break a test that passed before it. run-tests records a
+    fingerprint of the task's changed code; the DONE gate refuses a pass
+    whose code has changed since, whenever the change was made."""
+    td = _ready_task(tmp_path, stage="CHECKPOINT_AUDIT")
+    root = td.parent.parent
+    (root / ".gitignore").write_text(".dynos/\n")
+    (root / "app.py").write_text("def total():\n    return 1\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    manifest = json.loads((td / "manifest.json").read_text())
+    manifest["snapshot"] = {"head_sha": _git(root, "rev-parse", "HEAD")}
+    (td / "manifest.json").write_text(json.dumps(manifest))
+
+    (root / "app.py").write_text("def total():\n    return 2\n")  # the task's work
+    _run_tests(td, "true")
+    recorded = json.loads((td / "test-results.json").read_text())["code_fingerprint"]
+    assert isinstance(recorded, str) and len(recorded) == 64
+    assert _failing_test_results_err(td) is None
+
+    # Committing the work, or editing a doc, does not make the pass stale.
+    (root / "NOTES.md").write_text("notes\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "wip")
+    assert _failing_test_results_err(td) is None
+
+    # A later code edit does, with or without a repair log.
+    (root / "app.py").write_text("def total():\n    return 3\n")
+    err = _failing_test_results_err(td)
+    assert err is not None and "code changed after the last recorded test run" in err
+
+    _run_tests(td, "true")
+    assert _failing_test_results_err(td) is None
+    # A new untracked code file counts as a change too.
+    (root / "extra.py").write_text("def more():\n    return 0\n")
+    assert _failing_test_results_err(td) is not None
+
+
+def test_results_without_a_fingerprint_fall_back_to_the_repair_log_time(tmp_path: Path) -> None:
     import os
 
     td = _ready_task(tmp_path, stage="CHECKPOINT_AUDIT")
     _run_tests(td, "true")
+    results = td / "test-results.json"
+    payload = json.loads(results.read_text())
+    payload.pop("code_fingerprint", None)  # as written before fingerprints existed
+    results.write_text(json.dumps(payload))
     assert _failing_test_results_err(td) is None
 
-    results = td / "test-results.json"
     repair_log = td / "repair-log.json"
     repair_log.write_text(json.dumps({"repair_cycle": 1, "batches": []}))
     later = results.stat().st_mtime_ns + 5_000_000_000
     os.utime(repair_log, ns=(later, later))
-    err = _failing_test_results_err(td)
-    assert err is not None and "predates the latest repair" in err
-
-    # Re-running after the repair makes the pass current again.
-    _run_tests(td, "true")
-    newest = repair_log.stat().st_mtime_ns + 5_000_000_000
-    os.utime(results, ns=(newest, newest))
+    assert "code changed after the last recorded test run" in (_failing_test_results_err(td) or "")
+    os.utime(results, ns=(later + 1, later + 1))
     assert _failing_test_results_err(td) is None

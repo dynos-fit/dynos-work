@@ -7321,6 +7321,9 @@ def cmd_run_tests(args: argparse.Namespace) -> int:
             "stage": stage,
             "results": records,
             "known_failures": known_failed,
+            # Ties this run to the code it ran against; the DONE gate
+            # refuses a pass whose code has changed since.
+            "code_fingerprint": _task_code_fingerprint(task_dir),
         })
         for note in known_notes:
             append_execution_log(task_dir, f"[WARN] tests — {note}")
@@ -8164,6 +8167,15 @@ def cmd_run_repair_retry(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def _task_code_fingerprint(task_dir: Path) -> str | None:
+    """Hash of the code this task has changed, as it is on disk now; None when unknown."""
+    try:
+        from lib_core import task_code_fingerprint  # noqa: PLC0415
+        return task_code_fingerprint(task_dir)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _code_reuse_summary(task_dir: Path) -> dict | None:
