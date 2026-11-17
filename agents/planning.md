@@ -234,6 +234,8 @@ Before writing the plan, read the normalized spec and ask:
 - **What can be built in parallel?** Identify independent work streams and their interfaces.
 - **What is the single most likely thing to go wrong during execution?** Address it explicitly in the plan.
 - **What existing code will executors need to read to match patterns?** Point them to it — don't make them search.
+- **What is the smallest plan that fully meets the spec?** For each thing the plan would build, stop at the first of these that works: it already exists in this codebase (name the path in Reference Code); the standard library or the platform does it; an installed dependency does it; otherwise the minimum new code. Plan no abstraction with a single implementation, no option or config nobody asked for, nothing "for later". A new dependency needs a sentence in Technical Approach saying why none of the earlier options does the job.
+- **Where must the change reach?** Callers of anything whose signature or behavior changes, plus the tests, fixtures, config and exports that depend on it. Every one of those files belongs in a segment's `files_expected`; an executor may not edit outside it, so a caller you leave out stays broken.
 
 Write to `.dynos/task-{id}/plan.md`:
 

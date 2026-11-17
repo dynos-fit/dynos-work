@@ -1431,6 +1431,25 @@ def build_executor_plan(
 # ---------------------------------------------------------------------------
 
 
+# Executors that write product code get the shared smallest-change rules.
+# docs-executor writes prose and testing-executor's job is the tests
+# themselves, so neither takes a rule set about writing less code.
+_SMALLEST_CHANGE_EXEMPT = frozenset({"docs-executor", "testing-executor"})
+_SMALLEST_CHANGE_PATH = Path(__file__).resolve().parent.parent / "agents" / "_shared" / "smallest-change.md"
+
+
+def _smallest_change_block(executor: str) -> str:
+    """The shared smallest-complete-change rules for *executor*, or ""."""
+    if not executor.endswith("-executor") or executor in _SMALLEST_CHANGE_EXEMPT:
+        return ""
+    try:
+        text = _SMALLEST_CHANGE_PATH.read_text()
+    except OSError:
+        return ""
+    # The trailing HTML comment is attribution for people reading the file.
+    return text.split("\n<!--", 1)[0].strip()
+
+
 def build_executor_prompt(
     root: Path,
     segment: dict,
@@ -1458,6 +1477,10 @@ def build_executor_prompt(
     prevention_rules = plan_entry.get("prevention_rules", [])
 
     parts = [base_prompt]
+
+    smallest_change = _smallest_change_block(str(segment.get("executor", "") or ""))
+    if smallest_change:
+        parts.append("\n\n" + smallest_change)
 
     # Inject learned agent instructions
     if route_mode in ("replace", "alongside") and agent_path:

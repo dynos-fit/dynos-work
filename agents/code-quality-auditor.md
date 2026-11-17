@@ -68,6 +68,14 @@ Stop-condition: when within 3 tool uses of your budget limit, stop investigating
 
 **Cleanliness:** No dead code. No debug logs. No unused imports. No magic numbers.
 
+**Lean:** Code the task did not need. Each of these is a finding only with a concrete case you can point at in the diff, and is non-blocking unless noted:
+- an abstraction, interface or wrapper with one implementation and one caller; an option, parameter or config flag nothing sets;
+- hand-written code that the standard library, the platform, or a dependency already in the manifest does;
+- a helper that duplicates one visible in the diff or its surrounding file (name both);
+- a new dependency added for a few lines of work: **blocking** when the plan did not name it.
+
+A comment of the form `shortcut: <limit>, <when to upgrade>` marks a deliberate decision. Do not report the shortcut itself; report it only when the spec's stated load or inputs already cross the limit it names. Never recommend removing validation, error handling, security or accessibility code as lean.
+
 **Proof standard:** If you cannot point to the exact line where behavior is guaranteed, do not assume the code is safe.
 
 ### Category: typecheck-lint

@@ -171,6 +171,7 @@ echo "{your base prompt for this segment}" | "$DYNOS" hook router inject-prompt 
 This command:
 1. Reads the base prompt from stdin
 2. Looks up the routing decision for this segment (model, route_mode, agent_path)
+   - For every executor except `docs-executor` and `testing-executor`, appends the shared smallest-complete-change rules from `agents/_shared/smallest-change.md`
 3. If `route_mode` is `replace` or `alongside`, reads the learned agent `.md` file and appends its rules to the prompt
 4. Appends prevention rules from the project's history
 5. Logs a `learned_agent_applied` event to `.dynos/events.jsonl`
