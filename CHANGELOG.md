@@ -11,6 +11,26 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.11.0] - 2026-11-17
+Executors, the planner and the code-quality auditor now aim for the smallest change that fully meets the spec.
+
+### Added
+- **Smallest-complete-change rules for executors.** `router.py inject-prompt` appends `agents/_shared/smallest-change.md` to every executor prompt except `docs-executor` and `testing-executor`. Before writing new code an executor reuses what the codebase has, then the standard library or platform, then an installed dependency, and only then writes the minimum. It adds no abstraction, option or "for later" code the criteria do not ask for, and never trims validation, data-loss error handling, security or accessibility to get smaller. A new dependency the plan did not name is raised under Open Questions, not added.
+- **Caller check inside the segment boundary.** An executor that changes a function's signature or behavior greps for its callers, fixes the ones in its `files_expected`, and reports the rest; it does not edit outside its boundary.
+- **`shortcut:` comments.** A deliberate shortcut is marked `shortcut: <the limit>, <when to upgrade>`. `code-quality-auditor` treats a marked shortcut as a decision and reports it only when the spec's stated load already crosses the limit. `git grep -nE '(#|//) ?shortcut:'` lists them.
+- **`## Skipped and Not Checked` in executor evidence.** Each executor records what it left out on purpose and what it could not verify.
+- **Planner: smallest plan and full reach.** The planner asks what the smallest plan that meets the spec is, justifies any new dependency in Technical Approach, and puts every caller, test, fixture and config file the change must reach into a segment's `files_expected`.
+- **`code-quality-auditor` Lean check.** Single-use abstractions, unset options, hand-written code the standard library or an installed dependency already does, and duplicated helpers are non-blocking findings when a concrete case is visible in the diff; a new dependency for a few lines that the plan did not name is blocking.
+
+- **Codebase map.** `hooks/lib_codemap.py` lists the project's top-level definitions by folder with one regex per language and no model. `dynos hook codebase_map` prints it for the planner (the start skill appends it under `## Codebase Map`), and `inject-prompt` gives each code-writing executor a `## What Already Exists Near Your Files` listing: its own folders file by file, then the project's shared code. "Reuse what exists" now has something to draw on inside the read budgets.
+- **Open-caller check.** `audit-inject-prompt` gives `code-quality-auditor` a `## Change Analysis` block: top-level definitions the task removed or renamed that no line defines or assigns any more and that some line still calls or imports, each with the `file:line` and the text of the line (auditors cannot open files outside the diff), plus the list of new definitions for the Lean check. A live reference is a blocking finding.
+- **Reuse numbers.** `ctl run-audit-reflect` prints `code_reuse`: new definitions, existing definitions the added lines use, the ratio, and the open-caller count.
+
+### Fixed
+- **A test pass recorded before a repair no longer satisfies the DONE gate.** Tests were re-run after a repair only when the last recorded run had failed, so a repair that broke a previously passing test could reach DONE on the earlier pass. `ctl run-tests` now records a fingerprint of the code the task has changed, and the DONE gate refuses a pass whose code has changed since, whether or not a repair log exists; committing the work or editing a doc does not make a pass stale. Results recorded without a fingerprint fall back to comparing file times with the latest `repair-log.json`. The audit skill re-runs the recorded commands after every repair.
+
+The rules, the map and the caller tracking are adapted from Ponytail (MIT); see `THIRD_PARTY_NOTICES.md`. Ponytail's levels, commands, hooks and usage band are not included. The map and the change analysis are pattern matching, not parsing: nested and dynamically created definitions are missed, so their output is evidence for an agent to verify and nothing gates on it.
+
 ## [7.10.0] - 2026-11-16
 The UI agents now judge rendered pages, not only source, and stop duplicating each other.
 
