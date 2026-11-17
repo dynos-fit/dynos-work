@@ -330,7 +330,7 @@ After all batches complete, record it:
 "$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "repair-execution-{phase} — all fixes applied"
 ```
 
-**Re-run failing tests:** If `.dynos/task-{id}/test-results.json` has `status: "failed"`, re-run the same commands (its `results[].command`) before the re-audit:
+**Re-run the tests after every repair:** If `.dynos/task-{id}/test-results.json` exists, re-run the same commands (its `results[].command`) before the re-audit, whether the last recorded run failed or passed. A pass recorded before a repair says nothing about the repaired code, and the DONE gate refuses a test result older than the latest `repair-log.json`:
 
 ```bash
 "$DYNOS" ctl run-tests .dynos/task-{id} --command "{command 1}" --command "{command 2}"

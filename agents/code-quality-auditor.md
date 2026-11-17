@@ -74,6 +74,8 @@ Stop-condition: when within 3 tool uses of your budget limit, stop investigating
 - a helper that duplicates one visible in the diff or its surrounding file (name both);
 - a new dependency added for a few lines of work: **blocking** when the plan did not name it.
 
+When your prompt carries a `## Change Analysis` block, start the Lean check from its list of new definitions, and judge every entry under **Open callers** from the line quoted there: a definition this task removed or renamed that live code still uses is a **blocking** finding (category `code-quality`) at the quoted `file:line`, even though that file is outside the diff and you cannot open it.
+
 A comment of the form `shortcut: <limit>, <when to upgrade>` marks a deliberate decision. Do not report the shortcut itself; report it only when the spec's stated load or inputs already cross the limit it names. Never recommend removing validation, error handling, security or accessibility code as lean.
 
 **Proof standard:** If you cannot point to the exact line where behavior is guaranteed, do not assume the code is safe.

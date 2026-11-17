@@ -351,6 +351,14 @@ Use the JSON output as authoritative:
 
 Do NOT re-derive fast-track, risk-based escalation, or acceptance-criteria thresholds in prompt logic. Set the read-policy phase once before planning by running `"$DYNOS" ctl set-planner-phase .dynos/task-{id} combined` when `planning_path == combined`, otherwise use `plan`.
 
+**Codebase map (every planning flow below):** before spawning any planner that writes `plan.md` (Master, Worker, combined or standard), run
+
+```bash
+"$DYNOS" hook codebase_map --root .
+```
+
+and append its output verbatim to that planner's instruction under a `## Codebase Map` heading. It lists the top-level definitions that already exist, by folder, found by pattern matching with no model. Run it once and reuse the output for every planner in this step. If it prints nothing (no recognised source files), skip the heading.
+
 Hierarchical flow:
 1. Spawn Master Planner using the default planning model for this repo.
 2. Spawn Worker Planners in parallel for non-overlapping subsystems.

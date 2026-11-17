@@ -201,3 +201,27 @@ def test_expired_or_unexplained_known_failure_still_blocks(tmp_path: Path, entry
     assert payload["status"] == "tests_failed"
     assert json.loads((td / "test-results.json").read_text())["status"] == "failed"
     assert "[WARN] tests" in (td / "execution-log.md").read_text()
+
+
+def test_pass_recorded_before_the_latest_repair_is_stale(tmp_path: Path) -> None:
+    """A repair can break a test that passed before it. The DONE gate
+    refuses a pass older than repair-log.json until the suite is re-run."""
+    import os
+
+    td = _ready_task(tmp_path, stage="CHECKPOINT_AUDIT")
+    _run_tests(td, "true")
+    assert _failing_test_results_err(td) is None
+
+    results = td / "test-results.json"
+    repair_log = td / "repair-log.json"
+    repair_log.write_text(json.dumps({"repair_cycle": 1, "batches": []}))
+    later = results.stat().st_mtime_ns + 5_000_000_000
+    os.utime(repair_log, ns=(later, later))
+    err = _failing_test_results_err(td)
+    assert err is not None and "predates the latest repair" in err
+
+    # Re-running after the repair makes the pass current again.
+    _run_tests(td, "true")
+    newest = repair_log.stat().st_mtime_ns + 5_000_000_000
+    os.utime(results, ns=(newest, newest))
+    assert _failing_test_results_err(td) is None

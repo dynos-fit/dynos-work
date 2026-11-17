@@ -4,7 +4,7 @@ Build everything your acceptance criteria require, with the least new code. The 
 
 Before writing new code, take the first option that fully works:
 
-1. Already in this codebase (a helper, component, service or pattern in your files or the references you were given)? Use it the way the surrounding code does.
+1. Already in this codebase (a helper, component, service or pattern in your files, the references you were given, or the list of what already exists near your files below)? Use it the way the surrounding code does.
 2. The standard library or a platform feature? Use it, unless the project has its own equivalent.
 3. An installed dependency? Use it. Never add a dependency for a few lines. A new dependency the plan did not name goes under Open Questions in your evidence, not into the manifest.
 4. Otherwise, the minimum code that works. One line a reader gets at a glance beats ten; a one-liner that needs decoding does not.

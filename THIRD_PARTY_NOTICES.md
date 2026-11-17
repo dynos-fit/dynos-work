@@ -6,13 +6,15 @@ included, and none of them is required to use dynos-work.
 
 ## Ponytail
 
-- Source: https://github.com/DietrichGebert/ponytail (`skills/ponytail/SKILL.md`, `skills/ponytail-review/SKILL.md`)
+- Source: https://github.com/DietrichGebert/ponytail (`skills/ponytail/SKILL.md`, `skills/ponytail-review/SKILL.md`, `hooks/ponytail-map.js`, `hooks/band/metrics.ts`)
 - License: MIT. Copyright (c) 2026 DietrichGebert. The MIT permission notice
   reproduced under Hallmark below applies to this work as well.
 - Used in: `agents/_shared/smallest-change.md` (the rules the router injects
   into executor prompts), `agents/planning.md` (the smallest-plan question)
   and `agents/code-quality-auditor.md` (the Lean check and the `shortcut:`
-  comment convention).
+  comment convention), and `hooks/lib_codemap.py` (the codebase map and
+  the removed-definition caller check, reimplemented in Python from the
+  approach and per-language patterns of Ponytail's map and band metrics).
 - Changes: rewritten for dynos-work's segment boundaries, read budget and
   evidence files. Ponytail's levels, commands, hooks and usage band are not
   used.

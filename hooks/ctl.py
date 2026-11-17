@@ -8166,6 +8166,31 @@ def cmd_run_repair_retry(args: argparse.Namespace) -> int:
         return 1
 
 
+def _code_reuse_summary(task_dir: Path) -> dict | None:
+    """How much of the task's code was reuse versus new definitions.
+
+    Shown in `run-audit-reflect`'s output. Best effort: a measurement
+    failure never fails reflect, and nothing gates on the numbers.
+    """
+    try:
+        import lib_codemap  # noqa: PLC0415
+        snapshot = _load_manifest(task_dir).get("snapshot")
+        base = snapshot.get("head_sha") if isinstance(snapshot, dict) else None
+        if not isinstance(base, str) or not base.strip():
+            return None
+        analysis = lib_codemap.analyze_changes(_root_for_task_dir(task_dir), base.strip())
+        if not analysis:
+            return None
+        return {
+            "new_definitions": len(analysis["created"]),
+            "existing_definitions_used": len(analysis["reused"]),
+            "reuse_ratio": analysis["reuse_ratio"],
+            "open_callers": len(analysis["open_callers"]),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def cmd_run_audit_reflect(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -8186,6 +8211,7 @@ def cmd_run_audit_reflect(args: argparse.Namespace) -> int:
             "quality_score": result.get("quality_score"),
             "cost_score": result.get("cost_score"),
             "efficiency_score": result.get("efficiency_score"),
+            "code_reuse": _code_reuse_summary(task_dir),
         }, indent=2))
         return 0
     except Exception as exc:

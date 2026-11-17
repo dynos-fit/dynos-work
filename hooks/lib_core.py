@@ -1369,7 +1369,19 @@ def _failing_test_results_err(task_dir: Path) -> str | None:
     except (OSError, ValueError, AttributeError):
         status = None
     if status in ("passed", "passed_with_known_failures"):
-        return None
+        # A pass recorded before the latest repair says nothing about the
+        # code the repair left behind.
+        try:
+            stale = (task_dir / "repair-log.json").stat().st_mtime_ns > path.stat().st_mtime_ns
+        except OSError:
+            stale = False
+        if not stale:
+            return None
+        return (
+            "test-results.json (the last recorded test run predates the latest "
+            "repair — re-run `ctl run-tests` with the same commands so the pass "
+            "covers the repaired code)"
+        )
     return (
         "test-results.json (last recorded test run did not pass — repair, "
         "then re-run `ctl run-tests` until it records status=passed)"
