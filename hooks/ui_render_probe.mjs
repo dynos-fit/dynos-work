@@ -1,0 +1,432 @@
+#!/usr/bin/env node
+// Deterministic UI render probe for `ctl run-ui-render-evidence`.
+//
+// Renders each declared target at each viewport width, saves a full-page
+// screenshot and measures what an auditor cannot read off a diff: horizontal
+// overflow, undersized touch targets, text contrast, unnamed controls, images
+// without alt text, broken images and console errors. No LLM, no network
+// beyond this machine: requests to other hosts are aborted.
+//
+// usage: node ui_render_probe.mjs --spec <spec.json> --out <dir>
+// spec:  {"targets": [{"id", "url", "wait_for"?}], "widths": [320, 768, 1440],
+//         "height": 900, "nav_timeout_ms": 30000}
+// Prints one JSON object on stdout. Exit 0 when the probe ran (even with
+// findings), 3 when no browser driver is available, 2 on a usage error.
+
+import { createRequire } from 'node:module';
+import { readFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const MAX_ITEMS = 20;
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--spec') out.spec = argv[i += 1];
+    else if (argv[i] === '--out') out.out = argv[i += 1];
+  }
+  return out;
+}
+
+function loadChromium() {
+  // The project's own install wins (same version its tests use), then a
+  // global one. A driver is never installed from here.
+  const bases = [join(process.cwd(), 'package.json'), import.meta.url];
+  const names = ['playwright', '@playwright/test', 'playwright-core'];
+  for (const base of bases) {
+    const req = createRequire(base);
+    for (const name of names) {
+      try {
+        const mod = req(name);
+        if (mod && mod.chromium) return { chromium: mod.chromium, driver: name };
+      } catch { /* try the next one */ }
+    }
+  }
+  return null;
+}
+
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+function allowedUrl(raw, root) {
+  let url;
+  try { url = new URL(raw); } catch { return false; }
+  if (url.protocol === 'data:' || url.protocol === 'blob:' || url.protocol === 'about:') return true;
+  if (url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'ws:' || url.protocol === 'wss:') {
+    return LOOPBACK.has(url.hostname.toLowerCase());
+  }
+  if (url.protocol === 'file:' && root) {
+    let path;
+    try { path = realpathSync(fileURLToPath(url)); } catch { return false; }
+    const base = root.endsWith(sep) ? root : root + sep;
+    return path.startsWith(base);
+  }
+  return false;
+}
+
+// Runs inside the page. Must stay self-contained (no closure references).
+function measure(maxItems) {
+  const vw = window.innerWidth;
+  const describe = (el) => {
+    let s = el.tagName.toLowerCase();
+    if (el.id) s += `#${el.id}`;
+    const cls = typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 2) : [];
+    if (cls.length) s += `.${cls.join('.')}`;
+    const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+    return text ? `${s} "${text}"` : s;
+  };
+  // Visible to a sighted user: rendered, not transparent or hidden through
+  // any ancestor, not parked off-screen, not clipped away, not inert.
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    if (r.right <= 0 || r.bottom <= 0) return false;
+    if (el.closest('[aria-hidden="true"], [inert]')) return false;
+    if (typeof el.checkVisibility === 'function') {
+      if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })) return false;
+    } else {
+      const cs = getComputedStyle(el);
+      if (cs.visibility === 'hidden' || cs.display === 'none' || Number(cs.opacity) === 0) return false;
+    }
+    for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+      const box = node.getBoundingClientRect();
+      if (box.width <= 1 || box.height <= 1) return false;
+    }
+    return true;
+  };
+  // Text a user can perceive inside el: skips hidden and aria-hidden subtrees.
+  const perceivedText = (el) => {
+    let out = '';
+    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = tw.nextNode(); n; n = tw.nextNode()) {
+      const parent = n.parentElement;
+      if (!parent || !n.nodeValue.trim()) continue;
+      const hidden = parent.closest('[aria-hidden="true"]');
+      if (hidden && el.contains(hidden)) continue;
+      const cs = getComputedStyle(parent);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      if (typeof parent.checkVisibility === 'function' && !parent.checkVisibility()) continue;
+      out += ` ${n.nodeValue}`;
+    }
+    return out.trim();
+  };
+  // Lists are capped; `counts` keeps the real totals.
+  const counts = new Map();
+  const push = (list, item) => {
+    counts.set(list, (counts.get(list) || 0) + 1);
+    if (list.length < maxItems) list.push(item);
+  };
+  const total = (list) => counts.get(list) || 0;
+
+  // Horizontal overflow.
+  const doc = document.documentElement;
+  const scrollWidth = Math.max(doc.scrollWidth, document.body ? document.body.scrollWidth : 0);
+  const overflow = { overflows: scrollWidth > vw + 1, scroll_width: scrollWidth, viewport_width: vw, offenders: [] };
+  if (overflow.overflows) {
+    for (const el of document.body.querySelectorAll('*')) {
+      if (!visible(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.right > vw + 1 && r.width <= scrollWidth) push(overflow.offenders, { element: describe(el), right: Math.round(r.right) });
+      if (overflow.offenders.length >= 5) break;
+    }
+  } else {
+    // A fixed element wider than the viewport does not grow the scroll
+    // width, but its content is still cut off.
+    for (const el of document.body ? document.body.querySelectorAll('*') : []) {
+      if (getComputedStyle(el).position !== 'fixed' || !visible(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.right > vw + 1 || r.left < -1) {
+        overflow.overflows = true;
+        overflow.fixed_element_cut_off = true;
+        if (overflow.offenders.length < 5) overflow.offenders.push({ element: describe(el), right: Math.round(r.right) });
+      }
+    }
+  }
+
+  // Interactive elements: target size and accessible name.
+  const interactiveSel = 'a[href], button, input:not([type="hidden"]), select, textarea, summary, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="tab"], [role="menuitem"], [tabindex]:not([tabindex="-1"])';
+  const smallTargets = [];
+  const unnamed = [];
+  let under44 = 0;
+  let spacedSmall = 0;
+  let interactiveCount = 0;
+  const nameOf = (el) => {
+    const labelled = el.getAttribute('aria-labelledby');
+    if (labelled) {
+      const t = labelled.split(/\s+/).map((id) => (document.getElementById(id) || {}).textContent || '').join(' ').trim();
+      if (t) return t;
+    }
+    const aria = (el.getAttribute('aria-label') || '').trim();
+    if (aria) return aria;
+    if (el.labels && el.labels.length) {
+      const t = Array.from(el.labels).map((l) => l.textContent || '').join(' ').trim();
+      if (t) return t;
+    }
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'input') {
+      const type = (el.getAttribute('type') || 'text').toLowerCase();
+      if (['submit', 'button', 'reset'].includes(type)) return (el.value || type).trim();
+      if (type === 'image') return (el.getAttribute('alt') || '').trim();
+    }
+    const text = perceivedText(el);
+    if (text) return text;
+    const img = el.querySelector('img[alt], svg[aria-label], [aria-label]');
+    if (img) return (img.getAttribute('alt') || img.getAttribute('aria-label') || '').trim();
+    const svgTitle = el.querySelector('svg title');
+    if (svgTitle && svgTitle.textContent.trim()) return svgTitle.textContent.trim();
+    return (el.getAttribute('title') || '').trim();
+  };
+  const candidates = [];
+  for (const el of document.querySelectorAll(interactiveSel)) {
+    if (!visible(el) || el.disabled || el.getAttribute('aria-hidden') === 'true') continue;
+    interactiveCount += 1;
+    const tag = el.tagName.toLowerCase();
+    // WCAG 2.5.8 exempts links inline in a sentence; skip them.
+    // "Inline" means running text sits beside the link in the same parent.
+    const inlineLink = tag === 'a' && getComputedStyle(el).display === 'inline' && el.parentElement
+      && Array.from(el.parentElement.childNodes).some((n) => n.nodeType === 3 && /[^\s|·•,/]/.test(n.nodeValue || ''));
+    if (!inlineLink) candidates.push({ el, rect: el.getBoundingClientRect() });
+    if (!nameOf(el)) push(unnamed, { element: describe(el) });
+  }
+  // WCAG 2.5.8 spacing exception: an undersized target passes when a 24px
+  // circle centred on it overlaps no other target and no other undersized
+  // target's circle.
+  const undersized = (r) => r.width < 24 || r.height < 24;
+  const centre = (r) => ({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
+  const circleHitsRect = (c, r) => {
+    const dx = c.x - Math.max(r.left, Math.min(c.x, r.right));
+    const dy = c.y - Math.max(r.top, Math.min(c.y, r.bottom));
+    return dx * dx + dy * dy < 12 * 12;
+  };
+  for (const item of candidates) {
+    const w = Math.round(item.rect.width);
+    const h = Math.round(item.rect.height);
+    if (!undersized(item.rect)) {
+      if (w < 44 || h < 44) under44 += 1;
+      continue;
+    }
+    const c = centre(item.rect);
+    const crowded = candidates.some((other) => {
+      if (other === item || other.el.contains(item.el) || item.el.contains(other.el)) return false;
+      if (undersized(other.rect)) {
+        const o = centre(other.rect);
+        return Math.hypot(c.x - o.x, c.y - o.y) < 24;
+      }
+      return circleHitsRect(c, other.rect);
+    });
+    if (crowded) push(smallTargets, { element: describe(item.el), width: w, height: h });
+    else spacedSmall += 1;
+  }
+
+  // Images.
+  const missingAlt = [];
+  const broken = [];
+  for (const img of document.querySelectorAll('img')) {
+    const decorative = img.getAttribute('role') === 'presentation' || img.getAttribute('role') === 'none' || img.getAttribute('aria-hidden') === 'true';
+    if (!img.hasAttribute('alt') && !decorative) push(missingAlt, { element: describe(img), src: (img.getAttribute('src') || '').slice(0, 120) });
+    if (img.complete && img.naturalWidth === 0 && img.getAttribute('src')) push(broken, { element: describe(img), src: (img.getAttribute('src') || '').slice(0, 120) });
+  }
+
+  // Text contrast (WCAG 2.x relative luminance). Only measured where the
+  // background is a solid colour all the way up; anything over an image or
+  // gradient is counted as unmeasured rather than guessed.
+  const parse = (v) => {
+    const m = /^rgba?\(([^)]+)\)$/.exec(v || '');
+    if (!m) return null;
+    const p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+    if (p.length < 3 || p.slice(0, 3).some(Number.isNaN)) return null;
+    return { r: p[0], g: p[1], b: p[2], a: p.length > 3 && !Number.isNaN(p[3]) ? p[3] : 1 };
+  };
+  const over = (top, bottom) => ({
+    r: top.r * top.a + bottom.r * (1 - top.a),
+    g: top.g * top.a + bottom.g * (1 - top.a),
+    b: top.b * top.a + bottom.b * (1 - top.a),
+    a: 1,
+  });
+  const lum = (c) => {
+    const f = (x) => { const s = x / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
+    return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+  };
+  const backgroundOf = (el) => {
+    const layers = [];
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      if (cs.backgroundImage && cs.backgroundImage !== 'none') return null;
+      if (Number(cs.opacity) < 1) return null;
+      const bg = parse(cs.backgroundColor);
+      if (bg && bg.a > 0) {
+        layers.push(bg);
+        if (bg.a === 1) break;
+      }
+    }
+    let base = { r: 255, g: 255, b: 255, a: 1 };
+    for (let i = layers.length - 1; i >= 0; i -= 1) base = over(layers[i], base);
+    return base;
+  };
+  // True when something that is not an ancestor is painted behind the text
+  // (an overlay, a positioned sibling), so the ancestor walk would be wrong.
+  const paintedOver = (el) => {
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+    const stack = document.elementsFromPoint(x, y);
+    const at = stack.indexOf(el);
+    if (at === -1) return stack.some((other) => !other.contains(el) && !el.contains(other));
+    for (const other of stack.slice(at + 1)) {
+      if (other.contains(el)) continue;
+      const ocs = getComputedStyle(other);
+      const obg = parse(ocs.backgroundColor);
+      if ((obg && obg.a > 0) || (ocs.backgroundImage && ocs.backgroundImage !== 'none')) return true;
+    }
+    return false;
+  };
+  const lowContrast = [];
+  let contrastChecked = 0;
+  let contrastUnmeasured = 0;
+  const seen = new Set();
+  const walker = document.createTreeWalker(document.body || doc, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.nodeValue || !node.nodeValue.trim()) continue;
+    const el = node.parentElement;
+    if (!el || seen.has(el) || !visible(el)) continue;
+    if (['script', 'style', 'noscript', 'option'].includes(el.tagName.toLowerCase())) continue;
+    // SC 1.4.3 exempts inactive controls.
+    if (el.closest(':disabled, [aria-disabled="true"]')) continue;
+    seen.add(el);
+    const cs = getComputedStyle(el);
+    if (el instanceof SVGElement || paintedOver(el)) { contrastUnmeasured += 1; continue; }
+    judge(el, cs, cs.color);
+  }
+  // Text typed into a field and its placeholder are not text nodes.
+  for (const el of document.querySelectorAll('input:not([type="hidden"]), textarea')) {
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (['checkbox', 'radio', 'range', 'color', 'file', 'image'].includes(type)) continue;
+    if (!visible(el) || el.closest(':disabled, [aria-disabled="true"]')) continue;
+    const cs = getComputedStyle(el);
+    if (el.value) judge(el, cs, cs.color, 'value');
+    else if (el.getAttribute('placeholder')) judge(el, cs, getComputedStyle(el, '::placeholder').color, 'placeholder');
+  }
+
+  function judge(el, cs, color, part) {
+    const fg = parse(color);
+    const bg = backgroundOf(el);
+    if (!fg || !bg) { contrastUnmeasured += 1; return; }
+    contrastChecked += 1;
+    const text = over(fg, bg);
+    const l1 = lum(text);
+    const l2 = lum(bg);
+    const ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    const size = parseFloat(cs.fontSize) || 16;
+    const weight = Number(cs.fontWeight) || 400;
+    const large = size >= 24 || (size >= 18.66 && weight >= 700);
+    const required = large ? 3 : 4.5;
+    if (ratio + 0.005 < required) {
+      push(lowContrast, {
+        element: part ? `${describe(el)} (${part})` : describe(el), ratio: Math.round(ratio * 100) / 100, required,
+        color, background: `rgb(${Math.round(bg.r)}, ${Math.round(bg.g)}, ${Math.round(bg.b)})`,
+        font_size_px: Math.round(size * 10) / 10,
+      });
+    }
+  }
+
+  return {
+    horizontal_overflow: overflow,
+    interactive_count: interactiveCount,
+    small_targets: smallTargets,
+    small_targets_total: total(smallTargets),
+    small_targets_passing_by_spacing: spacedSmall,
+    targets_under_44: under44,
+    unnamed_controls: unnamed,
+    unnamed_controls_total: total(unnamed),
+    images_missing_alt: missingAlt,
+    images_missing_alt_total: total(missingAlt),
+    broken_images: broken,
+    broken_images_total: total(broken),
+    low_contrast: lowContrast,
+    low_contrast_total: total(lowContrast),
+    contrast_checked: contrastChecked,
+    contrast_unmeasured: contrastUnmeasured,
+  };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (!args.spec || !args.out) {
+    console.error('usage: node ui_render_probe.mjs --spec <spec.json> --out <dir>');
+    process.exit(2);
+  }
+  const spec = JSON.parse(readFileSync(args.spec, 'utf8'));
+  const outDir = resolve(args.out);
+  mkdirSync(outDir, { recursive: true });
+
+  const loaded = loadChromium();
+  if (!loaded) {
+    console.log(JSON.stringify({ status: 'skipped', reason: 'no Playwright driver found (looked for playwright, @playwright/test, playwright-core in the project and next to the plugin)' }));
+    process.exit(3);
+  }
+
+  let browser;
+  try {
+    browser = await loaded.chromium.launch();
+  } catch (err) {
+    console.log(JSON.stringify({ status: 'skipped', reason: `browser could not start: ${String(err && err.message ? err.message : err).split('\n')[0]}` }));
+    process.exit(3);
+  }
+
+  const widths = spec.widths || [320, 768, 1440];
+  const height = spec.height || 900;
+  const navTimeout = spec.nav_timeout_ms || 30000;
+  const targets = [];
+  try {
+    for (const target of spec.targets || []) {
+      const viewports = [];
+      for (const width of widths) {
+        const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1 });
+        const page = await context.newPage();
+        // Nothing leaves this machine: requests to non-loopback hosts, and
+        // file: URLs outside the workspace, are aborted.
+        const blocked = [];
+        await page.route('**/*', (route) => {
+          const url = route.request().url();
+          if (allowedUrl(url, spec.root)) return route.continue();
+          if (blocked.length < MAX_ITEMS) blocked.push(url.slice(0, 200));
+          return route.abort('blockedbyclient');
+        });
+        const consoleErrors = [];
+        page.on('console', (msg) => { if (msg.type() === 'error' && consoleErrors.length < MAX_ITEMS) consoleErrors.push(msg.text().slice(0, 300)); });
+        page.on('pageerror', (err) => { if (consoleErrors.length < MAX_ITEMS) consoleErrors.push(`uncaught: ${String(err.message || err).slice(0, 300)}`); });
+        const entry = { width, height, screenshot: null, load_error: null, console_errors: consoleErrors, blocked_requests: blocked };
+        try {
+          const response = await page.goto(target.url, { waitUntil: 'load', timeout: navTimeout });
+          if (response && response.status() >= 400) entry.load_error = `HTTP ${response.status()}`;
+          await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+          if (target.wait_for) {
+            await page.waitForSelector(target.wait_for, { state: 'visible', timeout: navTimeout }).catch(() => {
+              entry.load_error = entry.load_error || `wait_for selector never became visible: ${target.wait_for}`;
+            });
+          }
+          Object.assign(entry, await page.evaluate(measure, MAX_ITEMS));
+          const file = `${target.id}-${width}.png`;
+          await page.screenshot({ path: join(outDir, file), fullPage: true });
+          entry.screenshot = file;
+        } catch (err) {
+          entry.load_error = String(err && err.message ? err.message : err).split('\n')[0].slice(0, 300);
+        }
+        await context.close();
+        viewports.push(entry);
+      }
+      targets.push({ id: target.id, url: target.url, viewports });
+    }
+  } finally {
+    await browser.close();
+  }
+  console.log(JSON.stringify({ status: 'captured', driver: loaded.driver, widths, targets }));
+}
+
+main().catch((err) => {
+  console.log(JSON.stringify({ status: 'failed', reason: String(err && err.stack ? err.stack : err).slice(0, 2000) }));
+  process.exit(1);
+});

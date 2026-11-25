@@ -40,6 +40,7 @@ from lib_core import load_json
 # ---------------------------------------------------------------------------
 
 ALLOWED_AUDITORS: frozenset[str] = frozenset({
+    "accessibility-auditor",
     "claude-md-auditor",
     "code-quality-auditor",
     "dead-code-auditor",

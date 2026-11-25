@@ -181,7 +181,9 @@ ROLE_DEFAULT_TIERS: dict[str, str] = {
     "dead-code-auditor": TIER_FAST,
     "performance-auditor": TIER_FAST,
     "db-schema-auditor": TIER_FAST,
-    "ui-auditor": TIER_FAST,
+    # Reads rendered evidence and screenshots and judges layout: balanced,
+    # the same as accessibility-auditor beside it.
+    "ui-auditor": TIER_BALANCED,
     "claude-md-auditor": TIER_BALANCED,
     "security-auditor": TIER_DEEP,
     "architecture-auditor": TIER_BALANCED,

@@ -50,7 +50,7 @@ Run the deterministic helper to extract and classify all CLAUDE.md rules. Use th
 
 ```bash
 HOOKS=""
-for candidate in "${PLUGIN_HOOKS:-}" "{plugin_hooks}" "${CODEX_PLUGIN_ROOT:+$CODEX_PLUGIN_ROOT/hooks}" "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/hooks}"; do
+for candidate in "${PLUGIN_HOOKS:-}" "{plugin_hooks}" "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/hooks}"; do
   if [ -n "$candidate" ] && [ -f "$candidate/lib_claude_md.py" ]; then HOOKS="$candidate"; break; fi
 done
 if [ -z "$HOOKS" ]; then

@@ -125,7 +125,7 @@ When given this phase, produce `.dynos/task-{id}/design-doc.md` — a §1–§13
 
 When given this phase, read `raw-input.md`, `discovery-notes.md`, and `design-decisions.md`. If `.dynos/task-{id}/design-doc.md` exists (high/critical-risk task), read it too — its §1–§4 inform the spec, §10 has been resolved by the human, and §11 lists the intended segments. Write the normalized spec to `spec.md`.
 
-Every criterion must be falsifiable by a named test, and every executor must be able to read it the same way. Keep it to the minimum set that proves the request: the validator rejects more than 20 criteria or 2,500 words.
+Every criterion must be falsifiable by a named test, and every executor must be able to read it the same way. Keep it to the minimum set that proves the request: the validator rejects more than 20 criteria or 2,500 words. The normalization rules under "Step 3 — Normalize Spec" below apply here too, including the one that names each UI screen's required states.
 
 ## Phase: Spec + Plan (combined planning path)
 
@@ -212,7 +212,7 @@ Write to `.dynos/task-{id}/spec.md`:
 - Every acceptance criterion must be concrete and testable — not vague.
 - "The user can log in" is too vague. "A user with valid email+password credentials receives a JWT and is redirected to /dashboard within 2 seconds" is correct.
 - Do not invent requirements. Surface implicit ones, but flag them as surfaced, not stated.
-- For UI tasks: loading, empty, error, and disabled states are always implicit acceptance criteria unless the spec explicitly excludes them.
+- For UI tasks: loading, empty, error, and disabled states are always implicit acceptance criteria unless the spec explicitly excludes them. Name them: for each screen or component that fetches or mutates data, a criterion lists the states it must render and what the user sees in each ("The orders list shows a skeleton while loading, an empty state with a 'Create order' action at zero orders, and a retry action when the fetch fails"). The UI auditor treats the named states as the required set for that screen and falls back to a generic list only where none are named. One criterion may cover several small screens that share the same states, so the 20-criterion ceiling holds.
 - For data mutation tasks: validation rules, conflict resolution, and rollback behavior are always implicit.
 - Write acceptance criteria from the user's perspective when possible — "the user sees X when Y" rather than "the component renders X."
 - Ban adjectives without mechanics. Words like "clean", "intuitive", "robust", "fast", and "secure" are worthless unless converted into observable behavior or measurable constraints.
@@ -234,6 +234,8 @@ Before writing the plan, read the normalized spec and ask:
 - **What can be built in parallel?** Identify independent work streams and their interfaces.
 - **What is the single most likely thing to go wrong during execution?** Address it explicitly in the plan.
 - **What existing code will executors need to read to match patterns?** Point them to it — don't make them search.
+- **What is the smallest plan that fully meets the spec?** For each thing the plan would build, stop at the first of these that works: it already exists in this codebase (your instruction carries a `## Codebase Map` of existing top-level definitions by folder; a name there tells you something exists, so read that file before planning around it, and name the path in Reference Code); the standard library or the platform does it; an installed dependency does it; otherwise the minimum new code. Plan no abstraction with a single implementation, no option or config nobody asked for, nothing "for later". A new dependency needs a sentence in Technical Approach saying why none of the earlier options does the job.
+- **Where must the change reach?** Callers of anything whose signature or behavior changes, plus the tests, fixtures, config and exports that depend on it. Every one of those files belongs in a segment's `files_expected`; an executor may not edit outside it, so a caller you leave out stays broken.
 
 Write to `.dynos/task-{id}/plan.md`:
 
@@ -255,7 +257,14 @@ Write to `.dynos/task-{id}/plan.md`:
 Each ADR is a constraint that downstream executors must follow. If an executor encounters a gray area not covered by an ADR, they should stop and ask rather than guess.]
 
 ## Reference Code
-[List 2-5 existing files in the codebase that executors should read before implementing, with a one-sentence note on what pattern each demonstrates. This prevents executors from inventing new patterns when existing ones work.]
+[List 2-5 existing files in the codebase that executors should read before implementing, with a one-sentence note on what pattern each demonstrates. This prevents executors from inventing new patterns when existing ones work.
+
+For UI tasks, when they exist, two of these must be the file that defines the design tokens or theme (colors, spacing, type) and the closest existing sibling component or screen. A UI executor reads at most two reference files and never sees this plan, so repeat both paths in each `ui-executor` segment's `description` (see the execution graph rules). When neither exists, write Design Direction instead; list only files that exist here, or mark a new one to-be-created on the same line.]
+
+## Design Direction
+*(UI tasks only, and only when the codebase has no design system to match — no tokens or theme file, no comparable screen. Otherwise omit the section; the existing system is the direction.)*
+
+[The decisions an executor would otherwise make by default: the typeface, the palette (neutrals plus one accent, with the values), the spacing scale, light or dark and why for this user and setting, and which file the tokens are defined in. Take it from a wireframe, brand asset or discovery answer when one exists; where you chose it yourself, say so and flag it in Open Questions for the human to confirm at the plan gate. Three to six lines. Repeat it in each `ui-executor` segment's `description`. Put the new tokens file in exactly one segment's `files_expected` and make every other UI segment depend on that segment, so parallel executors do not each invent their own.]
 
 ## Components / Modules
 ### Component: [Name]
@@ -326,7 +335,16 @@ Build the execution graph payload with this shape and persist it by piping it to
         {"id": "e2e", "command": "npx playwright test", "criteria_ids": [3], "timeout": 1800}
       ]
     }
-  ]
+  ],
+  "ui_render": {
+    "start_command": "npm run dev -- --port 4173",
+    "ready_url": "http://localhost:4173/",
+    "ready_timeout": 120,
+    "targets": [
+      {"id": "orders", "url": "http://localhost:4173/orders", "wait_for": "main"},
+      {"id": "report", "file": "out/report.html"}
+    ]
+  }
 }
 ```
 
@@ -341,6 +359,11 @@ Build the execution graph payload with this shape and persist it by piping it to
 - Segments with empty `depends_on` and `parallelizable: true` can run simultaneously
 - The dependency graph must be acyclic
 - Every file path must be repo-relative and must not escape the workspace
+- A `ui-executor` segment's `description` is all the plan that executor sees. It must name the two reference files (the tokens or theme file and the sibling component) by path, and carry the Design Direction when the plan has one
+- `ui_render` (top level, UI tasks only) declares the screens the audit renders. ctl opens each target at 320, 768 and 1440 px wide and measures overflow, contrast, target sizes, unnamed controls and missing alt text, and the UI auditors judge from those measurements. Declare it whenever the task changes something a browser can open (this needs `node` and a Playwright driver in the project or beside the plugin; without them the capture is recorded as skipped); omit it for native or non-web UI, and when a screen cannot be reached without credentials or data the task does not provide (say which in Open Questions). Without it the auditors can only mark those checks unverified
+  - `targets` (1–12): one per screen or page the task adds or visibly changes. Each has a unique `id` (lowercase letters, digits, hyphens; at most 40 characters) and exactly one of `url` (http(s) on `localhost`, `127.0.0.1` or `[::1]` only) or `file` (a repo-relative `.html` or `.htm` file outside `.dynos/`). Requests the page makes to other hosts are blocked during the capture, so a screen that needs a remote API or CDN to render should be pointed at local fixtures. A `file` must exist when the audit runs: commit it, or have a segment's `verify_commands` generate it. `wait_for` is an optional CSS selector that must be visible before measuring
+  - `start_command` starts the dev server from the repo root when the targets need one; take it from the project's own scripts and pin the port the URLs use. ctl waits for `ready_url` (default: the first `url` target) for `ready_timeout` seconds (default 120), captures, and stops the server; `ready_timeout` is at most 900, and a server already answering at `ready_url` is used as it is and left running. Omit it for `file` targets
+  - A target renders in whatever state its URL loads in. To put an empty or error state in front of the auditors, give it its own target only if the app already has a URL that shows it (a fixture route, a query parameter); do not ask an executor to add one just for the audit
 
 ## Phase: Strategic Implementation Planning (Master)
 
@@ -349,6 +372,7 @@ When given this phase, you act as the **Architect**. For large or high-risk task
 1. Write a **Strategic Plan** to `.dynos/task-{id}/plan.md`. Focus on: Technical Approach, Architecture, Global Interfaces, and High-Level Dependency Graph. 
 2. Write a **Skeletal Execution Graph** to `.dynos/task-{id}/execution-graph-skeleton.json`. Each segment ID should represent a major subsystem (e.g. `sub-auth`, `sub-data-layer`). 
 3. Do NOT list individual files or sub-tasks. Instead, describe the **Objective and Boundary** for each subsystem.
+4. For a UI task, you own what spans subsystems: write Design Direction in the Strategic Plan when there is no design system, name the subsystem that owns the tokens file, and put the top-level `ui_render` declaration in the skeleton so it is carried into the merged execution graph.
 
 ## Phase: Detailed Segment Planning (Worker)
 
@@ -360,7 +384,7 @@ When given this phase, you act as the **Project Lead for a specific subsystem**.
    - Identify all specific files to create/modify.
    - Define internal data flow and component structures.
    - List the specific sub-tasks for this segment.
-4. Return the detailed segment object to be merged into the final execution-graph payload. The merged payload is persisted through the `write-execution-graph` ctl wrapper.
+4. Return the detailed segment object to be merged into the final execution-graph payload. The execution graph rules above apply to it, including what a `ui-executor` segment's `description` must carry. The merged payload is persisted through the `write-execution-graph` ctl wrapper.
 
 ## Hard Rules
 

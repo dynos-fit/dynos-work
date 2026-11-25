@@ -95,6 +95,23 @@ For each auditor in the plan:
 - For the plan-auditor: For each AC in spec.md naming a function signature, verify plan.md's Component section names the same signature. Mismatch is a partial finding.
 - If `plan-audit-gap-warnings.json` exists with `advisory: true` (also recorded as `gap_warnings` in the `plan-audit-check` receipt), give its `warnings` to the plan-auditor and spec-completion auditor: each names a plan endpoint or model the gap scanner could not find. Verify each against the final code; one that still does not exist and is not created by the diff is a finding.
 
+**UI render evidence (deterministic — run before spawning `ui-auditor` or `accessibility-auditor`):** When either auditor is in the plan with `action: "spawn"`, capture rendered evidence first:
+
+```bash
+"$DYNOS" ctl run-ui-render-evidence .dynos/task-{id}
+"$DYNOS" ctl log-append .dynos/task-{id} --tag VISION --message "ui render evidence: {status} — {reason or totals}"
+```
+
+It reads the `ui_render` declaration from the approved execution graph, starts the declared dev server if one is named (and stops it afterwards), renders every target at 320, 768 and 1440 px wide, and writes screenshots plus measurements to `.dynos/task-{id}/evidence/ui-render/` (`report.json` is the index). Measured per viewport: horizontal overflow, interactive targets under 24 px (and a count under 44 px), text contrast against solid backgrounds, controls with no accessible name, images with no `alt`, images that failed to load, and console errors. Do not start a server, take screenshots, or measure any of this by hand, and do not spawn a subagent to do it.
+
+`router.py audit-inject-prompt` reads the resulting `report.json` and tells both auditors what exists, so do not describe the capture in their base prompts. The output `status` is one of:
+
+- `ui_render_captured` — the auditors are pointed at the report and its screenshots.
+- `ui_render_skipped` (exit 0) — nothing was declared, or this machine has no `node` or Playwright driver. The auditors are told to judge from source and to mark what they cannot prove as unverified.
+- `ui_render_failed` (exit 1) — the declaration is invalid, or the declared server or every target could not be loaded. Print the `reason` to the user and continue the audit; the auditors are told the same as for a skip. This step never blocks the audit.
+
+Re-run the command before each re-audit batch that includes either auditor, so they judge the repaired UI and not the earlier capture. The capture is evidence, not an auditor: it produces no findings and nothing gates on it.
+
 **Pre-load diff context (run once, write to sidecar, reference by path):** Using `diff_base` from the audit plan output, write the context ONCE to a sidecar file and reference its path in each auditor's base prompt. Do NOT capture the full content into a shell variable and append it to every prompt — that pattern multiplies (auditors × cascade-models × context-size) input tokens, which is exactly the regression the 2026-04-30 latency investigation flagged in CG-013 (the mislabeled "perf:" commit).
 
 ```bash
@@ -173,8 +190,6 @@ The audit batch is a loop. In the first batch, spawn every auditor whose status 
 **Re-audit (after a repair cycle):** the cascade does not restart. Each ensemble auditor in the re-audit set is spawned **once** at its escalation model, and that deep-tier verdict is binding. `run-audit-reaudit-plan` returns the exact `model` and `shard_step_name` per auditor under `spawns`. While `repair-log.json` exists, `ensemble-next` reports `reaudit_model` and `reaudit_done` for every ensemble auditor, and `audit-inject-prompt` and `audit-receipt` refuse any other tier (no fast or balanced restart). The receipt written for that spawn records the repair cycle, which is what marks the re-audit done.
 
 **Enforcement (there is no shortcut):** `router.py audit-inject-prompt` refuses to build a prompt for an ensemble auditor at any model other than the one `ensemble-next` returns; `audit-receipt` refuses a shard receipt written out of cascade order; `run-audit-summary` and the DONE gate refuse while any cascade is incomplete. On a first audit a single deep-tier spawn does not satisfy an ensemble auditor. On null-model hosts the router sets `"ensemble": false` and the auditor spawns once at the plan model.
-
-**Visual Audit Pass:** For tasks where `domains` includes `"ui"`, run a visual audit: start the dev server, use a browser subagent to screenshot modified screens, then evaluate with Claude 3.5 Sonnet against the planning-phase Design Decisions. Report visual findings as category `vision-finding`. Log it with `"$DYNOS" ctl log-append .dynos/task-{id} --tag VISION --message "UI audit complete -- {N} visual bugs found"`.
 
 **Alongside mode deduplication:** When generic and learned auditors both produce findings for the same role, deduplicate by key `{file}:{line}:{category}`. Count duplicates once, preferring the learned version. The deduplicated set feeds into repair and retrospective counts. Track whether learned findings are a superset of generic findings (for promotion decisions by the learn step).
 
@@ -315,7 +330,7 @@ After all batches complete, record it:
 "$DYNOS" ctl log-append .dynos/task-{id} --tag DONE --message "repair-execution-{phase} — all fixes applied"
 ```
 
-**Re-run failing tests:** If `.dynos/task-{id}/test-results.json` has `status: "failed"`, re-run the same commands (its `results[].command`) before the re-audit:
+**Re-run the tests after every repair:** If `.dynos/task-{id}/test-results.json` exists, re-run the same commands (its `results[].command`) before the re-audit, whether the last recorded run failed or passed. A pass recorded before a repair says nothing about the repaired code: `run-tests` records a fingerprint of the task's changed code, and the DONE gate refuses a pass whose code has changed since. Run it after the repair executors finish, not before:
 
 ```bash
 "$DYNOS" ctl run-tests .dynos/task-{id} --command "{command 1}" --command "{command 2}"
@@ -337,6 +352,8 @@ Use its JSON output as authoritative:
 - `scoped_auditors` receive only `modified_files`
 
 Do NOT hand-compute repair-modified files or choose the re-audit auditor set in prompt logic.
+
+When the re-audit set includes `ui-auditor` or `accessibility-auditor`, run `"$DYNOS" ctl run-ui-render-evidence .dynos/task-{id}` again before building their prompts. A capture older than the repair is treated as missing: `audit-inject-prompt` tells the auditors no rendered evidence is available.
 
 After re-audit, run `run-audit-findings-gate` again.
 
@@ -467,7 +484,7 @@ This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT
 
 If it refuses with `outside the declared write scope`, files changed since the task snapshot are not covered by any segment's `files_expected`/`files_optional`, any repair cycle's `files_to_modify` or the TDD test files — typically a write made through an interpreter or subprocess that the write hook could not see. The refusal names the files. Revert each file that is not task work (`git checkout -- <path>`, or delete an untracked one). If a file IS task work, stop and ask the user; only on their explicit confirmation record it with `"$DYNOS" ctl acknowledge-out-of-scope .dynos/task-{id} --file <path> [--file <path> ...] --reason "<why it belongs to this task>"`, then re-run `run-audit-finish`. Never acknowledge on your own judgment, and never force past this gate. Paths every task legitimately writes (for example `docs/follow-ups/`) belong in the project policy's `always_in_scope` list, which a human maintains; they are then never out of scope. `run-audit-findings-gate` (and `run-execution-segment-done`) already list the same files as `out_of_scope_files`, so deal with them before the finish.
 
-If it refuses on `test-results.json`, the last recorded test run did not pass. Re-run `ctl run-tests` with the same commands. If they still fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate. A failure the task does not own (a pre-existing or flaky repo-wide suite) is waived only by the project policy's `known_test_failures` list: entries of `{"command": "<exact --command string>", "reason": "<owner, ticket or cause>", "expires": "YYYY-MM-DD"}`. A waived command records `passed_with_known_failures`, which the DONE gate accepts; any other failing command still blocks. Agents never edit that policy; a human adds the entry.
+If it refuses on `test-results.json`, the last recorded test run either did not pass or ran before the code last changed (the message says which). Re-run `ctl run-tests` with the same commands. If they fail, re-spawn `spec-completion-auditor`: its injected prompt carries the failure, so it produces the blocking finding Step 4 repairs. Never force past this gate. A failure the task does not own (a pre-existing or flaky repo-wide suite) is waived only by the project policy's `known_test_failures` list: entries of `{"command": "<exact --command string>", "reason": "<owner, ticket or cause>", "expires": "YYYY-MM-DD"}`. A waived command records `passed_with_known_failures`, which the DONE gate accepts; any other failing command still blocks. Agents never edit that policy; a human adds the entry.
 
 Print verbatim the contents of `.dynos/task-{id}/completion.json::user_summary`.
 Do NOT paraphrase, reorder, or add commentary. The orchestrator's user-facing

@@ -11,12 +11,12 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
-## [7.9.2] - 2026-11-25
+## [7.11.1] - 2026-11-25
 
 ### Added
-- Native C hook fast-path (`hooks/native_fast.c` compiled to `hooks/bin/dynos-fast`) for `PreToolUse` and `SubagentStop` with automatic Python fallback.
+- Native C hook fast-path (`hooks/native_fast.c`, auto-compiled to `hooks/bin/dynos-fast` on SessionStart when a C compiler is available with automatic Python fallback) for `PreToolUse` and `SubagentStop`.
 - Single-process `hooks/session_start_hook.py` and `router.py audit-inject-batch` batch prompt injection.
-- Custom auditor generation in `memory/agent_generator.py` (`auditors/`) alongside dynamic project-role validation (`.dynos/config/{roles,auditors}.json`) across `lib_core.py`, `ctl.py`, `pre_tool_use.py`, and `agent_spawn_log.py`.
+- Custom auditor generation in `memory/agent_generator.py` (`auditors/`) alongside dynamic project-role validation (`.dynos/config/{roles,auditors}.json`) across `lib_core.py`, `ctl.py`, `pre_tool_use.py`, `agent_spawn_log.py`, and `lib_tokens_hook.py`.
 
 ### Fixed
 - `_fire_task_completed` falls back to co-located `hooks/` when `PLUGIN_HOOKS` is unset so post-task eventbus drain runs in external repos; `bin/dynos` exports `PLUGIN_HOOKS`.
@@ -29,9 +29,50 @@ and this project adheres to **Semantic Versioning**.
 - Removed Cursor and Codex plugin packaging (`.cursor-plugin/`, `.codex-plugin/`, `hooks-cursor.json`) and multi-host routing/alias shims in favor of pure Claude Code support.
 
 ### Plugin / Distribution
-- Bump package and plugin metadata to `7.9.2`.
+- Bump package and plugin metadata to `7.11.1`.
 
 ---
+
+## [7.11.0] - 2026-11-17
+Executors, the planner and the code-quality auditor now aim for the smallest change that fully meets the spec.
+
+### Added
+- **Smallest-complete-change rules for executors.** `router.py inject-prompt` appends `agents/_shared/smallest-change.md` to every executor prompt except `docs-executor` and `testing-executor`. Before writing new code an executor reuses what the codebase has, then the standard library or platform, then an installed dependency, and only then writes the minimum. It adds no abstraction, option or "for later" code the criteria do not ask for, and never trims validation, data-loss error handling, security or accessibility to get smaller. A new dependency the plan did not name is raised under Open Questions, not added.
+- **Caller check inside the segment boundary.** An executor that changes a function's signature or behavior greps for its callers, fixes the ones in its `files_expected`, and reports the rest; it does not edit outside its boundary.
+- **`shortcut:` comments.** A deliberate shortcut is marked `shortcut: <the limit>, <when to upgrade>`. `code-quality-auditor` treats a marked shortcut as a decision and reports it only when the spec's stated load already crosses the limit. `git grep -nE '(#|//) ?shortcut:'` lists them.
+- **`## Skipped and Not Checked` in executor evidence.** Each executor records what it left out on purpose and what it could not verify.
+- **Planner: smallest plan and full reach.** The planner asks what the smallest plan that meets the spec is, justifies any new dependency in Technical Approach, and puts every caller, test, fixture and config file the change must reach into a segment's `files_expected`.
+- **`code-quality-auditor` Lean check.** Single-use abstractions, unset options, hand-written code the standard library or an installed dependency already does, and duplicated helpers are non-blocking findings when a concrete case is visible in the diff; a new dependency for a few lines that the plan did not name is blocking.
+
+- **Codebase map.** `hooks/lib_codemap.py` lists the project's top-level definitions by folder with one regex per language and no model. `dynos hook codebase_map` prints it for the planner (the start skill appends it under `## Codebase Map`), and `inject-prompt` gives each code-writing executor a `## What Already Exists Near Your Files` listing: its own folders file by file, then the project's shared code. "Reuse what exists" now has something to draw on inside the read budgets.
+- **Open-caller check.** `audit-inject-prompt` gives `code-quality-auditor` a `## Change Analysis` block: top-level definitions the task removed or renamed that no line defines or assigns any more and that some line still calls or imports, each with the `file:line` and the text of the line (auditors cannot open files outside the diff), plus the list of new definitions for the Lean check. A live reference is a blocking finding.
+- **Reuse numbers.** `ctl run-audit-reflect` prints `code_reuse`: new definitions, existing definitions the added lines use, the ratio, and the open-caller count.
+
+### Fixed
+- **A test pass recorded before a repair no longer satisfies the DONE gate.** Tests were re-run after a repair only when the last recorded run had failed, so a repair that broke a previously passing test could reach DONE on the earlier pass. `ctl run-tests` now records a fingerprint of the code the task has changed, and the DONE gate refuses a pass whose code has changed since, whether or not a repair log exists; committing the work or editing a doc does not make a pass stale. Results recorded without a fingerprint fall back to comparing file times with the latest `repair-log.json`. The audit skill re-runs the recorded commands after every repair.
+
+The rules, the map and the caller tracking are adapted from Ponytail (MIT); see `THIRD_PARTY_NOTICES.md`. Ponytail's levels, commands, hooks and usage band are not included. The map and the change analysis are pattern matching, not parsing: nested and dynamically created definitions are missed, so their output is evidence for an agent to verify and nothing gates on it.
+
+## [7.10.0] - 2026-11-16
+The UI agents now judge rendered pages, not only source, and stop duplicating each other.
+
+### Added
+- **Rendered UI evidence.** A UI plan can declare `ui_render` in the execution graph: up to 12 targets (a loopback `url` or a repo-relative HTML `file`), with an optional `start_command` for the dev server. `ctl run-ui-render-evidence` starts the server (or reuses one already answering), renders each target at 320, 768 and 1440 px wide through Playwright, and writes screenshots plus `report.json` to `evidence/ui-render/`. Measured per viewport: horizontal overflow, interactive targets under 24 px that also fail the WCAG 2.5.8 spacing test, text contrast against solid backgrounds (disabled controls excluded), controls with no accessible name, images with no `alt`, broken images, and console errors. Needs `node` and a Playwright driver installed in the project or beside the plugin; without them the capture is recorded as skipped and the audit proceeds from source. It is evidence only and never blocks the audit.
+- **`evidence/ui-render/` is ctl-owned.** Agent roles, executors and auditors included, cannot write there, and the router presents a report to auditors only when it matches the hash in ctl's receipt, so the measurements cannot be doctored. The capture stays on this machine: requests a page makes to other hosts are aborted and listed, `file` targets must be `.html` files outside `.dynos/`, and the dev server's whole process group is stopped afterwards. `write-execution-graph` refuses a `ui_render` declaration that points off the machine, escapes the workspace, or is malformed, and a rewritten graph that does not mention `ui_render` keeps the approved declaration (`"ui_render": null` removes it).
+- **Auditors are told what evidence exists.** `router.py audit-inject-prompt` adds a `## Rendered Evidence` block to `ui-auditor` and `accessibility-auditor` prompts, built from `report.json`: where the report is and its totals, or that nothing was captured and unprovable claims must be marked unverified, never passing. A capture older than the latest repair is treated as missing.
+- **Planner guidance for UI tasks.** Acceptance criteria name the states each screen must render; the plan names the tokens file and a sibling component as reference code and repeats them in each `ui-executor` segment's description; a `## Design Direction` section covers projects with no design system; and the execution graph declares `ui_render` targets.
+- **`ui-executor` interaction contract.** Control states, form behavior, overlays, destructive actions, loading and empty states, narrow-screen layout and visual checks, plus what to do when there is no design system to match. Parts are adapted from Hallmark (MIT) and Impeccable (Apache 2.0); see `THIRD_PARTY_NOTICES.md` and `LICENSES/Apache-2.0.txt`.
+
+### Changed
+- **Accessibility has one owner.** `accessibility-auditor` owns keyboard, focus, names, ARIA, contrast, target size and motion, with thresholds and blocking criteria; `ui-auditor` no longer reports them and keeps states, spec coverage, layout and edge cases. When `accessibility-auditor` is not spawned in an audit, or not re-run in a re-audit, the router tells `ui-auditor` to cover accessibility. Accessibility findings use the prefix `a11y-`, now a known category for learned rules, and `accessibility-auditor` joins the residual and auto-approve allowlists so those findings keep the eligibility they had under `ui-auditor`.
+- **`accessibility-auditor` is diff-scoped.** It now carries the same inputs, read budget and hard rules as `ui-auditor`.
+- **`ui-auditor` runs on the balanced tier** (was fast), the same as `accessibility-auditor`, since it now reads rendered evidence and screenshots. This raises the cost of that auditor on every UI audit.
+- **`ui-auditor` blocks on false feedback.** A success message with no request or state change behind it, and an error state that shows a raw exception or status code, are blocking findings.
+- **The audit skill's "Visual Audit Pass" is replaced** by the render-evidence step. The old paragraph asked the orchestrator to start a server and screenshot by hand, and named an outdated model.
+
+### Fixed
+- **Write guard on ctl-captured evidence directories.** `evidence/verification` was protected only for paths under it; a write aimed at the directory itself (`cp forged.json .dynos/task-X/evidence/verification`), or at a differently-cased spelling, was allowed for executors. Both it and the new `evidence/ui-render` now match the directory and ignore case.
+- **`ui-executor` build order.** Step 2 listed two items numbered 2 and ran the boundary-state pass before the happy path existed; the boundary pass now comes last and includes a 320 px screen. The final checklist now covers disabled states, keyboard operation and narrow screens, which the rest of the prompt already required.
 
 ## [7.9.1] - 2026-11-14
 

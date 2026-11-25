@@ -27,6 +27,7 @@ CATEGORY_INSTRUCTIONS: dict[str, str] = {
     "perf": "DO NOT introduce O(n^2) or worse algorithms without explicit justification. ALWAYS consider performance impact of loops and queries.",
     "comp": "ALWAYS verify backward compatibility before modifying public interfaces or data formats.",
     "ui": "BEFORE submitting, verify that UI changes render correctly across supported viewports and do not break existing layouts.",
+    "a11y": "ALWAYS give every interactive element an accessible name, keyboard operation and a visible focus indicator, and keep text contrast at WCAG AA.",
     "db": "ALWAYS use parameterized queries. DO NOT modify schema without migration scripts.",
     "test": "ALWAYS include tests for new behavior and verify existing tests pass before submitting.",
     "process": "ALWAYS follow the established workflow steps. DO NOT skip required review or validation stages.",

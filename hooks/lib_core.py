@@ -1429,25 +1429,64 @@ def _rules_check_err(
     return None
 
 
+def task_code_fingerprint(task_dir: Path) -> str | None:
+    """Hash of every code file this task has changed since its snapshot, as on disk now.
+
+    None when it cannot be computed (no snapshot sha, not a git repo).
+    """
+    try:
+        import lib_codemap  # noqa: PLC0415
+        snapshot = load_json(task_dir / "manifest.json").get("snapshot")
+        base = snapshot.get("head_sha") if isinstance(snapshot, dict) else None
+        if not isinstance(base, str) or not base.strip():
+            return None
+        return lib_codemap.code_fingerprint(task_dir.parent.parent, base.strip())
+    except Exception:  # noqa: BLE001 - a fingerprint failure must never fail a gate by itself
+        return None
+
+
 def _failing_test_results_err(task_dir: Path) -> str | None:
-    """DONE-gate message when the last ctl-recorded test run failed.
+    """DONE-gate message when the last ctl-recorded test run failed or is stale.
 
     ``test-results.json`` is written only by ``ctl run-tests`` (control-plane
     file). Absent means the task predates the command or never ran tests
-    through ctl; only a recorded failure blocks.
+    through ctl; only a recorded failure, or a pass that no longer describes
+    the code, blocks.
+
+    A pass is stale when the task's code has changed since the run: a repair
+    (or any later edit) can break a test that passed before it. ``run-tests``
+    records a fingerprint of the changed code; when the current one differs,
+    the pass is refused. Results recorded without a fingerprint fall back to
+    comparing file times against the latest repair log.
     """
     path = task_dir / "test-results.json"
     if not path.exists():
         return None
     try:
-        status = load_json(path).get("status")
+        results = load_json(path)
+        status = results.get("status")
     except (OSError, ValueError, AttributeError):
-        status = None
-    if status in ("passed", "passed_with_known_failures"):
+        results, status = {}, None
+    if status not in ("passed", "passed_with_known_failures"):
+        return (
+            "test-results.json (last recorded test run did not pass — repair, "
+            "then re-run `ctl run-tests` until it records status=passed)"
+        )
+    recorded = results.get("code_fingerprint")
+    if isinstance(recorded, str) and recorded:
+        current = task_code_fingerprint(task_dir)
+        stale = current is not None and current != recorded
+    else:
+        try:
+            stale = (task_dir / "repair-log.json").stat().st_mtime_ns > path.stat().st_mtime_ns
+        except OSError:
+            stale = False
+    if not stale:
         return None
     return (
-        "test-results.json (last recorded test run did not pass — repair, "
-        "then re-run `ctl run-tests` until it records status=passed)"
+        "test-results.json (code changed after the last recorded test run — "
+        "re-run `ctl run-tests` with the same commands so the pass covers the "
+        "code as it is now)"
     )
 
 
