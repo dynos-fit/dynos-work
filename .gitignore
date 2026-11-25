@@ -13,3 +13,5 @@ benchmarks/generated/
 plan.md
 run-plan.sh
 logs/
+hooks/bin/
+.DS_Store

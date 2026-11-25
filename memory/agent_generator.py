@@ -71,8 +71,20 @@ def _retro_participants(retro: dict) -> set[str]:
 def _matching_retrospectives(
     retrospectives: list[dict], role: str, task_type: str, root: Path
 ) -> list[dict]:
-    """Return retrospectives where *role* participated and task_type matches
-    (participation per ``_retro_participants``)."""
+    """Return retrospectives where *role* participated and task_type matches."""
+    if role.endswith("-auditor"):
+        matched: list[dict] = []
+        for retro in retrospectives:
+            if retro.get("task_type") != task_type:
+                continue
+            if role in _retro_participants(retro):
+                matched.append(retro)
+                continue
+            fba = retro.get("findings_by_auditor")
+            streaks = retro.get("auditor_zero_finding_streaks")
+            if (isinstance(fba, dict) and role in fba) or (isinstance(streaks, dict) and role in streaks):
+                matched.append(retro)
+        return matched
     return [
         retro for retro in retrospectives
         if retro.get("task_type") == task_type and role in _retro_participants(retro)
@@ -82,12 +94,6 @@ def _matching_retrospectives(
 def _discover_executor_slots(retrospectives: list[dict]) -> dict[tuple[str, str], int]:
     """Count, per (executor role, task_type), the TASKS in which that executor
     ran, from the collected retrospectives.
-
-    Slots used to be discovered by scanning ``root/.dynos/task-*/
-    execution-graph.json``. Those exist only in the checkout that ran the task,
-    so on main (after worktree removal) no slot was ever found. It also counted
-    segments rather than tasks, so one task with three backend segments met the
-    three-sample threshold on its own.
     """
     counts: dict[tuple[str, str], int] = {}
     for retro in retrospectives:
@@ -98,6 +104,73 @@ def _discover_executor_slots(retrospectives: list[dict]) -> dict[tuple[str, str]
             if role.endswith("-executor"):
                 counts[(role, task_type)] = counts.get((role, task_type), 0) + 1
     return counts
+
+
+def _discover_auditor_slots(retrospectives: list[dict]) -> dict[tuple[str, str], int]:
+    """Count (auditor role, task_type) slots with recurring findings or observations."""
+    counts: dict[tuple[str, str], int] = {}
+    had_findings: set[tuple[str, str]] = set()
+    for retro in retrospectives:
+        task_type = retro.get("task_type")
+        if not isinstance(task_type, str) or not task_type:
+            continue
+        seen_in_retro: set[str] = set()
+        fba = retro.get("findings_by_auditor")
+        if isinstance(fba, dict):
+            for role, n in fba.items():
+                if isinstance(role, str) and role.endswith("-auditor"):
+                    seen_in_retro.add(role)
+                    if isinstance(n, (int, float)) and n > 0:
+                        had_findings.add((role, task_type))
+        mua = retro.get("model_used_by_agent")
+        if isinstance(mua, dict):
+            for role in mua:
+                if isinstance(role, str) and role.endswith("-auditor"):
+                    seen_in_retro.add(role)
+        streaks = retro.get("auditor_zero_finding_streaks")
+        if isinstance(streaks, dict):
+            for role in streaks:
+                if isinstance(role, str) and role.endswith("-auditor"):
+                    seen_in_retro.add(role)
+        for role in seen_in_retro:
+            counts[(role, task_type)] = counts.get((role, task_type), 0) + 1
+    return {k: v for k, v in counts.items() if k in had_findings}
+
+
+def _discover_custom_project_roles(root: Path, retrospectives: list[dict]) -> list[dict]:
+    """Read custom project roles declared in `.dynos/config/roles.json` or `auditors.json`."""
+    roles: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    config_dir = root / ".dynos" / "config"
+    for cfg_name in ("roles.json", "auditors.json"):
+        cfg_path = config_dir / cfg_name
+        if not cfg_path.is_file():
+            continue
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        raw_roles = cfg.get("roles") or cfg.get("auditors") or cfg.get("custom_roles") or [] if isinstance(cfg, dict) else []
+        if not isinstance(raw_roles, list):
+            continue
+        for item in raw_roles:
+            if isinstance(item, str):
+                role_name = item.strip()
+                task_type = str((retrospectives[-1].get("task_type") if retrospectives else None) or "feature")
+                description = ""
+            elif isinstance(item, dict):
+                role_name = str(item.get("role") or item.get("name") or "").strip()
+                task_type = str(item.get("task_type") or "feature").strip() or "feature"
+                description = str(item.get("description") or "").strip()
+            else:
+                continue
+            if not role_name or not (role_name.endswith("-executor") or role_name.endswith("-auditor")):
+                continue
+            if (role_name, task_type) in seen:
+                continue
+            seen.add((role_name, task_type))
+            roles.append({"role": role_name, "task_type": task_type, "description": description})
+    return roles
 
 
 def _aggregate_finding_categories(retros: list[dict]) -> dict[str, int]:
@@ -144,16 +217,21 @@ def _build_agent_content(
     # `auditor-only` rules (aggregate category-trend signals from
     # memory/postmortem_improve.py) are excluded from every executor agent
     # file — they are audit-review signals, not per-line code constraints.
+    is_auditor = role.endswith("-auditor")
     relevant_rules: dict[str, list[dict]] = {}
     for r in prevention_rules:
         cat = r.get("category")
         if cat not in finding_categories:
             continue
         rule_executor = r.get("executor", "all")
-        if rule_executor == "auditor-only":
-            continue
-        if rule_executor not in (role, "all"):
-            continue
+        if is_auditor:
+            if rule_executor not in (role, "all", "auditor-only"):
+                continue
+        else:
+            if rule_executor == "auditor-only":
+                continue
+            if rule_executor not in (role, "all"):
+                continue
         relevant_rules.setdefault(cat, []).append(r)
 
     lines: list[str] = []
@@ -220,8 +298,11 @@ def cmd_auto(args: argparse.Namespace) -> int:
     log_event(root, "agent_generator_step", step="gate_check", passed=True, retrospective_count=len(retrospectives))
 
     # Step 2: Discover uncovered (role, task_type) slots from the retrospectives
-    # themselves (they survive worktree removal), counting tasks per slot.
+    # themselves (executors AND auditors with recurring findings), plus any
+    # custom project roles declared in .dynos/config/roles.json.
     role_type_counts = _discover_executor_slots(retrospectives)
+    auditor_type_counts = _discover_auditor_slots(retrospectives)
+    custom_roles = _discover_custom_project_roles(root, retrospectives)
 
     existing = {
         (a.get("role"), a.get("task_type"))
@@ -229,10 +310,13 @@ def cmd_auto(args: argparse.Namespace) -> int:
     }
 
     candidates = [(r, t, c) for (r, t), c in role_type_counts.items() if c >= 3]
+    for (r, t), c in auditor_type_counts.items():
+        if c >= 3:
+            candidates.append((r, t, c))
     new_count = sum(1 for (r, t, _) in candidates if (r, t) not in existing)
     refresh_count = len(candidates) - new_count
-    result["steps"].append({"step": "discover_slots", "total_slots": len(role_type_counts), "new": new_count, "refresh": refresh_count, "existing": len(existing)})
-    log_event(root, "agent_generator_step", step="discover_slots", total_slots=len(role_type_counts), new=new_count, refresh=refresh_count, existing=len(existing))
+    result["steps"].append({"step": "discover_slots", "total_slots": len(role_type_counts) + len(auditor_type_counts), "new": new_count, "refresh": refresh_count, "existing": len(existing)})
+    log_event(root, "agent_generator_step", step="discover_slots", total_slots=len(role_type_counts) + len(auditor_type_counts), new=new_count, refresh=refresh_count, existing=len(existing))
 
     result.setdefault("refreshed", [])
 
@@ -240,6 +324,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
     # Refresh rewrites the .md file from current retros + prevention rules but does NOT touch the
     # registry entry — preserving accumulated mode (alongside/replace), benchmark_summary, and
     # last_evaluation. The .md content is a derived artifact; the registry holds promotion state.
+    learned_root = _persistent_project_dir(root) / "learned-agents"
     for role, task_type, count in candidates:
         matched_retros = _matching_retrospectives(retrospectives, role, task_type, root)
 
@@ -249,8 +334,13 @@ def cmd_auto(args: argparse.Namespace) -> int:
             result["skipped_reasons"].append(f"no matching retrospectives for {role}/{task_type}")
             continue
 
-        agent_name = f"auto-{role.replace('-executor', '')}-{task_type}"
-        agent_dir = _persistent_project_dir(root) / "learned-agents" / "executors"
+        if role.endswith("-auditor"):
+            short = role.removesuffix("-auditor")
+            agent_name = f"auto-audit-{short}-{task_type}"
+            agent_dir = learned_root / "auditors"
+        else:
+            agent_name = f"auto-{role.replace('-executor', '')}-{task_type}"
+            agent_dir = learned_root / "executors"
         agent_dir.mkdir(parents=True, exist_ok=True)
         agent_path = agent_dir / f"{agent_name}.md"
 
@@ -277,6 +367,33 @@ def cmd_auto(args: argparse.Namespace) -> int:
         else:
             result["refreshed"].append({"agent_name": agent_name, "role": role, "task_type": task_type, "sample_count": count})
             log_event(root, "agent_generator_step", step="agent_refreshed", agent_name=agent_name, role=role, task_type=task_type, sample_count=count)
+
+    # Step 3b: Materialize declared custom project roles from .dynos/config/{roles,auditors}.json
+    for spec in custom_roles:
+        c_role = spec["role"]
+        c_type = spec["task_type"]
+        sub = "auditors" if c_role.endswith("-auditor") else "executors"
+        role_dir = learned_root / sub
+        role_dir.mkdir(parents=True, exist_ok=True)
+        role_file = role_dir / f"{c_role}.md"
+        if not role_file.exists():
+            matched_c = _matching_retrospectives(retrospectives, c_role, c_type, root) or retrospectives[-3:]
+            latest_c = matched_c[-1].get("task_id", "project-config") if matched_c else "project-config"
+            body = _build_agent_content(c_role, c_role, c_type, matched_c, latest_c, root)
+            if spec["description"]:
+                body += f"\n## Role Scope\n\n{spec['description']}\n"
+            role_file.write_text(body)
+        if (c_role, c_type) not in existing:
+            register_learned_agent(
+                root,
+                agent_name=c_role,
+                role=c_role,
+                task_type=c_type,
+                path=str(role_file),
+                generated_from="project-config",
+                source="custom_role",
+            )
+            result["generated"].append({"agent_name": c_role, "role": c_role, "task_type": c_type})
 
     result["steps"].append({"step": "generate", "generated_count": len(result["generated"]), "refreshed_count": len(result["refreshed"])})
     log_event(root, "agent_generator_auto", generated_count=len(result.get("generated", [])), refreshed_count=len(result.get("refreshed", [])), skipped_reasons=result.get("skipped_reasons", []), retrospective_count=len(retrospectives), steps=result["steps"])

@@ -66,18 +66,92 @@ SUBAGENT_ROLE_MAP = {"dynos-work:planning": "planning", "planning": "planning",
                     "dynos-work:investigator": "investigator", "investigator": "investigator"}
 
 
-def role_for_subagent_type(subagent_type: str) -> str | None:
-    """Map a known Agent type to its write-policy role."""
+def _is_under_hooks(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+_PRIVILEGED_INTERNAL_ROLES: frozenset[str] = frozenset({
+    "ctl", "receipt-writer", "eventbus", "scheduler", "system", "daemon", "orchestrator",
+})
+_DYNAMIC_CUSTOM_ROLE_RE = re.compile(r"^(?:[a-z][a-z0-9-]*-executor|audit-[a-z][a-z0-9-]*)$")
+
+
+def is_allowed_project_role(role: str, project_root: Path | None = None) -> bool:
+    """Return True if *role* is a safely formatted project-declared custom role.
+
+    Permits project-scoped `<domain>-executor` or `audit-<domain>` roles
+    declared in `.dynos/config/roles.json`, `.dynos/config/auditors.json`, or
+    learned-agent artifacts/registry while rejecting all privileged internal roles.
+    """
+    if not isinstance(role, str):
+        return False
+    role = role.strip()
+    if not role or role in _PRIVILEGED_INTERNAL_ROLES or not _DYNAMIC_CUSTOM_ROLE_RE.match(role):
+        return False
+    if project_root is None:
+        return False
+    root = Path(project_root)
+    config_dir = root / ".dynos" / "config"
+    for cfg_name in ("roles.json", "auditors.json"):
+        cfg_path = config_dir / cfg_name
+        if cfg_path.is_file():
+            try:
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cfg = None
+            if isinstance(cfg, dict):
+                raw_roles = cfg.get("roles") or cfg.get("auditors") or cfg.get("custom_roles") or []
+                if isinstance(raw_roles, list):
+                    for item in raw_roles:
+                        candidate = item.get("role") or item.get("name") if isinstance(item, dict) else item
+                        if not isinstance(candidate, str):
+                            continue
+                        norm = ("audit-" + candidate.removesuffix("-auditor")) if candidate.endswith("-auditor") else candidate
+                        if norm == role or candidate == role:
+                            return True
+    # Also recognize custom .md files in project .dynos/agents/ or persistent learned-agents/{executors,auditors,roles}/
+    slug_name = (role.removeprefix("audit-") + "-auditor") if role.startswith("audit-") else role
+    candidate_dirs: list[Path] = [root / ".dynos" / "agents", root / ".dynos" / "roles"]
+    try:
+        pdir = _persistent_project_dir(root) / "learned-agents"
+        candidate_dirs.extend([pdir / "executors", pdir / "auditors", pdir / "roles"])
+    except Exception:
+        pass
+    for d in candidate_dirs:
+        if (d / f"{slug_name}.md").is_file() or (d / f"{role}.md").is_file():
+            return True
+    try:
+        reg_path = _persistent_project_dir(root) / "learned-agents" / "registry.json"
+        if reg_path.is_file():
+            reg = json.loads(reg_path.read_text(encoding="utf-8"))
+            for agent in reg.get("agents", []) if isinstance(reg, dict) else []:
+                if isinstance(agent, dict) and agent.get("role") in {role, slug_name}:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def role_for_subagent_type(subagent_type: str, project_root: Path | None = None) -> str | None:
+    """Map a known Agent type (or project-declared custom type) to its write-policy role."""
     name = (subagent_type or "").removeprefix("dynos-work:")
     if name in {"planning", "repair-coordinator", "investigator"}:
         return name
     if name.endswith("-executor"):
-        return name if name in VALID_EXECUTORS else None
+        if name in VALID_EXECUTORS or is_allowed_project_role(name, project_root):
+            return name
+        return None
     if name.endswith("-auditor"):
         role = "audit-" + name.removesuffix("-auditor")
         agents_dir = Path(__file__).resolve().parent.parent / "agents"
-        return role if (agents_dir / f"{name}.md").is_file() else None
-    if name.startswith("audit-"):
+        if (agents_dir / f"{name}.md").is_file() or is_allowed_project_role(role, project_root):
+            return role
+        return None
+    if name.startswith("audit-") and _DYNAMIC_CUSTOM_ROLE_RE.match(name):
         return name
     return None
 
@@ -283,7 +357,7 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def write_json(path: Path, data: Any) -> None:
+def write_json(path: Path, data: Any, *, fsync: bool = True) -> None:
     """Atomic JSON write: write to temp file then rename to avoid partial writes."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -292,7 +366,8 @@ def write_json(path: Path, data: Any) -> None:
             fcntl.flock(f, fcntl.LOCK_EX)
             f.write(json.dumps(data, indent=2) + "\n")
             f.flush()
-            os.fsync(f.fileno())
+            if fsync:
+                os.fsync(f.fileno())
         os.rename(tmp, path)
     except BaseException:
         try:
@@ -3020,10 +3095,13 @@ def _fire_task_completed(task_dir: Path) -> None:
         hooks_dir = _Path(_plugin_hooks)
     else:
         _repo_hooks = root / "hooks"
+        _self_hooks = _Path(__file__).resolve().parent
         if (_repo_hooks / "eventbus.py").is_file():
             hooks_dir = _repo_hooks
+        elif (_self_hooks / "eventbus.py").is_file():
+            hooks_dir = _self_hooks
         else:
-            # Neither PLUGIN_HOOKS nor root/hooks/eventbus.py is available.
+            # Neither PLUGIN_HOOKS, root/hooks/eventbus.py, nor co-located hooks is available.
             # Log the skip and return — don't Popen into a broken path.
             try:
                 log_dir = root / ".dynos" / "events"
@@ -3036,6 +3114,11 @@ def _fire_task_completed(task_dir: Path) -> None:
                 pass
             return
     env_path = f"{hooks_dir}:{os.environ.get('PYTHONPATH', '')}"
+    dispatch_env = {
+        **os.environ,
+        "PYTHONPATH": env_path,
+        "PLUGIN_HOOKS": str(hooks_dir),
+    }
 
     # Step 1: Emit task-completed event with task identity (sync — small write)
     task_id = task_dir.name
@@ -3045,7 +3128,7 @@ def _fire_task_completed(task_dir: Path) -> None:
             [_PYTHON3, str(hooks_dir / "lib_events.py"), "emit",
              "--root", str(root), "--type", "task-completed", "--source", "task",
              "--payload", payload],
-            env={**__import__("os").environ, "PYTHONPATH": env_path},
+            env=dispatch_env,
             capture_output=True, text=True, timeout=10,
         )
     except Exception as exc:
@@ -3066,7 +3149,7 @@ def _fire_task_completed(task_dir: Path) -> None:
             subprocess.Popen(
                 [_PYTHON3, str(hooks_dir / "eventbus.py"), "drain",
                  "--root", str(root)],
-                env={**__import__("os").environ, "PYTHONPATH": env_path},
+                env=dispatch_env,
                 stdin=subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,

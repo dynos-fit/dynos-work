@@ -349,8 +349,6 @@ def _protected_host_paths() -> tuple[Path, ...]:
         home / ".claude" / "plugins",
         home / ".claude" / "settings.json",
         home / ".claude" / "settings.local.json",
-        home / ".cursor" / "plugins",
-        home / ".cursor" / "hooks.json",
         home / ".dynos",
     )
 

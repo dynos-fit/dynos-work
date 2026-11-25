@@ -406,12 +406,28 @@ def _record_orphan_tokens(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record subagent token usage")
-    parser.add_argument("--transcript", required=True, help="Path to subagent transcript JSONL")
+    parser.add_argument("--transcript", default="", help="Path to subagent transcript JSONL")
     parser.add_argument("--agent-type", default="unknown", help="Agent type (e.g. dynos-work:backend-executor)")
     parser.add_argument("--agent-desc", default="", help="Agent description")
-    parser.add_argument("--root", required=True, help="Project root path")
+    parser.add_argument("--root", default="", help="Project root path")
     parser.add_argument("--session-id", default="", help="Host session id for task attribution")
+    parser.add_argument("--from-stdin", action="store_true", help="Read SubagentStop JSON payload from stdin")
     args = parser.parse_args()
+
+    if args.from_stdin:
+        try:
+            _payload = json.loads(sys.stdin.read() or "{}")
+        except Exception:
+            return 0
+        if not isinstance(_payload, dict):
+            return 0
+        args.transcript = str(_payload.get("agent_transcript_path", _payload.get("transcript_path", "")) or "")
+        args.agent_type = str(_payload.get("agent_type", _payload.get("subagent_type", "unknown")) or "unknown")
+        args.agent_desc = str(_payload.get("description", "") or "")[:80]
+        args.root = str(_payload.get("cwd", "") or args.root)
+        args.session_id = str(_payload.get("session_id", "") or "")
+        if not args.transcript or not args.root:
+            return 0
 
     root = Path(args.root).resolve()
     transcript_path = Path(args.transcript)
@@ -488,7 +504,7 @@ def main() -> int:
     try:
         from lib_core import role_for_subagent_type
         from agent_spawn_log import release_role_stamp, role_released_on_return
-        stopped_role = role_for_subagent_type(args.agent_type)
+        stopped_role = role_for_subagent_type(args.agent_type, project_root=task_dir.parent.parent)
         if role_released_on_return(stopped_role):
             release_role_stamp(task_dir, str(stopped_role))
     except Exception as exc:

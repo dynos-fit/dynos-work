@@ -15,8 +15,6 @@ VERSION_PATHS = (
     Path("package.json"),
     Path(".claude-plugin/plugin.json"),
     Path(".claude-plugin/marketplace.json"),
-    Path(".codex-plugin/plugin.json"),
-    Path(".cursor-plugin/plugin.json"),
 )
 IGNORED_CHANGE_PATHS = {
     "CHANGELOG.md",

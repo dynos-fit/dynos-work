@@ -2782,19 +2782,22 @@ def cmd_tdd_receipt(args: argparse.Namespace) -> int:
     return 0
 
 
-def _validated_grant_role(command: str, raw_role: str | None) -> str | None:
-    """Shared allowlist validation for stamp-role / grant-role."""
+def _validated_grant_role(command: str, raw_role: str | None, task_dir: Path | None = None) -> str | None:
+    """Shared allowlist validation for stamp-role / grant-role (plus project-declared custom roles)."""
     role = (raw_role or "").strip()
     if not role:
         print(f"{command}: --role is required and must be non-empty", file=sys.stderr)
         return None
     if role not in _STAMP_ROLE_ALLOWLIST:
-        print(
-            f"{command}: refused — role {role!r} is not in the role "
-            f"allowlist; permitted values: {sorted(_STAMP_ROLE_ALLOWLIST)}",
-            file=sys.stderr,
-        )
-        return None
+        from lib_core import is_allowed_project_role  # noqa: PLC0415
+        project_root = _root_for_task_dir(task_dir) if task_dir is not None else None
+        if not is_allowed_project_role(role, project_root):
+            print(
+                f"{command}: refused — role {role!r} is not in the role "
+                f"allowlist; permitted values: {sorted(_STAMP_ROLE_ALLOWLIST)}",
+                file=sys.stderr,
+            )
+            return None
     return role
 
 
@@ -2809,23 +2812,24 @@ def _append_role_grant(task_dir: Path, role: str) -> dict:
     return actor_identity.append_grant(task_dir, role, write_json_fn=_ctl_writer)
 
 
+def grant_role_for_task(task_dir: Path, role: str) -> dict:
+    """In-process helper to validate and append a single-use role grant."""
+    validated = _validated_grant_role("grant-role", role, task_dir=task_dir)
+    if validated is None:
+        raise ValueError(f"role {role!r} is not allowed")
+    return _append_role_grant(task_dir, validated)
+
+
 def cmd_stamp_role(args: argparse.Namespace) -> int:
     """Write the executor role to active-segment-role under role=ctl,
     AND append a matching grant to the per-actor ledger (D3).
-
-    Replaces the legacy `printf '%s' "{role}" > active-segment-role` pattern.
-    Validates the role string against the allowlist. The legacy role file is
-    kept for sessions without an orchestrator pin (pre-D3 fallback); pinned
-    sessions resolve subagent roles from the grant ledger. Forgery defense
-    for audit-* claims is enforced downstream at receipt_audit_done, which
-    cross-checks against spawn-log.jsonl — see task-20260430-005.
     """
     task_dir = Path(args.task_dir).resolve()
     if not task_dir.is_dir():
         print(f"stamp-role: task_dir does not exist: {task_dir}", file=sys.stderr)
         return 1
 
-    role = _validated_grant_role("stamp-role", args.role)
+    role = _validated_grant_role("stamp-role", args.role, task_dir=task_dir)
     if role is None:
         return 1
 
@@ -2854,19 +2858,13 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
 
 
 def cmd_grant_role(args: argparse.Namespace) -> int:
-    """Append a single-use role grant for the NEXT subagent spawn (D3).
-
-    The grant is consumed by the first tool call of the first unbound
-    session that appears; the binding is immutable for that session's
-    lifetime. Grants expire unconsumed after the TTL. Unlike stamp-role this
-    does not touch the legacy active-segment-role file.
-    """
+    """Append a single-use role grant for the NEXT subagent spawn (D3)."""
     task_dir = Path(args.task_dir).resolve()
     if not task_dir.is_dir():
         print(f"grant-role: task_dir does not exist: {task_dir}", file=sys.stderr)
         return 1
 
-    role = _validated_grant_role("grant-role", args.role)
+    role = _validated_grant_role("grant-role", args.role, task_dir=task_dir)
     if role is None:
         return 1
 
@@ -2884,24 +2882,13 @@ def cmd_grant_role(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_clear_role(args: argparse.Namespace) -> int:
-    """Expire unconsumed grants and drop stamped roles nothing still needs.
-
-    This is the sanctioned replacement for the (policy-denied)
-    `rm active-segment-role` step the skills used to prescribe. Clearing
-    only ever REDUCES privilege. Under a harness that shares one session
-    across subagents, every running subagent resolves its role from the
-    role file, so a role whose spawn is still in flight (per
-    spawn-log.jsonl) keeps both its stamp and its grants: clearing after
-    one parallel segment returns must not revoke its siblings. ``--role``
-    drops that one role regardless; ``--all`` restores the old
-    clear-everything behaviour.
-    """
-    task_dir = Path(args.task_dir).resolve()
-    if not task_dir.is_dir():
-        print(f"clear-role: task_dir does not exist: {task_dir}", file=sys.stderr)
-        return 1
-
+def clear_role_for_task(
+    task_dir: Path,
+    *,
+    only_role: str | None = None,
+    clear_all: bool = False,
+) -> dict:
+    """In-process helper to expire grants and drop released stamped roles."""
     import actor_identity
     from agent_spawn_log import spawns_in_flight
     from lib_core import read_stamped_roles, write_stamped_roles
@@ -2909,9 +2896,8 @@ def cmd_clear_role(args: argparse.Namespace) -> int:
     def _ctl_writer(path: Path, data: object) -> None:
         _write_ctl_json(task_dir, path, data)
 
-    only_role = (getattr(args, "role", None) or "").strip() or None
     stamped = read_stamped_roles(task_dir)
-    if getattr(args, "all", False):
+    if clear_all:
         keep: set[str] = set()
     else:
         in_flight = spawns_in_flight(task_dir / "spawn-log.jsonl")
@@ -2925,29 +2911,37 @@ def cmd_clear_role(args: argparse.Namespace) -> int:
             str(g.get("role")) for g in actor_identity.pending_grants(task_dir)
         } - {only_role}
 
-    try:
-        expired = actor_identity.expire_grants(
-            task_dir, write_json_fn=_ctl_writer, keep_roles=keep_grants,
-        )
-    except Exception as exc:
-        print(f"clear-role: failed to expire grants: {exc}", file=sys.stderr)
-        return 1
-
-    role_file = task_dir / "active-segment-role"
+    expired = actor_identity.expire_grants(
+        task_dir, write_json_fn=_ctl_writer, keep_roles=keep_grants,
+    )
     remaining = [r for r in stamped if r in keep]
-    try:
-        write_stamped_roles(task_dir, remaining)
-    except OSError as exc:
-        print(f"clear-role: failed to update {role_file}: {exc}", file=sys.stderr)
-        return 1
-
-    print(json.dumps({
+    write_stamped_roles(task_dir, remaining)
+    return {
         "status": "role_cleared",
         "grants_expired": expired,
         "roles_cleared": [r for r in stamped if r not in keep],
         "roles_kept_in_flight": remaining,
         "legacy_role_file_removed": bool(stamped) and not remaining,
-    }, indent=2))
+    }
+
+
+def cmd_clear_role(args: argparse.Namespace) -> int:
+    """Expire unconsumed grants and drop stamped roles nothing still needs."""
+    task_dir = Path(args.task_dir).resolve()
+    if not task_dir.is_dir():
+        print(f"clear-role: task_dir does not exist: {task_dir}", file=sys.stderr)
+        return 1
+
+    only_role = (getattr(args, "role", None) or "").strip() or None
+    try:
+        payload = clear_role_for_task(
+            task_dir, only_role=only_role, clear_all=bool(getattr(args, "all", False)),
+        )
+    except Exception as exc:
+        print(f"clear-role: failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(payload, indent=2))
     return 0
 
 
@@ -3721,52 +3715,44 @@ def cmd_run_plan_audit(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
-        # Signature-check (task-20260501-001): verify spec AC signature claims match plan.
+        # Signature-check (task-20260501-001): run in-process to save Python startup overhead.
         _sig_script = Path(__file__).parent / "plan_signature_check.py"
         if _sig_script.exists():
-            sig_result = subprocess.run(
-                [sys.executable, str(_sig_script), "--root", str(root), "--task-dir", str(task_dir)],
-                capture_output=True, text=True,
-            )
-            if sig_result.returncode != 0:
-                print(json.dumps({
-                    "status": "plan_audit_failed",
-                    "task_dir": str(task_dir),
-                    "error": "signature-check script non-zero exit",
-                    "check_output": sig_result.stderr or sig_result.stdout,
-                }, indent=2))
-                return 1
             try:
-                sig_payload = json.loads(sig_result.stdout)
-            except json.JSONDecodeError:
-                print(json.dumps({
-                    "status": "ctl_internal_error",
-                    "task_dir": str(task_dir),
-                    "error": "plan_signature_check.py stdout is not valid JSON",
-                }, indent=2))
-                return 1
-            if sig_payload.get("findings"):
+                import plan_signature_check as _psc  # noqa: PLC0415
+                spec_path = task_dir / "spec.md"
+                plan_path = task_dir / "plan.md"
+                if spec_path.is_file() and plan_path.is_file():
+                    spec_text = spec_path.read_text(errors="ignore")
+                    plan_text = plan_path.read_text(errors="ignore")
+                    claims = _psc.extract_signature_claims(spec_text)
+                    plan_sigs = _psc.extract_plan_signatures(plan_text)
+                    sig_findings, _ = _psc.compare_signatures(claims, plan_sigs)
+                    if sig_findings:
+                        print(json.dumps({
+                            "status": "plan_audit_failed",
+                            "task_dir": str(task_dir),
+                            "error": "signature mismatch found",
+                            "findings": sig_findings,
+                        }, indent=2))
+                        return 1
+            except Exception as _sig_exc:  # noqa: BLE001
                 print(json.dumps({
                     "status": "plan_audit_failed",
                     "task_dir": str(task_dir),
-                    "error": "signature mismatch found",
-                    "findings": sig_payload["findings"],
+                    "error": f"signature-check failed: {_sig_exc}",
                 }, indent=2))
                 return 1
 
-        # Run intermediate-state pipeline check (task-003 PRO-006 capture).
-        # Bootstrap: tolerate the script not existing yet; when it exists, failures block.
+        # Run intermediate-state pipeline check in-process.
         _check_script = Path(__file__).parent / "plan_intermediate_state_check.py"
         if _check_script.exists():
-            check_result = subprocess.run(
-                [sys.executable, str(_check_script), "--root", str(root), "--task-dir", str(task_dir)],
-                capture_output=True, text=True,
-            )
-            if check_result.returncode != 0:
-                try:
-                    check_payload = json.loads(check_result.stdout)
-                except json.JSONDecodeError:
-                    check_payload = {"status": "blocked", "error": check_result.stderr or check_result.stdout}
+            try:
+                import plan_intermediate_state_check as _pisc  # noqa: PLC0415
+                check_payload = _pisc.run_check(root, task_dir)
+            except Exception as _check_exc:  # noqa: BLE001
+                check_payload = {"status": "blocked", "error": str(_check_exc)}
+            if not isinstance(check_payload, dict) or check_payload.get("status") != "pass":
                 print(json.dumps({
                     "status": "plan_audit_failed",
                     "task_dir": str(task_dir),
@@ -6299,12 +6285,18 @@ def cmd_run_execute_setup(args: argparse.Namespace) -> int:
             }, indent=2))
             return 1
 
-        from router import build_executor_plan  # noqa: PLC0415
+        from router import (  # noqa: PLC0415
+            _router_inputs_fingerprint,
+            _write_executor_plan_cache,
+            build_executor_plan,
+        )
+        from lib_receipts import plan_validated_receipt_matches  # noqa: PLC0415
 
         root = _root_for_task_dir(task_dir)
         graph = load_json(graph_path)
         segments = graph.get("segments", []) if isinstance(graph, dict) else []
-        validation_errors = validate_task_artifacts(task_dir, strict=True, run_gap=True)
+        skip_gap = plan_validated_receipt_matches(task_dir) is True
+        validation_errors = validate_task_artifacts(task_dir, strict=True, run_gap=not skip_gap)
         if validation_errors:
             print(json.dumps({
                 "status": "replan_required",
@@ -6315,6 +6307,13 @@ def cmd_run_execute_setup(args: argparse.Namespace) -> int:
 
         _, updated = transition_task(task_dir, "EXECUTION")
         plan = build_executor_plan(root, task_type, segments, task_dir=task_dir)
+        try:
+            task_id_val = task_dir.name
+            if task_id_val:
+                fp = _router_inputs_fingerprint(root, task_type, graph_path)
+                _write_executor_plan_cache(root, task_id_val, plan, fp, graph_path)
+        except OSError:
+            pass
         receipt_path = receipt_executor_routing(task_dir, plan.get("segments", []))
         manifest = updated if isinstance(updated, dict) else _load_manifest(task_dir)
         fast_track = bool(manifest.get("fast_track", False))

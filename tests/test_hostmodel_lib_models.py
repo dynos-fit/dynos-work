@@ -62,12 +62,10 @@ class TestLibModelsTierConstants:
         assert ranks == list(range(len(lib_models.ALL_TIERS))), "ranks must be 0..n-1"
 
     def test_host_constants(self) -> None:
-        """AC-3: HOST_CLAUDE, HOST_CODEX, ALL_HOSTS must have correct values."""
+        """HOST_CLAUDE and ALL_HOSTS represent Claude Code only."""
         assert lib_models.HOST_CLAUDE == "claude"
-        assert lib_models.HOST_CODEX == "codex"
-        assert lib_models.HOST_CURSOR == "cursor"
         assert isinstance(lib_models.ALL_HOSTS, frozenset)
-        assert lib_models.ALL_HOSTS == frozenset({"claude", "codex", "cursor"})
+        assert lib_models.ALL_HOSTS == frozenset({"claude"})
 
 
 # ---------------------------------------------------------------------------
@@ -90,40 +88,7 @@ class TestLibModelsClaudeMapping:
 
 
 # ---------------------------------------------------------------------------
-# AC-3: Codex host mapping (all null)
-# ---------------------------------------------------------------------------
-
-class TestLibModelsCodexMappingNull:
-    def test_lib_models_codex_mapping_null(self) -> None:
-        """AC-3: resolve_model_for_tier returns None for all tiers under codex."""
-        assert lib_models.resolve_model_for_tier("codex", "fast") is None
-        assert lib_models.resolve_model_for_tier("codex", "balanced") is None
-        assert lib_models.resolve_model_for_tier("codex", "deep") is None
-
-    def test_tier_to_model_codex_dict_all_none(self) -> None:
-        """AC-3: TIER_TO_MODEL['codex'] must map all tiers to None."""
-        mapping = lib_models.TIER_TO_MODEL
-        for tier in lib_models.ALL_TIERS:
-            assert mapping["codex"][tier] is None, (
-                f"TIER_TO_MODEL['codex']['{tier}'] must be None, got {mapping['codex'][tier]!r}"
-            )
-
-
-class TestLibModelsCursorUsesCursorPoolModels:
-    def test_cursor_tier_map_uses_composer_and_grok(self) -> None:
-        assert lib_models.resolve_model_for_tier("cursor", "fast") == "composer-2.5-fast"
-        assert lib_models.resolve_model_for_tier("cursor", "balanced") == "composer-2.5"
-        assert lib_models.resolve_model_for_tier("cursor", "deep") == "grok-4.7"
-        assert "claude" not in str(lib_models.TIER_TO_MODEL["cursor"])
-
-    def test_translate_claude_aliases_on_cursor_host(self) -> None:
-        assert lib_models.translate_model_for_host("sonnet", "cursor") == "composer-2.5"
-        assert lib_models.translate_model_for_host("opus", "cursor") == "grok-4.7"
-        assert lib_models.translate_model_for_host("sonnet", "claude") == "sonnet"
-
-
-# ---------------------------------------------------------------------------
-# AC-3: model_to_tier reverse mapping
+# model_to_tier reverse mapping
 # ---------------------------------------------------------------------------
 
 class TestLibModelsModelToTierRoundtrip:

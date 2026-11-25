@@ -106,21 +106,14 @@ _PYTHON3: str = shutil.which("python3") or sys.executable
 # ---------------------------------------------------------------------------
 
 WASTED_SPAWN_ABORT_THRESHOLD: int = 9
-SMALL_TASK_TOKEN_LIMIT: int = 9_371_185
-BUGFIX_TOKEN_LIMIT: int = 68_283_719
+SMALL_TASK_TOKEN_LIMIT: int = 1_500_000
+BUGFIX_TOKEN_LIMIT: int = 2_500_000
 OPUS_AUDITOR_ZERO_YIELD_THRESHOLD: int = 3
 SMALL_TASK_FILES_THRESHOLD: int = 2
-SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD: int = 7_496_948
-BUGFIX_TOKEN_DOWNGRADE_THRESHOLD: int = 54_626_975
+SMALL_TASK_TOKEN_DOWNGRADE_THRESHOLD: int = 1_000_000
+BUGFIX_TOKEN_DOWNGRADE_THRESHOLD: int = 1_800_000
 
-# Activation gate. Default False: the breaker logs decisions via
-# _dispatch_breaker_decision but does NOT call _apply_abort. Flip to
-# True only after reviewing circuit_breaker_observed events from the
-# last N tasks and verifying zero false positives. Activation is a
-# one-line PR after operator validation; threshold tuning is a
-# separate task informed by the observed events. Closes residual
-# a1c4a97c.
-BREAKER_ACTIVE: bool = False
+BREAKER_ACTIVE: bool = True
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
