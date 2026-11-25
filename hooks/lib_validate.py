@@ -2136,6 +2136,7 @@ def compute_reward(task_dir: Path) -> dict:
 
     # --- 1. Scan audit reports ---
     findings_by_auditor: dict[str, int] = {}
+    blocking_by_auditor: dict[str, int] = {}
     findings_by_category: dict[str, int] = {}
     total_findings = 0
     raw_blocking = 0
@@ -2222,7 +2223,9 @@ def compute_reward(task_dir: Path) -> dict:
             findings_by_auditor[auditor] = findings_by_auditor.get(auditor, 0) + count
             total_findings += count
             routed_report_paths.add(str(report_path))
-            raw_blocking += sum(1 for f in findings if finding_is_blocking(f))
+            report_blocking = sum(1 for f in findings if finding_is_blocking(f))
+            blocking_by_auditor[auditor] = blocking_by_auditor.get(auditor, 0) + report_blocking
+            raw_blocking += report_blocking
             for finding in findings:
                 if not isinstance(finding, dict):
                     continue
@@ -2405,7 +2408,7 @@ def compute_reward(task_dir: Path) -> dict:
                 if entry.get("action") == "skip":
                     auditor_zero_finding_streaks[name] = prior_value
                     continue
-                auditor_zero_finding_streaks[name] = prior_value + 1 if findings_by_auditor.get(name, 0) == 0 else 0
+                auditor_zero_finding_streaks[name] = prior_value + 1 if blocking_by_auditor.get(name, 0) == 0 else 0
 
     executor_zero_repair_streak = prior_executor_zero + 1 if not executor_repair_frequency else 0
 

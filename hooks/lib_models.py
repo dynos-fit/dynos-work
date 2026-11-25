@@ -34,13 +34,11 @@ TIER_RANK: dict[str, int] = {
 # ---------------------------------------------------------------------------
 
 HOST_CLAUDE: str = "claude"
-HOST_CODEX: str = "codex"
-HOST_CURSOR: str = "cursor"
 
-ALL_HOSTS: frozenset[str] = frozenset({HOST_CLAUDE, HOST_CODEX, HOST_CURSOR})
+ALL_HOSTS: frozenset[str] = frozenset({HOST_CLAUDE})
 
 # ---------------------------------------------------------------------------
-# Tier → model mapping per host
+# Tier → model mapping
 # ---------------------------------------------------------------------------
 
 # Claude Code aliases (capability tiers, not full Anthropic IDs).
@@ -51,32 +49,9 @@ _CLAUDE_TIER_MAP: dict[str, Optional[str]] = {
     TIER_FRONTIER: "fable",
 }
 
-# Cursor's included-usage pool (Composer + Grok). Claude/GPT/Gemini are
-# third-party on Cursor and must not be selected when host=cursor.
-_CURSOR_TIER_MAP: dict[str, Optional[str]] = {
-    TIER_FAST: "composer-2.5-fast",
-    TIER_BALANCED: "composer-2.5",
-    TIER_DEEP: "grok-4.7",
-    TIER_FRONTIER: "grok-4.7-high-fast",
-}
-
 TIER_TO_MODEL: dict[str, dict[str, Optional[str]]] = {
     HOST_CLAUDE: dict(_CLAUDE_TIER_MAP),
-    HOST_CURSOR: dict(_CURSOR_TIER_MAP),
-    HOST_CODEX: {
-        TIER_FAST: None,
-        TIER_BALANCED: None,
-        TIER_DEEP: None,
-        TIER_FRONTIER: None,
-    },
 }
-
-# Prefixes that already identify Cursor-pool models (keep as-is).
-_CURSOR_MODEL_PREFIXES: tuple[str, ...] = (
-    "composer-",
-    "grok-",
-    "cursor-grok-",
-)
 
 # ---------------------------------------------------------------------------
 # Public functions
@@ -123,7 +98,7 @@ _CLAUDE_ALIASES: frozenset[str] = frozenset(
 
 
 def model_to_tier(model: str, *, host: str | None = None) -> Optional[str]:
-    """Return the tier for *model* (host alias, Claude alias, or full ID)."""
+    """Return the tier for *model* (tier name, Claude alias, or full Claude ID)."""
     if not isinstance(model, str):
         return None
     lowered = model.strip().lower()
@@ -133,9 +108,6 @@ def model_to_tier(model: str, *, host: str | None = None) -> Optional[str]:
         for tier, mapped in TIER_TO_MODEL.get(host, {}).items():
             if mapped is not None and mapped.lower() == lowered:
                 return tier
-    for tier, mapped in _CURSOR_TIER_MAP.items():
-        if mapped is not None and mapped.lower() == lowered:
-            return tier
     normalized = normalize_model(model)
     if isinstance(normalized, str) and normalized in TIER_RANK:
         return normalized
@@ -147,41 +119,9 @@ def model_to_tier(model: str, *, host: str | None = None) -> Optional[str]:
     return None
 
 
-def translate_model_for_host(model: Optional[str], host: str) -> Optional[str]:
-    """Map Claude-era aliases to the active host's spawn model IDs.
-
-    On ``host=cursor``, policy overrides, learned UCB winners, and agent
-    frontmatter that still say ``haiku``/``sonnet``/``opus``/``fable`` are
-    rewritten to Composer/Grok pool models. Already-Cursor IDs pass through.
-    """
-    if model is None or host != HOST_CURSOR:
-        return model
-    if not isinstance(model, str):
-        return model
-    lowered = model.strip().lower()
-    if lowered in ("inherit", "default", ""):
-        return None
-    if lowered in TIER_RANK:
-        return resolve_model_for_tier(host, lowered)
-    _alias_to_tier = {
-        "haiku": TIER_FAST,
-        "sonnet": TIER_BALANCED,
-        "opus": TIER_DEEP,
-        "fable": TIER_FRONTIER,
-    }
-    if lowered in _alias_to_tier:
-        return resolve_model_for_tier(host, _alias_to_tier[lowered])
-    if any(lowered.startswith(p) for p in _CURSOR_MODEL_PREFIXES):
-        return lowered
-    # Block explicit third-party model IDs on Cursor — route to role-appropriate tier.
-    if (
-        "claude" in lowered
-        or lowered.startswith("gpt-")
-        or lowered.startswith("gemini")
-        or lowered.startswith("deepseek")
-    ):
-        return resolve_model_for_tier(host, TIER_BALANCED)
-    return lowered
+def translate_model_for_host(model: Optional[str], host: str = HOST_CLAUDE) -> Optional[str]:
+    """Passthrough helper (Claude Code only)."""
+    return model
 
 
 def valid_models_for_host(host: str) -> frozenset[str]:
@@ -207,11 +147,6 @@ def model_rank(model: Optional[str], *, host: str | None = None) -> int:
     """
     if model is None:
         return -1
-    if host == HOST_CURSOR:
-        translated = translate_model_for_host(model, host)
-        tier = model_to_tier(translated or "", host=host)
-        if tier is not None:
-            return tier_rank(tier)
     model_norm = normalize_model(model)
     if isinstance(model_norm, str) and model_norm in TIER_RANK:
         return TIER_RANK[model_norm]

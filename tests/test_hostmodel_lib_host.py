@@ -41,72 +41,13 @@ class TestHostDetectFallbackClaude:
             f"detect_host() must return 'claude' as safe default, got {result!r}"
         )
 
-    def test_detect_host_cursor_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """detect_host() returns 'cursor' when CURSOR_PLUGIN_ROOT is non-empty."""
-        monkeypatch.setenv("CURSOR_PLUGIN_ROOT", "/cursor/path")
-        monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
-        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-        result = lib_host.detect_host()
-        assert result == "cursor", (
-            f"detect_host() must return 'cursor' when CURSOR_PLUGIN_ROOT is set, got {result!r}"
-        )
-
-    def test_detect_host_codex_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """AC-5: detect_host() returns 'codex' when CODEX_PLUGIN_ROOT is non-empty."""
-        monkeypatch.delenv("CURSOR_PLUGIN_ROOT", raising=False)
-        monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/some/path")
-        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-        result = lib_host.detect_host()
-        assert result == "codex", (
-            f"detect_host() must return 'codex' when CODEX_PLUGIN_ROOT is set, got {result!r}"
-        )
-
     def test_detect_host_claude_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """AC-5: detect_host() returns 'claude' when CLAUDE_PLUGIN_ROOT is non-empty."""
-        monkeypatch.delenv("CURSOR_PLUGIN_ROOT", raising=False)
-        monkeypatch.delenv("CODEX_PLUGIN_ROOT", raising=False)
+        """detect_host() returns 'claude' when CLAUDE_PLUGIN_ROOT is non-empty."""
         monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/some/path")
         result = lib_host.detect_host()
         assert result == "claude", (
             f"detect_host() must return 'claude' when CLAUDE_PLUGIN_ROOT is set, "
             f"got {result!r}"
-        )
-
-    def test_detect_host_cursor_takes_priority_over_codex(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """CURSOR_PLUGIN_ROOT takes priority over CODEX_PLUGIN_ROOT."""
-        monkeypatch.setenv("CURSOR_PLUGIN_ROOT", "/cursor/path")
-        monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/codex/path")
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/claude/path")
-        result = lib_host.detect_host()
-        assert result == "cursor", (
-            "CURSOR_PLUGIN_ROOT must take priority over CODEX/CLAUDE plugin roots"
-        )
-
-    def test_detect_host_codex_takes_priority_over_claude(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC-5: CODEX_PLUGIN_ROOT takes priority over CLAUDE_PLUGIN_ROOT."""
-        monkeypatch.delenv("CURSOR_PLUGIN_ROOT", raising=False)
-        monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/codex/path")
-        monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/claude/path")
-        result = lib_host.detect_host()
-        assert result == "codex", (
-            "CODEX_PLUGIN_ROOT must take priority over CLAUDE_PLUGIN_ROOT"
-        )
-
-    def test_detect_host_empty_codex_env_falls_to_claude(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """AC-5: Empty CODEX_PLUGIN_ROOT is treated as unset; falls back to claude."""
-        monkeypatch.delenv("CURSOR_PLUGIN_ROOT", raising=False)
-        monkeypatch.setenv("CODEX_PLUGIN_ROOT", "")
-        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-        result = lib_host.detect_host()
-        # Empty string means not set — falls back to "claude" default
-        assert result == "claude", (
-            f"Empty CODEX_PLUGIN_ROOT should not trigger codex detection, got {result!r}"
         )
 
 

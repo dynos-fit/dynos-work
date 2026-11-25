@@ -140,12 +140,6 @@ class TestClampHelper:
             "backend-executor", "gpt-9"
         ) == "gpt-9"
 
-    def test_passthrough_when_host_has_no_ceiling_model(self) -> None:
-        """Under codex every tier is None — there is nothing to clamp to."""
-        assert lib_models.clamp_model_to_role_ceiling(
-            "backend-executor", FRONTIER_MODEL, lib_models.HOST_CODEX
-        ) == FRONTIER_MODEL
-
     def test_accepts_tier_names_as_well_as_model_literals(self) -> None:
         """model_override admits both spellings, so the clamp must too."""
         assert lib_models.clamp_model_to_role_ceiling(

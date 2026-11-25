@@ -40,18 +40,6 @@ You are read-only AND scope-limited:
 
 Violating this budget can waste 1M+ tokens per audit spawn.
 
-## Turn Budget Discipline
-
-Tool-use budget by model:
-
-| Model  | Max tool uses |
-|--------|---------------|
-| haiku  | ≤ 15          |
-| sonnet | ≤ 20          |
-| opus   | ≤ 25          |
-
-Stop-condition: when within 3 tool uses of your budget limit, stop investigating and emit the JSON report immediately, even if investigation is incomplete. Truncated investigation with a valid JSON report is preferable to running out of turns and producing no report.
-
 ## What you inspect
 
 ### Category: code-quality

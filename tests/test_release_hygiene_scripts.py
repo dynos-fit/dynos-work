@@ -25,13 +25,11 @@ def test_bump_release_updates_all_manifests_and_changelog(
     package_json = tmp_path / "package.json"
     claude_plugin = tmp_path / ".claude-plugin" / "plugin.json"
     claude_marketplace = tmp_path / ".claude-plugin" / "marketplace.json"
-    codex_plugin = tmp_path / ".codex-plugin" / "plugin.json"
     changelog = tmp_path / "CHANGELOG.md"
 
     _write_json(package_json, {"version": "1.2.3"})
     _write_json(claude_plugin, {"version": "1.2.3"})
     _write_json(claude_marketplace, {"plugins": [{"version": "1.2.3"}]})
-    _write_json(codex_plugin, {"version": "1.2.3"})
     changelog.write_text(
         "# Changelog\n\n## [Unreleased]\n\n### Changed\n- Existing unreleased change.\n\n---\n\n"
         "## [1.2.3] - 2026-01-01\n"
@@ -41,12 +39,11 @@ def test_bump_release_updates_all_manifests_and_changelog(
     monkeypatch.setattr(bump_version, "PACKAGE_JSON", package_json)
     monkeypatch.setattr(bump_version, "CLAUDE_PLUGIN_JSON", claude_plugin)
     monkeypatch.setattr(bump_version, "CLAUDE_MARKETPLACE_JSON", claude_marketplace)
-    monkeypatch.setattr(bump_version, "CODEX_PLUGIN_JSON", codex_plugin)
     monkeypatch.setattr(bump_version, "CHANGELOG", changelog)
     monkeypatch.setattr(
         bump_version,
         "VERSION_FILES",
-        (package_json, claude_plugin, claude_marketplace, codex_plugin),
+        (package_json, claude_plugin, claude_marketplace),
     )
 
     version = bump_version.bump_release(
@@ -59,7 +56,6 @@ def test_bump_release_updates_all_manifests_and_changelog(
     assert version == "1.2.4"
     assert json.loads(package_json.read_text())["version"] == "1.2.4"
     assert json.loads(claude_plugin.read_text())["version"] == "1.2.4"
-    assert json.loads(codex_plugin.read_text())["version"] == "1.2.4"
     assert json.loads(claude_marketplace.read_text())["plugins"][0]["version"] == "1.2.4"
     changelog_text = changelog.read_text()
     assert "## [1.2.4]" in changelog_text
@@ -73,7 +69,6 @@ def test_check_release_hygiene_reports_mismatched_versions(
     _write_json(tmp_path / "package.json", {"version": "1.2.4"})
     _write_json(tmp_path / ".claude-plugin" / "plugin.json", {"version": "1.2.4"})
     _write_json(tmp_path / ".claude-plugin" / "marketplace.json", {"plugins": [{"version": "1.2.3"}]})
-    _write_json(tmp_path / ".codex-plugin" / "plugin.json", {"version": "1.2.4"})
     (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [1.2.4]\n")
 
     monkeypatch.setattr(check_release_hygiene, "ROOT", tmp_path)
@@ -90,7 +85,6 @@ def test_check_release_hygiene_accepts_consistent_release(
     _write_json(tmp_path / "package.json", {"version": "1.2.4"})
     _write_json(tmp_path / ".claude-plugin" / "plugin.json", {"version": "1.2.4"})
     _write_json(tmp_path / ".claude-plugin" / "marketplace.json", {"plugins": [{"version": "1.2.4"}]})
-    _write_json(tmp_path / ".codex-plugin" / "plugin.json", {"version": "1.2.4"})
     (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [1.2.4]\n")
 
     monkeypatch.setattr(check_release_hygiene, "ROOT", tmp_path)

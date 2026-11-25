@@ -76,33 +76,28 @@ def _persist_host(task_dir: Path, host: str) -> None:
     "host,expected",
     [
         ("claude", True),
-        ("codex", False),
-        ("CODEX", False),
-        ("  codex  ", False),
         ("", True),
         ("some-future-host", True),
     ],
 )
 def test_host_emits_web_tool_telemetry(host: str, expected: bool) -> None:
-    """Only known non-emitting hosts relax; unknown names stay strict."""
+    """Claude Code emits WebSearch/WebFetch telemetry."""
     from lib_host import host_emits_web_tool_telemetry
     assert host_emits_web_tool_telemetry(host) is expected
 
 
 def test_resolve_host_prefers_persisted_over_env(tmp_path: Path, monkeypatch) -> None:
-    """A persisted host wins over env detection and reports its provenance."""
+    """A persisted host wins and reports its provenance."""
     from lib_host import persist_host, resolve_host
-    monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/somewhere")
     cp = tmp_path / "control-plane.json"
     persist_host(cp, "claude")
     assert resolve_host(cp) == ("claude", "control-plane")
 
 
 def test_resolve_host_falls_back_to_env(tmp_path: Path, monkeypatch) -> None:
-    """With no persisted anchor, env detection answers and says so."""
+    """With no persisted anchor, env detection answers claude and says so."""
     from lib_host import resolve_host
-    monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/somewhere")
-    assert resolve_host(tmp_path / "absent.json") == ("codex", "env")
+    assert resolve_host(tmp_path / "absent.json") == ("claude", "env")
 
 
 # ---------------------------------------------------------------------------
@@ -140,113 +135,6 @@ def test_unknown_host_stays_strict(tmp_path: Path) -> None:
     assert "web-tool-log.jsonl not found" in err
 
 
-# ---------------------------------------------------------------------------
-# Degraded path (codex)
-# ---------------------------------------------------------------------------
-
-def test_codex_host_passes_without_log(tmp_path: Path, capsys) -> None:
-    """The blocker case: no log, and the spec may still advance on Codex."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    _persist_host(task_dir, "codex")
-    assert _check_web_tool_evidence(task_dir, _gate(), _receipt()) is None
-
-
-def test_codex_degrade_is_announced_on_stdout(tmp_path: Path, capsys) -> None:
-    """Degrading is never silent — it prints a [GATE] line."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    _persist_host(task_dir, "codex")
-    _check_web_tool_evidence(task_dir, _gate(), _receipt())
-    out = capsys.readouterr().out
-    assert "[GATE] external-solution-cross-check degraded" in out
-    assert "codex" in out
-    assert "control-plane" in out
-
-
-def test_codex_degrade_emits_event(tmp_path: Path) -> None:
-    """The degrade lands in events.jsonl so an auditor can see it later."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    _persist_host(task_dir, "codex")
-    _check_web_tool_evidence(task_dir, _gate(), _receipt())
-    events_path = task_dir / "events.jsonl"
-    assert events_path.exists(), "degraded cross-check must leave an event trail"
-    events = [json.loads(ln) for ln in events_path.read_text().splitlines() if ln.strip()]
-    degraded = [e for e in events if e.get("event") == "web_tool_evidence_degraded"]
-    assert len(degraded) == 1, f"expected one degrade event, got {events}"
-    assert degraded[0]["host"] == "codex"
-    assert degraded[0]["host_source"] == "control-plane"
-
-
-def test_codex_host_refuses_receipt_predating_gate(tmp_path: Path) -> None:
-    """Degraded does not mean unconditional: ordering still has to hold."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    _persist_host(task_dir, "codex")
-    err = _check_web_tool_evidence(task_dir, _gate(), _receipt(ts=EARLY_RECEIPT_TS))
-    assert err is not None
-    assert "predates gate.written_at" in err
-
-
-def test_codex_host_refuses_receipt_without_timestamp(tmp_path: Path) -> None:
-    """With no log and no parseable receipt ts, there is no evidence at all."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    _persist_host(task_dir, "codex")
-    err = _check_web_tool_evidence(task_dir, _gate(), {"step": "search-conducted"})
-    assert err is not None
-    assert "only ordering evidence" in err
-
-
-def test_codex_host_with_real_log_entry_passes_at_full_strength(
-    tmp_path: Path, capsys
-) -> None:
-    """A qualifying entry satisfies the check outright — no degrade needed."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    _persist_host(task_dir, "codex")
-    _write_log(task_dir, [{"ts": ENTRY_TS, "tool": "WebSearch", "query": "q"}])
-    assert _check_web_tool_evidence(task_dir, _gate(), _receipt()) is None
-    assert "degraded" not in capsys.readouterr().out
-
-
-# ---------------------------------------------------------------------------
-# Bypass defense: env is not enough to relax the check
-# ---------------------------------------------------------------------------
-
-def test_env_codex_cannot_override_persisted_claude(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """CODEX_PLUGIN_ROOT on a Bash call must not unlock the degraded path
-    when the hook-written anchor says this is a Claude session."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    _persist_host(task_dir, "claude")
-    monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/home/attacker/plugin")
-    err = _check_web_tool_evidence(task_dir, _gate(), _receipt())
-    assert err is not None, "env alone must not relax the evidence check"
-
-
-def test_env_provenance_is_recorded_when_no_anchor_exists(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Without an anchor the env signal is used, but the event says so."""
-    from ctl import _check_web_tool_evidence
-    task_dir = _task_dir(tmp_path)
-    monkeypatch.setenv("CODEX_PLUGIN_ROOT", "/home/user/dynos-work")
-    monkeypatch.setenv("DYNOS_HOME", str(tmp_path / "dynos-home"))
-    assert _check_web_tool_evidence(task_dir, _gate(), _receipt()) is None
-    events = [
-        json.loads(ln)
-        for ln in (task_dir / "events.jsonl").read_text().splitlines()
-        if ln.strip()
-    ]
-    degraded = [e for e in events if e.get("event") == "web_tool_evidence_degraded"]
-    assert degraded and degraded[0]["host_source"] == "env"
-
-
-# ---------------------------------------------------------------------------
 # Hook-side: non-Claude tool spellings produce canonical entries
 # ---------------------------------------------------------------------------
 
@@ -303,11 +191,8 @@ def test_web_tool_log_ignores_unrelated_tools(tmp_path: Path, monkeypatch) -> No
 # ---------------------------------------------------------------------------
 
 def test_session_start_persists_host_anchor() -> None:
-    """lib_host.persist_host had zero callers, so get_persisted_host always
-    returned None and every reader silently fell back to env. The SessionStart
-    hook is the documented write path — keep it wired."""
-    text = (ROOT / "hooks" / "session-start").read_text(encoding="utf-8")
-    assert "persist_host" in text, (
-        "hooks/session-start must persist the detected host to "
-        "control-plane.json; the gate's bypass defense reads that anchor"
-    )
+    """SessionStart invokes session_start_hook.py which persists control-plane.json."""
+    hook_text = (ROOT / "hooks" / "session-start").read_text(encoding="utf-8")
+    py_text = (ROOT / "hooks" / "session_start_hook.py").read_text(encoding="utf-8")
+    assert "session_start_hook.py" in hook_text
+    assert "persist_host" in py_text

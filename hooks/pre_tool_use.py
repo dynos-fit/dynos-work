@@ -46,37 +46,14 @@ except Exception:  # pragma: no cover - defensive import fallback
         except Exception:
             return False
 
-# Cursor (and Claude-import payloads under Cursor) use different tool names
-# than Claude Code. Canonicalize before policy checks so write/read gates do
-# not fail open on Shell/Task/StrReplace.
-_TOOL_NAME_ALIASES: dict[str, str] = {
-    "Shell": "Bash",
-    "Task": "Agent",
-    "StrReplace": "Edit",
-}
-
-
 def _canonical_tool_name(tool_name: object) -> str:
-    if not isinstance(tool_name, str):
-        return str(tool_name)
-    return _TOOL_NAME_ALIASES.get(tool_name, tool_name)
+    return tool_name if isinstance(tool_name, str) else str(tool_name)
 
 
 def _resolve_hook_cwd(payload: dict) -> Path:
-    """Resolve cwd from the hook payload, falling back to host project dirs.
-
-    Cursor plugin hooks sometimes omit ``cwd`` or point it at the plugin
-    install directory. Prefer an explicit payload cwd, then CURSOR/CLAUDE
-    project-dir env vars, then process cwd.
-    """
+    """Resolve cwd from the hook payload, falling back to CLAUDE_PROJECT_DIR."""
     raw = payload.get("cwd")
-    candidates: list[object] = [raw]
-    candidates.append(os.environ.get("CURSOR_PROJECT_DIR"))
-    candidates.append(os.environ.get("CLAUDE_PROJECT_DIR"))
-    roots = payload.get("workspace_roots")
-    if isinstance(roots, list) and roots:
-        candidates.append(roots[0])
-    candidates.append(os.getcwd())
+    candidates: list[object] = [raw, os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd()]
     for candidate in candidates:
         if not isinstance(candidate, str) or not candidate.strip():
             continue
@@ -149,6 +126,19 @@ def _subagent_isolation(task_dir: "Path | None") -> bool:
         return False
 
 
+def _is_allowed_role(role: str, project_root: "Path | None" = None) -> bool:
+    """True for static built-in roles OR project-declared custom roles."""
+    if role in _EXECUTOR_ROLE_ALLOWLIST:
+        return True
+    if project_root is None:
+        return False
+    try:
+        from lib_core import is_allowed_project_role  # noqa: PLC0415
+        return is_allowed_project_role(role, project_root)
+    except Exception:
+        return False
+
+
 def _stamped_roles(task_dir: "Path | None") -> "list[str]":
     """Valid roles in the role file, oldest first. Parallel spawns each
     stamp one line, so several subagent roles can be active at once."""
@@ -158,10 +148,11 @@ def _stamped_roles(task_dir: "Path | None") -> "list[str]":
         rf = task_dir / "active-segment-role"
         if not rf.is_file():
             return []
+        project_root = task_dir.parent.parent
         roles: list[str] = []
         for line in rf.read_text(encoding="utf-8").splitlines():
             val = line.strip()
-            if val and val in _EXECUTOR_ROLE_ALLOWLIST and val not in roles:
+            if val and _is_allowed_role(val, project_root) and val not in roles:
                 roles.append(val)
         return roles
     except Exception:
@@ -1211,48 +1202,50 @@ def main() -> int:
         print(f"pre-tool-use: failed to parse payload fields: {exc}", file=sys.stderr)
         return 1
 
-    # Import write_policy -- failure is an internal error (exit 1)
-    # decide_write may be pre-populated by tests via module-level patching;
-    # WriteAttempt and _emit_policy_event are always resolved from write_policy
-    # because they are not independently patchable by the test suite.
-    try:
-        import write_policy as _wp
-        if decide_write is None:
-            decide_write = _wp.decide_write
-        if _emit_policy_event is None:
-            _emit_policy_event = _wp._emit_policy_event
-        if WriteAttempt is None:
-            WriteAttempt = _wp.WriteAttempt
-    except ImportError as exc:
-        # Only fatal if decide_write itself is not yet available
-        if decide_write is None:
-            print(f"pre-tool-use: cannot import write_policy: {exc}", file=sys.stderr)
-            return 1
-        # If decide_write was pre-populated (test context), proceed without
-        # write_policy — WriteAttempt and _emit_policy_event may be None
+    _is_read_tool = tool_name in ("Read", "Glob", "Grep")
 
-    # Import read_policy -- failure is non-fatal if decide_read was pre-populated
-    try:
-        import read_policy as _rp
-        if decide_read is None:
-            decide_read = _rp.decide_read
-        if ReadAttempt_RP is None:
-            ReadAttempt_RP = _rp.ReadAttempt
-        if _emit_read_policy_event is None:
-            _emit_read_policy_event = _rp._emit_read_policy_event
-    except ImportError as exc:
-        # Only fatal if decide_read itself is not yet available
-        if decide_read is None:
-            print(f"pre-tool-use: cannot import read_policy: {exc}", file=sys.stderr)
-            return 1
+    # Lazy-import only the policy module needed for this tool class (while still
+    # importing write_policy whenever decide_write isn't pre-patched on non-read paths).
+    if not _is_read_tool or decide_write is None:
+        if not _is_read_tool:
+            try:
+                import write_policy as _wp
+                if decide_write is None:
+                    decide_write = _wp.decide_write
+                if _emit_policy_event is None:
+                    _emit_policy_event = _wp._emit_policy_event
+                if WriteAttempt is None:
+                    WriteAttempt = _wp.WriteAttempt
+            except ImportError as exc:
+                if decide_write is None:
+                    print(f"pre-tool-use: cannot import write_policy: {exc}", file=sys.stderr)
+                    return 1
 
-    # Import lib_log -- failure is non-fatal (event logging is optional)
-    if log_event is None:
+    if _is_read_tool:
         try:
-            import lib_log as _ll
-            log_event = _ll.log_event
-        except ImportError:
-            pass
+            import read_policy as _rp
+            if decide_read is None:
+                decide_read = _rp.decide_read
+            if ReadAttempt_RP is None:
+                ReadAttempt_RP = _rp.ReadAttempt
+            if _emit_read_policy_event is None:
+                _emit_read_policy_event = _rp._emit_read_policy_event
+        except ImportError as exc:
+            if decide_read is None:
+                print(f"pre-tool-use: cannot import read_policy: {exc}", file=sys.stderr)
+                return 1
+
+    # Lazy wrapper around lib_log.log_event so normal allowed tool calls pay 0 import cost.
+    if log_event is None:
+        def _lazy_log_event(*args, **kwargs):
+            global log_event
+            try:
+                import lib_log as _ll
+                log_event = _ll.log_event
+                return log_event(*args, **kwargs)
+            except Exception:
+                return None
+        log_event = _lazy_log_event
 
     # Actor identity inputs (D3): the harness-provided session_id and the
     # SessionStart-pinned orchestrator identity. Neither is agent-writable.
@@ -1307,8 +1300,20 @@ def main() -> int:
         try:
             import actor_identity as _ai
             actor_identity = _ai
-            pin = _ai.read_pin(task_dir.parent.parent, session_id=session_id)
-            latest_pin = _ai.read_pin(task_dir.parent.parent)
+            pin_data = _ai._load_json(_ai.pin_path(task_dir.parent.parent))
+            if isinstance(pin_data, dict):
+                sessions_map = pin_data.get("sessions")
+                if session_id and isinstance(sessions_map, dict):
+                    ent = sessions_map.get(session_id)
+                    pin = ent if isinstance(ent, dict) and ent.get("session_id") else None
+                elif session_id and pin_data.get("session_id") == session_id:
+                    pin = pin_data
+                if isinstance(sessions_map, dict):
+                    latest_key = str(pin_data.get("latest_session_id") or pin_data.get("session_id") or "")
+                    lent = sessions_map.get(latest_key)
+                    latest_pin = lent if isinstance(lent, dict) and lent.get("session_id") else (pin_data if pin_data.get("session_id") else None)
+                elif pin_data.get("session_id"):
+                    latest_pin = pin_data
         except Exception:
             actor_identity = None
             pin = None
@@ -1366,16 +1371,6 @@ def main() -> int:
                     role = adopted
                     candidate_roles = adoptable
                     role_missing = False
-                    try:
-                        if log_event is not None:
-                            log_event(
-                                task_dir.parent.parent,
-                                "orchestrator_role_adopted",
-                                task=task_dir.name,
-                                role=adopted,
-                            )
-                    except Exception:
-                        pass
                 else:
                     role = "orchestrator"
                     role_missing = False
@@ -1395,7 +1390,7 @@ def main() -> int:
                                 )
                         except Exception:
                             pass
-                if bound is not None and bound in _EXECUTOR_ROLE_ALLOWLIST:
+                if bound is not None and _is_allowed_role(bound, task_dir.parent.parent):
                     role = bound
                     role_missing = False
 
@@ -1413,7 +1408,7 @@ def main() -> int:
                             role = file_roles[-1]
                             candidate_roles = file_roles
                             role_missing = False
-                        elif file_contents and file_contents not in _EXECUTOR_ROLE_ALLOWLIST:
+                        elif file_contents and not _is_allowed_role(file_contents, task_dir.parent.parent):
                             # Not an allowed executor role — reject and fall to
                             # (e) to prevent privilege escalation via role file.
                             role_file_reason = "invalid"
@@ -1505,7 +1500,7 @@ def main() -> int:
         if task_dir is not None:
             if (
                 role != "orchestrator"
-                and role not in _EXECUTOR_ROLE_ALLOWLIST
+                and not _is_allowed_role(role, task_dir.parent.parent)
                 and not role.endswith("-executor")
             ):
                 print(
@@ -1889,37 +1884,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    if os.environ.get("CURSOR_PLUGIN_ROOT"):
-        # Cursor's permission hooks require a JSON response on stdout even
-        # when the tool is allowed. The shared Claude/Codex hook uses exit
-        # codes and stderr for its decision, so translate that protocol here.
-        stdout_buffer = io.StringIO()
-        stderr_buffer = io.StringIO()
-        try:
-            with (
-                contextlib.redirect_stdout(stdout_buffer),
-                contextlib.redirect_stderr(stderr_buffer),
-            ):
-                result = main()
-        except SystemExit as exc:
-            result = int(exc.code or 0)
-        except Exception as exc:
-            print(f"pre-tool-use: internal error: {exc}", file=stderr_buffer)
-            result = 1
-
-        diagnostic = stderr_buffer.getvalue().strip() or stdout_buffer.getvalue().strip()
-        if result == 0:
-            response = {"permission": "allow"}
-        else:
-            if result == 2:
-                message = diagnostic or "Denied by dynos-work write/read policy."
-            else:
-                detail = f": {diagnostic}" if diagnostic else ""
-                message = f"dynos-work pre-tool-use hook failed (exit {result}){detail}"
-            response = {"permission": "deny", "user_message": message}
-        print(json.dumps(response))
-        sys.exit(0)
-
     try:
         sys.exit(main())
     except SystemExit:

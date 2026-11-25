@@ -172,9 +172,8 @@ def _task_is_non_terminal(task_dir: Path) -> bool:
 def bind_session_task(project_root: Path, session_id: str, task_dir: Path) -> None:
     """Persist the task currently associated with a host session.
 
-    This is hook-owned state used to avoid the old project-global
-    ``active-task.json`` singleton when multiple dynos-work sessions run at
-    the same time.
+    Skips lock acquisition + atomic rewrite when the existing session-tasks
+    mapping already binds *session_id* to the exact resolved *task_dir*.
     """
     if not session_id:
         return
@@ -184,20 +183,33 @@ def bind_session_task(project_root: Path, session_id: str, task_dir: Path) -> No
         task_dir.relative_to(project_root / ".dynos")
     except ValueError:
         return
+    target_str = str(task_dir)
+    st_path = session_tasks_path(project_root)
+    existing_fast = _load_json(st_path)
+    if (
+        isinstance(existing_fast, dict)
+        and isinstance(existing_fast.get("sessions"), dict)
+        and isinstance(existing_fast["sessions"].get(session_id), dict)
+        and existing_fast["sessions"][session_id].get("task_dir") == target_str
+    ):
+        return
     lock_file = project_root / ".dynos" / ".session-tasks.lock"
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_file, "w", encoding="utf-8") as lock_fh:
         fcntl.flock(lock_fh, fcntl.LOCK_EX)
         try:
-            data = _load_json(session_tasks_path(project_root))
+            data = _load_json(st_path)
             if not isinstance(data, dict) or not isinstance(data.get("sessions"), dict):
                 data = {"sessions": {}}
+            prev = data["sessions"].get(session_id)
+            if isinstance(prev, dict) and prev.get("task_dir") == target_str:
+                return
             data["sessions"][session_id] = {
-                "task_dir": str(task_dir),
+                "task_dir": target_str,
                 "task_id": task_dir.name,
                 "bound_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
-            _atomic_write_json(session_tasks_path(project_root), data)
+            _atomic_write_json(st_path, data)
         finally:
             fcntl.flock(lock_fh, fcntl.LOCK_UN)
 

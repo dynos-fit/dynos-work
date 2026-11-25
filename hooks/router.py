@@ -48,13 +48,11 @@ from lib_models import (
     valid_models_for_host as _valid_models_for_host,
     ALL_TIERS as _ALL_TIERS,
     HOST_CLAUDE as _HOST_CLAUDE,
-    HOST_CURSOR as _HOST_CURSOR,
     TIER_FRONTIER as _TIER_FRONTIER,
     clamp_model_to_role_ceiling as _clamp_model_to_role_ceiling,
     max_tier_for_role as _max_tier_for_role,
     model_rank as _model_rank,
     tier_rank as _tier_rank,
-    translate_model_for_host as _translate_model_for_host,
 )
 from lib_host import detect_host as _detect_host
 import lib_ensemble as _lib_ensemble
@@ -574,7 +572,6 @@ def _resolve_model_uncapped(
     model_overrides = policy.get("model_overrides", {})
     model = model_overrides.get(key) or model_overrides.get(role)
     if model:
-        model = _translate_model_for_host(model, host)
         result = {"model": model, "source": "explicit_policy"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source=result["source"])
         return result
@@ -598,7 +595,7 @@ def _resolve_model_uncapped(
             host_models = list(_valid_models_for_host(host))
             _arms = [m for m in host_models if m != _security_floor_model]
         if _arms:
-            model = _translate_model_for_host(random.choice(_arms), host)
+            model = random.choice(_arms)
             result = {"model": model, "source": "exploration", "epsilon": epsilon}
             log_event(
                 root, "router_model_decision", role=role, task_type=task_type,
@@ -638,7 +635,7 @@ def _resolve_model_uncapped(
             exploration_c = float(policy.get("ucb_exploration_constant", DEFAULT_UCB_C))
             winner = _ucb_select_model(candidates, exploration_c)
             if winner:
-                model = _translate_model_for_host(winner["model"], host)
+                model = winner["model"]
                 source = "ucb"
                 result = {"model": model, "source": source,
                           "ucb_score": winner["ucb_score"],
@@ -653,7 +650,7 @@ def _resolve_model_uncapped(
     # 2b. Benchmark model performance — learned agent benchmark runs grouped by model
     benchmark_result = _benchmark_model_for_agent(root, role, task_type, ctx=ctx)
     if benchmark_result:
-        model = _translate_model_for_host(benchmark_result["model"], host)
+        model = benchmark_result["model"]
         result = {"model": model, "source": "benchmark_model",
                   "mean_composite": benchmark_result["mean_composite"],
                   "sample_count": benchmark_result["sample_count"]}
@@ -667,7 +664,7 @@ def _resolve_model_uncapped(
     # 3. model-policy.json fallback (backward compat for pre-UCB projects)
     entry = _read_policy_json(root, "model-policy.json", key)
     if entry and isinstance(entry, dict) and entry.get("model"):
-        model = _translate_model_for_host(entry["model"], host)
+        model = entry["model"]
         # Security floor
         if role == "security-auditor" and model in _non_floor_models:
             result = {"model": _security_floor_model, "source": "security_floor"}
@@ -865,32 +862,18 @@ def resolve_route(root: Path, role: str, task_type: str, ctx: RouterContext | No
     if role == "security-auditor" and mode == "replace":
         mode = "alongside"
 
-    # Shadow mode means it's not yet proven — use generic
-    if mode == "shadow":
-        result = {
-            "mode": "generic",
-            "agent_path": agent_path,
-            "agent_name": agent_name,
-            "composite_score": composite,
-            "source": f"shadow (not yet promoted): {agent_name}",
-        }
-        log_event(root, "router_route_decision", role=role, task_type=task_type, mode=result["mode"], agent_name=result["agent_name"], composite_score=result["composite_score"], source=result["source"])
-        return result
-
-    # Path validation — resolve against persistent dir
+    # Path validation — resolve against persistent dir first so shadow-canary
+    # routing only fires when the learned agent file genuinely exists on disk.
     if agent_path:
         p = Path(agent_path)
-        # Try as absolute first, then persistent dir, then repo-relative
         if p.is_absolute():
             full_path = p
         else:
             persistent_root = _persistent_project_dir(root) / "learned-agents"
             full_path = persistent_root / p.name
             if not full_path.exists():
-                # Try relative to persistent learned-agents
                 full_path = persistent_root / p
             if not full_path.exists():
-                # Last resort: repo-relative
                 full_path = root / p
         if not full_path.exists():
             result = {
@@ -903,6 +886,31 @@ def resolve_route(root: Path, role: str, task_type: str, ctx: RouterContext | No
             log_event(root, "router_route_decision", role=role, task_type=task_type, mode=result["mode"], agent_name=result["agent_name"], composite_score=result["composite_score"], source=result["source"])
             return result
         agent_path = str(full_path)
+
+    # Break shadow-mode calibration Catch-22: when a shadow agent file exists on
+    # disk (other than security-auditor), trial it in learned mode at zero
+    # extra spawns so retrospectives accumulate real candidate observations for
+    # fixture synthesis and promotion/demotion.
+    if mode == "shadow":
+        if role == "security-auditor" or not agent_path:
+            result = {
+                "mode": "generic",
+                "agent_path": agent_path or None,
+                "agent_name": agent_name,
+                "composite_score": composite,
+                "source": f"shadow (not yet promoted): {agent_name}",
+            }
+            log_event(root, "router_route_decision", role=role, task_type=task_type, mode=result["mode"], agent_name=result["agent_name"], composite_score=result["composite_score"], source=result["source"])
+            return result
+        result = {
+            "mode": "learned",
+            "agent_path": agent_path,
+            "agent_name": agent_name,
+            "composite_score": composite,
+            "source": f"shadow_canary:{agent_name}",
+        }
+        log_event(root, "router_route_decision", role=role, task_type=task_type, mode=result["mode"], agent_name=result["agent_name"], composite_score=result["composite_score"], source=result["source"])
+        return result
 
     result = {
         "mode": mode,
@@ -1071,15 +1079,54 @@ _DEFAULT_AUDITOR_REGISTRY = {
 
 
 def _load_auditor_registry(root: Path) -> dict:
-    """Load auditor registry from .dynos/config/auditors.json with fallback to defaults."""
+    """Load auditor registry from .dynos/config/auditors.json with custom role merging."""
     config_path = root / ".dynos" / "config" / "auditors.json"
+    registry: dict | None = None
     try:
         data = load_json(config_path)
         if isinstance(data, dict) and "always" in data:
-            return data
+            registry = data
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
-    return _DEFAULT_AUDITOR_REGISTRY
+    if registry is None:
+        registry = {
+            "always": list(_DEFAULT_AUDITOR_REGISTRY["always"]),
+            "fast_track": list(_DEFAULT_AUDITOR_REGISTRY["fast_track"]),
+            "domain_conditional": {
+                k: list(v) for k, v in _DEFAULT_AUDITOR_REGISTRY["domain_conditional"].items()
+            },
+        }
+    # Merge project-declared custom auditors from .dynos/config/roles.json (if present).
+    roles_cfg_path = root / ".dynos" / "config" / "roles.json"
+    if roles_cfg_path.is_file():
+        try:
+            rcfg = load_json(roles_cfg_path)
+        except (OSError, json.JSONDecodeError):
+            rcfg = None
+        if isinstance(rcfg, dict):
+            raw_roles = rcfg.get("roles") or rcfg.get("auditors") or rcfg.get("custom_roles") or []
+            if isinstance(raw_roles, list):
+                always = registry.setdefault("always", [])
+                cond = registry.setdefault("domain_conditional", {})
+                for item in raw_roles:
+                    if isinstance(item, str):
+                        rname, rdomains = item.strip(), []
+                    elif isinstance(item, dict):
+                        rname = str(item.get("role") or item.get("name") or "").strip()
+                        rdomains = item.get("domains") if isinstance(item.get("domains"), list) else []
+                    else:
+                        continue
+                    if not rname.endswith("-auditor"):
+                        continue
+                    if rdomains:
+                        for d in rdomains:
+                            if isinstance(d, str) and d.strip():
+                                lst = cond.setdefault(d.strip(), [])
+                                if rname not in lst:
+                                    lst.append(rname)
+                    elif rname not in always:
+                        always.append(rname)
+    return registry
 
 
 def _load_ensemble_config(config: dict, host: str) -> tuple[set[str], list[str], str | None]:
@@ -1089,12 +1136,6 @@ def _load_ensemble_config(config: dict, host: str) -> tuple[set[str], list[str],
     default_esc = _default_ensemble_escalation_model(host)
     models = config.get("ensemble_voting_models", default_vote)
     escalation = config.get("ensemble_escalation_model", default_esc)
-    if host == _HOST_CURSOR or host == "cursor":
-        models = [
-            _translate_model_for_host(m, host) for m in models
-            if _translate_model_for_host(m, host)
-        ] or default_vote
-        escalation = _translate_model_for_host(escalation, host) or default_esc
     return auditors, models, escalation
 
 
@@ -1128,6 +1169,44 @@ def _claude_md_risk_gate_skip(
         f"risk_level={risk_level} and CLAUDE.md not in diff "
         f"({len(diff_files)} files); skipping perf-non-essential auditor",
     )
+
+
+_DOCS_SIGNAL_SUFFIXES = (".md", ".mdx", ".rst", ".adoc", ".txt")
+_DOCS_SIGNAL_NAMES = (
+    "README", "CHANGELOG", "LICENSE", "package.json", "plugin.json",
+    "marketplace.json", "openapi", "swagger",
+)
+
+
+def _docs_risk_gate_skip(
+    risk_level: str, diff_files: list[str] | None
+) -> tuple[bool, str]:
+    """Skip docs-accuracy-auditor on low/medium diffs without doc/spec/manifest changes."""
+    if diff_files is None:
+        return False, "diff_files unavailable"
+    if risk_level in {"high", "critical"}:
+        return False, f"risk_level={risk_level}"
+    for f in diff_files:
+        low = f.lower()
+        if low.endswith(_DOCS_SIGNAL_SUFFIXES) or "/docs/" in f"/{low}" or "/skills/" in f"/{low}" or "/agents/" in f"/{low}" or "/commands/" in f"/{low}":
+            return False, f"doc-relevant path in diff ({f})"
+        base = f.rsplit("/", 1)[-1]
+        if any(tok.lower() in base.lower() for tok in _DOCS_SIGNAL_NAMES):
+            return False, f"doc-relevant manifest in diff ({f})"
+    return True, f"risk_level={risk_level} and no doc/schema/skill files in diff"
+
+
+def _dead_code_risk_gate_skip(
+    risk_level: str, diff_files: list[str] | None
+) -> tuple[bool, str]:
+    """Skip dead-code-auditor on trivial low/medium diffs (<= 2 files)."""
+    if diff_files is None:
+        return False, "diff_files unavailable"
+    if risk_level in {"high", "critical"}:
+        return False, f"risk_level={risk_level}"
+    if len(diff_files) <= 2:
+        return True, f"risk_level={risk_level} and diff has <= 2 files"
+    return False, f"diff has {len(diff_files)} files"
 
 
 def build_audit_plan(
@@ -1201,6 +1280,28 @@ def build_audit_plan(
                     "threshold": 0,
                 })
                 continue
+        elif auditor == "docs-accuracy-auditor":
+            should_skip, gate_reason = _docs_risk_gate_skip(risk_level, diff_files)
+            if should_skip:
+                plan["auditors"].append({
+                    "name": auditor,
+                    "action": "skip",
+                    "reason": f"docs risk-gate: {gate_reason}",
+                    "streak": 0,
+                    "threshold": 0,
+                })
+                continue
+        elif auditor == "dead-code-auditor":
+            should_skip, gate_reason = _dead_code_risk_gate_skip(risk_level, diff_files)
+            if should_skip:
+                plan["auditors"].append({
+                    "name": auditor,
+                    "action": "skip",
+                    "reason": f"dead-code risk-gate: {gate_reason}",
+                    "streak": 0,
+                    "threshold": 0,
+                })
+                continue
         # Skip check (uses cached retrospectives via ctx)
         skip_decision = resolve_skip(root, auditor, task_type, ctx=ctx)
         if skip_decision["skip"]:
@@ -1256,15 +1357,18 @@ def build_audit_plan(
             # comment for rationale.
             entry["ensemble"] = False
             reason = "deterministic_first_auditor"
-        elif auditor in ensemble_auditors:
-            # Baseline ensemble auditors always run ensemble
-            entry["ensemble"] = True
-            reason = "always_ensemble_auditor"
         elif fast_track:
             entry["ensemble"] = False
             reason = "fast_track"
+        elif auditor in ensemble_auditors:
+            # Baseline ensemble auditors always run ensemble outside fast_track
+            entry["ensemble"] = True
+            reason = "always_ensemble_auditor"
+        elif risk_level not in {"high", "critical"}:
+            entry["ensemble"] = False
+            reason = "risk_level_below_high"
         else:
-            # All risk levels: probabilistic sampling keyed on task_id + auditor
+            # High/critical risk levels: probabilistic sampling keyed on task_id + auditor
             seed_key = f"{task_id}|{auditor}".encode()
             sampled = zlib.crc32(seed_key) % 10000 < int(ENSEMBLE_SAMPLE_RATE * 10000)
             entry["ensemble"] = sampled
@@ -1514,7 +1618,7 @@ def build_executor_prompt(
             parts.append(nearby)
 
     # Inject learned agent instructions
-    if route_mode in ("replace", "alongside") and agent_path:
+    if route_mode in ("replace", "alongside", "learned") and agent_path:
         try:
             p = Path(agent_path)
             if not p.is_absolute():
@@ -2390,19 +2494,19 @@ def _build_audit_budget_block(auditor_name: str, model: "str | None") -> str:
         "that read the whole diff before writing routinely hit this limit and "
         "produce NO report — that is an audit failure and forces a re-spawn.\n\n"
         "1. Your FIRST or SECOND tool call MUST create your audit-report JSON "
-        "file (the path named in your output contract) containing a "
-        "`## Progress Ledger` with `### Done`, `### In-Flight`, and `### Next` "
-        "subsections and `status=\"partial\"`. Write this skeleton BEFORE "
-        "reading the diff in depth.\n"
-        "2. Write each finding to that file the moment you confirm it — one "
-        "Edit per finding, never batched into a final write. Work that is not "
-        "on disk does not exist.\n"
+        "file (the path named in your output contract) containing valid JSON "
+        "(no markdown headings or code fences inside the .json file) with "
+        "`\"status\": \"partial\"`, `"
+        "`\"findings\": []`, and concise `progress` (`done`/`in_flight`/`next`). "
+        "Write this skeleton BEFORE reading the diff in depth.\n"
+        "2. Append each confirmed finding into the JSON file immediately via "
+        "Edit rather than waiting for the end. Work not on disk is lost.\n"
         f"3. By tool call {checkpoint} the file must already hold real content "
-        "(the Progress Ledger plus any findings so far). Review the highest-risk "
-        "files first, so a cut-off report still covers what matters most.\n"
+        "(valid JSON progress plus any confirmed findings). Review highest-risk "
+        "files first so an early cutoff still covers what matters most.\n"
         "4. When within 2 tool calls of the limit, STOP investigating and "
-        "finalize the report with `status=\"complete\"`. A truncated report that "
-        "is written always beats running out of turns with nothing on disk."
+        "finalize valid JSON with `\"status\": \"complete\"`. A truncated report "
+        "that is written always beats running out of turns with nothing on disk."
     )
 
 
@@ -2836,7 +2940,7 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
             aggregate_block += f"- {r['rule']}\n"
         final_text = final_text.rstrip() + aggregate_block
 
-    if route_mode in ("replace", "alongside") and agent_path:
+    if route_mode in ("replace", "alongside", "learned") and agent_path:
         try:
             p = Path(agent_path)
             if not p.is_absolute():
@@ -2940,6 +3044,112 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
 
     _sys.stdout.write(final_text + "\n")
     _sys.stdout.flush()
+    return 0
+
+
+def cmd_audit_inject_batch(args: argparse.Namespace) -> int:
+    """Batch-inject rules + sidecars for multiple auditors in one process.
+
+    Reads a JSON array of objects from stdin:
+      [{"auditor_name": "...", "model": "..."|null, "prompt": "..."}]
+    Prints a JSON array of {"auditor_name", "model", "sha256", "prompt"} objects.
+    """
+    import sys as _sys
+    import lib_ensemble as _lib_ensemble  # noqa: PLC0415
+
+    root = Path(args.root).resolve()
+    plan_path = Path(args.audit_plan)
+    if not plan_path.exists():
+        print(json.dumps({"error": f"audit plan not found: {plan_path}"}))
+        return 1
+    plan = load_json(plan_path)
+    task_dir = plan_path.resolve().parent
+    if not task_dir.name.startswith("task-"):
+        print(json.dumps({"error": f"audit plan not under a task dir: {task_dir}"}))
+        return 1
+
+    try:
+        items = json.loads(_sys.stdin.read() or "[]")
+    except json.JSONDecodeError as exc:
+        print(json.dumps({"error": f"invalid batch stdin JSON: {exc}"}))
+        return 1
+    if not isinstance(items, list):
+        print(json.dumps({"error": "batch stdin must be a JSON array"}))
+        return 1
+
+    by_name = {
+        a.get("name"): a
+        for a in plan.get("auditors", [])
+        if isinstance(a, dict) and a.get("name")
+    }
+    aggregate_rules = [
+        r for r in task_prevention_rules(root, task_dir)
+        if isinstance(r, dict) and r.get("rule") and r.get("executor") == "auditor-only"
+    ]
+    aggregate_block = ""
+    if aggregate_rules:
+        aggregate_block = (
+            "\n\n## Aggregate Findings Trends\n"
+            "Cross-task signals to scrutinize during this audit.\n\n"
+            + "".join(f"- {r['rule']}\n" for r in aggregate_rules)
+        )
+    reopen_block = _build_reopen_block(task_dir)
+    is_reaudit = _is_reaudit(task_dir)
+    sidecar_dir = task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
+
+    outputs: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        auditor_name = str(item.get("auditor_name") or "").strip()
+        model = item.get("model")
+        base_prompt = str(item.get("prompt") or "")
+        target = by_name.get(auditor_name)
+        if target is None or target.get("action") != "spawn":
+            print(json.dumps({"error": f"auditor not scheduled for spawn: {auditor_name}"}))
+            return 1
+        if _lib_ensemble.is_ensemble_entry(target):
+            cascade = _lib_ensemble.ensemble_next(task_dir, auditor_name, target)
+            if cascade.get("status") == _lib_ensemble.STATUS_INVALID or not model:
+                print(json.dumps({"error": f"invalid ensemble spawn request for {auditor_name}", "cascade": cascade}))
+                return 1
+        final_text = (
+            base_prompt.rstrip()
+            + "\n\n"
+            + _build_ruthless_audit_brief(root, task_dir, plan, auditor_name, reaudit=is_reaudit)
+            + _build_reaudit_context_block(task_dir, auditor_name)
+            + _build_failing_tests_block(task_dir, auditor_name)
+            + reopen_block
+            + aggregate_block
+        )
+        route_mode = target.get("route_mode", "generic")
+        agent_path = target.get("agent_path")
+        if route_mode in ("replace", "alongside", "learned") and agent_path:
+            try:
+                p = Path(agent_path)
+                if not p.is_absolute():
+                    p = root / p
+                if p.exists():
+                    agent_content = p.read_text().strip()
+                    if agent_content.startswith("---"):
+                        end = agent_content.find("---", 3)
+                        if end != -1:
+                            agent_content = agent_content[end + 3:].strip()
+                    final_text = (
+                        final_text.rstrip()
+                        + f"\n\n## Learned Auditor Instructions\nYou are running as the **{auditor_name}** learned auditor (mode={route_mode}).\n\n"
+                        + agent_content
+                    )
+            except OSError:
+                pass
+        spawn_model = model if model not in (None, "default") else target.get("model")
+        final_text = final_text.rstrip() + _build_audit_budget_block(auditor_name, spawn_model)
+        printed_bytes = (final_text + "\n").encode("utf-8")
+        model_label = model if model else "default"
+        digest = _write_prompt_sidecar(sidecar_dir, f"{auditor_name}-{model_label}", printed_bytes, task_dir=task_dir)
+        outputs.append({"auditor_name": auditor_name, "model": model_label, "sha256": digest, "prompt": final_text})
+
+    print(json.dumps(outputs))
     return 0
 
 
@@ -3165,6 +3375,15 @@ def build_parser() -> argparse.ArgumentParser:
     aip.add_argument("--auditor-name", required=True)
     aip.add_argument("--model", default=None, help="Model label for sidecar disambiguation; 'default' if unset")
     aip.set_defaults(func=cmd_audit_inject_prompt)
+
+    aib = subparsers.add_parser(
+        "audit-inject-batch",
+        help="Batch-inject rules and write sidecars for multiple auditors in one process",
+    )
+    aib.add_argument("--root", default=".")
+    aib.add_argument("--task-type", required=True)
+    aib.add_argument("--audit-plan", required=True, help="Path to .dynos/task-{id}/audit-plan.json")
+    aib.set_defaults(func=cmd_audit_inject_batch)
 
     pip = subparsers.add_parser(
         "planner-inject-prompt",

@@ -17,6 +17,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # REPO_DIR enables the newer `from hooks.cloud import ...` imports used
 # by the cloud module.
 export PYTHONPATH="${HOOKS_DIR}:${REPO_DIR}:${PYTHONPATH:-}"
+export PLUGIN_HOOKS="${HOOKS_DIR}"
 
 usage() {
   cat <<EOF

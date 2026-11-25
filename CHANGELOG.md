@@ -11,6 +11,28 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.11.1] - 2026-11-25
+
+### Added
+- Native C hook fast-path (`hooks/native_fast.c`, auto-compiled to `hooks/bin/dynos-fast` on SessionStart when a C compiler is available with automatic Python fallback) for `PreToolUse` and `SubagentStop`.
+- Single-process `hooks/session_start_hook.py` and `router.py audit-inject-batch` batch prompt injection.
+- Custom auditor generation in `memory/agent_generator.py` (`auditors/`) alongside dynamic project-role validation (`.dynos/config/{roles,auditors}.json`) across `lib_core.py`, `ctl.py`, `pre_tool_use.py`, `agent_spawn_log.py`, and `lib_tokens_hook.py`.
+
+### Fixed
+- `_fire_task_completed` falls back to co-located `hooks/` when `PLUGIN_HOOKS` is unset so post-task eventbus drain runs in external repos; `bin/dynos` exports `PLUGIN_HOOKS`.
+- Shadow-mode calibration deadlock resolved (`resolve_route` shadow canary routing when learned `.md` exists) and `auditor_zero_finding_streaks` now tracks blocking findings instead of resetting on non-blocking nits.
+- `router.py` disables `fast_track` ensemble cascades, restricts probabilistic ensemble sampling to `high`/`critical` risk, adds diff-scoped skip gates for `docs-accuracy-auditor` and `dead-code-auditor`, and enforces valid JSON in injected auditor turn-budget blocks.
+- `ctl.py` caches `executor-plan`, skips redundant gap re-runs on matched `plan-validated` receipts, and inlines plan signature/intermediate checks; `circuit_breaker.py` enables active enforcement with `1.5M`/`2.5M` limits.
+- Trimmed redundant boilerplate from `agents/*-auditor.md` and prioritized `audit-context.md` in `agents/claude-md-auditor.md`.
+
+### Removed
+- Removed Cursor and Codex plugin packaging (`.cursor-plugin/`, `.codex-plugin/`, `hooks-cursor.json`) and multi-host routing/alias shims in favor of pure Claude Code support.
+
+### Plugin / Distribution
+- Bump package and plugin metadata to `7.11.1`.
+
+---
+
 ## [7.11.0] - 2026-11-17
 Executors, the planner and the code-quality auditor now aim for the smallest change that fully meets the spec.
 

@@ -378,15 +378,11 @@ def release_role_stamp(
 
     in_flight = spawns_in_flight(task_dir / "spawn-log.jsonl", pending).get(role, 0)
     if not in_flight and clear_stamped_role(task_dir, role):
-        ctl = Path(__file__).with_name("ctl.py")
-        cmd = [sys.executable, str(ctl), "clear-role", str(task_dir)]
-        if role != "planning":
-            # Auditors run in parallel batches: expire only this role's
-            # grants, never a sibling auditor's or an executor's.
-            cmd += ["--role", role]
-        cleared = subprocess.run(cmd, capture_output=True, text=True)
-        if cleared.returncode:
-            raise RuntimeError(cleared.stderr.strip() or "clear-role failed")
+        from ctl import clear_role_for_task
+        clear_role_for_task(
+            task_dir,
+            only_role=role if role != "planning" else None,
+        )
         if pending is not None:
             pending["cleared_role"] = role
     return in_flight
@@ -420,15 +416,12 @@ def main(argv: list[str]) -> int:
         print("agent-spawn-log: stdin payload must be a JSON object", file=sys.stderr)
         return 1
 
-    # Claude Code uses Agent; Cursor uses Task. Accept both and normalize the
-    # spawn-log `tool` field to Agent so receipt cross-checks stay stable.
     raw_tool = payload.get("tool_name")
-    if raw_tool not in ("Agent", "Task"):
+    if raw_tool != "Agent":
         return 0
 
     cwd_str = (
         payload.get("cwd")
-        or os.environ.get("CURSOR_PROJECT_DIR")
         or os.environ.get("CLAUDE_PROJECT_DIR")
         or os.getcwd()
     )
@@ -454,7 +447,7 @@ def main(argv: list[str]) -> int:
     if phase == "pre":
         from lib_core import role_for_subagent_type, stamp_role
         subagent_type = str(entry.get("subagent_type", ""))
-        role = role_for_subagent_type(subagent_type)
+        role = role_for_subagent_type(subagent_type, project_root=task_dir.parent.parent)
         if role is None:
             entry["stamped_role"] = None
             try:
@@ -467,11 +460,9 @@ def main(argv: list[str]) -> int:
                 # Parallel spawns share the role file: keep the roles of
                 # siblings still running instead of overwriting them.
                 stamp_role(task_dir, role, keep=spawns_in_flight(log_path))
-                # Keep the one-shot actor grant path used by pinned sessions.
-                ctl = Path(__file__).with_name("ctl.py")
-                grant = subprocess.run([sys.executable, str(ctl), "grant-role", str(task_dir), "--role", role], capture_output=True, text=True)
-                if grant.returncode:
-                    raise RuntimeError(grant.stderr.strip() or "grant-role failed")
+                # In-process actor grant update (avoids subprocess ctl.py startup overhead).
+                from ctl import grant_role_for_task
+                grant_role_for_task(task_dir, role)
                 entry["stamped_role"] = role
             except Exception as exc:
                 print(f"agent-spawn-log: role stamp failed: {exc}", file=sys.stderr)
@@ -483,7 +474,7 @@ def main(argv: list[str]) -> int:
         # background launch has not returned yet; SubagentStop clears it.
         # Auditor stamps follow the same lifetime (bug 7, 7.6.0 field report).
         from lib_core import role_for_subagent_type
-        returned_role = role_for_subagent_type(str(entry.get("subagent_type", "")))
+        returned_role = role_for_subagent_type(str(entry.get("subagent_type", "")), project_root=task_dir.parent.parent)
         if role_released_on_return(returned_role) and not entry.get("async_launch"):
             # Hierarchical planning runs worker planners in parallel and they
             # share one stamp: only the last one to return may clear it. The
